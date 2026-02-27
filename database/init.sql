@@ -155,12 +155,13 @@ CREATE TABLE task_results_total (
 CREATE INDEX idx_results_total_task ON task_results_total(task_id);
 
 
--- Insert default admin user (password: admin - change on first login)
--- Password hash is bcrypt of 'admin'
-INSERT INTO users (email, password_hash, name, role)
-VALUES (
-    'admin@avoided-emissions.org',
-    '$2b$12$SL4sRxTGFJAn2aTmQsZMauL1SOLzLg8YP79CE4dtJ19rxG3jvCdKS',
-    'Administrator',
-    'admin'
-);
+-- NOTE: No default admin user is seeded here.  Create one via:
+--   docker compose exec webapp python -c "
+--     from auth import hash_password; from models import User, get_db;
+--     db = get_db();
+--     db.add(User(email='admin@example.org',
+--                 password_hash=hash_password('CHANGE_ME'),
+--                 name='Administrator', role='admin'));
+--     db.commit(); db.close()
+--   "
+-- Be sure to use a strong, unique password.

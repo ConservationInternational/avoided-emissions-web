@@ -5,6 +5,7 @@ callbacks, and sets up URL routing between pages.
 """
 
 import logging
+import uuid as _uuid
 
 import dash
 import dash_bootstrap_components as dbc
@@ -14,6 +15,7 @@ import rollbar
 import rollbar.contrib.flask
 from dash import Input, Output, dcc, html
 from flask import got_request_exception
+from flask_wtf.csrf import CSRFProtect
 
 from auth import login_manager
 from callbacks import register_callbacks
@@ -39,7 +41,27 @@ app = dash.Dash(
 server = app.server
 
 # Configure Flask
+if not Config.DEBUG and Config.SECRET_KEY in ("change-me-in-production", ""):
+    raise RuntimeError(
+        "SECRET_KEY is not set. Refusing to start in production with the "
+        "default key. Set SECRET_KEY in your environment."
+    )
 server.config["SECRET_KEY"] = Config.SECRET_KEY
+server.config["SESSION_COOKIE_HTTPONLY"] = True
+server.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+if not Config.DEBUG:
+    server.config["SESSION_COOKIE_SECURE"] = True
+
+# Initialize CSRF protection.
+# Dash callbacks use their own transport (_dash-update-component) which
+# is already guarded by the same-origin policy and SameSite cookies,
+# so we exempt the Dash callback endpoint but protect any Flask routes.
+csrf = CSRFProtect(server)
+csrf.exempt("dash.dash._dash-update-component")
+# Exempt all Dash internal endpoints (they use X-CSRFToken-less AJAX)
+for rule in list(server.url_map.iter_rules()):
+    if rule.endpoint and rule.endpoint.startswith("_dash"):
+        csrf.exempt(rule.endpoint)
 
 # Initialize Rollbar error tracking
 if Config.ROLLBAR_ACCESS_TOKEN:
@@ -102,6 +124,11 @@ def display_page(pathname):
 
     if pathname and pathname.startswith("/task/"):
         task_id = pathname.split("/task/")[1]
+        # Validate task_id is a proper UUID to prevent injection
+        try:
+            _uuid.UUID(task_id)
+        except (ValueError, AttributeError):
+            return not_found_layout(user)
         return task_detail_layout(user, task_id)
 
     return not_found_layout(user)

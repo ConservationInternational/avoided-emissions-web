@@ -8,7 +8,9 @@ visualization, and admin panel actions.
 import base64
 import io
 import json
+import logging
 import os
+import uuid as _uuid
 
 import dash_bootstrap_components as dbc
 import flask_login
@@ -38,6 +40,34 @@ from services import (
     start_gee_export,
     submit_analysis_task,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _is_valid_uuid(value):
+    """Return True if *value* is a valid UUID string."""
+    try:
+        _uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
+def _check_task_access(task_id, user):
+    """Return True if *user* may access the task identified by *task_id*.
+
+    Admins can view any task; regular users can only view their own.
+    Returns False (and logs a warning) for invalid UUIDs or ownership
+    violations.
+    """
+    if not _is_valid_uuid(task_id):
+        return False
+    detail = get_task_detail(task_id)
+    if not detail:
+        return False
+    if user.is_admin:
+        return True
+    return str(detail["task"].submitted_by) == str(user.id)
 
 
 def _fmt_dt(dt):
@@ -202,7 +232,8 @@ def register_callbacks(app):
             ], color="success")
 
         except Exception as e:
-            return f"Submission failed: {e!s}", None
+            logger.exception("Task submission failed")
+            return "Submission failed. Please try again or contact support.", None
 
     # -- Dashboard task list (AG Grid) ---------------------------------------
 
@@ -254,6 +285,10 @@ def register_callbacks(app):
         if not task_id:
             raise PreventUpdate
 
+        user = get_current_user()
+        if not user or not _check_task_access(task_id, user):
+            return ("Task Not Found", None, None, None, None, None)
+
         refresh_task_status(task_id)
         detail = get_task_detail(task_id)
         if not detail:
@@ -302,6 +337,10 @@ def register_callbacks(app):
     def handle_download(by_year_clicks, total_clicks, task_id):
         ctx = callback_context
         if not ctx.triggered:
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user or not _check_task_access(task_id, user):
             raise PreventUpdate
 
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
@@ -359,7 +398,11 @@ def register_callbacks(app):
                 color="success",
             )
         except Exception as e:
-            return dbc.Alert(f"Export failed: {e!s}", color="danger")
+            logger.exception("GEE export failed")
+            return dbc.Alert(
+                "Export failed. Please try again or contact support.",
+                color="danger",
+            )
 
     @app.callback(
         [Output("gee-exports-table", "rowData"),
