@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files (contain secrets)
+*.env
+!.env.example
+!deploy/.env.example
+
+# Credentials and private keys — never commit these
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*-credentials.json
+*-key.json
+service-account*.json
+
+# R artifacts
+.Rhistory
+.RData
+.Rproj.user/
+
+# Data and output files
+*.RDS
+*.rds
+*.csv
+!gee-export/requirements.txt
+!webapp/requirements.txt
+
+# Docker
+*.log
+
+# Coverage / testing
+htmlcov/
+.coverage
+coverage.xml
+.pytest_cache/
+
+# Node (if any frontend tooling is added later)
+node_modules/

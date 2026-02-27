@@ -1,0 +1,97 @@
+/* Avoided Emissions – AG Grid and layout styling
+ *
+ * Mirrors patterns from trends.earth-api-ui for consistent look & feel.
+ * Uses the ag-theme-alpine base with customizations.
+ */
+
+/* ── AG Grid row performance ─────────────────────────────────────────── */
+.ag-theme-alpine .ag-row {
+    contain: layout style;
+}
+
+.ag-theme-alpine .ag-cell {
+    line-height: 32px;
+}
+
+/* Tighter header */
+.ag-theme-alpine .ag-header-cell-label {
+    font-weight: 600;
+    font-size: 13px;
+}
+
+/* Even/odd row striping */
+.ag-theme-alpine .ag-row-odd {
+    background-color: #f8f9fa;
+}
+
+/* Hover highlight */
+.ag-theme-alpine .ag-row:hover {
+    background-color: #e9ecef !important;
+}
+
+/* Compact filter menu */
+.ag-theme-alpine .ag-filter-toolpanel-header {
+    font-size: 12px;
+}
+
+/* ── Card styling ────────────────────────────────────────────────────── */
+.card {
+    border-radius: 6px;
+}
+
+.card-header {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+/* ── Status badges (outside AG Grid) ─────────────────────────────────── */
+.badge-status-pending {
+    background-color: #6c757d;
+}
+
+.badge-status-submitted {
+    background-color: #ffc107;
+    color: #664d03;
+}
+
+.badge-status-running {
+    background-color: #0d6efd;
+}
+
+.badge-status-succeeded,
+.badge-status-completed {
+    background-color: #198754;
+}
+
+.badge-status-failed {
+    background-color: #dc3545;
+}
+
+/* ── Skeleton loading placeholder ────────────────────────────────────── */
+.skeleton {
+    background: linear-gradient(90deg, #eee 25%, #f5f5f5 50%, #eee 75%);
+    background-size: 200% 100%;
+    animation: skeleton-pulse 1.5s ease-in-out infinite;
+    border-radius: 4px;
+}
+
+@keyframes skeleton-pulse {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* ── Responsive tweaks ───────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    .ag-theme-alpine .ag-header-cell-label {
+        font-size: 11px;
+    }
+    .ag-theme-alpine .ag-cell {
+        font-size: 12px;
+    }
+}
+
+/* ── Plotly graphs ───────────────────────────────────────────────────── */
+.js-plotly-plot .plotly .modebar {
+    top: 4px !important;
+    right: 4px !important;
+}

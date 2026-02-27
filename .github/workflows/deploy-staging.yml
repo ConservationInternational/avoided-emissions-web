@@ -1,0 +1,297 @@
+name: CodeDeploy - Staging
+
+on:
+  push:
+    branches:
+      - staging
+      - develop
+    paths:
+      - 'webapp/**'
+      - 'r-analysis/**'
+      - 'gee-export/**'
+      - 'database/**'
+      - 'deploy/**'
+      - 'appspec.yml'
+      - '.github/workflows/deploy-staging.yml'
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Force deployment even if no changes detected'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+env:
+  AWS_REGION: us-east-1
+  APPLICATION_NAME: avoided-emissions-web
+  DEPLOYMENT_GROUP: avoided-emissions-web-staging
+  ECR_REPOSITORY_WEBAPP: avoided-emissions-webapp
+  ECR_REPOSITORY_RANALYSIS: avoided-emissions-ranalysis
+
+concurrency:
+  group: staging-deployment
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: staging
+    outputs:
+      webapp-image-uri: ${{ steps.build-webapp.outputs.image-uri }}
+      ranalysis-image-uri: ${{ steps.build-ranalysis.outputs.image-uri }}
+      image-tag: ${{ steps.info.outputs.image-tag }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Get deployment info
+      id: info
+      run: |
+        echo "short-sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+        echo "timestamp=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+        echo "image-tag=staging-$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+        role-session-name: GitHubActionsStagingBuild
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Ensure ECR repositories exist
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        for REPO in "${{ env.ECR_REPOSITORY_WEBAPP }}" "${{ env.ECR_REPOSITORY_RANALYSIS }}"; do
+          if ! aws ecr describe-repositories --repository-names "$REPO" 2>/dev/null; then
+            echo "Creating ECR repository: $REPO"
+            aws ecr create-repository \
+              --repository-name "$REPO" \
+              --image-scanning-configuration scanOnPush=true \
+              --image-tag-mutability MUTABLE
+          else
+            echo "ECR repository exists: $REPO"
+          fi
+        done
+
+    - name: Build and push webapp image
+      id: build-webapp
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ steps.info.outputs.image-tag }}
+      run: |
+        IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY_WEBAPP }}:$IMAGE_TAG"
+        docker buildx build \
+          --platform linux/amd64 \
+          --cache-from=type=gha,scope=webapp-staging \
+          --cache-to=type=gha,mode=max,scope=webapp-staging \
+          --tag "$IMAGE_URI" \
+          --tag "$ECR_REGISTRY/${{ env.ECR_REPOSITORY_WEBAPP }}:staging-latest" \
+          --push \
+          --file webapp/Dockerfile \
+          webapp/
+        echo "image-uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+    - name: Build and push R analysis image
+      id: build-ranalysis
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ steps.info.outputs.image-tag }}
+      run: |
+        IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY_RANALYSIS }}:$IMAGE_TAG"
+        docker buildx build \
+          --platform linux/amd64 \
+          --cache-from=type=gha,scope=ranalysis-staging \
+          --cache-to=type=gha,mode=max,scope=ranalysis-staging \
+          --tag "$IMAGE_URI" \
+          --tag "$ECR_REGISTRY/${{ env.ECR_REPOSITORY_RANALYSIS }}:staging-latest" \
+          --push \
+          --file r-analysis/Dockerfile \
+          r-analysis/
+        echo "image-uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Deploy to Staging via CodeDeploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+    needs: build-and-push
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+        role-session-name: GitHubActionsStagingDeploy
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Get deployment info
+      id: info
+      run: |
+        echo "short-sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+        echo "timestamp=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        echo "s3-bucket=avoided-emissions-deployments-${ACCOUNT_ID}" >> $GITHUB_OUTPUT
+
+    - name: Create environment file for deployment
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        WEBAPP_IMAGE: ${{ needs.build-and-push.outputs.webapp-image-uri }}
+        RANALYSIS_IMAGE: ${{ needs.build-and-push.outputs.ranalysis-image-uri }}
+        IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+        SECRET_KEY: ${{ secrets.SECRET_KEY }}
+        POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+        POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+        S3_BUCKET: ${{ vars.S3_BUCKET }}
+        S3_PREFIX: ${{ vars.S3_PREFIX || 'avoided-emissions' }}
+        GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+        GCS_PREFIX: ${{ vars.GCS_PREFIX || 'avoided-emissions/covariates' }}
+        EE_SERVICE_ACCOUNT_JSON: ${{ secrets.EE_SERVICE_ACCOUNT_JSON }}
+        AWS_BATCH_JOB_QUEUE: ${{ vars.AWS_BATCH_JOB_QUEUE || 'avoided-emissions-queue' }}
+        AWS_BATCH_JOB_DEFINITION: ${{ vars.AWS_BATCH_JOB_DEFINITION || 'avoided-emissions-analysis' }}
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        {
+          echo "# Generated by GitHub Actions"
+          echo "# Commit: ${{ github.sha }}"
+          echo ""
+          echo "# Container images"
+          echo "ECR_REGISTRY=$ECR_REGISTRY"
+          echo "WEBAPP_IMAGE=$WEBAPP_IMAGE"
+          echo "RANALYSIS_IMAGE=$RANALYSIS_IMAGE"
+          echo "R_ANALYSIS_IMAGE_TAG=$IMAGE_TAG"
+          echo ""
+          echo "# Environment"
+          echo "ENVIRONMENT=staging"
+          echo "DEBUG=false"
+          echo ""
+          echo "# App"
+          echo "SECRET_KEY=$SECRET_KEY"
+          echo ""
+          echo "# Database"
+          echo "POSTGRES_USER=$POSTGRES_USER"
+          echo "POSTGRES_PASSWORD=$POSTGRES_PASSWORD"
+          echo "POSTGRES_DB=$POSTGRES_DB"
+          echo ""
+          echo "# AWS"
+          echo "AWS_REGION=${{ env.AWS_REGION }}"
+          echo "AWS_ACCOUNT_ID=$ACCOUNT_ID"
+          echo "S3_BUCKET=$S3_BUCKET"
+          echo "S3_PREFIX=$S3_PREFIX"
+          echo "AWS_BATCH_JOB_QUEUE=$AWS_BATCH_JOB_QUEUE"
+          echo "AWS_BATCH_JOB_DEFINITION=$AWS_BATCH_JOB_DEFINITION"
+          echo ""
+          echo "# GCS / GEE"
+          echo "GCS_BUCKET=$GCS_BUCKET"
+          echo "GCS_PREFIX=$GCS_PREFIX"
+          echo "EE_SERVICE_ACCOUNT_JSON=$EE_SERVICE_ACCOUNT_JSON"
+          echo ""
+          echo "# Deployment info"
+          echo "GIT_REVISION=${{ github.sha }}"
+          echo "GIT_BRANCH=${{ github.ref_name }}"
+        } > staging.env
+
+    - name: Update appspec.yml for staging
+      run: |
+        sed -i 's|destination: /opt/avoided-emissions-web|destination: /opt/avoided-emissions-web-staging|g' appspec.yml
+
+    - name: Create deployment package
+      id: package
+      run: |
+        REVISION_FILE="staging-${{ steps.info.outputs.timestamp }}-${{ steps.info.outputs.short-sha }}.zip"
+        echo "revision-file=$REVISION_FILE" >> $GITHUB_OUTPUT
+        zip -r "$REVISION_FILE" \
+          appspec.yml \
+          staging.env \
+          deploy/ \
+          database/ \
+          -x "*.pyc" "__pycache__/*" ".git/*"
+
+    - name: Upload deployment package to S3
+      id: upload
+      run: |
+        BUCKET="${{ steps.info.outputs.s3-bucket }}"
+        KEY="staging/${{ steps.package.outputs.revision-file }}"
+        aws s3 cp "${{ steps.package.outputs.revision-file }}" "s3://$BUCKET/$KEY"
+        echo "s3-key=$KEY" >> $GITHUB_OUTPUT
+
+    - name: Stop any in-progress deployments
+      run: |
+        ACTIVE=$(aws deploy list-deployments \
+          --application-name ${{ env.APPLICATION_NAME }} \
+          --deployment-group-name ${{ env.DEPLOYMENT_GROUP }} \
+          --include-only-statuses "InProgress" "Queued" "Created" \
+          --query 'deployments' --output text 2>/dev/null || echo "")
+
+        if [ -n "$ACTIVE" ] && [ "$ACTIVE" != "None" ]; then
+          for DID in $ACTIVE; do
+            aws deploy stop-deployment --deployment-id "$DID" --auto-rollback-enabled 2>/dev/null || true
+          done
+          sleep 15
+        fi
+
+    - name: Create CodeDeploy deployment
+      id: deploy
+      run: |
+        BUCKET="${{ steps.info.outputs.s3-bucket }}"
+        KEY="${{ steps.upload.outputs.s3-key }}"
+        DEPLOYMENT_ID=$(aws deploy create-deployment \
+          --application-name ${{ env.APPLICATION_NAME }} \
+          --deployment-group-name ${{ env.DEPLOYMENT_GROUP }} \
+          --s3-location bucket=$BUCKET,key=$KEY,bundleType=zip \
+          --deployment-config-name CodeDeployDefault.OneAtATime \
+          --description "Staging deployment from ${{ github.ref_name }}" \
+          --file-exists-behavior OVERWRITE \
+          --query 'deploymentId' --output text)
+        echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+
+    - name: Wait for deployment to complete
+      run: |
+        DEPLOYMENT_ID="${{ steps.deploy.outputs.deployment-id }}"
+        aws deploy wait deployment-successful \
+          --deployment-id "$DEPLOYMENT_ID" \
+          --cli-read-timeout 1800 || {
+            STATUS=$(aws deploy get-deployment --deployment-id "$DEPLOYMENT_ID" \
+              --query 'deploymentInfo.status' --output text)
+            echo "Deployment failed with status: $STATUS"
+            aws deploy list-deployment-targets --deployment-id "$DEPLOYMENT_ID" \
+              --query 'targetIds' --output text | while read TARGET_ID; do
+              aws deploy get-deployment-target \
+                --deployment-id "$DEPLOYMENT_ID" --target-id "$TARGET_ID" \
+                --query 'deploymentTarget.instanceTarget.lifecycleEvents[*].{Event:lifecycleEventName,Status:status}' \
+                --output table
+            done
+            exit 1
+          }
+
+    - name: Verify deployment
+      run: |
+        aws deploy get-deployment \
+          --deployment-id "${{ steps.deploy.outputs.deployment-id }}" \
+          --query 'deploymentInfo.{Status:status,CreateTime:createTime,CompleteTime:completeTime}' \
+          --output table

@@ -1,0 +1,628 @@
+"""Service layer for interacting with AWS Batch and GEE.
+
+Provides functions for submitting analysis tasks, checking job status,
+uploading site files, and managing GEE covariate exports. Used by the
+Dash callbacks to keep business logic out of the UI layer.
+"""
+
+import io
+import json
+import os
+import tempfile
+import uuid
+from datetime import datetime, timezone
+
+import boto3
+import geopandas as gpd
+import pandas as pd
+
+from config import Config
+from models import (
+    AnalysisTask,
+    GeeExport,
+    TaskResult,
+    TaskResultTotal,
+    TaskSite,
+    get_db,
+)
+
+# Lazy-import batch_jobs to avoid requiring boto3 at module level in tests
+_batch_module = None
+
+
+def _get_batch_module():
+    global _batch_module
+    if _batch_module is None:
+        import importlib
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "r-analysis"))
+        _batch_module = importlib.import_module("batch_jobs")
+    return _batch_module
+
+
+def get_s3_client():
+    return boto3.client("s3", region_name=Config.AWS_REGION)
+
+
+def parse_sites_file(file_content, filename):
+    """Parse an uploaded GeoJSON or GeoPackage file into a GeoDataFrame.
+
+    Validates required columns and geometry types. Returns the GeoDataFrame
+    and a list of validation errors (empty if valid).
+    """
+    errors = []
+    gdf = None
+
+    try:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in (".geojson", ".json"):
+            gdf = gpd.read_file(io.BytesIO(file_content), driver="GeoJSON")
+        elif ext == ".gpkg":
+            with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as f:
+                f.write(file_content)
+                tmp_path = f.name
+            gdf = gpd.read_file(tmp_path)
+            os.unlink(tmp_path)
+        else:
+            errors.append(f"Unsupported file format: {ext}")
+            return None, errors
+    except Exception as e:
+        errors.append(f"Failed to read file: {str(e)}")
+        return None, errors
+
+    # Validate required columns
+    required = {"site_id", "site_name", "start_date"}
+    missing = required - set(gdf.columns)
+    if missing:
+        errors.append(f"Missing required columns: {', '.join(missing)}")
+
+    # Validate geometries
+    if gdf is not None and not gdf.empty:
+        invalid_geom = gdf[~gdf.geometry.is_valid]
+        if len(invalid_geom) > 0:
+            details = []
+            for idx, row in invalid_geom.iterrows():
+                site_id = row.get("site_id", "N/A")
+                site_name = row.get("site_name", "N/A")
+                details.append(
+                    f"  Feature {idx}: site_id={site_id}, "
+                    f"site_name={site_name}"
+                )
+            detail_str = "\n".join(details)
+            errors.append(
+                f"{len(invalid_geom)} invalid geometries found:\n"
+                f"{detail_str}\n"
+                "Please fix geometry errors before uploading."
+            )
+        # Ensure EPSG:4326
+        if gdf.crs and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
+
+    return gdf, errors
+
+
+def upload_sites_to_s3(gdf, task_id):
+    """Upload a GeoDataFrame as GeoJSON to S3.
+
+    Returns the S3 URI of the uploaded file.
+    """
+    s3 = get_s3_client()
+    key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.geojson"
+    # Convert any Timestamp columns to strings to avoid JSON serialization errors
+    for col in gdf.columns:
+        if pd.api.types.is_datetime64_any_dtype(gdf[col]):
+            gdf[col] = gdf[col].dt.strftime("%Y-%m-%d")
+        elif gdf[col].apply(lambda v: isinstance(v, pd.Timestamp)).any():
+            gdf[col] = gdf[col].apply(
+                lambda v: v.strftime("%Y-%m-%d") if isinstance(v, pd.Timestamp) else v
+            )
+    body = gdf.to_json()
+    s3.put_object(
+        Bucket=Config.S3_BUCKET,
+        Key=key,
+        Body=body.encode("utf-8"),
+        ContentType="application/json",
+    )
+    return f"s3://{Config.S3_BUCKET}/{key}"
+
+
+def upload_config_to_s3(config_dict, task_id):
+    """Upload a task configuration JSON to S3.
+
+    Returns the S3 URI.
+    """
+    s3 = get_s3_client()
+    key = f"{Config.S3_PREFIX}/tasks/{task_id}/config.json"
+    body = json.dumps(config_dict, indent=2)
+    s3.put_object(
+        Bucket=Config.S3_BUCKET,
+        Key=key,
+        Body=body.encode("utf-8"),
+        ContentType="application/json",
+    )
+    return f"s3://{Config.S3_BUCKET}/{key}"
+
+
+def submit_analysis_task(task_name, description, user_id, gdf,
+                         covariates, fc_years=None):
+    """Create and submit a full analysis task to AWS Batch.
+
+    1. Creates the database record
+    2. Uploads sites and config to S3
+    3. Submits the three-step pipeline to AWS Batch
+    4. Updates the database with job IDs
+
+    Returns the task ID.
+    """
+    if fc_years is None:
+        fc_years = list(range(2000, 2024))
+
+    db = get_db()
+    try:
+        task_id = str(uuid.uuid4())
+
+        # Create task record
+        task = AnalysisTask(
+            id=task_id,
+            name=task_name,
+            description=description,
+            submitted_by=user_id,
+            status="pending",
+            covariates=covariates,
+            n_sites=len(gdf),
+        )
+        db.add(task)
+
+        # Store site metadata
+        for _, row in gdf.iterrows():
+            site = TaskSite(
+                task_id=task_id,
+                site_id=str(row["site_id"]),
+                site_name=str(row.get("site_name", "")),
+                start_date=pd.to_datetime(row["start_date"]),
+                end_date=pd.to_datetime(row["end_date"])
+                if pd.notna(row.get("end_date")) else None,
+            )
+            db.add(site)
+
+        db.commit()
+
+        # Upload to S3
+        sites_uri = upload_sites_to_s3(gdf, task_id)
+        config_dict = {
+            "task_id": task_id,
+            "data_dir": "/data",
+            "gcs_bucket": Config.GCS_BUCKET,
+            "gcs_prefix": Config.GCS_PREFIX,
+            "sites_file": "/data/input/sites.geojson",
+            "covariates": covariates,
+            "exact_match_vars": ["region", "ecoregion", "pa"],
+            "fc_years": fc_years,
+            "max_treatment_pixels": 1000,
+            "control_multiplier": 50,
+            "min_site_area_ha": 100,
+            "min_glm_treatment_pixels": 15,
+        }
+        config_uri = upload_config_to_s3(config_dict, task_id)
+
+        # Submit to AWS Batch
+        data_s3_uri = f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}"
+        batch = _get_batch_module()
+        job_ids = batch.submit_full_pipeline(
+            job_queue=Config.AWS_BATCH_JOB_QUEUE,
+            job_definition=Config.AWS_BATCH_JOB_DEFINITION,
+            n_sites=len(gdf),
+            config_s3_uri=config_uri,
+            data_s3_uri=data_s3_uri,
+        )
+
+        # Update task with job IDs
+        task.extract_job_id = job_ids["extract_job_id"]
+        task.match_job_id = job_ids["match_job_id"]
+        task.summarize_job_id = job_ids["summarize_job_id"]
+        task.sites_s3_uri = sites_uri
+        task.config_s3_uri = config_uri
+        task.results_s3_uri = f"{data_s3_uri}/output"
+        task.status = "submitted"
+        task.submitted_at = datetime.now(timezone.utc)
+        db.commit()
+
+        return task_id
+
+    except Exception as e:
+        db.rollback()
+        # If task was created, mark it as failed
+        if "task_id" in dir():
+            task = db.query(AnalysisTask).get(task_id)
+            if task:
+                task.status = "failed"
+                task.error_message = str(e)
+                db.commit()
+        raise
+    finally:
+        db.close()
+
+
+def get_task_list(user_id=None, limit=50):
+    """Get recent analysis tasks, optionally filtered by user."""
+    db = get_db()
+    try:
+        query = db.query(AnalysisTask).order_by(
+            AnalysisTask.created_at.desc()
+        )
+        if user_id:
+            query = query.filter(AnalysisTask.submitted_by == user_id)
+        return query.limit(limit).all()
+    finally:
+        db.close()
+
+
+def get_task_detail(task_id):
+    """Get full task details including sites and results."""
+    db = get_db()
+    try:
+        task = db.query(AnalysisTask).filter(
+            AnalysisTask.id == task_id
+        ).first()
+        if not task:
+            return None
+
+        sites = db.query(TaskSite).filter(
+            TaskSite.task_id == task_id
+        ).all()
+
+        results = db.query(TaskResult).filter(
+            TaskResult.task_id == task_id
+        ).order_by(TaskResult.site_id, TaskResult.year).all()
+
+        totals = db.query(TaskResultTotal).filter(
+            TaskResultTotal.task_id == task_id
+        ).all()
+
+        return {
+            "task": task,
+            "sites": sites,
+            "results": results,
+            "totals": totals,
+        }
+    finally:
+        db.close()
+
+
+def refresh_task_status(task_id):
+    """Poll AWS Batch for updated job status and update the database.
+
+    Maps Batch job states to task_status enum values.
+    """
+    db = get_db()
+    try:
+        task = db.query(AnalysisTask).filter(
+            AnalysisTask.id == task_id
+        ).first()
+        if not task or task.status in ("succeeded", "failed", "cancelled"):
+            return task
+
+        batch = _get_batch_module()
+        now = datetime.now(timezone.utc)
+
+        # Check the summarize job first (last step)
+        if task.summarize_job_id:
+            status = batch.get_job_status(task.summarize_job_id)
+            if status["status"] == "SUCCEEDED":
+                task.status = "succeeded"
+                task.completed_at = now
+                db.commit()
+                return task
+            elif status["status"] == "FAILED":
+                task.status = "failed"
+                task.error_message = status.get("reason", "Summarize job failed")
+                task.completed_at = now
+                db.commit()
+                return task
+
+        # Check matching job
+        if task.match_job_id:
+            status = batch.get_job_status(task.match_job_id)
+            if status["status"] == "RUNNING":
+                task.status = "running"
+                if not task.started_at:
+                    task.started_at = now
+            elif status["status"] == "FAILED":
+                task.status = "failed"
+                task.error_message = status.get("reason", "Match job failed")
+                task.completed_at = now
+
+        # Check extract job
+        if task.extract_job_id:
+            status = batch.get_job_status(task.extract_job_id)
+            if status["status"] == "RUNNING" and task.status == "submitted":
+                task.status = "running"
+                if not task.started_at:
+                    task.started_at = now
+            elif status["status"] == "FAILED":
+                task.status = "failed"
+                task.error_message = status.get("reason", "Extract job failed")
+                task.completed_at = now
+
+        db.commit()
+        return task
+    finally:
+        db.close()
+
+
+def start_gee_export(covariate_names, user_id):
+    """Start GEE export tasks for the specified covariates.
+
+    Creates database records and starts GEE batch tasks. Returns a list
+    of export record IDs.
+    """
+    import ee
+    import importlib.util
+    import sys
+
+    gee_dir = os.path.join(os.path.dirname(__file__), "gee-export")
+
+    # Load gee-export/config.py as its own module, then temporarily
+    # inject it into sys.modules["config"] so that gee-export/tasks.py
+    # (which does "from config import COVARIATES") picks it up instead
+    # of the webapp's config.py.
+    gee_cfg_spec = importlib.util.spec_from_file_location(
+        "gee_export_config", os.path.join(gee_dir, "config.py")
+    )
+    gee_cfg = importlib.util.module_from_spec(gee_cfg_spec)
+    gee_cfg_spec.loader.exec_module(gee_cfg)
+
+    original_config = sys.modules.get("config")
+    sys.modules["config"] = gee_cfg
+    # Also add gee-export dir to sys.path so tasks.py can find
+    # sibling modules like derived_layers
+    path_inserted = gee_dir not in sys.path
+    if path_inserted:
+        sys.path.insert(0, gee_dir)
+    try:
+        gee_tasks_spec = importlib.util.spec_from_file_location(
+            "gee_export_tasks", os.path.join(gee_dir, "tasks.py")
+        )
+        gee_tasks = importlib.util.module_from_spec(gee_tasks_spec)
+        gee_tasks_spec.loader.exec_module(gee_tasks)
+        start_export_task = gee_tasks.start_export_task
+    finally:
+        # Restore the webapp config module
+        if original_config is not None:
+            sys.modules["config"] = original_config
+        else:
+            sys.modules.pop("config", None)
+        if path_inserted:
+            sys.path.remove(gee_dir)
+
+    project = Config.GEE_PROJECT_ID or None
+    opt_url = Config.GEE_ENDPOINT or None
+
+    # Authenticate with a service account if credentials are provided
+    ee_sa_json = os.environ.get("EE_SERVICE_ACCOUNT_JSON", "")
+    if ee_sa_json:
+        import base64
+        try:
+            key_data = base64.b64decode(ee_sa_json).decode("utf-8")
+        except Exception:
+            # Assume it's already plain JSON, not base64-encoded
+            key_data = ee_sa_json
+        sa_info = json.loads(key_data)
+        credentials = ee.ServiceAccountCredentials(
+            sa_info["client_email"], key_data=json.dumps(sa_info)
+        )
+        ee.Initialize(credentials=credentials, project=project, opt_url=opt_url)
+    else:
+        ee.Initialize(project=project, opt_url=opt_url)
+
+    db = get_db()
+    export_ids = []
+    try:
+        for name in covariate_names:
+            task = start_export_task(
+                covariate_name=name,
+                bucket=Config.GCS_BUCKET,
+                prefix=Config.GCS_PREFIX,
+            )
+
+            export = GeeExport(
+                covariate_name=name,
+                gee_task_id=task.id,
+                gcs_bucket=Config.GCS_BUCKET,
+                gcs_prefix=Config.GCS_PREFIX,
+                status="running",
+                started_by=user_id,
+            )
+            db.add(export)
+            export_ids.append(str(export.id))
+
+        db.commit()
+        return export_ids
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def poll_gee_export_status():
+    """Poll GEE for actual task status and update database records.
+
+    Checks all exports with status 'pending' or 'running' against the
+    GEE Operations API and updates their status, completion time, and
+    error messages accordingly.
+    """
+    import base64
+    import ee
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    db = get_db()
+    try:
+        active = (
+            db.query(GeeExport)
+            .filter(GeeExport.status.in_(["pending", "running"]))
+            .all()
+        )
+        if not active:
+            return
+
+        # Initialize EE
+        project = Config.GEE_PROJECT_ID or None
+        opt_url = Config.GEE_ENDPOINT or None
+        ee_sa_json = os.environ.get("EE_SERVICE_ACCOUNT_JSON", "")
+        if ee_sa_json:
+            try:
+                key_data = base64.b64decode(ee_sa_json).decode("utf-8")
+            except Exception:
+                key_data = ee_sa_json
+            sa_info = json.loads(key_data)
+            credentials = ee.ServiceAccountCredentials(
+                sa_info["client_email"], key_data=json.dumps(sa_info)
+            )
+            ee.Initialize(credentials=credentials, project=project, opt_url=opt_url)
+        else:
+            ee.Initialize(project=project, opt_url=opt_url)
+
+        # Map GEE operation states to our status enum
+        state_map = {
+            "PENDING": "pending",
+            "RUNNING": "running",
+            "SUCCEEDED": "completed",
+            "FAILED": "failed",
+            "CANCELLED": "cancelled",
+            "CANCELLING": "running",
+        }
+
+        for export in active:
+            if not export.gee_task_id:
+                continue
+            try:
+                op_name = f"projects/{project}/operations/{export.gee_task_id}"
+                op = ee.data.getOperation(op_name)
+                metadata = op.get("metadata", {})
+                gee_state = metadata.get("state", op.get("done") and "SUCCEEDED")
+                new_status = state_map.get(gee_state, export.status)
+
+                if new_status != export.status:
+                    export.status = new_status
+                    if new_status in ("completed", "failed", "cancelled"):
+                        export.completed_at = datetime.now(timezone.utc)
+                    # Cache tile URLs when export completes successfully
+                    if new_status == "completed":
+                        tile_urls = list_export_tiles(
+                            export.gcs_bucket,
+                            export.gcs_prefix,
+                            export.covariate_name,
+                        )
+                        meta = dict(export.extra_metadata or {})
+                        meta["tile_urls"] = tile_urls
+                        export.extra_metadata = meta
+
+                # Capture error details if present
+                error = op.get("error")
+                if error:
+                    export.error_message = error.get("message", str(error))
+                    if export.status == "running":
+                        export.status = "failed"
+                        export.completed_at = datetime.now(timezone.utc)
+
+            except Exception as exc:
+                logger.warning(
+                    "Failed to poll GEE status for task %s: %s",
+                    export.gee_task_id, exc,
+                )
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def list_export_tiles(bucket, prefix, covariate_name):
+    """List exported tile URLs from GCS for a covariate.
+
+    Uses the public GCS JSON API to list objects matching the export
+    prefix.  Returns a list of public ``https://storage.googleapis.com/…``
+    URLs, or an empty list if listing fails.
+    """
+    import logging
+    import requests
+
+    logger = logging.getLogger(__name__)
+    obj_prefix = f"{prefix}/{covariate_name}".strip("/")
+    api_url = (
+        f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
+        f"?prefix={obj_prefix}&maxResults=1000"
+    )
+    try:
+        resp = requests.get(api_url, timeout=15)
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        urls = [
+            f"https://storage.googleapis.com/{bucket}/{item['name']}"
+            for item in items
+            if item["name"].endswith(".tif")
+        ]
+        return sorted(urls)
+    except Exception as exc:
+        logger.warning(
+            "Failed to list GCS tiles for %s/%s: %s",
+            bucket, covariate_name, exc,
+        )
+        return []
+
+
+def get_gee_exports(limit=100):
+    """Get recent GEE export records."""
+    db = get_db()
+    try:
+        return (
+            db.query(GeeExport)
+            .order_by(GeeExport.started_at.desc())
+            .limit(limit)
+            .all()
+        )
+    finally:
+        db.close()
+
+
+def get_user_list():
+    """Return all users ordered by creation date (admin only)."""
+    db = get_db()
+    try:
+        from models import User
+        return db.query(User).order_by(User.created_at.desc()).all()
+    finally:
+        db.close()
+
+
+def download_results_csv(task_id, result_type="by_site_year"):
+    """Download result CSV from S3 for a completed task.
+
+    Args:
+        task_id: The task UUID.
+        result_type: One of 'by_site_year', 'by_site_total', 'pixel_level'.
+
+    Returns:
+        CSV content as string, or None if not found.
+    """
+    filename_map = {
+        "by_site_year": "results_by_site_year.csv",
+        "by_site_total": "results_by_site_total.csv",
+        "pixel_level": "results_pixel_level.csv",
+    }
+    filename = filename_map.get(result_type)
+    if not filename:
+        return None
+
+    s3 = get_s3_client()
+    key = f"{Config.S3_PREFIX}/tasks/{task_id}/output/{filename}"
+    try:
+        response = s3.get_object(Bucket=Config.S3_BUCKET, Key=key)
+        return response["Body"].read().decode("utf-8")
+    except s3.exceptions.NoSuchKey:
+        return None

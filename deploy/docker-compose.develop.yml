@@ -1,0 +1,53 @@
+# Docker Compose for local development.
+# Usage: docker compose -f deploy/docker-compose.develop.yml up --build
+
+name: avoided-emissions-web
+
+services:
+  postgres:
+    image: postgis/postgis:18-3.6-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ae_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ae_password}
+      POSTGRES_DB: ${POSTGRES_DB:-avoided_emissions}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../database/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ae_user} -d ${POSTGRES_DB:-avoided_emissions}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  webapp:
+    build:
+      context: ../webapp
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      DEBUG: "true"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ae_user}:${POSTGRES_PASSWORD:-ae_password}@postgres:5432/${POSTGRES_DB:-avoided_emissions}
+    ports:
+      - "8050:8050"
+    volumes:
+      - ../webapp:/app
+      - ../gee-export:/app/gee-export
+      - ../r-analysis:/app/r-analysis
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "app.py"]
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  postgres_data:

@@ -1,0 +1,78 @@
+# Docker Compose for production deployment via Docker Swarm.
+# Deployed to EC2 using CodeDeploy with `docker stack deploy`.
+
+name: avoided-emissions-web
+
+services:
+  postgres:
+    image: postgis/postgis:18-3.6-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+
+  webapp:
+    image: ${WEBAPP_IMAGE}
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    ports:
+      - "8050:8050"
+    depends_on:
+      - postgres
+    networks:
+      - backend
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+networks:
+  backend:
+    driver: overlay
+    ipam:
+      config:
+        - subnet: ${BACKEND_SUBNET:-10.30.0.0/16}
+
+volumes:
+  postgres_prod_data:
+    # Named volume — data persists across stack deploys and container restarts.
+    # Do NOT use `docker volume rm` or `docker stack rm --volumes` in production.
+    name: postgres_prod_data

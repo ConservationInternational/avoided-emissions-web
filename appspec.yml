@@ -1,0 +1,44 @@
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /opt/avoided-emissions-web
+    overwrite: true
+
+permissions:
+  - object: /opt/avoided-emissions-web
+    pattern: "**"
+    owner: ubuntu
+    group: ubuntu
+    mode: 755
+  - object: /opt/avoided-emissions-web/deploy/codedeploy
+    pattern: "**/*.sh"
+    owner: ubuntu
+    group: ubuntu
+    mode: 755
+
+hooks:
+  ApplicationStop:
+    - location: deploy/codedeploy/application-stop.sh
+      timeout: 120
+      runas: root
+
+  BeforeInstall:
+    - location: deploy/codedeploy/before-install.sh
+      timeout: 300
+      runas: root
+
+  AfterInstall:
+    - location: deploy/codedeploy/after-install.sh
+      timeout: 600
+      runas: root
+
+  ApplicationStart:
+    - location: deploy/codedeploy/application-start.sh
+      timeout: 600
+      runas: root
+
+  ValidateService:
+    - location: deploy/codedeploy/validate-service.sh
+      timeout: 300
+      runas: root
