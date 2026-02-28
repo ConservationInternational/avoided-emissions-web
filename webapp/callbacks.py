@@ -22,6 +22,7 @@ from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from auth import authenticate, get_current_user, register_user
+from config import report_exception
 from layouts import (
     RESULTS_TOTAL_COLUMNS,
     RESULTS_YEARLY_COLUMNS,
@@ -302,6 +303,7 @@ def register_callbacks(app):
 
         except Exception as e:
             logger.exception("Task submission failed")
+            report_exception()
             return "Submission failed. Please try again or contact support.", None
 
     # -- Dashboard task list (AG Grid) ---------------------------------------
@@ -469,6 +471,7 @@ def register_callbacks(app):
             )
         except Exception:
             logger.exception("GEE export failed")
+            report_exception()
             return dbc.Alert(
                 "Export failed. Please try again or contact support.",
                 color="danger",
@@ -488,6 +491,7 @@ def register_callbacks(app):
             rows = get_covariate_inventory()
         except Exception:
             logger.exception("Failed to build covariate inventory")
+            report_exception()
             rows = []
 
         gcs_count = sum(1 for r in rows if r.get("gcs_tiles", 0) > 0)
@@ -542,6 +546,7 @@ def register_callbacks(app):
             logger.exception(
                 "Covariate action '%s' failed for %s", action, covariate_name
             )
+            report_exception(covariate=covariate_name, action=action)
             # Persist a 'failed' record so the table row reflects the error
             try:
                 _record_covariate_action_failure(

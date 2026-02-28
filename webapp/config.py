@@ -1,6 +1,10 @@
 """Application configuration loaded from environment variables."""
 
+import logging
 import os
+import sys
+
+_logger = logging.getLogger(__name__)
 
 
 def _build_database_url() -> str:
@@ -35,3 +39,26 @@ class Config:
     GIT_REVISION = os.environ.get("GIT_REVISION", "")
     CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
     CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/0")
+
+
+def report_exception(**extra):
+    """Report the current exception to Rollbar (if configured).
+
+    Call from an ``except`` block to send the active exception to Rollbar.
+    Silently does nothing when ``ROLLBAR_ACCESS_TOKEN`` is not set or when
+    Rollbar has not been initialised yet.
+
+    Parameters
+    ----------
+    **extra
+        Arbitrary key/value pairs attached to the Rollbar item as
+        ``extra_data``.
+    """
+    if not Config.ROLLBAR_ACCESS_TOKEN:
+        return
+    try:
+        import rollbar
+
+        rollbar.report_exc_info(sys.exc_info(), extra_data=extra or None)
+    except Exception:
+        _logger.debug("Failed to report exception to Rollbar", exc_info=True)

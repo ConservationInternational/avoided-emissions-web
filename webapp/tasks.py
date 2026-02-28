@@ -8,6 +8,7 @@ Celery worker process.  The web application dispatches work by calling
 import logging
 
 from celery_app import celery_app
+from config import report_exception
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
 
     except Exception as exc:
         logger.exception("COG merge failed for layer %s", layer_id)
+        report_exception(layer_id=layer_id)
         try:
             layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
             if layer:
@@ -193,6 +195,7 @@ def poll_gee_exports() -> dict:
                     export.gee_task_id,
                     exc,
                 )
+                report_exception(gee_task_id=export.gee_task_id)
 
         db.commit()
 
@@ -268,6 +271,7 @@ def auto_merge_unmerged() -> dict:
         )
     except Exception:
         logger.exception("Failed to scan GCS tiles for auto-merge")
+        report_exception()
         return {"scanned": 0, "dispatched": 0}
 
     # Covariates that have tiles on GCS
@@ -299,6 +303,7 @@ def auto_merge_unmerged() -> dict:
                     already_handled.add(obj["covariate"])
         except Exception:
             logger.warning("Failed to scan S3 for existing COGs")
+            report_exception()
 
         need_merge = with_tiles - already_handled
         if not need_merge:
@@ -452,6 +457,7 @@ def poll_batch_tasks() -> dict:
                     task.id,
                     exc,
                 )
+                report_exception(task_id=str(task.id))
 
         db.commit()
         return {"checked": len(active), "updated": updated}
