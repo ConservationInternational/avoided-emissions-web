@@ -21,22 +21,25 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
-from auth import authenticate, get_current_user
+from auth import authenticate, get_current_user, register_user
 from layouts import (
     RESULTS_TOTAL_COLUMNS,
     RESULTS_YEARLY_COLUMNS,
     _make_ag_grid,
 )
 from services import (
+    approve_user,
+    change_user_role,
+    delete_user,
     download_results_csv,
-    get_gee_exports,
+    get_covariate_inventory,
     get_task_detail,
     get_task_list,
     get_user_list,
-    list_export_tiles,
     parse_sites_file,
     poll_gee_export_status,
     refresh_task_status,
+    start_cog_merge,
     start_gee_export,
     submit_analysis_task,
 )
@@ -93,11 +96,45 @@ def register_callbacks(app):
         if not email or not password:
             return "Please enter email and password."
 
-        user = authenticate(email, password)
-        if user:
-            flask_login.login_user(user)
+        result = authenticate(email, password)
+        if result == "pending_approval":
+            return "Your account is pending admin approval."
+        if result:
+            flask_login.login_user(result)
             return dcc.Location(pathname="/", id="redirect-login")
         return "Invalid email or password."
+
+    # -- Registration --------------------------------------------------------
+
+    @app.callback(
+        Output("register-message", "children"),
+        Input("register-button", "n_clicks"),
+        State("register-name", "value"),
+        State("register-email", "value"),
+        State("register-password", "value"),
+        State("register-password-confirm", "value"),
+        prevent_initial_call=True,
+    )
+    def handle_register(n_clicks, name, email, password, password_confirm):
+        if not name or not email or not password:
+            return dbc.Alert(
+                "Please fill in all fields.", color="warning", duration=5000,
+            )
+
+        if len(password) < 8:
+            return dbc.Alert(
+                "Password must be at least 8 characters.", color="warning",
+                duration=5000,
+            )
+
+        if password != password_confirm:
+            return dbc.Alert(
+                "Passwords do not match.", color="danger", duration=5000,
+            )
+
+        success, message = register_user(email, password, name)
+        color = "success" if success else "danger"
+        return dbc.Alert(message, color=color)
 
     # -- File upload ---------------------------------------------------------
 
@@ -355,7 +392,7 @@ def register_callbacks(app):
             return dict(content=csv, filename=filename)
         return no_update
 
-    # -- Admin: GEE exports --------------------------------------------------
+    # -- Admin: Covariates (unified export + merge) ---------------------------
 
     @app.callback(
         Output("gee-export-result", "children"),
@@ -397,7 +434,7 @@ def register_callbacks(app):
                 f"Started {len(export_ids)} GEE export task(s).",
                 color="success",
             )
-        except Exception as e:
+        except Exception:
             logger.exception("GEE export failed")
             return dbc.Alert(
                 "Export failed. Please try again or contact support.",
@@ -405,73 +442,84 @@ def register_callbacks(app):
             )
 
     @app.callback(
-        [Output("gee-exports-table", "rowData"),
-         Output("gee-export-total-count", "children")],
-        [Input("admin-refresh-interval", "n_intervals"),
-         Input("gee-export-result", "children")],
+        Output("cog-merge-result", "children"),
+        Input("start-cog-merge", "n_clicks"),
+        State("covariates-table", "selectedRows"),
+        prevent_initial_call=True,
     )
-    def refresh_gee_exports(n, _export_result):
-        # Poll GEE for actual task status before fetching records
+    def handle_cog_merge(n_clicks, selected_rows):
+        user = get_current_user()
+        if not user or not user.is_admin:
+            return dbc.Alert("Admin access required.", color="danger")
+
+        if not selected_rows:
+            return dbc.Alert(
+                "No covariates selected.  Use the checkboxes to select "
+                "rows with GCS tiles, then click 'Merge Selected'.",
+                color="warning",
+            )
+
+        # Only merge covariates that actually have tiles on GCS
+        names = [
+            row["covariate_name"]
+            for row in selected_rows
+            if row.get("gcs_tiles", 0) > 0
+        ]
+
+        if not names:
+            return dbc.Alert(
+                "None of the selected covariates have tiles on GCS.",
+                color="warning",
+            )
+
+        try:
+            merge_ids = start_cog_merge(names, user.id)
+            if not merge_ids:
+                return dbc.Alert(
+                    "All selected covariates are already pending or merging.",
+                    color="info",
+                    duration=4000,
+                )
+            return dbc.Alert(
+                f"Started COG merge for {len(merge_ids)} covariate(s). "
+                "This runs in the background — the table will update "
+                "automatically as merges complete.",
+                color="success",
+            )
+        except Exception:
+            logger.exception("COG merge request failed")
+            return dbc.Alert(
+                "Merge failed. Please try again or contact support.",
+                color="danger",
+            )
+
+    @app.callback(
+        [Output("covariates-table", "rowData"),
+         Output("covariates-total-count", "children")],
+        [Input("admin-refresh-interval", "n_intervals"),
+         Input("gee-export-result", "children"),
+         Input("cog-merge-result", "children")],
+    )
+    def refresh_covariate_inventory(n, _export_result, _merge_result):
+        # Poll GEE for actual task status before building inventory
         try:
             poll_gee_export_status()
         except Exception:
             pass  # Don't break the UI if polling fails
 
-        exports = get_gee_exports()
-        if not exports:
-            return [], "Total: 0"
+        try:
+            rows = get_covariate_inventory()
+        except Exception:
+            logger.exception("Failed to build covariate inventory")
+            rows = []
 
-        # Load COVARIATES to look up categories
-        import importlib.util
-
-        gee_config_path = os.path.join(
-            os.path.dirname(__file__), "gee-export", "config.py"
+        gcs_count = sum(1 for r in rows if r.get("gcs_tiles", 0) > 0)
+        s3_count = sum(1 for r in rows if r.get("on_s3"))
+        total_label = (
+            f"Total: {len(rows)} | On GCS: {gcs_count} | On S3: {s3_count}"
         )
-        spec = importlib.util.spec_from_file_location(
-            "gee_export_config", gee_config_path
-        )
-        gee_config = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(gee_config)
-        covariates = gee_config.COVARIATES
 
-        cat_labels = {
-            "climate": "Climate",
-            "terrain": "Terrain",
-            "accessibility": "Accessibility",
-            "demographics": "Demographics",
-            "biomass": "Biomass",
-            "land_cover": "Land Cover",
-            "forest_cover": "Forest Cover",
-            "ecological": "Ecological",
-            "administrative": "Administrative",
-        }
-
-        rows = []
-        for exp in exports:
-            cov_cfg = covariates.get(exp.covariate_name, {})
-            raw_cat = cov_cfg.get("category", "")
-
-            # Retrieve cached tile URLs, or fetch them on-the-fly for
-            # completed exports that were finished before caching was added.
-            meta = exp.extra_metadata or {}
-            tile_urls = meta.get("tile_urls")
-            if tile_urls is None and exp.status == "completed":
-                tile_urls = list_export_tiles(
-                    exp.gcs_bucket, exp.gcs_prefix, exp.covariate_name,
-                )
-
-            rows.append({
-                "covariate_name": exp.covariate_name,
-                "category": cat_labels.get(raw_cat, raw_cat),
-                "gee_task_id": exp.gee_task_id or "",
-                "status": exp.status,
-                "started_at": _fmt_dt(exp.started_at),
-                "completed_at": _fmt_dt(exp.completed_at),
-                "error_message": exp.error_message or "",
-                "tile_urls": json.dumps(tile_urls) if tile_urls else "",
-            })
-
-        return rows, f"Total: {len(rows)}"
+        return rows, total_label
 
     # -- Admin: User management (AG Grid) ------------------------------------
 
@@ -488,15 +536,160 @@ def register_callbacks(app):
         rows = []
         for u in users:
             rows.append({
+                "id": str(u.id),
                 "name": u.name,
                 "email": u.email,
                 "role": u.role,
+                "is_approved": u.is_approved,
                 "created_at": _fmt_dt(u.created_at),
                 "last_login": _fmt_dt(u.last_login),
                 "is_active": u.is_active,
             })
 
         return rows, f"Total: {len(rows)}"
+
+    # -- Admin: populate user select dropdown --------------------------------
+
+    @app.callback(
+        Output("admin-user-select", "options"),
+        Input("user-management-table", "rowData"),
+    )
+    def update_user_select(row_data):
+        if not row_data:
+            return []
+        return [
+            {
+                "label": f"{r['name']} ({r['email']})"
+                         + (" [pending]" if not r.get("is_approved") else ""),
+                "value": r["id"],
+            }
+            for r in row_data
+        ]
+
+    # -- Admin: approve user -------------------------------------------------
+
+    @app.callback(
+        [Output("admin-user-action-result", "children", allow_duplicate=True),
+         Output("admin-refresh-interval", "n_intervals", allow_duplicate=True)],
+        Input("admin-approve-btn", "n_clicks"),
+        State("admin-user-select", "value"),
+        State("admin-refresh-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def handle_approve_user(n_clicks, user_id, current_n):
+        if not user_id:
+            return dbc.Alert("Please select a user.", color="warning",
+                             duration=4000), no_update
+        user = get_current_user()
+        if not user or not user.is_admin:
+            return dbc.Alert("Admin access required.", color="danger",
+                             duration=4000), no_update
+        success, message = approve_user(user_id)
+        color = "success" if success else "danger"
+        # Bump n_intervals to force a refresh of the user table
+        return dbc.Alert(message, color=color, duration=4000), (current_n or 0) + 1
+
+    # -- Admin: change user role ---------------------------------------------
+
+    @app.callback(
+        [Output("admin-user-action-result", "children", allow_duplicate=True),
+         Output("admin-refresh-interval", "n_intervals", allow_duplicate=True)],
+        Input("admin-role-btn", "n_clicks"),
+        State("admin-user-select", "value"),
+        State("admin-role-select", "value"),
+        State("admin-refresh-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def handle_change_role(n_clicks, user_id, new_role, current_n):
+        if not user_id:
+            return dbc.Alert("Please select a user.", color="warning",
+                             duration=4000), no_update
+        user = get_current_user()
+        if not user or not user.is_admin:
+            return dbc.Alert("Admin access required.", color="danger",
+                             duration=4000), no_update
+        success, message = change_user_role(user_id, new_role)
+        color = "success" if success else "danger"
+        return dbc.Alert(message, color=color, duration=4000), (current_n or 0) + 1
+
+    # -- Admin: delete user (modal) ------------------------------------------
+
+    @app.callback(
+        Output("admin-delete-modal", "is_open"),
+        [Input("admin-delete-btn", "n_clicks"),
+         Input("admin-delete-cancel", "n_clicks"),
+         Input("admin-delete-confirm", "n_clicks")],
+        State("admin-delete-modal", "is_open"),
+        prevent_initial_call=True,
+    )
+    def toggle_admin_delete_modal(open_clicks, cancel_clicks, confirm_clicks,
+                                  is_open):
+        ctx = callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger == "admin-delete-btn":
+            return True
+        return False
+
+    @app.callback(
+        [Output("admin-user-action-result", "children", allow_duplicate=True),
+         Output("admin-refresh-interval", "n_intervals", allow_duplicate=True)],
+        Input("admin-delete-confirm", "n_clicks"),
+        State("admin-user-select", "value"),
+        State("admin-refresh-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def handle_admin_delete_user(n_clicks, user_id, current_n):
+        if not user_id:
+            return dbc.Alert("Please select a user.", color="warning",
+                             duration=4000), no_update
+        user = get_current_user()
+        if not user or not user.is_admin:
+            return dbc.Alert("Admin access required.", color="danger",
+                             duration=4000), no_update
+        # Prevent admins from deleting themselves
+        if str(user.id) == str(user_id):
+            return dbc.Alert("You cannot delete your own admin account.",
+                             color="warning", duration=4000), no_update
+        success, message = delete_user(user_id)
+        color = "success" if success else "danger"
+        return dbc.Alert(message, color=color, duration=4000), (current_n or 0) + 1
+
+    # -- Self account deletion (modal) ---------------------------------------
+
+    @app.callback(
+        Output("self-delete-modal", "is_open"),
+        [Input("self-delete-btn", "n_clicks"),
+         Input("self-delete-cancel", "n_clicks"),
+         Input("self-delete-confirm", "n_clicks")],
+        State("self-delete-modal", "is_open"),
+        prevent_initial_call=True,
+    )
+    def toggle_self_delete_modal(open_clicks, cancel_clicks, confirm_clicks,
+                                 is_open):
+        ctx = callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger == "self-delete-btn":
+            return True
+        return False
+
+    @app.callback(
+        Output("self-delete-result", "children"),
+        Input("self-delete-confirm", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def handle_self_delete(n_clicks):
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+        success, message = delete_user(user.id)
+        if success:
+            flask_login.logout_user()
+            return dcc.Location(pathname="/login", id="redirect-after-delete")
+        return dbc.Alert(message, color="danger", duration=4000)
 
     # -- AG Grid cell click (task link navigation) ---------------------------
 

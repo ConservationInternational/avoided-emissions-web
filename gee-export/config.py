@@ -5,17 +5,20 @@ parameters, and the default matching formula used in the avoided emissions
 analysis.
 """
 
-# Target export resolution in arc-degrees (approximately 1 km at the equator)
-EXPORT_SCALE_METERS = 927.67  # ~1km at equator in meters
+EXPORT_SCALE_METERS = 927.67  # (30 arc seconds - approximately 1km at equator in meters)
 EXPORT_CRS = "EPSG:4326"
 
 # Default GCS path prefix for exported COGs
 DEFAULT_GCS_PREFIX = "avoided-emissions/covariates"
 
-# Maximum number of pixels per export tile (GEE limit is ~1e9 per task).
-# We tile the global extent into manageable chunks and export each tile as
-# a separate GEE task.
-MAX_PIXELS_PER_TASK = 1e9
+# Maximum number of pixels allowed in a single Export.image task.
+# The GEE default is 1e8 (100 million); it can be raised up to 1e13.
+# At ~1 km resolution the global extent has ~933 million pixels, so we
+# set this high enough to avoid a pixel-count error.  Note that GEE also
+# enforces a hard 32,768-pixel limit per dimension.  At 30 arc-seconds
+# the global width is ~43,200 px, which exceeds that limit, so GEE will
+# always split the export into at least 2 tiles regardless of maxPixels.
+MAX_PIXELS_PER_TASK = 1e10
 
 # Full-globe export region
 GLOBAL_REGION = {

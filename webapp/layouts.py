@@ -108,21 +108,32 @@ TASK_LIST_COLUMNS = [
     },
 ]
 
-GEE_EXPORT_COLUMNS = [
+COVARIATE_COLUMNS = [
     {
         "headerName": "Covariate",
         "field": "covariate_name",
+        "checkboxSelection": True,
+        "headerCheckboxSelection": True,
+        "headerCheckboxSelectionFilteredOnly": True,
         "flex": 2,
-        "minWidth": 180,
+        "minWidth": 200,
         "pinned": "left",
         "cellStyle": {**TRUNCATED_CELL},
-        "tooltipField": "covariate_name",
+        "tooltipField": "description",
     },
     {
         "headerName": "Category",
         "field": "category",
-        "flex": 1,
+        "flex": 1.2,
         "minWidth": 120,
+        "filter": "agTextColumnFilter",
+    },
+    {
+        "headerName": "Status",
+        "field": "status",
+        "flex": 1,
+        "minWidth": 110,
+        "cellRenderer": "StatusBadge",
         "filter": "agTextColumnFilter",
     },
     {
@@ -134,28 +145,36 @@ GEE_EXPORT_COLUMNS = [
         "tooltipField": "gee_task_id",
     },
     {
-        "headerName": "Status",
-        "field": "status",
-        "flex": 1,
-        "minWidth": 110,
-        "cellRenderer": "StatusBadge",
-        "filter": "agTextColumnFilter",
+        "headerName": "GCS Tiles",
+        "field": "gcs_tiles",
+        "flex": 0.7,
+        "minWidth": 85,
+        "cellRenderer": "TileCount",
     },
     {
-        "headerName": "Started",
-        "field": "started_at",
-        "flex": 1.5,
-        "minWidth": 160,
-        "sort": "desc",
-        "sortIndex": 0,
-        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "headerName": "On S3",
+        "field": "on_s3",
+        "flex": 0.5,
+        "minWidth": 65,
+        "cellRenderer": "S3Status",
     },
     {
-        "headerName": "Completed",
-        "field": "completed_at",
-        "flex": 1.5,
-        "minWidth": 160,
-        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "headerName": "Size (MB)",
+        "field": "size_mb",
+        "flex": 0.8,
+        "minWidth": 90,
+        "filter": "agNumberColumnFilter",
+        "valueFormatter": {"function": "params.value ? d3.format(',.1f')(params.value) : ''"},
+        "type": "numericColumn",
+    },
+    {
+        "headerName": "Merged URL",
+        "field": "merged_url",
+        "flex": 2.5,
+        "minWidth": 250,
+        "cellRenderer": "CogLink",
+        "cellStyle": {**TRUNCATED_CELL, "fontSize": "11px"},
+        "tooltipField": "merged_url",
     },
     {
         "headerName": "Error",
@@ -164,15 +183,6 @@ GEE_EXPORT_COLUMNS = [
         "minWidth": 200,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "11px", "color": "#721C24"},
         "tooltipField": "error_message",
-    },
-    {
-        "headerName": "Tiles",
-        "field": "tile_urls",
-        "flex": 2,
-        "minWidth": 200,
-        "cellRenderer": "TileLinks",
-        "autoHeight": True,
-        "cellStyle": {"whiteSpace": "normal", "lineHeight": "1.4"},
     },
 ]
 
@@ -303,6 +313,14 @@ USER_MANAGEMENT_COLUMNS = [
         "filter": "agTextColumnFilter",
     },
     {
+        "headerName": "Approved",
+        "field": "is_approved",
+        "flex": 0.7,
+        "minWidth": 90,
+        "cellRenderer": "ApprovalBadge",
+        "filter": "agTextColumnFilter",
+    },
+    {
         "headerName": "Created",
         "field": "created_at",
         "flex": 1.5,
@@ -325,6 +343,7 @@ USER_MANAGEMENT_COLUMNS = [
         "minWidth": 80,
     },
 ]
+
 
 
 # -- AG Grid defaults (mirroring api-ui patterns) ---------------------------
@@ -376,22 +395,51 @@ TASK_STATUS_ROW_STYLES = [
     },
 ]
 
-GEE_STATUS_ROW_STYLES = [
+COVARIATE_STATUS_ROW_STYLES = [
+    # Greyed-out: nothing anywhere
+    {
+        "condition": "(!params.data.gcs_tiles || params.data.gcs_tiles === 0) && !params.data.on_s3 && !params.data.status",
+        "style": {"backgroundColor": "#F5F5F5", "color": "#AAAAAA"},
+    },
+    # Export phase
+    {
+        "condition": "params.data.status === 'pending_export'",
+        "style": {"backgroundColor": "#E2E3E5", "color": "#495057"},
+    },
+    {
+        "condition": "params.data.status === 'exporting'",
+        "style": {"backgroundColor": "#CCE5FF", "color": "#084298"},
+    },
+    {
+        "condition": "params.data.status === 'exported'",
+        "style": {"backgroundColor": "#FFF3CD", "color": "#664D03"},
+    },
+    # Merge phase
+    {
+        "condition": "params.data.status === 'pending_merge'",
+        "style": {"backgroundColor": "#E2E3E5", "color": "#495057"},
+    },
+    {
+        "condition": "params.data.status === 'merging'",
+        "style": {"backgroundColor": "#CCE5FF", "color": "#084298"},
+    },
+    # Merged / on S3
+    {
+        "condition": "params.data.on_s3 && !params.data.status",
+        "style": {"backgroundColor": "#D1E7DD", "color": "#0F5132"},
+    },
+    {
+        "condition": "params.data.status === 'merged'",
+        "style": {"backgroundColor": "#D1E7DD", "color": "#0F5132"},
+    },
+    # Failed / cancelled
     {
         "condition": "params.data.status === 'failed'",
         "style": {"backgroundColor": "#F8D7DA", "color": "#721C24"},
     },
     {
-        "condition": "params.data.status === 'completed'",
-        "style": {"backgroundColor": "#D1E7DD", "color": "#0F5132"},
-    },
-    {
-        "condition": "params.data.status === 'running'",
-        "style": {"backgroundColor": "#CCE5FF", "color": "#084298"},
-    },
-    {
-        "condition": "params.data.status === 'pending'",
-        "style": {"backgroundColor": "#E2E3E5", "color": "#495057"},
+        "condition": "params.data.status === 'cancelled'",
+        "style": {"backgroundColor": "#F8D7DA", "color": "#721C24"},
     },
 ]
 
@@ -455,7 +503,10 @@ def navbar(user=None):
             dbc.NavItem(dbc.NavLink("Logout", href="/logout")),
         ]
     else:
-        right_items = [dbc.NavItem(dbc.NavLink("Login", href="/login"))]
+        right_items = [
+            dbc.NavItem(dbc.NavLink("Login", href="/login")),
+            dbc.NavItem(dbc.NavLink("Register", href="/register")),
+        ]
 
     return dbc.Navbar(
         dbc.Container([
@@ -500,6 +551,59 @@ def login_layout():
                     html.Div(id="login-error", className="text-danger mb-2"),
                     dbc.Button("Login", id="login-button", color="primary",
                                className="w-100"),
+                    html.Hr(),
+                    html.P([
+                        "Don't have an account? ",
+                        dcc.Link("Register here", href="/register",
+                                 className="fw-bold"),
+                    ], className="text-center mb-0 small"),
+                ]),
+            ], className="mt-5 shadow-sm"),
+        ], width={"size": 4, "offset": 4})),
+    ])
+
+
+def register_layout():
+    """Registration page layout."""
+    return dbc.Container([
+        navbar(),
+        dbc.Row(dbc.Col([
+            dbc.Card([
+                dbc.CardHeader(
+                    html.Div([
+                        html.H4("Avoided Emissions",
+                                className="text-center mb-1",
+                                style={"color": "white"}),
+                        html.H6("Create Account",
+                                className="text-center",
+                                style={"color": "#ffffffcc"}),
+                    ]),
+                    style={"backgroundColor": "#2c3e50"},
+                ),
+                dbc.CardBody([
+                    dbc.Label("Full Name"),
+                    dbc.Input(id="register-name", type="text",
+                              placeholder="Jane Doe",
+                              className="mb-2"),
+                    dbc.Label("Email"),
+                    dbc.Input(id="register-email", type="email",
+                              placeholder="user@example.com",
+                              className="mb-2"),
+                    dbc.Label("Password"),
+                    dbc.Input(id="register-password", type="password",
+                              className="mb-2"),
+                    dbc.Label("Confirm Password"),
+                    dbc.Input(id="register-password-confirm", type="password",
+                              className="mb-3"),
+                    html.Div(id="register-message", className="mb-2"),
+                    dbc.Button("Register", id="register-button",
+                               color="primary", className="w-100"),
+                    html.Hr(),
+                    html.P([
+                        "Already have an account? ",
+                        dcc.Link("Login here", href="/login",
+                                 className="fw-bold"),
+                    ], className="text-center mb-0 small"),
                 ]),
             ], className="mt-5 shadow-sm"),
         ], width={"size": 4, "offset": 4})),
@@ -533,6 +637,38 @@ def dashboard_layout(user):
             height="700px",
             style_conditions=TASK_STATUS_ROW_STYLES,
         ),
+        # Account management section
+        html.Hr(),
+        dbc.Row([
+            dbc.Col([
+                dbc.Button(
+                    "Delete My Account",
+                    id="self-delete-btn",
+                    color="danger",
+                    outline=True,
+                    size="sm",
+                ),
+                dbc.Modal([
+                    dbc.ModalHeader(dbc.ModalTitle("Delete Account")),
+                    dbc.ModalBody([
+                        html.P(
+                            "Are you sure you want to delete your account? "
+                            "This will permanently remove your account and all "
+                            "associated analysis tasks. This action cannot be undone.",
+                            className="text-danger",
+                        ),
+                    ]),
+                    dbc.ModalFooter([
+                        dbc.Button("Cancel", id="self-delete-cancel",
+                                   color="secondary", className="me-2"),
+                        dbc.Button("Delete My Account",
+                                   id="self-delete-confirm",
+                                   color="danger"),
+                    ]),
+                ], id="self-delete-modal", is_open=False, centered=True),
+                html.Div(id="self-delete-result"),
+            ], className="text-end"),
+        ]),
         # Stores & intervals
         dcc.Store(id="task-list-store"),
         dcc.Interval(id="refresh-interval", interval=30000, n_intervals=0),
@@ -753,7 +889,7 @@ def _build_category_options():
 
 
 def admin_layout(user):
-    """Admin panel for GEE export management and users."""
+    """Admin panel for covariate management and users."""
     category_options = _build_category_options()
 
     return dbc.Container([
@@ -762,7 +898,8 @@ def admin_layout(user):
         html.Hr(),
 
         dbc.Tabs([
-            dbc.Tab(label="GEE Exports", tab_id="tab-gee", children=[
+            dbc.Tab(label="Covariates", tab_id="tab-covariates", children=[
+                # -- Export controls -----------------------------------------
                 dbc.Card([
                     dbc.CardHeader("Export Covariate Layers from GEE"),
                     dbc.CardBody([
@@ -784,24 +921,65 @@ def admin_layout(user):
                         ]),
                         html.Div(id="gee-export-result", className="mt-2"),
                     ]),
-                ], className="mt-3 mb-4"),
+                ], className="mt-3 mb-3"),
 
+                # -- Merge controls ------------------------------------------
+                dbc.Card([
+                    dbc.CardHeader("Merge GCS Tiles → S3 COG"),
+                    dbc.CardBody([
+                        html.P(
+                            "Select rows with GCS tiles below and click "
+                            "'Merge Selected' to create single Cloud-"
+                            "Optimized GeoTIFFs on S3.",
+                            className="text-muted small mb-3",
+                        ),
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Button(
+                                    "Merge Selected",
+                                    id="start-cog-merge",
+                                    color="primary",
+                                    className="me-2",
+                                ),
+                            ], width="auto"),
+                        ]),
+                        html.Div(id="cog-merge-result", className="mt-2"),
+                    ]),
+                ], className="mb-4"),
+
+                # -- Inventory grid ------------------------------------------
                 dbc.Row([
-                    dbc.Col(html.H5("Export History"), width="auto"),
+                    dbc.Col(html.H5("Covariate Inventory"), width="auto"),
                     dbc.Col(
-                        html.Span(id="gee-export-total-count",
-                                  children="Total: 0",
-                                  className="text-muted fw-bold"),
+                        html.Span(
+                            id="covariates-total-count",
+                            children="Total: 0",
+                            className="text-muted fw-bold",
+                        ),
                         width=True,
                         className="text-end",
                     ),
                 ], className="align-items-center mb-2"),
                 _make_ag_grid(
-                    table_id="gee-exports-table",
-                    column_defs=GEE_EXPORT_COLUMNS,
+                    table_id="covariates-table",
+                    column_defs=COVARIATE_COLUMNS,
                     row_model="clientSide",
                     height="500px",
-                    style_conditions=GEE_STATUS_ROW_STYLES,
+                    style_conditions=COVARIATE_STATUS_ROW_STYLES,
+                    grid_options_extra={
+                        "rowSelection": "multiple",
+                        "suppressRowClickSelection": True,
+                        "isRowSelectable": {
+                            "function": (
+                                "!!params.data"
+                                " && params.data.gcs_tiles > 0"
+                                " && params.data.status !== 'merging'"
+                                " && params.data.status !== 'pending_merge'"
+                                " && params.data.status !== 'exporting'"
+                                " && params.data.status !== 'pending_export'"
+                            )
+                        },
+                    },
                 ),
             ]),
             dbc.Tab(label="Users", tab_id="tab-users", children=[
@@ -816,6 +994,77 @@ def admin_layout(user):
                         className="text-end",
                     ),
                 ], className="align-items-center mb-2"),
+
+                # User action controls
+                dbc.Card([
+                    dbc.CardHeader("User Actions"),
+                    dbc.CardBody([
+                        html.P(
+                            "Select a user from the table below, then use "
+                            "these actions.",
+                            className="text-muted small mb-3",
+                        ),
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Label("Selected User", size="sm"),
+                                dbc.Select(
+                                    id="admin-user-select",
+                                    options=[],
+                                    placeholder="Select a user...",
+                                ),
+                            ], width=4),
+                            dbc.Col([
+                                dbc.Label("Change Role", size="sm"),
+                                dbc.Select(
+                                    id="admin-role-select",
+                                    options=[
+                                        {"label": "User", "value": "user"},
+                                        {"label": "Admin", "value": "admin"},
+                                    ],
+                                    value="user",
+                                ),
+                            ], width=2),
+                            dbc.Col([
+                                html.Div(style={"height": "32px"}),
+                                dbc.ButtonGroup([
+                                    dbc.Button("Approve",
+                                               id="admin-approve-btn",
+                                               color="success", size="sm"),
+                                    dbc.Button("Change Role",
+                                               id="admin-role-btn",
+                                               color="info", size="sm"),
+                                    dbc.Button("Delete",
+                                               id="admin-delete-btn",
+                                               color="danger", size="sm"),
+                                ]),
+                            ], width="auto",
+                               className="d-flex align-items-end"),
+                        ]),
+                        html.Div(id="admin-user-action-result",
+                                 className="mt-2"),
+                        # Confirmation modal for admin delete
+                        dbc.Modal([
+                            dbc.ModalHeader(
+                                dbc.ModalTitle("Confirm Delete User")),
+                            dbc.ModalBody(
+                                "Are you sure you want to delete this user "
+                                "and all their analysis tasks? This cannot be "
+                                "undone."
+                            ),
+                            dbc.ModalFooter([
+                                dbc.Button("Cancel",
+                                           id="admin-delete-cancel",
+                                           color="secondary",
+                                           className="me-2"),
+                                dbc.Button("Delete User",
+                                           id="admin-delete-confirm",
+                                           color="danger"),
+                            ]),
+                        ], id="admin-delete-modal", is_open=False,
+                           centered=True),
+                    ]),
+                ], className="mt-3 mb-3"),
+
                 _make_ag_grid(
                     table_id="user-management-table",
                     column_defs=USER_MANAGEMENT_COLUMNS,
@@ -823,7 +1072,7 @@ def admin_layout(user):
                     height="500px",
                 ),
             ]),
-        ], id="admin-tabs", active_tab="tab-gee"),
+        ], id="admin-tabs", active_tab="tab-covariates"),
 
         dcc.Interval(id="admin-refresh-interval", interval=30000,
                      n_intervals=0),

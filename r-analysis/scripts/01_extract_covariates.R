@@ -61,12 +61,12 @@ all_layers <- c(
     config$exact_match_vars,
     paste0("fc_", config$fc_years)
 )
-message("  Loading ", length(all_layers), " covariate layers from GCS")
+message("  Loading ", length(all_layers), " covariate layers from S3")
 
-# Load covariate rasters
-d <- build_covariate_vrt(
-    gcs_bucket = config$gcs_bucket,
-    gcs_prefix = config$gcs_prefix,
+# Load merged COGs from S3
+d <- load_covariates(
+    cog_bucket = config$cog_bucket,
+    cog_prefix = config$cog_prefix,
     covariate_names = all_layers
 )
 message("  Covariate stack dimensions: ", paste(dim(d), collapse = " x "))

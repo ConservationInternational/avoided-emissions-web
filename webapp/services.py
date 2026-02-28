@@ -7,6 +7,7 @@ Dash callbacks to keep business logic out of the UI layer.
 
 import io
 import json
+import logging
 import os
 import tempfile
 import uuid
@@ -19,12 +20,14 @@ import pandas as pd
 from config import Config
 from models import (
     AnalysisTask,
-    GeeExport,
+    Covariate,
     TaskResult,
     TaskResultTotal,
     TaskSite,
     get_db,
 )
+
+logger = logging.getLogger(__name__)
 
 # Lazy-import batch_jobs to avoid requiring boto3 at module level in tests
 _batch_module = None
@@ -192,8 +195,8 @@ def submit_analysis_task(task_name, description, user_id, gdf,
         config_dict = {
             "task_id": task_id,
             "data_dir": "/data",
-            "gcs_bucket": Config.GCS_BUCKET,
-            "gcs_prefix": Config.GCS_PREFIX,
+            "cog_bucket": Config.S3_BUCKET,
+            "cog_prefix": f"{Config.S3_PREFIX}/cog",
             "sites_file": "/data/input/sites.geojson",
             "covariates": covariates,
             "exact_match_vars": ["region", "ecoregion", "pa"],
@@ -425,12 +428,12 @@ def start_gee_export(covariate_names, user_id):
                 prefix=Config.GCS_PREFIX,
             )
 
-            export = GeeExport(
+            export = Covariate(
                 covariate_name=name,
                 gee_task_id=task.id,
                 gcs_bucket=Config.GCS_BUCKET,
                 gcs_prefix=Config.GCS_PREFIX,
-                status="running",
+                status="exporting",
                 started_by=user_id,
             )
             db.add(export)
@@ -454,15 +457,12 @@ def poll_gee_export_status():
     """
     import base64
     import ee
-    import logging
-
-    logger = logging.getLogger(__name__)
 
     db = get_db()
     try:
         active = (
-            db.query(GeeExport)
-            .filter(GeeExport.status.in_(["pending", "running"]))
+            db.query(Covariate)
+            .filter(Covariate.status.in_(["pending_export", "exporting"]))
             .all()
         )
         if not active:
@@ -485,14 +485,14 @@ def poll_gee_export_status():
         else:
             ee.Initialize(project=project, opt_url=opt_url)
 
-        # Map GEE operation states to our status enum
+        # Map GEE operation states to our covariate_status enum
         state_map = {
-            "PENDING": "pending",
-            "RUNNING": "running",
-            "SUCCEEDED": "completed",
+            "PENDING": "pending_export",
+            "RUNNING": "exporting",
+            "SUCCEEDED": "exported",
             "FAILED": "failed",
             "CANCELLED": "cancelled",
-            "CANCELLING": "running",
+            "CANCELLING": "exporting",
         }
 
         for export in active:
@@ -507,10 +507,10 @@ def poll_gee_export_status():
 
                 if new_status != export.status:
                     export.status = new_status
-                    if new_status in ("completed", "failed", "cancelled"):
+                    if new_status in ("exported", "failed", "cancelled"):
                         export.completed_at = datetime.now(timezone.utc)
                     # Cache tile URLs when export completes successfully
-                    if new_status == "completed":
+                    if new_status == "exported":
                         tile_urls = list_export_tiles(
                             export.gcs_bucket,
                             export.gcs_prefix,
@@ -524,7 +524,7 @@ def poll_gee_export_status():
                 error = op.get("error")
                 if error:
                     export.error_message = error.get("message", str(error))
-                    if export.status == "running":
+                    if export.status == "exporting":
                         export.status = "failed"
                         export.completed_at = datetime.now(timezone.utc)
 
@@ -549,10 +549,8 @@ def list_export_tiles(bucket, prefix, covariate_name):
     prefix.  Returns a list of public ``https://storage.googleapis.com/…``
     URLs, or an empty list if listing fails.
     """
-    import logging
     import requests
 
-    logger = logging.getLogger(__name__)
     obj_prefix = f"{prefix}/{covariate_name}".strip("/")
     api_url = (
         f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
@@ -576,26 +574,79 @@ def list_export_tiles(bucket, prefix, covariate_name):
         return []
 
 
-def get_gee_exports(limit=100):
-    """Get recent GEE export records."""
-    db = get_db()
-    try:
-        return (
-            db.query(GeeExport)
-            .order_by(GeeExport.started_at.desc())
-            .limit(limit)
-            .all()
-        )
-    finally:
-        db.close()
-
-
 def get_user_list():
     """Return all users ordered by creation date (admin only)."""
     db = get_db()
     try:
         from models import User
         return db.query(User).order_by(User.created_at.desc()).all()
+    finally:
+        db.close()
+
+
+def approve_user(user_id):
+    """Approve a pending user account. Returns (success, message)."""
+    db = get_db()
+    try:
+        from models import User
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return False, "User not found."
+        if user.is_approved:
+            return False, "User is already approved."
+        user.is_approved = True
+        user.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return True, f"User {user.email} approved."
+    except Exception:
+        db.rollback()
+        return False, "Failed to approve user."
+    finally:
+        db.close()
+
+
+def change_user_role(user_id, new_role):
+    """Change a user's role. Returns (success, message)."""
+    if new_role not in ("admin", "user"):
+        return False, "Invalid role."
+    db = get_db()
+    try:
+        from models import User
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return False, "User not found."
+        user.role = new_role
+        user.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return True, f"User {user.email} role changed to {new_role}."
+    except Exception:
+        db.rollback()
+        return False, "Failed to change role."
+    finally:
+        db.close()
+
+
+def delete_user(user_id):
+    """Delete a user account and their analysis tasks. Returns (success, message)."""
+    db = get_db()
+    try:
+        from models import User
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return False, "User not found."
+        email = user.email
+        # Delete the user's analysis tasks (cascades to sites/results via DB)
+        tasks = db.query(AnalysisTask).filter(
+            AnalysisTask.submitted_by == user_id
+        ).all()
+        for task in tasks:
+            db.delete(task)
+        db.delete(user)
+        db.commit()
+        return True, f"User {email} deleted."
+    except Exception:
+        db.rollback()
+        return False, "Failed to delete user."
     finally:
         db.close()
 
@@ -626,3 +677,339 @@ def download_results_csv(task_id, result_type="by_site_year"):
         return response["Body"].read().decode("utf-8")
     except s3.exceptions.NoSuchKey:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Covariate inventory & COG merge functions
+# ---------------------------------------------------------------------------
+
+def get_covariate_inventory():
+    """Build a comprehensive inventory of all covariates with GCS/S3 status.
+
+    Scans GCS for exported tiles, S3 for merged COGs, and the database
+    for export/merge status.  Returns one row per covariate defined in
+    the GEE export config.
+
+    Returns
+    -------
+    list[dict]
+        Each dict has keys: covariate_name, category, description,
+        gcs_tiles, on_s3, s3_url, status, gee_task_id, size_mb,
+        merged_url, started_at, completed_at, error_message.
+    """
+    import importlib.util
+
+    from cog_merge import list_all_gcs_tiles, list_s3_cog_objects
+
+    # Load covariate definitions from GEE export config
+    gee_config_path = os.path.join(
+        os.path.dirname(__file__), "gee-export", "config.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "gee_export_config", gee_config_path
+    )
+    gee_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gee_config)
+    covariates = gee_config.COVARIATES
+
+    cat_labels = {
+        "climate": "Climate",
+        "terrain": "Terrain",
+        "accessibility": "Accessibility",
+        "demographics": "Demographics",
+        "biomass": "Biomass",
+        "land_cover": "Land Cover",
+        "forest_cover": "Forest Cover",
+        "ecological": "Ecological",
+        "administrative": "Administrative",
+    }
+
+    # 1. Scan GCS for tiles (single paginated API call)
+    gcs_counts: dict[str, int] = {}
+    try:
+        if Config.GCS_BUCKET:
+            gcs_counts = list_all_gcs_tiles(
+                Config.GCS_BUCKET,
+                Config.GCS_PREFIX,
+                list(covariates.keys()),
+            )
+    except Exception:
+        logger.exception("Failed to scan GCS for tiles")
+
+    # 2. Scan S3 for merged COGs
+    s3_cogs: dict[str, dict] = {}
+    try:
+        if Config.S3_BUCKET:
+            cog_prefix = f"{Config.S3_PREFIX}/cog"
+            for obj in list_s3_cog_objects(
+                Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
+            ):
+                s3_cogs[obj["covariate"]] = obj
+    except Exception:
+        logger.exception("Failed to scan S3 for COGs")
+
+    # 3. Get most recent DB record per covariate
+    db_records: dict[str, Covariate] = {}
+    db = get_db()
+    try:
+        for rec in db.query(Covariate).all():
+            existing = db_records.get(rec.covariate_name)
+            if existing is None or (
+                rec.started_at
+                and (
+                    existing.started_at is None
+                    or rec.started_at > existing.started_at
+                )
+            ):
+                db_records[rec.covariate_name] = rec
+    finally:
+        db.close()
+
+    # 4. Build inventory rows
+    def _fmt(dt):
+        return dt.strftime("%Y-%m-%d %H:%M") if dt else ""
+
+    rows = []
+    for name, cfg in covariates.items():
+        raw_cat = cfg.get("category", "other")
+        gcs_tiles = gcs_counts.get(name, 0)
+        s3_obj = s3_cogs.get(name)
+        db_rec = db_records.get(name)
+
+        row = {
+            "covariate_name": name,
+            "category": cat_labels.get(raw_cat, raw_cat),
+            "description": cfg.get("description", ""),
+            "gcs_tiles": gcs_tiles,
+            "on_s3": bool(s3_obj),
+            "status": db_rec.status if db_rec else "",
+            "gee_task_id": (
+                db_rec.gee_task_id if db_rec and db_rec.gee_task_id else ""
+            ),
+            "size_mb": (
+                round(db_rec.size_bytes / (1024 * 1024), 1)
+                if db_rec and db_rec.size_bytes
+                else (
+                    round(s3_obj["size"] / (1024 * 1024), 1)
+                    if s3_obj
+                    else None
+                )
+            ),
+            "merged_url": (
+                db_rec.merged_url
+                if db_rec and db_rec.merged_url
+                else (s3_obj["url"] if s3_obj else "")
+            ),
+            "started_at": _fmt(db_rec.started_at) if db_rec else "",
+            "completed_at": _fmt(db_rec.completed_at) if db_rec else "",
+            "error_message": (
+                db_rec.error_message
+                if db_rec and db_rec.error_message
+                else ""
+            ),
+        }
+        rows.append(row)
+
+    return rows
+
+
+def discover_existing_cogs():
+    """Scan S3 for pre-existing merged COGs and import them into the DB.
+
+    Lists all ``.tif`` files under the COG prefix in the S3 bucket,
+    matches filenames to known covariates, and inserts ``Covariate`` rows
+    (status=merged) for any that aren't already tracked.
+
+    Returns
+    -------
+    list[str]
+        Covariate names that were newly imported.
+    """
+    from cog_merge import list_s3_cog_objects
+
+    bucket = Config.S3_BUCKET
+    if not bucket:
+        return []
+
+    cog_prefix = f"{Config.S3_PREFIX}/cog"
+    cog_objects = list_s3_cog_objects(bucket, cog_prefix, Config.AWS_REGION)
+    if not cog_objects:
+        return []
+
+    db = get_db()
+    imported = []
+    try:
+        # Get covariate names already tracked in the DB
+        existing = {
+            row.covariate_name
+            for row in db.query(Covariate.covariate_name)
+            .filter(Covariate.status.in_(["merged", "merging", "pending_merge"]))
+            .all()
+        }
+
+        for obj in cog_objects:
+            cov_name = obj["covariate"]
+            if cov_name in existing:
+                continue
+            layer = Covariate(
+                covariate_name=cov_name,
+                status="merged",
+                gcs_bucket=Config.GCS_BUCKET,
+                gcs_prefix=Config.GCS_PREFIX or "avoided-emissions/covariates",
+                output_bucket=bucket,
+                output_prefix=cog_prefix,
+                merged_url=obj["url"],
+                size_bytes=obj["size"],
+                completed_at=datetime.now(timezone.utc),
+            )
+            db.add(layer)
+            imported.append(cov_name)
+            existing.add(cov_name)  # prevent duplicates within batch
+
+        if imported:
+            db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    return imported
+
+
+def start_cog_merge(covariate_names, user_id):
+    """Create COG merge records and kick off background merges.
+
+    For each covariate, either updates an existing ``Covariate`` row
+    that has status *exported* to *pending_merge*, or creates a new row.
+    Then a background thread is spawned to perform the actual download /
+    merge / upload pipeline.
+
+    Parameters
+    ----------
+    covariate_names : list[str]
+        Covariate keys from config.COVARIATES to merge.
+    user_id : uuid.UUID
+        The admin user who triggered the merge.
+
+    Returns
+    -------
+    list[str]
+        UUIDs (as strings) of the ``Covariate`` records queued for merge.
+    """
+    import threading
+
+    db = get_db()
+    ids = []
+    try:
+        # Skip covariates already pending or actively merging
+        in_progress = {
+            row.covariate_name
+            for row in db.query(Covariate.covariate_name)
+            .filter(Covariate.status.in_(["pending_merge", "merging"]))
+            .all()
+        }
+
+        for name in covariate_names:
+            if name in in_progress:
+                continue
+
+            # Try to update an existing 'exported' row for this covariate
+            exported_row = (
+                db.query(Covariate)
+                .filter(
+                    Covariate.covariate_name == name,
+                    Covariate.status == "exported",
+                )
+                .order_by(Covariate.started_at.desc())
+                .first()
+            )
+
+            if exported_row:
+                exported_row.status = "pending_merge"
+                exported_row.output_bucket = Config.S3_BUCKET
+                exported_row.output_prefix = f"{Config.S3_PREFIX}/cog"
+                ids.append(str(exported_row.id))
+            else:
+                # No exported row — create fresh (e.g. pre-existing tiles)
+                layer = Covariate(
+                    covariate_name=name,
+                    status="pending_merge",
+                    gcs_bucket=Config.GCS_BUCKET,
+                    gcs_prefix=Config.GCS_PREFIX,
+                    output_bucket=Config.S3_BUCKET,
+                    output_prefix=f"{Config.S3_PREFIX}/cog",
+                    started_by=user_id,
+                )
+                db.add(layer)
+                db.flush()
+                ids.append(str(layer.id))
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    # Launch background threads — one per covariate
+    for layer_id in ids:
+        t = threading.Thread(
+            target=_run_cog_merge,
+            args=(layer_id,),
+            daemon=True,
+        )
+        t.start()
+
+    return ids
+
+
+def _run_cog_merge(layer_id):
+    """Background worker that runs the merge pipeline for a single layer.
+
+    Updates the ``Covariate`` record in the database with status
+    transitions (pending_merge → merging → merged / failed).
+    """
+    from cog_merge import merge_covariate_tiles
+
+    db = get_db()
+    try:
+        layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
+        if not layer:
+            logger.error("Covariate %s not found", layer_id)
+            return
+
+        # Transition to 'merging'
+        layer.status = "merging"
+        db.commit()
+
+        result = merge_covariate_tiles(
+            covariate_name=layer.covariate_name,
+            source_bucket=layer.gcs_bucket or Config.GCS_BUCKET,
+            source_prefix=layer.gcs_prefix or Config.GCS_PREFIX,
+            output_bucket=layer.output_bucket,
+            output_prefix=layer.output_prefix or f"{Config.S3_PREFIX}/cog",
+            aws_region=Config.AWS_REGION,
+        )
+
+        layer.status = "merged"
+        layer.merged_url = result["url"]
+        layer.size_bytes = result["size_bytes"]
+        layer.n_tiles = result["n_tiles"]
+        layer.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        logger.info("COG merge completed for '%s'", layer.covariate_name)
+
+    except Exception as exc:
+        logger.exception("COG merge failed for layer %s", layer_id)
+        try:
+            layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
+            if layer:
+                layer.status = "failed"
+                layer.error_message = str(exc)[:2000]
+                layer.completed_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception:
+            db.rollback()
+    finally:
+        db.close()

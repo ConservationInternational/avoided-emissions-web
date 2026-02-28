@@ -96,13 +96,37 @@ docker compose -f deploy/docker-compose.develop.yml up --build
 
 ### Default Development Credentials
 
-| Service   | Username / Email              | Password      |
-|-----------|-------------------------------|---------------|
-| Web app   | `admin@avoided-emissions.org` | `admin`       |
-| Postgres  | `ae_user`                     | `ae_password` |
+| Service   | Username / Email | Password      |
+|-----------|------------------|---------------|
+| Postgres  | `ae_user`        | `ae_password` |
 
-> **Note:** Change these credentials before deploying to any non-local
-> environment. The admin password should be changed on first login.
+### Creating the Admin User
+
+No default admin user is seeded in the database. After starting the
+development environment for the first time, create one by running:
+
+```bash
+docker compose -f deploy/docker-compose.develop.yml exec webapp python -c "
+from auth import hash_password
+from models import User, get_db
+db = get_db()
+db.add(User(
+    email='admin@avoided-emissions.org',
+    password_hash=hash_password('CHANGE_ME'),
+    name='Administrator',
+    role='admin',
+    is_approved=True,
+))
+db.commit()
+db.close()
+"
+```
+
+Replace `admin@avoided-emissions.org` and `CHANGE_ME` with your preferred
+email and a strong password.
+
+> **Note:** Change the Postgres credentials in your `.env` file before
+> deploying to any non-local environment.
 
 ## Covariate Configuration
 

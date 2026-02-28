@@ -41,6 +41,7 @@ class User(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_login = Column(DateTime(timezone=True))
     is_active = Column(Boolean, default=True)
+    is_approved = Column(Boolean, default=False)
 
     tasks = relationship("AnalysisTask", back_populates="user")
 
@@ -49,21 +50,48 @@ class User(Base):
         return self.role == "admin"
 
 
-class GeeExport(Base):
-    __tablename__ = "gee_exports"
+class Covariate(Base):
+    """Unified covariate lifecycle tracking.
+
+    Each row tracks a covariate through export (GEE → GCS) and merge
+    (GCS tiles → single COG on S3).  Multiple rows per covariate are
+    allowed to preserve history; the inventory view uses the most recent.
+    """
+
+    __tablename__ = "covariates"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     covariate_name = Column(String(100), nullable=False)
+
+    # GEE export fields
     gee_task_id = Column(String(255))
-    gcs_bucket = Column(String(255), nullable=False)
-    gcs_prefix = Column(String(500), nullable=False)
+    gcs_bucket = Column(String(255))
+    gcs_prefix = Column(String(500))
+
+    # COG merge / output fields
+    output_bucket = Column(String(255))
+    output_prefix = Column(String(500))
+    n_tiles = Column(Integer)
+    merged_url = Column(String(1000))
+    size_bytes = Column(Float)
+
+    # Lifecycle
     status = Column(
-        Enum("pending", "running", "completed", "failed", "cancelled",
-             name="gee_export_status"),
+        Enum(
+            "pending_export",
+            "exporting",
+            "exported",
+            "pending_merge",
+            "merging",
+            "merged",
+            "failed",
+            "cancelled",
+            name="covariate_status",
+        ),
         nullable=False,
-        default="pending",
+        default="pending_export",
     )
-    started_by = Column(UUID(as_uuid=True))
+    started_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime(timezone=True))
     error_message = Column(Text)

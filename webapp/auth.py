@@ -25,6 +25,7 @@ class SessionUser(flask_login.UserMixin):
         self.email = user_record.email
         self.name = user_record.name
         self.role = user_record.role
+        self.is_approved = user_record.is_approved
 
     @property
     def is_admin(self):
@@ -36,7 +37,7 @@ def load_user(user_id):
     db = get_db()
     try:
         user = db.query(User).filter(User.id == user_id).first()
-        if user and user.is_active:
+        if user and user.is_active and user.is_approved:
             return SessionUser(user)
     finally:
         db.close()
@@ -54,18 +55,49 @@ def verify_password(password: str, password_hash: str) -> bool:
 def authenticate(email: str, password: str):
     """Authenticate a user by email and password.
 
-    Returns a SessionUser on success, None on failure. Updates last_login.
+    Returns a SessionUser on success, None on failure.  Updates last_login.
+    Returns the string ``"pending_approval"`` when the credentials are
+    correct but the account has not yet been approved by an admin.
     """
     db = get_db()
     try:
         user = db.query(User).filter(User.email == email).first()
         if user and user.is_active and verify_password(password, user.password_hash):
+            if not user.is_approved:
+                return "pending_approval"
             user.last_login = datetime.now(timezone.utc)
             db.commit()
             return SessionUser(user)
     finally:
         db.close()
     return None
+
+
+def register_user(email: str, password: str, name: str):
+    """Create a new user account pending admin approval.
+
+    Returns ``(True, message)`` on success or ``(False, error)`` on failure.
+    """
+    db = get_db()
+    try:
+        existing = db.query(User).filter(User.email == email).first()
+        if existing:
+            return False, "An account with this email already exists."
+        user = User(
+            email=email,
+            password_hash=hash_password(password),
+            name=name,
+            role="user",
+            is_approved=False,
+        )
+        db.add(user)
+        db.commit()
+        return True, "Account created. An administrator must approve your account before you can log in."
+    except Exception:
+        db.rollback()
+        return False, "Registration failed. Please try again."
+    finally:
+        db.close()
 
 
 def get_current_user():

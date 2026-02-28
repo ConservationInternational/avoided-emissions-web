@@ -39,9 +39,26 @@ services:
       - ../gee-export:/app/gee-export
       - ../r-analysis:/app/r-analysis
     depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "app.py"]
+    networks:
+      - backend
+
+  migrate:
+    build:
+      context: ../webapp
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ae_user}:${POSTGRES_PASSWORD:-ae_password}@postgres:5432/${POSTGRES_DB:-avoided_emissions}
+    volumes:
+      - ../webapp:/app
+    depends_on:
       postgres:
         condition: service_healthy
-    command: ["python", "app.py"]
+    command: ["alembic", "upgrade", "head"]
     networks:
       - backend
 

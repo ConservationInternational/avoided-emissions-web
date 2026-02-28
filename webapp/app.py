@@ -25,6 +25,7 @@ from layouts import (
     dashboard_layout,
     login_layout,
     not_found_layout,
+    register_layout,
     submit_layout,
     task_detail_layout,
 )
@@ -53,15 +54,13 @@ if not Config.DEBUG:
     server.config["SESSION_COOKIE_SECURE"] = True
 
 # Initialize CSRF protection.
-# Dash callbacks use their own transport (_dash-update-component) which
-# is already guarded by the same-origin policy and SameSite cookies,
-# so we exempt the Dash callback endpoint but protect any Flask routes.
+# Dash submits all interactions as same-origin XHR/JSON requests which are
+# already guarded by SameSite cookies and the browser same-origin policy,
+# so we disable the automatic check and rely on those built-in protections.
+# If standalone Flask form routes are added later, decorate them with
+# @csrf.protect to opt in.
+server.config["WTF_CSRF_CHECK_DEFAULT"] = False
 csrf = CSRFProtect(server)
-csrf.exempt("dash.dash._dash-update-component")
-# Exempt all Dash internal endpoints (they use X-CSRFToken-less AJAX)
-for rule in list(server.url_map.iter_rules()):
-    if rule.endpoint and rule.endpoint.startswith("_dash"):
-        csrf.exempt(rule.endpoint)
 
 # Initialize Rollbar error tracking
 if Config.ROLLBAR_ACCESS_TOKEN:
@@ -102,6 +101,9 @@ def display_page(pathname):
 
     if pathname == "/login":
         return login_layout()
+
+    if pathname == "/register":
+        return register_layout()
 
     if pathname == "/logout":
         flask_login.logout_user()

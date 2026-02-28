@@ -98,10 +98,17 @@ dagcomponentfuncs.TileLinks = function (props) {
  */
 dagcomponentfuncs.StatusBadge = function (props) {
     var status = (props.value || "").toLowerCase();
+    if (!status) return "";
     var colorMap = {
         pending: { bg: "#6c757d", text: "#ffffff" },
+        pending_export: { bg: "#6c757d", text: "#ffffff" },
+        pending_merge: { bg: "#6c757d", text: "#ffffff" },
         submitted: { bg: "#ffc107", text: "#664d03" },
         running: { bg: "#0d6efd", text: "#ffffff" },
+        exporting: { bg: "#0d6efd", text: "#ffffff" },
+        exported: { bg: "#ffc107", text: "#664d03" },
+        merging: { bg: "#0d6efd", text: "#ffffff" },
+        merged: { bg: "#198754", text: "#ffffff" },
         succeeded: { bg: "#198754", text: "#ffffff" },
         completed: { bg: "#198754", text: "#ffffff" },
         failed: { bg: "#dc3545", text: "#ffffff" },
@@ -125,6 +132,128 @@ dagcomponentfuncs.StatusBadge = function (props) {
                 lineHeight: "1.5",
             },
         },
-        status
+        status.replace(/_/g, " ")
+    );
+};
+
+/**
+ * ApprovalBadge – renders a boolean approval status as a colored badge.
+ *
+ * True → green "Approved" badge; False → orange "Pending" badge.
+ */
+dagcomponentfuncs.ApprovalBadge = function (props) {
+    var approved = props.value;
+    var label = approved ? "Approved" : "Pending";
+    var bg = approved ? "#198754" : "#fd7e14";
+    var text = "#ffffff";
+
+    return React.createElement(
+        "span",
+        {
+            style: {
+                display: "inline-block",
+                padding: "2px 8px",
+                borderRadius: "4px",
+                fontSize: "11px",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.3px",
+                backgroundColor: bg,
+                color: text,
+                lineHeight: "1.5",
+            },
+        },
+        label
+    );
+};
+
+/**
+ * CogLink – renders a merged COG URL as a clickable download link.
+ *
+ * Shows the filename portion of the URL with a download icon.
+ */
+dagcomponentfuncs.CogLink = function (props) {
+    var url = props.value;
+    if (!url) {
+        return "";
+    }
+    var parts = url.split("/");
+    var label = parts[parts.length - 1] || url;
+    return React.createElement(
+        "a",
+        {
+            href: url,
+            target: "_blank",
+            rel: "noopener noreferrer",
+            style: {
+                color: "#0d6efd",
+                fontSize: "11px",
+                textDecoration: "none",
+                wordBreak: "break-all",
+            },
+            onMouseOver: function (e) {
+                e.target.style.textDecoration = "underline";
+            },
+            onMouseOut: function (e) {
+                e.target.style.textDecoration = "none";
+            },
+        },
+        "\u2B07 " + label
+    );
+};
+
+/**
+ * TileCount \u2013 renders a GCS tile count as a small green badge.
+ * Shows a green pill with the count if > 0, otherwise a gray dash.
+ */
+dagcomponentfuncs.TileCount = function (props) {
+    var count = props.value || 0;
+    if (count > 0) {
+        return React.createElement(
+            "span",
+            {
+                style: {
+                    display: "inline-block",
+                    padding: "1px 8px",
+                    borderRadius: "10px",
+                    backgroundColor: "#198754",
+                    color: "#ffffff",
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    minWidth: "24px",
+                    textAlign: "center",
+                },
+            },
+            count
+        );
+    }
+    return React.createElement(
+        "span",
+        { style: { color: "#adb5bd" } },
+        "\u2014"
+    );
+};
+
+/**
+ * S3Status \u2013 renders a boolean S3 presence as a check mark or dash.
+ */
+dagcomponentfuncs.S3Status = function (props) {
+    if (props.value) {
+        return React.createElement(
+            "span",
+            {
+                style: {
+                    color: "#198754",
+                    fontWeight: "bold",
+                    fontSize: "14px",
+                },
+            },
+            "\u2713"
+        );
+    }
+    return React.createElement(
+        "span",
+        { style: { color: "#adb5bd" } },
+        "\u2014"
     );
 };

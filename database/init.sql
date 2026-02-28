@@ -17,11 +17,14 @@ CREATE TYPE task_status AS ENUM (
     'cancelled'
 );
 
--- GEE export status
-CREATE TYPE gee_export_status AS ENUM (
-    'pending',
-    'running',
-    'completed',
+-- Covariate lifecycle status (export from GEE → merge tiles → COG on S3)
+CREATE TYPE covariate_status AS ENUM (
+    'pending_export',
+    'exporting',
+    'exported',
+    'pending_merge',
+    'merging',
+    'merged',
     'failed',
     'cancelled'
 );
@@ -37,20 +40,33 @@ CREATE TABLE users (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_login TIMESTAMP WITH TIME ZONE,
-    is_active BOOLEAN DEFAULT TRUE
+    is_active BOOLEAN DEFAULT TRUE,
+    is_approved BOOLEAN DEFAULT FALSE
 );
 
 CREATE INDEX idx_users_email ON users(email);
 
 
--- GEE covariate export tracking
-CREATE TABLE gee_exports (
+-- Covariates table: tracks the full lifecycle of each covariate layer
+-- from GEE export through to merged Cloud-Optimized GeoTIFF on S3.
+CREATE TABLE covariates (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     covariate_name VARCHAR(100) NOT NULL,
+
+    -- GEE export fields
     gee_task_id VARCHAR(255),
-    gcs_bucket VARCHAR(255) NOT NULL,
-    gcs_prefix VARCHAR(500) NOT NULL,
-    status gee_export_status NOT NULL DEFAULT 'pending',
+    gcs_bucket VARCHAR(255),
+    gcs_prefix VARCHAR(500),
+
+    -- COG merge / output fields
+    output_bucket VARCHAR(255),
+    output_prefix VARCHAR(500),
+    n_tiles INTEGER,
+    merged_url VARCHAR(1000),
+    size_bytes BIGINT,
+
+    -- Lifecycle
+    status covariate_status NOT NULL DEFAULT 'pending_export',
     started_by UUID REFERENCES users(id),
     started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     completed_at TIMESTAMP WITH TIME ZONE,
@@ -58,8 +74,8 @@ CREATE TABLE gee_exports (
     metadata JSONB DEFAULT '{}'::jsonb
 );
 
-CREATE INDEX idx_gee_exports_status ON gee_exports(status);
-CREATE INDEX idx_gee_exports_covariate ON gee_exports(covariate_name);
+CREATE INDEX idx_covariates_status ON covariates(status);
+CREATE INDEX idx_covariates_name ON covariates(covariate_name);
 
 
 -- Analysis tasks (submitted to AWS Batch)
@@ -161,7 +177,8 @@ CREATE INDEX idx_results_total_task ON task_results_total(task_id);
 --     db = get_db();
 --     db.add(User(email='admin@example.org',
 --                 password_hash=hash_password('CHANGE_ME'),
---                 name='Administrator', role='admin'));
+--                 name='Administrator', role='admin',
+--                 is_approved=True));
 --     db.commit(); db.close()
 --   "
 -- Be sure to use a strong, unique password.

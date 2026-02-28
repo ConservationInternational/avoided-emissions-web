@@ -258,16 +258,21 @@ load_sites <- function(sites_path) {
 
 # -- Covariate loading -------------------------------------------------------
 
-build_covariate_vrt <- function(gcs_bucket, gcs_prefix, covariate_names,
-                                 local_dir = NULL) {
-    # Open covariate COGs from a public GCS bucket via GDAL /vsicurl/.
+load_covariates <- function(cog_bucket, cog_prefix, covariate_names) {
+    # Open merged covariate COGs from S3 via GDAL /vsis3/.
     # No download is required — GDAL reads Cloud-Optimised GeoTIFFs
     # through HTTP range requests, fetching only the tiles needed for
-    # the analysis extent.
+    # the analysis extent.  AWS credentials are provided by the Batch
+    # instance role (no env vars needed).
+    #
+    # Args:
+    #   cog_bucket:      S3 bucket name
+    #   cog_prefix:      S3 key prefix (e.g. "avoided-emissions/cog")
+    #   covariate_names: character vector of covariate names
     #
     # Returns a terra SpatRaster stack with one layer per covariate.
 
-    # Tune GDAL HTTP settings for better COG performance
+    # Tune GDAL for COG range-request performance
     terra::gdalCache(1024)  # 1 GB GDAL block cache
     Sys.setenv(
         GDAL_HTTP_MULTIPLEX   = "YES",
@@ -275,17 +280,18 @@ build_covariate_vrt <- function(gcs_bucket, gcs_prefix, covariate_names,
         GDAL_HTTP_MAX_RETRY   = "5",
         GDAL_HTTP_RETRY_DELAY = "2",
         VSI_CACHE             = "TRUE",
-        VSI_CACHE_SIZE        = "50000000"  # 50 MB per file
+        VSI_CACHE_SIZE        = "50000000",  # 50 MB per file
+        AWS_NO_SIGN_REQUEST   = "NO"
     )
 
-    vsicurl_uris <- vapply(covariate_names, function(name) {
-        paste0("/vsicurl/https://storage.googleapis.com/",
-               gcs_bucket, "/", gcs_prefix, "/", name, ".tif")
+    s3_uris <- vapply(covariate_names, function(name) {
+        paste0("/vsis3/", cog_bucket, "/", cog_prefix, "/", name, ".tif")
     }, character(1), USE.NAMES = FALSE)
 
-    rast_list <- lapply(seq_along(vsicurl_uris), function(i) {
-        message(paste("  Opening:", covariate_names[i]))
-        terra::rast(vsicurl_uris[i])
+    rast_list <- lapply(seq_along(s3_uris), function(i) {
+        message(paste("  Opening:", covariate_names[i],
+                      "from s3://", cog_bucket, "/", cog_prefix))
+        terra::rast(s3_uris[i])
     })
     d <- do.call(c, rast_list)
 
