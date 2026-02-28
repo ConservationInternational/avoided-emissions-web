@@ -59,6 +59,11 @@ def register_job_definition(job_def_name="avoided-emissions-analysis",
             "environment": [
                 {"name": "AWS_DEFAULT_REGION",
                  "value": os.environ.get("AWS_REGION", "us-east-1")},
+                {"name": "ROLLBAR_ACCESS_TOKEN",
+                 "value": os.environ.get("ROLLBAR_ACCESS_TOKEN", "")},
+                {"name": "ROLLBAR_ENVIRONMENT",
+                 "value": os.environ.get("ROLLBAR_ENVIRONMENT",
+                          os.environ.get("ENVIRONMENT", "development"))},
             ],
             "mountPoints": [
                 {
@@ -105,6 +110,11 @@ def submit_extract_job(job_queue, job_definition, config_s3_uri,
             "environment": [
                 {"name": "CONFIG_S3_URI", "value": config_s3_uri},
                 {"name": "DATA_S3_URI", "value": data_s3_uri},
+                {"name": "ROLLBAR_ACCESS_TOKEN",
+                 "value": os.environ.get("ROLLBAR_ACCESS_TOKEN", "")},
+                {"name": "ROLLBAR_ENVIRONMENT",
+                 "value": os.environ.get("ROLLBAR_ENVIRONMENT",
+                          os.environ.get("ENVIRONMENT", "development"))},
             ],
         },
     )
@@ -147,6 +157,11 @@ def submit_matching_array_job(job_queue, job_definition, n_sites,
             "environment": [
                 {"name": "CONFIG_S3_URI", "value": config_s3_uri},
                 {"name": "DATA_S3_URI", "value": data_s3_uri},
+                {"name": "ROLLBAR_ACCESS_TOKEN",
+                 "value": os.environ.get("ROLLBAR_ACCESS_TOKEN", "")},
+                {"name": "ROLLBAR_ENVIRONMENT",
+                 "value": os.environ.get("ROLLBAR_ENVIRONMENT",
+                          os.environ.get("ENVIRONMENT", "development"))},
             ],
         },
     )
@@ -183,6 +198,11 @@ def submit_summarize_job(job_queue, job_definition, config_s3_uri,
             "environment": [
                 {"name": "CONFIG_S3_URI", "value": config_s3_uri},
                 {"name": "DATA_S3_URI", "value": data_s3_uri},
+                {"name": "ROLLBAR_ACCESS_TOKEN",
+                 "value": os.environ.get("ROLLBAR_ACCESS_TOKEN", "")},
+                {"name": "ROLLBAR_ENVIRONMENT",
+                 "value": os.environ.get("ROLLBAR_ENVIRONMENT",
+                          os.environ.get("ENVIRONMENT", "development"))},
             ],
         },
     )

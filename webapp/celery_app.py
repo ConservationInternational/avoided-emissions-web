@@ -21,13 +21,17 @@ logger = logging.getLogger(__name__)
 # Rollbar — initialise at module level so every worker process inherits it.
 # Follows https://github.com/rollbar/rollbar-celery-example
 # ---------------------------------------------------------------------------
+_rollbar_kwargs = dict(
+    access_token=Config.ROLLBAR_ACCESS_TOKEN,
+    environment=Config.ROLLBAR_ENVIRONMENT,
+    root=__name__,
+    allow_logging_basic_config=False,
+)
+if Config.GIT_REVISION:
+    _rollbar_kwargs["code_version"] = Config.GIT_REVISION
+
 if Config.ROLLBAR_ACCESS_TOKEN:
-    rollbar.init(
-        access_token=Config.ROLLBAR_ACCESS_TOKEN,
-        environment=Config.ROLLBAR_ENVIRONMENT,
-        root=__name__,
-        allow_logging_basic_config=False,
-    )
+    rollbar.init(**_rollbar_kwargs)
 
     def _celery_base_data_hook(request, data):
         data["framework"] = "celery"

@@ -79,6 +79,39 @@ def _fmt_dt(dt):
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
+def _record_covariate_action_failure(covariate_name, action, user_id):
+    """Create a ``failed`` Covariate record so the table shows the error.
+
+    Called when a reexport/remerge action raises before the GEE task is
+    submitted.  Without this, the old DB records are already deleted and
+    the table row would show blank status.
+    """
+    import traceback
+
+    from models import Covariate, get_db
+
+    error_msg = (
+        f"Action '{action}' failed before the task was submitted to GEE. "
+        f"{traceback.format_exc(limit=3)}"
+    )
+
+    db = get_db()
+    try:
+        rec = Covariate(
+            covariate_name=covariate_name,
+            status="failed",
+            error_message=error_msg,
+            started_by=user_id,
+        )
+        db.add(rec)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def register_callbacks(app):
     """Register all Dash callbacks on the app instance."""
 
@@ -509,6 +542,15 @@ def register_callbacks(app):
             logger.exception(
                 "Covariate action '%s' failed for %s", action, covariate_name
             )
+            # Persist a 'failed' record so the table row reflects the error
+            try:
+                _record_covariate_action_failure(
+                    covariate_name, action, user.id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist failure record for %s", covariate_name,
+                )
             return dbc.Alert(
                 f"Action '{action}' failed for '{covariate_name}'. "
                 "Check logs for details.",
