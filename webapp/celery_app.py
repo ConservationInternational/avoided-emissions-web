@@ -7,9 +7,35 @@ when defining tasks or when the worker process starts::
     from celery_app import celery_app
 """
 
+import logging
+
+import rollbar
 from celery import Celery
+from celery.signals import task_failure
 
 from config import Config
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Rollbar — initialise at module level so every worker process inherits it.
+# Follows https://github.com/rollbar/rollbar-celery-example
+# ---------------------------------------------------------------------------
+if Config.ROLLBAR_ACCESS_TOKEN:
+    rollbar.init(
+        access_token=Config.ROLLBAR_ACCESS_TOKEN,
+        environment=Config.ROLLBAR_ENVIRONMENT,
+        root=__name__,
+        allow_logging_basic_config=False,
+    )
+
+    def _celery_base_data_hook(request, data):
+        data["framework"] = "celery"
+
+    rollbar.BASE_DATA_HOOK = _celery_base_data_hook
+    logger.info("Rollbar initialized for Celery (environment=%s)", Config.ROLLBAR_ENVIRONMENT)
+else:
+    logger.warning("ROLLBAR_ACCESS_TOKEN not set — Celery error tracking disabled")
 
 celery_app = Celery(
     "avoided_emissions",
@@ -56,3 +82,13 @@ celery_app.conf.beat_schedule = {
         "schedule": 120.0,  # every 2 minutes
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Rollbar integration — report task failures from worker processes
+# ---------------------------------------------------------------------------
+@task_failure.connect
+def handle_task_failure(**kw):
+    """Send every unhandled task exception to Rollbar."""
+    if Config.ROLLBAR_ACCESS_TOKEN:
+        rollbar.report_exc_info(extra_data=kw)

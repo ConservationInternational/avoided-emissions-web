@@ -78,6 +78,12 @@ if Config.ROLLBAR_ACCESS_TOKEN:
 else:
     logger.warning("ROLLBAR_ACCESS_TOKEN not set — error tracking disabled")
 
+# Health endpoint (used by Docker healthcheck to confirm app + migrations are ready)
+@server.route("/health")
+def health_check():
+    return "ok", 200
+
+
 # Initialize Flask-Login
 login_manager.init_app(server)
 login_manager.login_view = "/login"

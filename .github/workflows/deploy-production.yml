@@ -176,6 +176,7 @@ jobs:
         EE_SERVICE_ACCOUNT_JSON: ${{ secrets.EE_SERVICE_ACCOUNT_JSON }}
         AWS_BATCH_JOB_QUEUE: ${{ vars.AWS_BATCH_JOB_QUEUE || 'avoided-emissions-queue' }}
         AWS_BATCH_JOB_DEFINITION: ${{ vars.AWS_BATCH_JOB_DEFINITION || 'avoided-emissions-analysis' }}
+        ROLLBAR_ACCESS_TOKEN: ${{ secrets.ROLLBAR_ACCESS_TOKEN }}
       run: |
         ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         {
@@ -216,6 +217,10 @@ jobs:
           echo "# Deployment info"
           echo "GIT_REVISION=${{ github.sha }}"
           echo "GIT_BRANCH=${{ github.ref_name }}"
+          echo ""
+          echo "# Rollbar"
+          echo "ROLLBAR_ACCESS_TOKEN=$ROLLBAR_ACCESS_TOKEN"
+          echo "ROLLBAR_ENVIRONMENT=production"
         } > prod.env
 
     - name: Update appspec.yml for production
@@ -297,3 +302,21 @@ jobs:
           --deployment-id "${{ steps.deploy.outputs.deployment-id }}" \
           --query 'deploymentInfo.{Status:status,CreateTime:createTime,CompleteTime:completeTime}' \
           --output table
+
+    - name: Notify Rollbar of deployment
+      if: success()
+      env:
+        ROLLBAR_ACCESS_TOKEN: ${{ secrets.ROLLBAR_ACCESS_TOKEN }}
+      run: |
+        if [ -n "$ROLLBAR_ACCESS_TOKEN" ]; then
+          curl -s https://api.rollbar.com/api/1/deploy \
+            -F access_token="$ROLLBAR_ACCESS_TOKEN" \
+            -F environment=production \
+            -F revision="${{ github.sha }}" \
+            -F local_username="${{ github.actor }}" \
+            -F comment="Production deploy from ${{ github.ref_name }}" \
+            -F status=succeeded
+          echo "Rollbar deploy notification sent"
+        else
+          echo "ROLLBAR_ACCESS_TOKEN not set — skipping Rollbar deploy notification"
+        fi

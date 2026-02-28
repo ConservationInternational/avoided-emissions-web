@@ -593,7 +593,6 @@ def register_layout():
                 dbc.CardBody([
                     dbc.Label("Full Name"),
                     dbc.Input(id="register-name", type="text",
-                              placeholder="Jane Doe",
                               className="mb-2"),
                     dbc.Label("Email"),
                     dbc.Input(id="register-email", type="email",
