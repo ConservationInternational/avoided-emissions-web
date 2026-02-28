@@ -114,6 +114,16 @@ dagcomponentfuncs.StatusBadge = function (props) {
         failed: { bg: "#dc3545", text: "#ffffff" },
         cancelled: { bg: "#6c757d", text: "#ffffff" },
     };
+
+    // Distinguish pre-submission failures from GEE execution failures:
+    // if status is "failed" but there is no GEE task ID, the export was
+    // never submitted to GEE.
+    var label = status.replace(/_/g, " ");
+    if (status === "failed" && props.data && !props.data.gee_task_id) {
+        label = "GEE error";
+        colorMap["failed"] = { bg: "#842029", text: "#ffffff" };
+    }
+
     var colors = colorMap[status] || { bg: "#adb5bd", text: "#212529" };
 
     return React.createElement(
@@ -132,7 +142,7 @@ dagcomponentfuncs.StatusBadge = function (props) {
                 lineHeight: "1.5",
             },
         },
-        status.replace(/_/g, " ")
+        label
     );
 };
 
