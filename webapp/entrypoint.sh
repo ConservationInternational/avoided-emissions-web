@@ -15,6 +15,9 @@ case "$1" in
             echo "Running database migrations..."
             alembic upgrade head
             echo "Migrations complete."
+
+            echo "Dispatching vector data import to background worker..."
+            python -c "from tasks import import_vector_data_task; import_vector_data_task.delay(); print('Vector data import task queued.')"
         fi
         ;;
 esac

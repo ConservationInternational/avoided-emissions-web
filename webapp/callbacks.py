@@ -31,15 +31,18 @@ from layouts import (
 from services import (
     approve_user,
     change_user_role,
+    delete_covariate_preset,
     delete_user,
     download_results_csv,
     force_reexport,
     force_remerge,
     get_covariate_inventory,
+    get_covariate_presets,
     get_task_detail,
     get_task_list,
     get_user_list,
     parse_sites_file,
+    save_covariate_preset,
     start_gee_export,
     submit_analysis_task,
 )
@@ -607,6 +610,196 @@ def register_callbacks(app):
             for r in row_data
         ]
 
+    # -- Settings: link trends.earth account ---------------------------------
+
+    @app.callback(
+        [Output("te-link-message", "children"),
+         Output("te-link-done-store", "data")],
+        Input("te-link-btn", "n_clicks"),
+        State("te-link-email", "value"),
+        State("te-link-password", "value"),
+        prevent_initial_call=True,
+    )
+    def handle_te_link(n_clicks, email, password):
+        """Log in to trends.earth, register an OAuth2 client, store creds."""
+        if not email or not password:
+            return (
+                dbc.Alert("Please enter both email and password.",
+                          color="warning", duration=5000),
+                no_update,
+            )
+
+        user = get_current_user()
+        if not user:
+            return (
+                dbc.Alert("Please log in first.", color="danger",
+                          duration=5000),
+                no_update,
+            )
+
+        from config import Config
+        from credential_store import save_credential
+        from trendsearth_client import TrendsEarthClient
+
+        try:
+            # 1. Authenticate with email/password to get a JWT
+            client = TrendsEarthClient(
+                api_url=Config.TRENDSEARTH_API_URL,
+                email=email,
+                password=password,
+            )
+            # Force login to verify credentials
+            client._login()
+
+            # 2. Register an OAuth2 service client
+            result = client.create_oauth2_client(
+                name=f"avoided-emissions-web ({user.email})",
+            )
+            data = result.get("data", {})
+            client_id = data.get("client_id", "")
+            client_secret = data.get("client_secret", "")
+            api_client_db_id = data.get("id", "")
+
+            if not client_id or not client_secret:
+                return (
+                    dbc.Alert(
+                        "The API did not return client credentials. "
+                        "Please try again.",
+                        color="danger",
+                    ),
+                    no_update,
+                )
+
+            # 3. Store encrypted credentials locally
+            save_credential(
+                user_id=user.id,
+                te_email=email,
+                client_id=client_id,
+                client_secret=client_secret,
+                client_name=f"avoided-emissions-web ({user.email})",
+                api_client_db_id=api_client_db_id,
+            )
+
+            return (
+                dbc.Alert(
+                    "Successfully linked to trends.earth! "
+                    "Your client credentials have been securely stored.",
+                    color="success",
+                ),
+                True,
+            )
+
+        except Exception as e:
+            logger.exception("Failed to link trends.earth account")
+            msg = str(e)
+            if "401" in msg or "Unauthorized" in msg:
+                msg = "Invalid email or password."
+            elif "Max" in msg or "limit" in msg.lower():
+                msg = (
+                    "Maximum number of OAuth2 clients reached on your "
+                    "trends.earth account. Please revoke an existing client "
+                    "at trends.earth first."
+                )
+            else:
+                msg = f"Failed to link account: {msg}"
+            return (
+                dbc.Alert(msg, color="danger"),
+                no_update,
+            )
+
+    # -- Settings: test connection -------------------------------------------
+
+    @app.callback(
+        Output("te-credential-status", "children"),
+        Input("te-test-connection-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def handle_te_test_connection(n_clicks):
+        """Test the stored OAuth2 credentials by requesting a token."""
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        from config import Config
+        from credential_store import get_decrypted_secret
+        from trendsearth_client import TrendsEarthClient
+
+        creds = get_decrypted_secret(user.id)
+        if not creds:
+            return dbc.Alert(
+                "No stored credentials found.", color="warning",
+                duration=5000,
+            )
+
+        client_id, client_secret = creds
+        try:
+            client = TrendsEarthClient(api_url=Config.TRENDSEARTH_API_URL)
+            token_data = client.oauth2_token(client_id, client_secret)
+            if token_data.get("access_token"):
+                return dbc.Alert(
+                    "Connection successful! Access token obtained.",
+                    color="success", duration=5000,
+                )
+            return dbc.Alert(
+                "Unexpected response from API.", color="warning",
+                duration=5000,
+            )
+        except Exception as e:
+            logger.exception("trends.earth connection test failed")
+            return dbc.Alert(
+                f"Connection failed: {e}", color="danger", duration=8000,
+            )
+
+    # -- Settings: unlink account --------------------------------------------
+
+    @app.callback(
+        Output("te-credential-status", "children", allow_duplicate=True),
+        Input("te-unlink-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def handle_te_unlink(n_clicks):
+        """Revoke the OAuth2 client on the API and delete local credentials."""
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        from config import Config
+        from credential_store import (
+            delete_credential,
+            get_credential,
+            get_decrypted_secret,
+        )
+        from trendsearth_client import TrendsEarthClient
+
+        cred = get_credential(user.id)
+        if not cred:
+            return dbc.Alert("No linked account.", color="info", duration=4000)
+
+        # Try to revoke on the API side (best-effort)
+        if cred.api_client_db_id:
+            try:
+                creds = get_decrypted_secret(user.id)
+                if creds:
+                    client_id, client_secret = creds
+                    client = TrendsEarthClient.from_oauth2_credentials(
+                        api_url=Config.TRENDSEARTH_API_URL,
+                        client_id=client_id,
+                        client_secret=client_secret,
+                    )
+                    client.revoke_oauth2_client(cred.api_client_db_id)
+            except Exception:
+                logger.warning(
+                    "Failed to revoke OAuth2 client on API (continuing "
+                    "with local cleanup)",
+                    exc_info=True,
+                )
+
+        delete_credential(user.id)
+        return dbc.Alert(
+            "Account unlinked. Refresh the page to update the display.",
+            color="success",
+        )
+
     # -- Admin: approve user -------------------------------------------------
 
     @app.callback(
@@ -747,6 +940,135 @@ def register_callbacks(app):
         if task_id and cell.get("colId") == "name":
             return f"/task/{task_id}"
         raise PreventUpdate
+
+    # -- Covariate presets ---------------------------------------------------
+
+    @app.callback(
+        [Output("preset-selector", "options"),
+         Output("presets-store", "data")],
+        [Input("url", "pathname"),
+         Input("presets-store", "modified_timestamp")],
+    )
+    def refresh_presets(_pathname, _ts):
+        """Populate the preset dropdown whenever the page loads or the
+        store is updated after a save/delete."""
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        presets = get_covariate_presets(user.id)
+        options = [{"label": p["name"], "value": p["id"]} for p in presets]
+        return options, presets
+
+    @app.callback(
+        [Output("covariate-selection", "value"),
+         Output("preset-feedback", "children", allow_duplicate=True)],
+        Input("load-preset-btn", "n_clicks"),
+        State("preset-selector", "value"),
+        State("presets-store", "data"),
+        prevent_initial_call=True,
+    )
+    def load_preset(_n, preset_id, presets_data):
+        """Set the checklist values to the covariates in the selected preset."""
+        if not preset_id or not presets_data:
+            return no_update, "Please select a preset to load."
+
+        for p in presets_data:
+            if p["id"] == preset_id:
+                return p["covariates"], dbc.Alert(
+                    f"Loaded preset \"{p['name']}\".",
+                    color="info", duration=3000,
+                )
+
+        return no_update, dbc.Alert(
+            "Preset not found.", color="warning", duration=3000,
+        )
+
+    @app.callback(
+        [Output("presets-store", "data", allow_duplicate=True),
+         Output("preset-feedback", "children", allow_duplicate=True),
+         Output("preset-name-input", "value")],
+        Input("save-preset-btn", "n_clicks"),
+        State("preset-name-input", "value"),
+        State("covariate-selection", "value"),
+        prevent_initial_call=True,
+    )
+    def save_preset(_n, name, covariates):
+        """Save the current covariate selection as a named preset."""
+        if not name or not name.strip():
+            return no_update, dbc.Alert(
+                "Please enter a name for the preset.",
+                color="warning", duration=3000,
+            ), no_update
+        if not covariates:
+            return no_update, dbc.Alert(
+                "Select at least one covariate before saving.",
+                color="warning", duration=3000,
+            ), no_update
+
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        try:
+            save_covariate_preset(user.id, name.strip(), covariates)
+            updated = get_covariate_presets(user.id)
+            return updated, dbc.Alert(
+                f"Preset \"{name.strip()}\" saved.",
+                color="success", duration=3000,
+            ), ""
+        except Exception:
+            logger.exception("Failed to save covariate preset")
+            report_exception()
+            return no_update, dbc.Alert(
+                "Failed to save preset.", color="danger", duration=3000,
+            ), no_update
+
+    @app.callback(
+        [Output("presets-store", "data", allow_duplicate=True),
+         Output("preset-feedback", "children", allow_duplicate=True),
+         Output("preset-selector", "value")],
+        Input("delete-preset-btn", "n_clicks"),
+        State("preset-selector", "value"),
+        State("presets-store", "data"),
+        prevent_initial_call=True,
+    )
+    def delete_preset(_n, preset_id, presets_data):
+        """Delete the currently selected preset."""
+        if not preset_id:
+            return no_update, dbc.Alert(
+                "Please select a preset to delete.",
+                color="warning", duration=3000,
+            ), no_update
+
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        preset_name = next(
+            (p["name"] for p in (presets_data or []) if p["id"] == preset_id),
+            "unknown",
+        )
+
+        try:
+            deleted = delete_covariate_preset(preset_id, user.id)
+            if not deleted:
+                return no_update, dbc.Alert(
+                    "Preset not found or already deleted.",
+                    color="warning", duration=3000,
+                ), no_update
+
+            updated = get_covariate_presets(user.id)
+            return updated, dbc.Alert(
+                f"Preset \"{preset_name}\" deleted.",
+                color="info", duration=3000,
+            ), None
+        except Exception:
+            logger.exception("Failed to delete covariate preset")
+            report_exception()
+            return no_update, dbc.Alert(
+                "Failed to delete preset.", color="danger", duration=3000,
+            ), no_update
 
 
 # -- Helper functions for building detail page content -----------------------

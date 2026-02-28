@@ -59,10 +59,10 @@ services:
     command: ["python", "app.py"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8050/health')\""]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 15s
+      retries: 5
+      start_period: 30s
     networks:
       - backend
 

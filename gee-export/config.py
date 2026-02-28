@@ -228,6 +228,15 @@ COVARIATES = {
         "resample": "mode",
     },
 
+    # Agro-ecological zones
+    "aez": {
+        "asset": "ESA/WorldCereal/AEZ/v100",
+        "derived": "aez",
+        "description": "ESA WorldCereal agro-ecological zone ID",
+        "category": "ecological",
+        "resample": "mode",
+    },
+
     # Administrative boundaries
     "region": {
         "asset": "WM/geoLab/geoBoundaries/600/ADM1",
@@ -238,13 +247,25 @@ COVARIATES = {
     },
 }
 
-# Forest cover layers: Hansen GFC annual cover by year (2000-2023)
-for year in range(2000, 2024):
+# Forest cover layers: Hansen GFC annual cover by year (2000-2024)
+for year in range(2000, 2025):
     COVARIATES[f"fc_{year}"] = {
         "derived": "hansen_fc",
         "year": year,
         "description": f"Hansen GFC forest cover fraction ({year})",
         "category": "forest_cover",
+        "resample": "mean",
+    }
+
+# GLAD Global Cropland Expansion Time-series (Potapov et al. 2021)
+# Binary cropland maps at 30m for five epochs: 2003, 2007, 2011, 2015, 2019.
+# At ~1km export the mean resampling yields cropland fraction (0-1).
+for year in (2003, 2007, 2011, 2015, 2019):
+    COVARIATES[f"cropland_{year}"] = {
+        "derived": "glad_cropland",
+        "year": year,
+        "description": f"GLAD cropland extent fraction ({year})",
+        "category": "cropland",
         "resample": "mean",
     }
 

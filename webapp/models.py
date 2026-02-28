@@ -3,6 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 
+from geoalchemy2 import Geometry
 from sqlalchemy import (
     Boolean,
     Column,
@@ -10,6 +11,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -44,6 +46,9 @@ class User(Base):
     is_approved = Column(Boolean, default=False)
 
     tasks = relationship("AnalysisTask", back_populates="user")
+    covariate_presets = relationship(
+        "CovariatePreset", back_populates="user", cascade="all, delete-orphan"
+    )
 
     @property
     def is_admin(self):
@@ -182,6 +187,167 @@ class TaskResultTotal(Base):
     n_years = Column(Integer)
 
     task = relationship("AnalysisTask", back_populates="results_total")
+
+
+class TrendsEarthCredential(Base):
+    """Stored OAuth2 client credentials for the trends.earth API.
+
+    Each user may link their trends.earth account, which registers an
+    OAuth2 service client on the API and stores the ``client_id`` and
+    encrypted ``client_secret`` here.  The webapp uses these credentials
+    to obtain short-lived access tokens on behalf of the user.
+    """
+
+    __tablename__ = "trendsearth_credentials"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, unique=True
+    )
+    # The trends.earth user email used to create the client
+    te_email = Column(String(255), nullable=False)
+    # OAuth2 client_id (public, non-secret)
+    client_id = Column(String(128), nullable=False)
+    # OAuth2 client_secret (encrypted with Fernet using SECRET_KEY)
+    client_secret_encrypted = Column(Text, nullable=False)
+    # Optional human-readable label used when registering the client
+    client_name = Column(String(255), nullable=False, default="avoided-emissions-web")
+    # The database UUID of the client on the API side (for revocation)
+    api_client_db_id = Column(String(128))
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    user = relationship(
+        "User",
+        backref="trendsearth_credential",
+    )
+
+
+class CovariatePreset(Base):
+    """Named set of covariates that a user can save and restore."""
+
+    __tablename__ = "covariate_presets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    covariates = Column(ARRAY(Text), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="covariate_presets")
+
+
+# ---------------------------------------------------------------------------
+# Vector reference data tables (PostGIS)
+# ---------------------------------------------------------------------------
+
+
+class GeoBoundaryADM0(Base):
+    """Country-level administrative boundaries from geoBoundaries CGAZ."""
+
+    __tablename__ = "geoboundaries_adm0"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    shape_group = Column(String(10), nullable=False, index=True)
+    shape_name = Column(String(255), nullable=False)
+    shape_iso = Column(String(10))
+    shape_id = Column(String(100))
+    shape_type = Column(String(20))
+    geom = Column(
+        Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
+    )
+
+
+class GeoBoundaryADM1(Base):
+    """First-level administrative boundaries from geoBoundaries CGAZ."""
+
+    __tablename__ = "geoboundaries_adm1"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    shape_group = Column(String(10), nullable=False, index=True)
+    shape_name = Column(String(255), nullable=False)
+    shape_iso = Column(String(10))
+    shape_id = Column(String(100))
+    shape_type = Column(String(20))
+    geom = Column(
+        Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
+    )
+
+
+class GeoBoundaryADM2(Base):
+    """Second-level administrative boundaries from geoBoundaries CGAZ."""
+
+    __tablename__ = "geoboundaries_adm2"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    shape_group = Column(String(10), nullable=False, index=True)
+    shape_name = Column(String(255), nullable=False)
+    shape_iso = Column(String(10))
+    shape_id = Column(String(100))
+    shape_type = Column(String(20))
+    geom = Column(
+        Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
+    )
+
+
+class Ecoregion(Base):
+    """RESOLVE ecoregions (2017)."""
+
+    __tablename__ = "ecoregions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    eco_id = Column(Integer, nullable=False, index=True)
+    eco_name = Column(String(255))
+    biome_num = Column(Integer)
+    biome_name = Column(String(255))
+    realm = Column(String(100))
+    nnh = Column(Float)
+    color = Column(String(10))
+    color_bio = Column(String(10))
+    color_nnh = Column(String(10))
+    area_km2 = Column(Float)
+    geom = Column(
+        Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
+    )
+
+
+class ProtectedArea(Base):
+    """WDPA protected areas."""
+
+    __tablename__ = "wdpa"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    wdpaid = Column(Integer, nullable=False, index=True)
+    name = Column(String(500))
+    orig_name = Column(String(500))
+    desig = Column(String(500))
+    desig_type = Column(String(100))
+    iucn_cat = Column(String(20))
+    int_crit = Column(String(100))
+    marine = Column(String(10))
+    rep_m_area = Column(Float)
+    gis_m_area = Column(Float)
+    rep_area = Column(Float)
+    gis_area = Column(Float)
+    no_take = Column(String(50))
+    no_tk_area = Column(Float)
+    status = Column(String(100))
+    status_yr = Column(Integer)
+    gov_type = Column(String(255))
+    own_type = Column(String(100))
+    mang_auth = Column(String(500))
+    mang_plan = Column(String(500))
+    verif = Column(String(100))
+    iso3 = Column(String(10), index=True)
+    parent_iso3 = Column(String(10))
+    geom = Column(
+        Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
+    )
 
 
 # Database session management

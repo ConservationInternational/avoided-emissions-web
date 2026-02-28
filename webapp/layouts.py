@@ -498,6 +498,7 @@ def navbar(user=None):
     nav_items = [
         dbc.NavItem(dbc.NavLink("Dashboard", href="/")),
         dbc.NavItem(dbc.NavLink("Submit Task", href="/submit")),
+        dbc.NavItem(dbc.NavLink("Settings", href="/settings")),
     ]
     if user and user.is_admin:
         nav_items.append(
@@ -775,6 +776,57 @@ def submit_layout(user):
             dbc.Row([
                 dbc.Col([
                     dbc.Label("Matching Covariates"),
+
+                    # -- Covariate preset controls --
+                    dbc.Card([
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col([
+                                    dbc.Select(
+                                        id="preset-selector",
+                                        placeholder="Load a saved preset…",
+                                    ),
+                                ], width=5),
+                                dbc.Col([
+                                    dbc.Button(
+                                        "Load",
+                                        id="load-preset-btn",
+                                        color="primary",
+                                        size="sm",
+                                        className="me-1",
+                                    ),
+                                    dbc.Button(
+                                        "Delete",
+                                        id="delete-preset-btn",
+                                        color="danger",
+                                        outline=True,
+                                        size="sm",
+                                    ),
+                                ], width=3, className="d-flex align-items-center"),
+                                dbc.Col([
+                                    dbc.InputGroup([
+                                        dbc.Input(
+                                            id="preset-name-input",
+                                            type="text",
+                                            placeholder="Preset name",
+                                            size="sm",
+                                        ),
+                                        dbc.Button(
+                                            "Save",
+                                            id="save-preset-btn",
+                                            color="success",
+                                            size="sm",
+                                        ),
+                                    ], size="sm"),
+                                ], width=4),
+                            ]),
+                            html.Div(
+                                id="preset-feedback",
+                                className="mt-1 small",
+                            ),
+                        ], className="py-2 px-3"),
+                    ], className="mb-2"),
+
                     dbc.Checklist(
                         id="covariate-selection",
                         options=[{"label": c, "value": c}
@@ -809,8 +861,9 @@ def submit_layout(user):
                        color="primary", size="lg", className="w-100"),
             html.Div(id="submit-result"),
         ]),
-        # Hidden store for parsed sites data
+        # Hidden stores
         dcc.Store(id="parsed-sites-store"),
+        dcc.Store(id="presets-store"),
     ])
 
 
@@ -1063,6 +1116,127 @@ def admin_layout(user):
         dcc.Interval(id="admin-refresh-interval", interval=30000,
                      n_intervals=0),
     ])
+
+
+def settings_layout(user):
+    """User settings page with trends.earth API credential management."""
+    from credential_store import get_credential
+
+    cred = get_credential(user.id)
+
+    if cred:
+        # Show current credential status
+        credential_card = dbc.Card([
+            dbc.CardHeader(
+                html.H5("Linked Account", className="mb-0"),
+                style={"backgroundColor": "#d1e7dd"},
+            ),
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.P([
+                            html.Strong("trends.earth email: "),
+                            cred.te_email,
+                        ]),
+                        html.P([
+                            html.Strong("Client ID: "),
+                            html.Code(cred.client_id),
+                        ]),
+                        html.P([
+                            html.Strong("Linked: "),
+                            cred.created_at.strftime("%Y-%m-%d %H:%M UTC")
+                            if cred.created_at else "—",
+                        ]),
+                    ]),
+                ]),
+                html.Hr(),
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Button(
+                            "Test Connection",
+                            id="te-test-connection-btn",
+                            color="info",
+                            outline=True,
+                            className="me-2",
+                        ),
+                        dbc.Button(
+                            "Unlink Account",
+                            id="te-unlink-btn",
+                            color="danger",
+                            outline=True,
+                        ),
+                    ]),
+                ]),
+                html.Div(id="te-credential-status", className="mt-3"),
+            ]),
+        ], className="mb-4 shadow-sm")
+    else:
+        credential_card = None
+
+    link_card = dbc.Card([
+        dbc.CardHeader(
+            html.H5(
+                "Link to trends.earth" if not cred else "Re-link Account",
+                className="mb-0",
+            ),
+            style={"backgroundColor": "#2c3e50", "color": "white"},
+        ),
+        dbc.CardBody([
+            html.P(
+                "Enter your trends.earth account credentials to register "
+                "this application as an authorized client.  Your password "
+                "is sent directly to the trends.earth API and is never "
+                "stored locally.",
+                className="text-muted",
+            ),
+            dbc.Label("trends.earth Email"),
+            dbc.Input(
+                id="te-link-email",
+                type="email",
+                placeholder="you@example.com",
+                className="mb-2",
+            ),
+            dbc.Label("trends.earth Password"),
+            dbc.Input(
+                id="te-link-password",
+                type="password",
+                className="mb-3",
+            ),
+            html.Div(id="te-link-message", className="mb-2"),
+            dbc.Button(
+                "Link Account",
+                id="te-link-btn",
+                color="primary",
+                className="w-100",
+            ),
+        ]),
+    ], className="mb-4 shadow-sm")
+
+    children = [
+        navbar(user),
+        html.H2("Settings"),
+        html.Hr(),
+        dbc.Row(dbc.Col([
+            html.H4("trends.earth API Integration"),
+            html.P(
+                "Link your trends.earth account to submit analysis tasks "
+                "through the trends.earth API.  Once linked, the webapp "
+                "obtains short-lived access tokens automatically — your "
+                "password is not stored.",
+                className="text-muted",
+            ),
+        ])),
+    ]
+
+    if credential_card:
+        children.append(dbc.Row(dbc.Col(credential_card, width=8)))
+
+    children.append(dbc.Row(dbc.Col(link_card, width=8)))
+
+    # Hidden stores for callback coordination
+    children.append(dcc.Store(id="te-link-done-store"))
+
+    return dbc.Container(children)
 
 
 def not_found_layout(user=None):

@@ -40,6 +40,20 @@ class Config:
     CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
     CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/0")
 
+    # trends.earth API integration
+    TRENDSEARTH_API_URL = os.environ.get(
+        "TRENDSEARTH_API_URL", "https://api.trends.earth/api/v1"
+    )
+    TRENDSEARTH_API_KEY = os.environ.get("TRENDSEARTH_API_KEY", "")
+    TRENDSEARTH_API_EMAIL = os.environ.get("TRENDSEARTH_API_EMAIL", "")
+    TRENDSEARTH_API_PASSWORD = os.environ.get("TRENDSEARTH_API_PASSWORD", "")
+    TRENDSEARTH_SCRIPT_ID = os.environ.get("TRENDSEARTH_SCRIPT_ID", "")
+    # Set to True to route analysis tasks through the trends.earth API
+    # instead of direct AWS Batch submission.
+    USE_TRENDSEARTH_API = (
+        os.environ.get("USE_TRENDSEARTH_API", "false").lower() == "true"
+    )
+
 
 def report_exception(**extra):
     """Report the current exception to Rollbar (if configured).

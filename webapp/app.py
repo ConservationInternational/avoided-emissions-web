@@ -26,6 +26,7 @@ from layouts import (
     login_layout,
     not_found_layout,
     register_layout,
+    settings_layout,
     submit_layout,
     task_detail_layout,
 )
@@ -127,6 +128,9 @@ def display_page(pathname):
 
     if pathname == "/submit":
         return submit_layout(user)
+
+    if pathname == "/settings":
+        return settings_layout(user)
 
     if pathname == "/admin":
         if not user.is_admin:

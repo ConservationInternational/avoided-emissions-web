@@ -21,6 +21,7 @@ from config import Config
 from models import (
     AnalysisTask,
     Covariate,
+    CovariatePreset,
     TaskResult,
     TaskResultTotal,
     TaskSite,
@@ -149,15 +150,143 @@ def upload_config_to_s3(config_dict, task_id):
 
 def submit_analysis_task(task_name, description, user_id, gdf,
                          covariates, fc_years=None):
-    """Create and submit a full analysis task to AWS Batch.
+    """Create and submit a full analysis task.
 
-    1. Creates the database record
+    Routes to the trends.earth API when ``Config.USE_TRENDSEARTH_API`` is
+    True, otherwise falls back to direct AWS Batch submission.
+
+    1. Creates the local database record
     2. Uploads sites and config to S3
-    3. Submits the three-step pipeline to AWS Batch
-    4. Updates the database with job IDs
+    3. Submits to the appropriate backend
+    4. Updates the database with tracking IDs
 
     Returns the task ID.
     """
+    if Config.USE_TRENDSEARTH_API:
+        return _submit_via_api(
+            task_name, description, user_id, gdf, covariates, fc_years
+        )
+    return _submit_via_batch(
+        task_name, description, user_id, gdf, covariates, fc_years
+    )
+
+
+def _submit_via_api(task_name, description, user_id, gdf,
+                     covariates, fc_years=None):
+    """Submit the analysis task through the trends.earth API.
+
+    Creates an Execution on the API which handles AWS Batch dispatch,
+    status tracking, and result collection.
+
+    Uses the submitting user's stored OAuth2 client credentials when
+    available, falling back to the global API key / email+password from
+    environment variables.
+    """
+    from credential_store import get_decrypted_secret
+    from trendsearth_client import TrendsEarthClient
+
+    if fc_years is None:
+        fc_years = list(range(2000, 2024))
+
+    db = get_db()
+    try:
+        task_id = str(uuid.uuid4())
+
+        task = AnalysisTask(
+            id=task_id,
+            name=task_name,
+            description=description,
+            submitted_by=user_id,
+            status="pending",
+            covariates=covariates,
+            n_sites=len(gdf),
+        )
+        db.add(task)
+
+        for _, row in gdf.iterrows():
+            site = TaskSite(
+                task_id=task_id,
+                site_id=str(row["site_id"]),
+                site_name=str(row.get("site_name", "")),
+                start_date=pd.to_datetime(row["start_date"]),
+                end_date=pd.to_datetime(row["end_date"])
+                if pd.notna(row.get("end_date")) else None,
+            )
+            db.add(site)
+        db.commit()
+
+        # Upload sites to S3
+        sites_uri = upload_sites_to_s3(gdf, task_id)
+
+        # Build params matching AvoidedEmissionsParams schema
+        params = {
+            "task_id": task_id,
+            "sites_s3_uri": sites_uri,
+            "cog_bucket": Config.S3_BUCKET,
+            "cog_prefix": f"{Config.S3_PREFIX}/cog",
+            "covariates": covariates,
+            "exact_match_vars": ["region", "ecoregion", "pa"],
+            "fc_years": fc_years,
+            "max_treatment_pixels": 1000,
+            "control_multiplier": 50,
+            "min_site_area_ha": 100,
+            "min_glm_treatment_pixels": 15,
+            "step": "all",
+            "results_s3_uri": (
+                f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}"
+                f"/tasks/{task_id}/output"
+            ),
+        }
+
+        # Submit via trends.earth API — prefer user's stored OAuth2 creds
+        user_creds = get_decrypted_secret(user_id)
+        if user_creds:
+            client_id, client_secret = user_creds
+            client = TrendsEarthClient.from_oauth2_credentials(
+                api_url=Config.TRENDSEARTH_API_URL,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+        else:
+            client = TrendsEarthClient(
+                api_url=Config.TRENDSEARTH_API_URL,
+                api_key=Config.TRENDSEARTH_API_KEY,
+                email=Config.TRENDSEARTH_API_EMAIL,
+                password=Config.TRENDSEARTH_API_PASSWORD,
+            )
+        script_id = Config.TRENDSEARTH_SCRIPT_ID
+        execution = client.create_execution(script_id, params)
+
+        # Store the API execution ID for polling
+        exec_data = execution.get("data", {})
+        exec_id = exec_data.get("id", "")
+        task.sites_s3_uri = sites_uri
+        task.results_s3_uri = params["results_s3_uri"]
+        task.status = "submitted"
+        task.submitted_at = datetime.now(timezone.utc)
+        # Store the API execution ID in a new-ish field; reuse
+        # extract_job_id since we no longer need the Batch job IDs.
+        task.extract_job_id = f"api:{exec_id}"
+        db.commit()
+
+        return task_id
+
+    except Exception as e:
+        db.rollback()
+        if "task_id" in dir():
+            task = db.query(AnalysisTask).get(task_id)
+            if task:
+                task.status = "failed"
+                task.error_message = str(e)
+                db.commit()
+        raise
+    finally:
+        db.close()
+
+
+def _submit_via_batch(task_name, description, user_id, gdf,
+                      covariates, fc_years=None):
+    """Original direct-to-Batch submission (legacy path)."""
     if fc_years is None:
         fc_years = list(range(2000, 2024))
 
@@ -859,4 +988,90 @@ def discover_existing_cogs():
     return imported
 
 
+# -- Covariate presets -------------------------------------------------------
 
+
+def get_covariate_presets(user_id):
+    """Return all covariate presets for the given user, ordered by name.
+
+    Each item is a dict with keys ``id``, ``name``, and ``covariates``.
+    """
+    db = get_db()
+    try:
+        presets = (
+            db.query(CovariatePreset)
+            .filter(CovariatePreset.user_id == user_id)
+            .order_by(CovariatePreset.name)
+            .all()
+        )
+        return [
+            {"id": str(p.id), "name": p.name, "covariates": list(p.covariates)}
+            for p in presets
+        ]
+    finally:
+        db.close()
+
+
+def save_covariate_preset(user_id, name, covariates):
+    """Create or update a covariate preset for the given user.
+
+    If a preset with the same *name* already exists for this user it is
+    updated in-place; otherwise a new row is inserted.  Returns the
+    preset ``id`` as a string.
+    """
+    db = get_db()
+    try:
+        existing = (
+            db.query(CovariatePreset)
+            .filter(
+                CovariatePreset.user_id == user_id,
+                CovariatePreset.name == name,
+            )
+            .first()
+        )
+        if existing:
+            existing.covariates = list(covariates)
+            existing.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            return str(existing.id)
+
+        preset = CovariatePreset(
+            user_id=user_id,
+            name=name,
+            covariates=list(covariates),
+        )
+        db.add(preset)
+        db.commit()
+        return str(preset.id)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def delete_covariate_preset(preset_id, user_id):
+    """Delete a covariate preset by id, scoped to the owning user.
+
+    Returns ``True`` if a row was deleted, ``False`` otherwise.
+    """
+    db = get_db()
+    try:
+        preset = (
+            db.query(CovariatePreset)
+            .filter(
+                CovariatePreset.id == preset_id,
+                CovariatePreset.user_id == user_id,
+            )
+            .first()
+        )
+        if not preset:
+            return False
+        db.delete(preset)
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()

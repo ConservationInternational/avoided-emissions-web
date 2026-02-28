@@ -56,6 +56,14 @@ run_step() {
 COMMAND="${1:-help}"
 shift || true
 
+# When launched by the trends.earth API (EXECUTION_ID is set and the first
+# argument is "api-run"), use the Python wrapper which handles param
+# retrieval, status updates, and result posting.
+if [ "$COMMAND" = "api-run" ] || [ -n "${EXECUTION_ID:-}" -a "$COMMAND" = "analyze" ]; then
+    echo "Running via API wrapper (execution $EXECUTION_ID)..."
+    exec python3 /app/api_wrapper.py
+fi
+
 case "$COMMAND" in
     analyze)
         # Full pipeline: extract + match + summarize

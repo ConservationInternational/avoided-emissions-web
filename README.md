@@ -28,7 +28,7 @@ exported as an individual GEE batch task. Covariates include:
 - **Demographics**: population (2000, 2005, 2010, 2015, 2020), population growth
 - **Biomass**: above + below ground biomass
 - **Land cover**: ESA CCI 7-class land cover (2015)
-- **Forest cover**: Hansen GFC annual forest cover (2000-2023)
+- **Forest cover**: Hansen GFC annual forest cover (2000-2024)
 - **Administrative**: GADM level-1 regions, ecoregions, protected areas
 
 ### 2. R Analysis Container (`r-analysis/`)
