@@ -235,6 +235,90 @@ dagcomponentfuncs.TileCount = function (props) {
 };
 
 /**
+ * CovariateActions \u2013 renders per-row action buttons for the covariate grid.
+ *
+ * Shows two small buttons:
+ *   - "Re-export" : force re-export from GEE (deletes GCS tiles + S3 COG)
+ *   - "Re-merge"  : force re-merge GCS tiles to S3 (deletes S3 COG)
+ *
+ * Buttons are disabled when the covariate is already in a transitional state.
+ * Clicking a button triggers setData which the Dash cellClicked callback reads.
+ */
+dagcomponentfuncs.CovariateActions = function (props) {
+    var data = props.data || {};
+    var status = (data.status || "").toLowerCase();
+    var hasTiles = (data.gcs_tiles || 0) > 0;
+
+    // Disable buttons during transitional states
+    var busy = [
+        "pending_export", "exporting", "pending_merge", "merging"
+    ].indexOf(status) >= 0;
+
+    var reexportBtn = React.createElement(
+        "button",
+        {
+            style: {
+                padding: "1px 6px",
+                fontSize: "10px",
+                fontWeight: 600,
+                border: "1px solid #dc3545",
+                borderRadius: "3px",
+                backgroundColor: busy ? "#e9ecef" : "#fff",
+                color: busy ? "#6c757d" : "#dc3545",
+                cursor: busy ? "not-allowed" : "pointer",
+                marginRight: "4px",
+            },
+            disabled: busy,
+            onClick: function (e) {
+                e.stopPropagation();
+                if (!busy) {
+                    props.setData(Object.assign({}, data, {
+                        _action: "reexport",
+                        _actionTs: Date.now(),
+                    }));
+                }
+            },
+        },
+        "\u21BB Export"
+    );
+
+    var remergeDisabled = busy || !hasTiles;
+    var remergeBtn = React.createElement(
+        "button",
+        {
+            style: {
+                padding: "1px 6px",
+                fontSize: "10px",
+                fontWeight: 600,
+                border: "1px solid #0d6efd",
+                borderRadius: "3px",
+                backgroundColor: remergeDisabled ? "#e9ecef" : "#fff",
+                color: remergeDisabled ? "#6c757d" : "#0d6efd",
+                cursor: remergeDisabled ? "not-allowed" : "pointer",
+            },
+            disabled: remergeDisabled,
+            onClick: function (e) {
+                e.stopPropagation();
+                if (!remergeDisabled) {
+                    props.setData(Object.assign({}, data, {
+                        _action: "remerge",
+                        _actionTs: Date.now(),
+                    }));
+                }
+            },
+        },
+        "\u21BB Merge"
+    );
+
+    return React.createElement(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: "2px" } },
+        reexportBtn,
+        remergeBtn
+    );
+};
+
+/**
  * S3Status \u2013 renders a boolean S3 presence as a check mark or dash.
  */
 dagcomponentfuncs.S3Status = function (props) {

@@ -211,6 +211,87 @@ def list_s3_cog_objects(bucket: str, prefix: str,
     return results
 
 
+def delete_s3_cog(bucket: str, prefix: str, covariate_name: str,
+                  region: str = "us-east-1") -> bool:
+    """Delete a merged COG from S3.
+
+    Returns True if the object was deleted, False if it didn't exist.
+    """
+    key = f"{prefix.strip('/')}/{covariate_name}.tif"
+    s3 = boto3.client("s3", region_name=region)
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+    except s3.exceptions.ClientError:
+        logger.info("S3 COG not found: s3://%s/%s", bucket, key)
+        return False
+    s3.delete_object(Bucket=bucket, Key=key)
+    logger.info("Deleted S3 COG: s3://%s/%s", bucket, key)
+    return True
+
+
+def delete_gcs_tiles(bucket: str, prefix: str,
+                     covariate_name: str) -> int:
+    """Delete all GCS tiles for a covariate.
+
+    Uses the GCS JSON API with an OAuth2 token from the default
+    application credentials (``GOOGLE_APPLICATION_CREDENTIALS`` or
+    service account).  Returns the number of objects deleted.
+
+    Falls back to doing nothing if no credentials are available
+    (GCS public buckets don't support unauthenticated deletes).
+    """
+    import google.auth
+    import google.auth.transport.requests
+
+    # List all tile objects for this covariate
+    tile_urls = list_gcs_tiles(bucket, prefix, covariate_name)
+    if not tile_urls:
+        return 0
+
+    # Get authenticated credentials
+    try:
+        credentials, _project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/devstorage.full_control"]
+        )
+        auth_req = google.auth.transport.requests.Request()
+        credentials.refresh(auth_req)
+    except Exception:
+        logger.warning(
+            "No GCS credentials available — cannot delete tiles for %s",
+            covariate_name,
+        )
+        return 0
+
+    deleted = 0
+    for url in tile_urls:
+        # Extract object name from URL
+        # URL: https://storage.googleapis.com/{bucket}/{object_name}
+        obj_name = url.split(f"/{bucket}/", 1)[-1]
+        import urllib.parse
+        encoded_name = urllib.parse.quote(obj_name, safe="")
+        delete_url = (
+            f"https://storage.googleapis.com/storage/v1/b/{bucket}"
+            f"/o/{encoded_name}"
+        )
+        resp = requests.delete(
+            delete_url,
+            headers={"Authorization": f"Bearer {credentials.token}"},
+            timeout=30,
+        )
+        if resp.status_code in (200, 204):
+            deleted += 1
+        elif resp.status_code == 404:
+            logger.debug("GCS tile already gone: %s", obj_name)
+        else:
+            logger.warning(
+                "Failed to delete GCS tile %s: %s %s",
+                obj_name, resp.status_code, resp.text[:200],
+            )
+    logger.info("Deleted %d/%d GCS tiles for %s", deleted, len(tile_urls),
+                covariate_name)
+    return deleted
+
+
 def _download_tile(url: str, dest_dir: str) -> str:
     """Download a single tile to *dest_dir*, returning the local path."""
     filename = url.rsplit("/", 1)[-1]

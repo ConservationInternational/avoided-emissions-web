@@ -528,6 +528,142 @@ def download_results_csv(task_id, result_type="by_site_year"):
 # Covariate inventory & COG merge functions
 # ---------------------------------------------------------------------------
 
+
+def force_reexport(covariate_name, user_id):
+    """Force re-export a covariate from GEE.
+
+    Deletes any existing S3 COG and GCS tiles, removes/resets the DB
+    record, then starts a fresh GEE export.
+
+    Parameters
+    ----------
+    covariate_name : str
+        Covariate key from config.COVARIATES.
+    user_id : uuid.UUID
+        Admin user who triggered the action.
+
+    Returns
+    -------
+    dict
+        ``{"status": "ok", "export_id": …}`` on success.
+    """
+    from cog_merge import delete_gcs_tiles, delete_s3_cog
+
+    # 1. Delete S3 COG (if exists)
+    if Config.S3_BUCKET:
+        cog_prefix = f"{Config.S3_PREFIX}/cog"
+        try:
+            delete_s3_cog(
+                Config.S3_BUCKET, cog_prefix, covariate_name,
+                region=Config.AWS_REGION,
+            )
+        except Exception:
+            logger.warning("Failed to delete S3 COG for %s", covariate_name)
+
+    # 2. Delete GCS tiles (if exists)
+    if Config.GCS_BUCKET:
+        try:
+            delete_gcs_tiles(
+                Config.GCS_BUCKET, Config.GCS_PREFIX, covariate_name,
+            )
+        except Exception:
+            logger.warning("Failed to delete GCS tiles for %s", covariate_name)
+
+    # 3. Remove old DB records for this covariate
+    db = get_db()
+    try:
+        old_records = (
+            db.query(Covariate)
+            .filter(Covariate.covariate_name == covariate_name)
+            .all()
+        )
+        for rec in old_records:
+            db.delete(rec)
+        db.commit()
+    finally:
+        db.close()
+
+    # 4. Start a fresh GEE export
+    export_ids = start_gee_export([covariate_name], user_id)
+    return {"status": "ok", "export_id": export_ids[0] if export_ids else None}
+
+
+def force_remerge(covariate_name, user_id):
+    """Force re-merge GCS tiles to a new S3 COG.
+
+    Deletes the existing S3 COG (if any), resets the DB record to
+    ``pending_merge``, and dispatches a Celery merge task.
+
+    Parameters
+    ----------
+    covariate_name : str
+        Covariate key from config.COVARIATES.
+    user_id : uuid.UUID
+        Admin user who triggered the action.
+
+    Returns
+    -------
+    dict
+        ``{"status": "ok", "layer_id": …}`` on success.
+    """
+    from cog_merge import delete_s3_cog
+    from tasks import run_cog_merge
+
+    # 1. Delete existing S3 COG
+    if Config.S3_BUCKET:
+        cog_prefix = f"{Config.S3_PREFIX}/cog"
+        try:
+            delete_s3_cog(
+                Config.S3_BUCKET, cog_prefix, covariate_name,
+                region=Config.AWS_REGION,
+            )
+        except Exception:
+            logger.warning("Failed to delete S3 COG for %s", covariate_name)
+
+    # 2. Update or create DB record
+    db = get_db()
+    layer_id = None
+    try:
+        existing = (
+            db.query(Covariate)
+            .filter(Covariate.covariate_name == covariate_name)
+            .order_by(Covariate.started_at.desc())
+            .first()
+        )
+        if existing:
+            existing.status = "pending_merge"
+            existing.merged_url = None
+            existing.size_bytes = None
+            existing.error_message = None
+            existing.completed_at = None
+            existing.output_bucket = Config.S3_BUCKET
+            existing.output_prefix = f"{Config.S3_PREFIX}/cog"
+            layer_id = str(existing.id)
+        else:
+            layer = Covariate(
+                covariate_name=covariate_name,
+                status="pending_merge",
+                gcs_bucket=Config.GCS_BUCKET,
+                gcs_prefix=Config.GCS_PREFIX,
+                output_bucket=Config.S3_BUCKET,
+                output_prefix=f"{Config.S3_PREFIX}/cog",
+                started_by=user_id,
+            )
+            db.add(layer)
+            db.flush()
+            layer_id = str(layer.id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    # 3. Dispatch Celery merge task
+    run_cog_merge.delay(layer_id)
+    return {"status": "ok", "layer_id": layer_id}
+
+
 def get_covariate_inventory():
     """Build a comprehensive inventory of all covariates with GCS/S3 status.
 
@@ -722,83 +858,4 @@ def discover_existing_cogs():
     return imported
 
 
-def start_cog_merge(covariate_names, user_id):
-    """Create COG merge records and dispatch Celery tasks.
 
-    For each covariate, either updates an existing ``Covariate`` row
-    that has status *exported* to *pending_merge*, or creates a new row.
-    Then a Celery task is dispatched for each to perform the download /
-    merge / upload pipeline in the background worker.
-
-    Parameters
-    ----------
-    covariate_names : list[str]
-        Covariate keys from config.COVARIATES to merge.
-    user_id : uuid.UUID
-        The admin user who triggered the merge.
-
-    Returns
-    -------
-    list[str]
-        UUIDs (as strings) of the ``Covariate`` records queued for merge.
-    """
-    from tasks import run_cog_merge
-
-    db = get_db()
-    ids = []
-    try:
-        # Skip covariates already pending or actively merging
-        in_progress = {
-            row.covariate_name
-            for row in db.query(Covariate.covariate_name)
-            .filter(Covariate.status.in_(["pending_merge", "merging"]))
-            .all()
-        }
-
-        for name in covariate_names:
-            if name in in_progress:
-                continue
-
-            # Try to update an existing 'exported' row for this covariate
-            exported_row = (
-                db.query(Covariate)
-                .filter(
-                    Covariate.covariate_name == name,
-                    Covariate.status == "exported",
-                )
-                .order_by(Covariate.started_at.desc())
-                .first()
-            )
-
-            if exported_row:
-                exported_row.status = "pending_merge"
-                exported_row.output_bucket = Config.S3_BUCKET
-                exported_row.output_prefix = f"{Config.S3_PREFIX}/cog"
-                ids.append(str(exported_row.id))
-            else:
-                # No exported row — create fresh (e.g. pre-existing tiles)
-                layer = Covariate(
-                    covariate_name=name,
-                    status="pending_merge",
-                    gcs_bucket=Config.GCS_BUCKET,
-                    gcs_prefix=Config.GCS_PREFIX,
-                    output_bucket=Config.S3_BUCKET,
-                    output_prefix=f"{Config.S3_PREFIX}/cog",
-                    started_by=user_id,
-                )
-                db.add(layer)
-                db.flush()
-                ids.append(str(layer.id))
-
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-
-    # Dispatch Celery tasks — one per covariate
-    for layer_id in ids:
-        run_cog_merge.delay(layer_id)
-
-    return ids

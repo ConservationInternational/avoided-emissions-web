@@ -79,7 +79,30 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2", "-Q", "celery"]
+    networks:
+      - backend
+
+  merge-worker:
+    build:
+      context: ../webapp
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ae_user}:${POSTGRES_PASSWORD:-ae_password}@postgres:5432/${POSTGRES_DB:-avoided_emissions}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - ../webapp:/app
+      - ../gee-export:/app/gee-export
+      - ../r-analysis:/app/r-analysis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2", "-Q", "merge"]
     networks:
       - backend
 

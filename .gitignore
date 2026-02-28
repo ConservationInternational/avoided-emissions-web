@@ -62,3 +62,5 @@ coverage.xml
 
 # Node (if any frontend tooling is added later)
 node_modules/
+webapp/celerybeat-schedule-shm
+webapp/celerybeat-schedule-wal

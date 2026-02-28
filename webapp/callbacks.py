@@ -32,12 +32,13 @@ from services import (
     change_user_role,
     delete_user,
     download_results_csv,
+    force_reexport,
+    force_remerge,
     get_covariate_inventory,
     get_task_detail,
     get_task_list,
     get_user_list,
     parse_sites_file,
-    start_cog_merge,
     start_gee_export,
     submit_analysis_task,
 )
@@ -441,65 +442,13 @@ def register_callbacks(app):
             )
 
     @app.callback(
-        Output("cog-merge-result", "children"),
-        Input("start-cog-merge", "n_clicks"),
-        State("covariates-table", "selectedRows"),
-        prevent_initial_call=True,
-    )
-    def handle_cog_merge(n_clicks, selected_rows):
-        user = get_current_user()
-        if not user or not user.is_admin:
-            return dbc.Alert("Admin access required.", color="danger")
-
-        if not selected_rows:
-            return dbc.Alert(
-                "No covariates selected.  Use the checkboxes to select "
-                "rows with GCS tiles, then click 'Merge Selected'.",
-                color="warning",
-            )
-
-        # Only merge covariates that actually have tiles on GCS
-        names = [
-            row["covariate_name"]
-            for row in selected_rows
-            if row.get("gcs_tiles", 0) > 0
-        ]
-
-        if not names:
-            return dbc.Alert(
-                "None of the selected covariates have tiles on GCS.",
-                color="warning",
-            )
-
-        try:
-            merge_ids = start_cog_merge(names, user.id)
-            if not merge_ids:
-                return dbc.Alert(
-                    "All selected covariates are already pending or merging.",
-                    color="info",
-                    duration=4000,
-                )
-            return dbc.Alert(
-                f"Started COG merge for {len(merge_ids)} covariate(s). "
-                "This runs in the background — the table will update "
-                "automatically as merges complete.",
-                color="success",
-            )
-        except Exception:
-            logger.exception("COG merge request failed")
-            return dbc.Alert(
-                "Merge failed. Please try again or contact support.",
-                color="danger",
-            )
-
-    @app.callback(
         [Output("covariates-table", "rowData"),
          Output("covariates-total-count", "children")],
         [Input("admin-refresh-interval", "n_intervals"),
          Input("gee-export-result", "children"),
-         Input("cog-merge-result", "children")],
+         Input("covariate-action-result", "children")],
     )
-    def refresh_covariate_inventory(n, _export_result, _merge_result):
+    def refresh_covariate_inventory(n, _export_result, _action_result):
         # GEE export status is polled by the Celery Beat worker;
         # this callback just reads the current DB/S3/GCS state.
         try:
@@ -515,6 +464,56 @@ def register_callbacks(app):
         )
 
         return rows, total_label
+
+    # -- Admin: Covariate row action buttons ---------------------------------
+
+    @app.callback(
+        Output("covariate-action-result", "children"),
+        Input("covariates-table", "cellRendererData"),
+        prevent_initial_call=True,
+    )
+    def handle_covariate_action(renderer_data):
+        if not renderer_data:
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user or not user.is_admin:
+            return dbc.Alert("Admin access required.", color="danger",
+                             duration=4000)
+
+        data = renderer_data.get("value", {})
+        action = data.get("_action")
+        covariate_name = data.get("covariate_name")
+
+        if not action or not covariate_name:
+            raise PreventUpdate
+
+        try:
+            if action == "reexport":
+                result = force_reexport(covariate_name, user.id)
+                return dbc.Alert(
+                    f"Re-export started for '{covariate_name}'. "
+                    "Existing GCS tiles and S3 COG have been deleted.",
+                    color="success", duration=6000,
+                )
+            elif action == "remerge":
+                result = force_remerge(covariate_name, user.id)
+                return dbc.Alert(
+                    f"Re-merge queued for '{covariate_name}'. "
+                    "Existing S3 COG has been deleted.",
+                    color="success", duration=6000,
+                )
+            else:
+                raise PreventUpdate
+        except Exception:
+            logger.exception(
+                "Covariate action '%s' failed for %s", action, covariate_name
+            )
+            return dbc.Alert(
+                f"Action '{action}' failed for '{covariate_name}'. "
+                "Check logs for details.",
+                color="danger", duration=6000,
+            )
 
     # -- Admin: User management (AG Grid) ------------------------------------
 

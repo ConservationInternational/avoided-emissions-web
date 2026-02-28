@@ -32,6 +32,11 @@ celery_app.conf.update(
     result_expires=86400,
     # Autodiscover tasks in the 'tasks' module
     imports=["tasks"],
+    # Route CPU/IO-heavy merge tasks to a dedicated queue so they
+    # never starve the lightweight polling tasks on the default queue.
+    task_routes={
+        "tasks.run_cog_merge": {"queue": "merge"},
+    },
 )
 
 # ---------------------------------------------------------------------------
@@ -45,5 +50,9 @@ celery_app.conf.beat_schedule = {
     "poll-batch-task-status": {
         "task": "tasks.poll_batch_tasks",
         "schedule": 30.0,  # every 30 seconds
+    },
+    "auto-merge-unmerged": {
+        "task": "tasks.auto_merge_unmerged",
+        "schedule": 120.0,  # every 2 minutes
     },
 }

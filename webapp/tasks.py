@@ -111,6 +111,8 @@ def poll_gee_exports() -> dict:
         if not active:
             return {"checked": 0, "updated": 0}
 
+        _auto_merge_ids: list[str] = []  # collect exports to auto-merge
+
         import base64
 
         import ee
@@ -171,6 +173,12 @@ def poll_gee_exports() -> dict:
                         meta["tile_urls"] = tile_urls
                         export.extra_metadata = meta
 
+                        # Auto-trigger COG merge now that tiles are ready
+                        export.status = "pending_merge"
+                        export.output_bucket = Config.S3_BUCKET
+                        export.output_prefix = f"{Config.S3_PREFIX}/cog"
+                        _auto_merge_ids.append(str(export.id))
+
                 error = op.get("error")
                 if error:
                     export.error_message = error.get("message", str(error))
@@ -187,12 +195,159 @@ def poll_gee_exports() -> dict:
                 )
 
         db.commit()
-        return {"checked": len(active), "updated": updated}
+
+        # Dispatch COG merges for any exports that just completed
+        for layer_id in _auto_merge_ids:
+            run_cog_merge.delay(layer_id)
+            logger.info("Auto-dispatched COG merge for covariate %s", layer_id)
+
+        return {
+            "checked": len(active),
+            "updated": updated,
+            "merges_dispatched": len(_auto_merge_ids),
+        }
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
+
+
+@celery_app.task(name="tasks.auto_merge_unmerged")
+def auto_merge_unmerged() -> dict:
+    """Find covariates with GCS tiles but no merge, and dispatch merges.
+
+    Scans GCS for tiles, checks which covariates are already merged or
+    in progress, and auto-dispatches :func:`run_cog_merge` for any
+    covariates that have tiles but haven't been merged yet.
+
+    This covers covariates exported outside the app (e.g. manually via
+    GEE), or tiles that were already on GCS before the app was set up.
+
+    Called periodically by Celery Beat.
+
+    Returns
+    -------
+    dict
+        ``{"scanned": N, "dispatched": N}``
+    """
+    import importlib.util
+    from datetime import datetime, timezone
+
+    from config import Config
+    from models import Covariate, get_db
+
+    if not Config.GCS_BUCKET:
+        return {"scanned": 0, "dispatched": 0}
+
+    # Load covariate names from GEE export config
+    import os
+
+    gee_config_path = os.path.join(
+        os.path.dirname(__file__), "gee-export", "config.py"
+    )
+    if not os.path.exists(gee_config_path):
+        logger.warning("GEE config not found at %s", gee_config_path)
+        return {"scanned": 0, "dispatched": 0}
+
+    spec = importlib.util.spec_from_file_location(
+        "gee_export_config", gee_config_path
+    )
+    gee_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gee_config)
+    known_covariates = list(gee_config.COVARIATES.keys())
+
+    # Scan GCS for tile counts
+    from cog_merge import list_all_gcs_tiles
+
+    try:
+        gcs_counts = list_all_gcs_tiles(
+            Config.GCS_BUCKET,
+            Config.GCS_PREFIX,
+            known_covariates,
+        )
+    except Exception:
+        logger.exception("Failed to scan GCS tiles for auto-merge")
+        return {"scanned": 0, "dispatched": 0}
+
+    # Covariates that have tiles on GCS
+    with_tiles = {name for name, count in gcs_counts.items() if count > 0}
+    if not with_tiles:
+        return {"scanned": len(known_covariates), "dispatched": 0}
+
+    # Check DB for covariates already merged or in progress
+    db = get_db()
+    dispatched_ids: list[str] = []
+    try:
+        skip_statuses = ["pending_merge", "merging", "merged"]
+        already_handled = {
+            row.covariate_name
+            for row in db.query(Covariate.covariate_name)
+            .filter(Covariate.status.in_(skip_statuses))
+            .all()
+        }
+
+        # Also skip covariates that already have a COG on S3
+        from cog_merge import list_s3_cog_objects
+
+        try:
+            if Config.S3_BUCKET:
+                cog_prefix = f"{Config.S3_PREFIX}/cog"
+                for obj in list_s3_cog_objects(
+                    Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
+                ):
+                    already_handled.add(obj["covariate"])
+        except Exception:
+            logger.warning("Failed to scan S3 for existing COGs")
+
+        need_merge = with_tiles - already_handled
+        if not need_merge:
+            return {"scanned": len(known_covariates), "dispatched": 0}
+
+        for name in sorted(need_merge):
+            # Check if there's an existing exported row to update
+            existing = (
+                db.query(Covariate)
+                .filter(
+                    Covariate.covariate_name == name,
+                    Covariate.status == "exported",
+                )
+                .order_by(Covariate.started_at.desc())
+                .first()
+            )
+            if existing:
+                existing.status = "pending_merge"
+                existing.output_bucket = Config.S3_BUCKET
+                existing.output_prefix = f"{Config.S3_PREFIX}/cog"
+                dispatched_ids.append(str(existing.id))
+            else:
+                # Create a new record for pre-existing GCS tiles
+                layer = Covariate(
+                    covariate_name=name,
+                    status="pending_merge",
+                    gcs_bucket=Config.GCS_BUCKET,
+                    gcs_prefix=Config.GCS_PREFIX,
+                    output_bucket=Config.S3_BUCKET,
+                    output_prefix=f"{Config.S3_PREFIX}/cog",
+                    started_at=datetime.now(timezone.utc),
+                )
+                db.add(layer)
+                db.flush()
+                dispatched_ids.append(str(layer.id))
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    # Dispatch merge tasks (runs on the merge queue)
+    for layer_id in dispatched_ids:
+        run_cog_merge.delay(layer_id)
+        logger.info("Auto-merge dispatched for covariate %s", layer_id)
+
+    return {"scanned": len(known_covariates), "dispatched": len(dispatched_ids)}
 
 
 @celery_app.task(name="tasks.poll_batch_tasks")

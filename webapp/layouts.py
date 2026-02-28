@@ -184,6 +184,16 @@ COVARIATE_COLUMNS = [
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "11px", "color": "#721C24"},
         "tooltipField": "error_message",
     },
+    {
+        "headerName": "Actions",
+        "field": "actions",
+        "flex": 1.5,
+        "minWidth": 170,
+        "cellRenderer": "CovariateActions",
+        "sortable": False,
+        "filter": False,
+        "pinned": "right",
+    },
 ]
 
 RESULTS_TOTAL_COLUMNS = [
@@ -923,30 +933,6 @@ def admin_layout(user):
                     ]),
                 ], className="mt-3 mb-3"),
 
-                # -- Merge controls ------------------------------------------
-                dbc.Card([
-                    dbc.CardHeader("Merge GCS Tiles → S3 COG"),
-                    dbc.CardBody([
-                        html.P(
-                            "Select rows with GCS tiles below and click "
-                            "'Merge Selected' to create single Cloud-"
-                            "Optimized GeoTIFFs on S3.",
-                            className="text-muted small mb-3",
-                        ),
-                        dbc.Row([
-                            dbc.Col([
-                                dbc.Button(
-                                    "Merge Selected",
-                                    id="start-cog-merge",
-                                    color="primary",
-                                    className="me-2",
-                                ),
-                            ], width="auto"),
-                        ]),
-                        html.Div(id="cog-merge-result", className="mt-2"),
-                    ]),
-                ], className="mb-4"),
-
                 # -- Inventory grid ------------------------------------------
                 dbc.Row([
                     dbc.Col(html.H5("Covariate Inventory"), width="auto"),
@@ -981,6 +967,7 @@ def admin_layout(user):
                         },
                     },
                 ),
+                html.Div(id="covariate-action-result", className="mt-2"),
             ]),
             dbc.Tab(label="Users", tab_id="tab-users", children=[
                 dbc.Row([
