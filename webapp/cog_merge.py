@@ -42,7 +42,20 @@ def list_gcs_tiles(bucket: str, prefix: str, covariate_name: str) -> list[str]:
     )
     resp = requests.get(api_url, timeout=30)
     resp.raise_for_status()
-    items = resp.json().get("items", [])
+    items = []
+    page_token = None
+    while True:
+        url = api_url
+        if page_token:
+            url += f"&pageToken={page_token}"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        items.extend(data.get("items", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
     urls = [
         f"https://storage.googleapis.com/{bucket}/{item['name']}"
         for item in items
@@ -137,19 +150,33 @@ def list_gcs_cog_objects(bucket: str, prefix: str) -> list[dict]:
     items = resp.json().get("items", [])
 
     results = []
-    for item in items:
-        obj_name = item["name"]
-        if not obj_name.endswith(".tif"):
-            continue
-        # Extract covariate name from filename:  prefix/elev.tif -> elev
-        filename = obj_name.rsplit("/", 1)[-1]
-        covariate = filename.removesuffix(".tif")
-        results.append({
-            "name": obj_name,
-            "url": f"https://storage.googleapis.com/{bucket}/{obj_name}",
-            "size": int(item.get("size", 0)),
-            "covariate": covariate,
-        })
+    page_token = None
+    while True:
+        url = api_url
+        if page_token:
+            url += f"&pageToken={page_token}"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("items", [])
+        
+        for item in items:
+            obj_name = item["name"]
+            if not obj_name.endswith(".tif"):
+                continue
+            # Extract covariate name from filename:  prefix/elev.tif -> elev
+            filename = obj_name.rsplit("/", 1)[-1]
+            covariate = filename.removesuffix(".tif")
+            results.append({
+                "name": obj_name,
+                "url": f"https://storage.googleapis.com/{bucket}/{obj_name}",
+                "size": int(item.get("size", 0)),
+                "covariate": covariate,
+            })
+        
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
     return results
 
 
