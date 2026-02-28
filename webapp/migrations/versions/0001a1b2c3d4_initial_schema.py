@@ -4,13 +4,7 @@ Revision ID: 0001a1b2c3d4
 Revises: None
 Create Date: 2025-01-01 00:00:00.000000
 
-This is the baseline migration representing the schema created by
-database/init.sql.  On a fresh database that was initialised with
-init.sql, run:
-
-    alembic stamp 0001a1b2c3d4
-
-to mark the database at this revision without re-running the DDL.
+Baseline migration that creates the full schema from scratch.
 """
 
 from typing import Sequence, Union

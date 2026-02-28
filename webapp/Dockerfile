@@ -17,9 +17,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app/
 
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 RUN useradd -m appuser
 USER appuser
 
 EXPOSE 8050
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["gunicorn", "--bind", "0.0.0.0:8050", "--workers", "4", "--timeout", "120", "app:server"]

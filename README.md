@@ -10,8 +10,7 @@ conservation sites.
 avoided-emissions-web/
   gee-export/          Python scripts to export GEE covariate layers to GCS as COGs
   r-analysis/          Docker container for R-based avoided emissions matching
-  webapp/              Dash web application for task management and visualization
-  database/            PostgreSQL schema and initialization
+  webapp/              Dash web application (includes Alembic migrations)
   deploy/              CI/CD, Docker Compose, and CodeDeploy configuration
 ```
 
@@ -53,12 +52,15 @@ A Dash (Plotly) web application providing:
 - Results download and interactive visualization (plots, maps)
 - Admin panel for triggering GEE covariate exports
 
-### 4. Database (`database/`)
+### 4. Database
 
-PostgreSQL database tracking:
+PostgreSQL + PostGIS, managed by Alembic migrations (in `webapp/migrations/`).
+Schema is created automatically on first startup via `alembic upgrade head`.
+
+Tracks:
 
 - Users and roles
-- GEE covariate export tasks
+- Covariate export and merge status
 - AWS Batch analysis tasks
 - Task results and metadata
 
