@@ -20,7 +20,8 @@ ECR_REPO_NAME = "avoided-emissions-r-analysis"
 
 
 def get_batch_client():
-    return boto3.client("batch")
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    return boto3.client("batch", region_name=region)
 
 
 def get_ecr_image_uri():

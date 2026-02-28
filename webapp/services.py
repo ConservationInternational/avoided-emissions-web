@@ -38,7 +38,8 @@ def _get_batch_module():
     if _batch_module is None:
         import importlib
         import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "r-analysis"))
+        # r-analysis is mounted at /app/r-analysis inside the container
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "r-analysis"))
         _batch_module = importlib.import_module("batch_jobs")
     return _batch_module
 

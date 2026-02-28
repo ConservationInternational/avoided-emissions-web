@@ -382,7 +382,7 @@ def poll_batch_tasks() -> dict:
 
         # Lazy-import the batch_jobs helper
         r_analysis_dir = os.path.join(
-            os.path.dirname(__file__), "..", "r-analysis"
+            os.path.dirname(__file__), "r-analysis"
         )
         if r_analysis_dir not in sys.path:
             sys.path.insert(0, r_analysis_dir)
