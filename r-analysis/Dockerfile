@@ -50,16 +50,18 @@ RUN install2.r --error --skipinstalled --ncpus -1 \
 WORKDIR /app
 COPY scripts/ /app/scripts/
 COPY entrypoint.sh /app/entrypoint.sh
-COPY api_wrapper.py /app/api_wrapper.py
+COPY main.py /app/main.py
+COPY requirements.txt /app/requirements.txt
 RUN chmod +x /app/entrypoint.sh
 
-# Install Python and the API wrapper dependencies so the container can
-# communicate execution status back to the trends.earth API.
+# Install Python and script dependencies (boto3 for S3, te_schemas for
+# result serialisation). Lifecycle management (status, params, results)
+# is handled by gefcore in the Environment image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv \
     && python3 -m venv /app/.venv \
     && /app/.venv/bin/pip install --no-cache-dir \
-        requests boto3 \
+        -r /app/requirements.txt \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/app/.venv/bin:$PATH"

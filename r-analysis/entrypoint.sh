@@ -56,14 +56,6 @@ run_step() {
 COMMAND="${1:-help}"
 shift || true
 
-# When launched by the trends.earth API (EXECUTION_ID is set and the first
-# argument is "api-run"), use the Python wrapper which handles param
-# retrieval, status updates, and result posting.
-if [ "$COMMAND" = "api-run" ] || [ -n "${EXECUTION_ID:-}" -a "$COMMAND" = "analyze" ]; then
-    echo "Running via API wrapper (execution $EXECUTION_ID)..."
-    exec python3 /app/api_wrapper.py
-fi
-
 case "$COMMAND" in
     analyze)
         # Full pipeline: extract + match + summarize
@@ -86,6 +78,10 @@ case "$COMMAND" in
         ;;
     help|--help|-h)
         echo "Avoided Emissions Analysis Container"
+        echo ""
+        echo "When launched by the trends.earth API, this container's main.py"
+        echo "is placed at gefcore/script/main.py inside the Environment image."
+        echo "The entrypoint below is for standalone / debugging use only."
         echo ""
         echo "Commands:"
         echo "  analyze    Run the full pipeline (extract + match + summarize)"
