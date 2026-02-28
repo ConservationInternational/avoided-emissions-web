@@ -145,6 +145,48 @@ def start_export_task(covariate_name, bucket, prefix, region=None,
     return task
 
 
+def export_admin_region_key(bucket, prefix):
+    """Fetch the admin region ID key from GEE and upload as CSV to GCS.
+
+    Writes a CSV file mapping each sequential region_id used in the
+    exported raster back to the original geoBoundaries feature attributes
+    (shapeGroup, shapeName, shapeISO, shapeID, shapeType).
+
+    The CSV is written to ``gs://<bucket>/<prefix>/region_key.csv``.
+
+    Args:
+        bucket: GCS bucket name.
+        prefix: GCS path prefix (no trailing slash).
+
+    Returns:
+        The GCS blob path of the uploaded CSV.
+    """
+    import csv
+    import io
+
+    from google.cloud import storage as gcs
+
+    from derived_layers import fetch_admin_region_key
+
+    rows = fetch_admin_region_key()
+    if not rows:
+        raise RuntimeError("No features returned from geoBoundaries ADM1")
+
+    # Write CSV to an in-memory buffer
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    writer.writerows(rows)
+    csv_bytes = buf.getvalue().encode("utf-8")
+
+    blob_path = f"{prefix}/region_key.csv".strip("/")
+    client = gcs.Client()
+    blob = client.bucket(bucket).blob(blob_path)
+    blob.upload_from_string(csv_bytes, content_type="text/csv")
+
+    return f"gs://{bucket}/{blob_path}"
+
+
 def check_task_status(task):
     """Return the current status dict for a GEE task.
 

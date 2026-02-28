@@ -230,9 +230,9 @@ COVARIATES = {
 
     # Administrative boundaries
     "region": {
-        "asset": "FAO/GAUL/2015/level1",
-        "select": ["ADM1_CODE"],
-        "description": "GADM level-1 administrative region ID",
+        "asset": "WM/geoLab/geoBoundaries/600/ADM1",
+        "derived": "admin_region",
+        "description": "geoBoundaries ADM1 administrative region ID",
         "category": "administrative",
         "resample": "mode",
     },

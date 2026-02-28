@@ -15,7 +15,7 @@ import click
 import ee
 
 from config import COVARIATES, DEFAULT_GCS_PREFIX
-from tasks import check_task_status, start_export_task
+from tasks import check_task_status, export_admin_region_key, start_export_task
 
 
 @click.command()
@@ -121,6 +121,15 @@ def main(bucket, prefix, covariates, list_covariates, check_status,
         tasks.append((name, task))
 
     click.echo(f"\n{len(tasks)} task(s) submitted to GEE.")
+
+    # If the 'region' covariate was exported, also upload its CSV key
+    if "region" in names:
+        click.echo("\nUploading region ID key CSV...")
+        try:
+            csv_path = export_admin_region_key(bucket, prefix)
+            click.echo(f"  Region key saved to {csv_path}")
+        except Exception as exc:
+            click.echo(f"  WARNING: failed to upload region key: {exc}", err=True)
 
     if wait_for_completion:
         _wait_for_tasks(tasks)

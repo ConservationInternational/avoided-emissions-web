@@ -173,6 +173,78 @@ def build_cropland_fraction():
     return cropland.rename("crop_suitability").toFloat()
 
 
+# geoBoundaries ADM1 properties to include in the CSV key
+_GEOBOUNDARIES_KEY_PROPERTIES = [
+    "shapeGroup",
+    "shapeName",
+    "shapeISO",
+    "shapeID",
+    "shapeType",
+]
+
+
+def _build_indexed_admin_fc():
+    """Load the geoBoundaries ADM1 FeatureCollection with sequential IDs.
+
+    Returns the FeatureCollection with an added 'region_id' property
+    (1-based integer) on each feature.
+    """
+    fc = ee.FeatureCollection("WM/geoLab/geoBoundaries/600/ADM1")
+    n = fc.size()
+    indexed_fc = ee.FeatureCollection(
+        fc.toList(n)
+        .zip(ee.List.sequence(1, n))
+        .map(
+            lambda pair: ee.Feature(ee.List(pair).get(0)).set(
+                "region_id", ee.List(pair).get(1)
+            )
+        )
+    )
+    return indexed_fc
+
+
+def build_admin_region():
+    """Build an administrative region ID raster from geoBoundaries ADM1.
+
+    Loads the WM/geoLab/geoBoundaries/600/ADM1 FeatureCollection, assigns
+    each feature a unique sequential integer ID, and rasterizes the result.
+    Used for exact matching (stratification) in the avoided-emissions analysis.
+    """
+    indexed_fc = _build_indexed_admin_fc()
+
+    region_image = (
+        indexed_fc.reduceToImage(["region_id"], ee.Reducer.first())
+        .unmask(0)
+        .rename("region")
+    )
+    return region_image.toInt()
+
+
+def fetch_admin_region_key():
+    """Fetch the mapping between sequential region_id and geoBoundaries properties.
+
+    Queries GEE for the indexed geoBoundaries ADM1 FeatureCollection and
+    returns a list of dicts with region_id and the original feature attributes.
+
+    Returns:
+        list[dict]: Each dict has 'region_id' plus the geoBoundaries
+        attribute columns (shapeGroup, shapeName, shapeISO, shapeID,
+        shapeType).
+    """
+    indexed_fc = _build_indexed_admin_fc()
+
+    # Select only the columns we need (drops geometry for faster transfer)
+    keep_cols = ["region_id"] + _GEOBOUNDARIES_KEY_PROPERTIES
+    key_fc = indexed_fc.select(keep_cols)
+
+    features = key_fc.getInfo()["features"]
+    rows = []
+    for f in features:
+        props = f["properties"]
+        rows.append({col: props.get(col) for col in keep_cols})
+    return rows
+
+
 def get_derived_image(covariate_name, covariate_config):
     """Dispatch to the appropriate builder for a derived covariate.
 
@@ -201,6 +273,8 @@ def get_derived_image(covariate_name, covariate_config):
         return build_friction_surface()
     elif derived_type == "cropland_fraction":
         return build_cropland_fraction()
+    elif derived_type == "admin_region":
+        return build_admin_region()
     else:
         raise ValueError(
             f"Unknown derived type '{derived_type}' for {covariate_name}"
