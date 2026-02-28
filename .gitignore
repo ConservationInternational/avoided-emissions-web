@@ -64,3 +64,4 @@ coverage.xml
 node_modules/
 webapp/celerybeat-schedule-shm
 webapp/celerybeat-schedule-wal
+webapp/celerybeat-schedule
