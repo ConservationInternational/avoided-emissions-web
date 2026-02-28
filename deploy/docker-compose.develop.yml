@@ -22,6 +22,18 @@ services:
     networks:
       - backend
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - backend
+
   webapp:
     build:
       context: ../webapp
@@ -31,6 +43,8 @@ services:
     environment:
       DEBUG: "true"
       DATABASE_URL: postgresql://${POSTGRES_USER:-ae_user}:${POSTGRES_PASSWORD:-ae_password}@postgres:5432/${POSTGRES_DB:-avoided_emissions}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     ports:
       - "8050:8050"
     volumes:
@@ -40,7 +54,51 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     command: ["python", "app.py"]
+    networks:
+      - backend
+
+  worker:
+    build:
+      context: ../webapp
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ae_user}:${POSTGRES_PASSWORD:-ae_password}@postgres:5432/${POSTGRES_DB:-avoided_emissions}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - ../webapp:/app
+      - ../gee-export:/app/gee-export
+      - ../r-analysis:/app/r-analysis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    networks:
+      - backend
+
+  beat:
+    build:
+      context: ../webapp
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ae_user}:${POSTGRES_PASSWORD:-ae_password}@postgres:5432/${POSTGRES_DB:-avoided_emissions}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - ../webapp:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
     networks:
       - backend
 

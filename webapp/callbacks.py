@@ -37,8 +37,6 @@ from services import (
     get_task_list,
     get_user_list,
     parse_sites_file,
-    poll_gee_export_status,
-    refresh_task_status,
     start_cog_merge,
     start_gee_export,
     submit_analysis_task,
@@ -326,7 +324,8 @@ def register_callbacks(app):
         if not user or not _check_task_access(task_id, user):
             return ("Task Not Found", None, None, None, None, None)
 
-        refresh_task_status(task_id)
+        # Batch task status is polled by the Celery Beat worker;
+        # this callback just reads the current DB state.
         detail = get_task_detail(task_id)
         if not detail:
             return ("Task Not Found", None, None, None, None, None)
@@ -501,12 +500,8 @@ def register_callbacks(app):
          Input("cog-merge-result", "children")],
     )
     def refresh_covariate_inventory(n, _export_result, _merge_result):
-        # Poll GEE for actual task status before building inventory
-        try:
-            poll_gee_export_status()
-        except Exception:
-            pass  # Don't break the UI if polling fails
-
+        # GEE export status is polled by the Celery Beat worker;
+        # this callback just reads the current DB/S3/GCS state.
         try:
             rows = get_covariate_inventory()
         except Exception:

@@ -292,67 +292,6 @@ def get_task_detail(task_id):
         db.close()
 
 
-def refresh_task_status(task_id):
-    """Poll AWS Batch for updated job status and update the database.
-
-    Maps Batch job states to task_status enum values.
-    """
-    db = get_db()
-    try:
-        task = db.query(AnalysisTask).filter(
-            AnalysisTask.id == task_id
-        ).first()
-        if not task or task.status in ("succeeded", "failed", "cancelled"):
-            return task
-
-        batch = _get_batch_module()
-        now = datetime.now(timezone.utc)
-
-        # Check the summarize job first (last step)
-        if task.summarize_job_id:
-            status = batch.get_job_status(task.summarize_job_id)
-            if status["status"] == "SUCCEEDED":
-                task.status = "succeeded"
-                task.completed_at = now
-                db.commit()
-                return task
-            elif status["status"] == "FAILED":
-                task.status = "failed"
-                task.error_message = status.get("reason", "Summarize job failed")
-                task.completed_at = now
-                db.commit()
-                return task
-
-        # Check matching job
-        if task.match_job_id:
-            status = batch.get_job_status(task.match_job_id)
-            if status["status"] == "RUNNING":
-                task.status = "running"
-                if not task.started_at:
-                    task.started_at = now
-            elif status["status"] == "FAILED":
-                task.status = "failed"
-                task.error_message = status.get("reason", "Match job failed")
-                task.completed_at = now
-
-        # Check extract job
-        if task.extract_job_id:
-            status = batch.get_job_status(task.extract_job_id)
-            if status["status"] == "RUNNING" and task.status == "submitted":
-                task.status = "running"
-                if not task.started_at:
-                    task.started_at = now
-            elif status["status"] == "FAILED":
-                task.status = "failed"
-                task.error_message = status.get("reason", "Extract job failed")
-                task.completed_at = now
-
-        db.commit()
-        return task
-    finally:
-        db.close()
-
-
 def start_gee_export(covariate_names, user_id):
     """Start GEE export tasks for the specified covariates.
 
@@ -441,100 +380,6 @@ def start_gee_export(covariate_names, user_id):
 
         db.commit()
         return export_ids
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-
-
-def poll_gee_export_status():
-    """Poll GEE for actual task status and update database records.
-
-    Checks all exports with status 'pending' or 'running' against the
-    GEE Operations API and updates their status, completion time, and
-    error messages accordingly.
-    """
-    import base64
-    import ee
-
-    db = get_db()
-    try:
-        active = (
-            db.query(Covariate)
-            .filter(Covariate.status.in_(["pending_export", "exporting"]))
-            .all()
-        )
-        if not active:
-            return
-
-        # Initialize EE
-        project = Config.GEE_PROJECT_ID or None
-        opt_url = Config.GEE_ENDPOINT or None
-        ee_sa_json = os.environ.get("EE_SERVICE_ACCOUNT_JSON", "")
-        if ee_sa_json:
-            try:
-                key_data = base64.b64decode(ee_sa_json).decode("utf-8")
-            except Exception:
-                key_data = ee_sa_json
-            sa_info = json.loads(key_data)
-            credentials = ee.ServiceAccountCredentials(
-                sa_info["client_email"], key_data=json.dumps(sa_info)
-            )
-            ee.Initialize(credentials=credentials, project=project, opt_url=opt_url)
-        else:
-            ee.Initialize(project=project, opt_url=opt_url)
-
-        # Map GEE operation states to our covariate_status enum
-        state_map = {
-            "PENDING": "pending_export",
-            "RUNNING": "exporting",
-            "SUCCEEDED": "exported",
-            "FAILED": "failed",
-            "CANCELLED": "cancelled",
-            "CANCELLING": "exporting",
-        }
-
-        for export in active:
-            if not export.gee_task_id:
-                continue
-            try:
-                op_name = f"projects/{project}/operations/{export.gee_task_id}"
-                op = ee.data.getOperation(op_name)
-                metadata = op.get("metadata", {})
-                gee_state = metadata.get("state", op.get("done") and "SUCCEEDED")
-                new_status = state_map.get(gee_state, export.status)
-
-                if new_status != export.status:
-                    export.status = new_status
-                    if new_status in ("exported", "failed", "cancelled"):
-                        export.completed_at = datetime.now(timezone.utc)
-                    # Cache tile URLs when export completes successfully
-                    if new_status == "exported":
-                        tile_urls = list_export_tiles(
-                            export.gcs_bucket,
-                            export.gcs_prefix,
-                            export.covariate_name,
-                        )
-                        meta = dict(export.extra_metadata or {})
-                        meta["tile_urls"] = tile_urls
-                        export.extra_metadata = meta
-
-                # Capture error details if present
-                error = op.get("error")
-                if error:
-                    export.error_message = error.get("message", str(error))
-                    if export.status == "exporting":
-                        export.status = "failed"
-                        export.completed_at = datetime.now(timezone.utc)
-
-            except Exception as exc:
-                logger.warning(
-                    "Failed to poll GEE status for task %s: %s",
-                    export.gee_task_id, exc,
-                )
-
-        db.commit()
     except Exception:
         db.rollback()
         raise
@@ -878,12 +723,12 @@ def discover_existing_cogs():
 
 
 def start_cog_merge(covariate_names, user_id):
-    """Create COG merge records and kick off background merges.
+    """Create COG merge records and dispatch Celery tasks.
 
     For each covariate, either updates an existing ``Covariate`` row
     that has status *exported* to *pending_merge*, or creates a new row.
-    Then a background thread is spawned to perform the actual download /
-    merge / upload pipeline.
+    Then a Celery task is dispatched for each to perform the download /
+    merge / upload pipeline in the background worker.
 
     Parameters
     ----------
@@ -897,7 +742,7 @@ def start_cog_merge(covariate_names, user_id):
     list[str]
         UUIDs (as strings) of the ``Covariate`` records queued for merge.
     """
-    import threading
+    from tasks import run_cog_merge
 
     db = get_db()
     ids = []
@@ -952,64 +797,8 @@ def start_cog_merge(covariate_names, user_id):
     finally:
         db.close()
 
-    # Launch background threads — one per covariate
+    # Dispatch Celery tasks — one per covariate
     for layer_id in ids:
-        t = threading.Thread(
-            target=_run_cog_merge,
-            args=(layer_id,),
-            daemon=True,
-        )
-        t.start()
+        run_cog_merge.delay(layer_id)
 
     return ids
-
-
-def _run_cog_merge(layer_id):
-    """Background worker that runs the merge pipeline for a single layer.
-
-    Updates the ``Covariate`` record in the database with status
-    transitions (pending_merge → merging → merged / failed).
-    """
-    from cog_merge import merge_covariate_tiles
-
-    db = get_db()
-    try:
-        layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
-        if not layer:
-            logger.error("Covariate %s not found", layer_id)
-            return
-
-        # Transition to 'merging'
-        layer.status = "merging"
-        db.commit()
-
-        result = merge_covariate_tiles(
-            covariate_name=layer.covariate_name,
-            source_bucket=layer.gcs_bucket or Config.GCS_BUCKET,
-            source_prefix=layer.gcs_prefix or Config.GCS_PREFIX,
-            output_bucket=layer.output_bucket,
-            output_prefix=layer.output_prefix or f"{Config.S3_PREFIX}/cog",
-            aws_region=Config.AWS_REGION,
-        )
-
-        layer.status = "merged"
-        layer.merged_url = result["url"]
-        layer.size_bytes = result["size_bytes"]
-        layer.n_tiles = result["n_tiles"]
-        layer.completed_at = datetime.now(timezone.utc)
-        db.commit()
-        logger.info("COG merge completed for '%s'", layer.covariate_name)
-
-    except Exception as exc:
-        logger.exception("COG merge failed for layer %s", layer_id)
-        try:
-            layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
-            if layer:
-                layer.status = "failed"
-                layer.error_message = str(exc)[:2000]
-                layer.completed_at = datetime.now(timezone.utc)
-                db.commit()
-        except Exception:
-            db.rollback()
-    finally:
-        db.close()

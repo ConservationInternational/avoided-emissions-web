@@ -1,14 +1,22 @@
 #!/bin/sh
-# Run Alembic migrations, then exec the container CMD.
-# If DATABASE_URL is not set, skip migrations (allows running the
-# container for one-off commands that don't need a database).
+# Run Alembic migrations (webapp only), then exec the container CMD.
+# Workers and beat schedulers skip migrations since only one process
+# should run them.
 
 set -e
 
-if [ -n "$DATABASE_URL" ]; then
-    echo "Running database migrations..."
-    alembic upgrade head
-    echo "Migrations complete."
-fi
+# Only run migrations for the webapp process, not for celery workers/beat
+case "$1" in
+    celery)
+        # Skip migrations for Celery processes
+        ;;
+    *)
+        if [ -n "$DATABASE_URL" ]; then
+            echo "Running database migrations..."
+            alembic upgrade head
+            echo "Migrations complete."
+        fi
+        ;;
+esac
 
 exec "$@"

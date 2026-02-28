@@ -32,3 +32,5 @@ class Config:
     R_ANALYSIS_IMAGE_TAG = os.environ.get("R_ANALYSIS_IMAGE_TAG", "latest")
     ROLLBAR_ACCESS_TOKEN = os.environ.get("ROLLBAR_ACCESS_TOKEN", "")
     ROLLBAR_ENVIRONMENT = os.environ.get("ROLLBAR_ENVIRONMENT", os.environ.get("ENVIRONMENT", "development"))
+    CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
+    CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/0")
