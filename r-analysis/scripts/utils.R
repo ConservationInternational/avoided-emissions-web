@@ -20,11 +20,11 @@ library(httr)
 .rollbar_env$environment <- "development"
 .rollbar_env$enabled <- FALSE
 
-rollbar_init <- function(token = Sys.getenv("ROLLBAR_ACCESS_TOKEN", ""),
+rollbar_init <- function(token = Sys.getenv("ROLLBAR_SCRIPT_TOKEN", ""),
                          environment = Sys.getenv("ROLLBAR_ENVIRONMENT",
                                                   Sys.getenv("ENVIRONMENT", "development"))) {
     # Initialize Rollbar error tracking. Call once at the start of each script.
-    # If ROLLBAR_ACCESS_TOKEN is not set, Rollbar calls are silently skipped.
+    # If ROLLBAR_SCRIPT_TOKEN is not set, Rollbar calls are silently skipped.
     .rollbar_env$token <- token
     .rollbar_env$environment <- environment
     .rollbar_env$enabled <- nchar(token) > 0
@@ -32,7 +32,7 @@ rollbar_init <- function(token = Sys.getenv("ROLLBAR_ACCESS_TOKEN", ""),
     if (.rollbar_env$enabled) {
         message("Rollbar initialized (environment=", environment, ")")
     } else {
-        message("ROLLBAR_ACCESS_TOKEN not set \u2014 error tracking disabled")
+        message("ROLLBAR_SCRIPT_TOKEN not set \u2014 error tracking disabled")
     }
 }
 

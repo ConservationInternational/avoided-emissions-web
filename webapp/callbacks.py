@@ -562,7 +562,7 @@ def register_callbacks(app):
 
         try:
             if action == "reexport":
-                result = force_reexport(covariate_name, user.id)
+                force_reexport(covariate_name, user.id)
                 return dbc.Alert(
                     f"Re-export started for '{covariate_name}'. "
                     "Existing GCS tiles and S3 COG have been deleted.",
@@ -570,7 +570,7 @@ def register_callbacks(app):
                     duration=6000,
                 )
             elif action == "remerge":
-                result = force_remerge(covariate_name, user.id)
+                force_remerge(covariate_name, user.id)
                 return dbc.Alert(
                     f"Re-merge queued for '{covariate_name}'. "
                     "Existing S3 COG has been deleted.",

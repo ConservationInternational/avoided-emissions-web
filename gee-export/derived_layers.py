@@ -9,7 +9,6 @@ protected area masks).
 import ee
 
 
-
 def build_slope():
     """Compute slope in degrees from the SRTM DEM."""
     dem = ee.Image("USGS/SRTMGL1_003").select("elevation")

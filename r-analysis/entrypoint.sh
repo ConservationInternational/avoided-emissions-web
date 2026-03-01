@@ -4,7 +4,11 @@ set -euo pipefail
 # Entrypoint for the R analysis container. Dispatches to the appropriate
 # analysis step based on the first argument.
 #
-# Usage:
+# When EXECUTION_ID is set (Batch mode), batch_runner.py handles S3
+# param retrieval and result upload.  The API's monitor_batch_executions
+# periodic task manages status transitions.
+#
+# Usage (standalone / debugging):
 #   docker run r-analysis analyze --config /data/config.json
 #   docker run r-analysis extract --config /data/config.json
 #   docker run r-analysis match --config /data/config.json --site-id SITE_001
@@ -16,7 +20,7 @@ set -euo pipefail
 # sends a minimal error report via curl as a last resort.
 rollbar_report() {
     local message="$1"
-    local token="${ROLLBAR_ACCESS_TOKEN:-}"
+    local token="${ROLLBAR_SCRIPT_TOKEN:-}"
     local env="${ROLLBAR_ENVIRONMENT:-${ENVIRONMENT:-development}}"
 
     if [ -z "$token" ]; then
@@ -53,6 +57,17 @@ run_step() {
     }
 }
 
+# -- Batch mode: API-managed lifecycle ----------------------------------------
+# When dispatched by the trends.earth API to AWS Batch, EXECUTION_ID is set.
+# batch_runner.py handles S3 param retrieval and result upload.  The API's
+# monitor_batch_executions periodic task manages status transitions —
+# no API credentials or status callbacks are needed in this container.
+if [ -n "${EXECUTION_ID:-}" ]; then
+    echo "Batch mode: EXECUTION_ID=${EXECUTION_ID}"
+    exec python /app/batch_runner.py "$@"
+fi
+
+# -- Standalone / debug mode --------------------------------------------------
 COMMAND="${1:-help}"
 shift || true
 

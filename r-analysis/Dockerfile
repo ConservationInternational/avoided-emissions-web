@@ -51,6 +51,7 @@ WORKDIR /app
 COPY scripts/ /app/scripts/
 COPY entrypoint.sh /app/entrypoint.sh
 COPY src/main.py /app/main.py
+COPY src/batch_runner.py /app/batch_runner.py
 COPY requirements.txt /app/requirements.txt
 RUN chmod +x /app/entrypoint.sh
 

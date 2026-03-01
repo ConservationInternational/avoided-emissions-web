@@ -210,7 +210,7 @@ class TrendsEarthClient:
         """
         resp = requests.post(
             f"{self.api_url}/api/v1/script/{script_id}/run",
-            json={"params": params},
+            json=params,
             headers=self._headers(),
             timeout=_TIMEOUT,
         )
