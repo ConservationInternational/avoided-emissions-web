@@ -1,4 +1,5 @@
 name: Publish R-Analysis Script
+run-name: "Publish ${{ github.ref_name }} to ${{ github.event_name == 'workflow_dispatch' && inputs.api_environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}"
 
 on:
   push:
@@ -75,17 +76,22 @@ jobs:
             -d "{\"grant_type\":\"client_credentials\",\"client_id\":\"${CLIENT_ID}\",\"client_secret\":\"${CLIENT_SECRET}\"}")
 
           TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+          EXPIRES_IN=$(echo "$RESPONSE" | jq -r '.expires_in')
           if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
             echo "::error::Failed to obtain access token"
             exit 1
           fi
 
-          # Write JWT into CLI config (same key the CLI uses after login)
+          # Write JWT and expiration into CLI config so the CLI
+          # recognises the token as valid and skips refresh.
           python3 -c "
           import yaml
+          from datetime import datetime, timedelta
           with open('$HOME/.tecli.yml', 'r') as f:
               cfg = yaml.safe_load(f) or {}
           cfg['JWT'] = '${TOKEN}'
+          expires_in = int('${EXPIRES_IN}') if '${EXPIRES_IN}' not in ('', 'null') else 1800
+          cfg['token_expires_at'] = (datetime.now() + timedelta(seconds=expires_in)).isoformat()
           with open('$HOME/.tecli.yml', 'w') as f:
               yaml.dump(cfg, f, default_flow_style=False)
           "
