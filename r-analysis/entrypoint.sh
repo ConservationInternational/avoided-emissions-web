@@ -73,15 +73,15 @@ shift || true
 
 case "$COMMAND" in
     analyze)
-        # Full pipeline: extract + match + summarize
+        # Full pipeline: extract (Python) + match + summarize
         echo "Running full analysis pipeline..."
-        run_step Rscript /app/scripts/01_extract_covariates.R "$@"
+        run_step python /app/scripts/01_extract_covariates.py "$@"
         run_step Rscript /app/scripts/02_perform_matching.R "$@"
         run_step Rscript /app/scripts/03_summarize_results.R "$@"
         ;;
     extract)
-        echo "Extracting covariates..."
-        run_step Rscript /app/scripts/01_extract_covariates.R "$@"
+        echo "Extracting covariates (Python)..."
+        run_step python /app/scripts/01_extract_covariates.py "$@"
         ;;
     match)
         echo "Running matching for individual site..."

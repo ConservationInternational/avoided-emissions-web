@@ -3,7 +3,7 @@ FROM rocker/r-ver:4.5.2
 LABEL maintainer="Conservation International"
 LABEL description="Avoided emissions propensity score matching analysis"
 
-# System dependencies for spatial R packages
+# System dependencies for spatial R packages and Python geospatial libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdal-dev \
     libgeos-dev \
@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gdal-bin \
     awscli \
     jq \
+    python3 \
+    python3-pip \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # Install R packages
@@ -55,12 +58,9 @@ COPY src/batch_runner.py /app/batch_runner.py
 COPY requirements.txt /app/requirements.txt
 RUN chmod +x /app/entrypoint.sh
 
-# Install Python and script dependencies (boto3 for S3, te_schemas for
-# result serialisation). Lifecycle management (status, params, results)
-# is handled by gefcore in the Environment image.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
-    && python3 -m venv /app/.venv \
+# Install Python dependencies. Step 1 (extract) now runs in Python for
+# speed using GDAL, rioxarray, and xarray to read COGs.
+RUN python3 -m venv /app/.venv \
     && /app/.venv/bin/pip install --no-cache-dir \
         -r /app/requirements.txt \
     && rm -rf /var/lib/apt/lists/*

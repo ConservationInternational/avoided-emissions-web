@@ -36,7 +36,7 @@ R_SCRIPTS_DIR = os.environ.get("R_SCRIPTS_DIR", "/app/scripts")
 R_STEP_TIMEOUT = int(os.environ.get("R_STEP_TIMEOUT", "14400"))
 
 STEP_SCRIPTS = {
-    "extract": "01_extract_covariates.R",
+    "extract": "01_extract_covariates.py",
     "match": "02_perform_matching.R",
     "summarize": "03_summarize_results.R",
 }
@@ -142,8 +142,11 @@ def _expand_steps(step):
 
 
 def _run_r_script(script_path, config_path, site_id, log):
-    """Execute a single R script as a subprocess."""
-    cmd = ["Rscript", script_path, "--config", config_path]
+    """Execute a single R or Python script as a subprocess."""
+    if script_path.endswith(".py"):
+        cmd = ["python", script_path, "--config", config_path]
+    else:
+        cmd = ["Rscript", script_path, "--config", config_path]
     if site_id:
         cmd += ["--site-id", site_id]
 

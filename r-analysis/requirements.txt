@@ -1,2 +1,16 @@
 boto3
+rollbar
 te_schemas @ git+https://github.com/ConservationInternational/trends.earth-schemas.git
+
+# Geospatial extraction (step 1 - Python)
+GDAL
+numpy
+pandas
+geopandas
+xarray
+rioxarray
+rasterio
+dask
+pyarrow
+pyproj
+shapely

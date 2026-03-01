@@ -22,6 +22,8 @@ library(tidyverse)
 library(foreach)
 library(optmatch)
 library(lubridate)
+library(arrow)
+library(jsonlite)
 
 source("/app/scripts/utils.R")
 rollbar_init()
@@ -37,12 +39,19 @@ MAX_TREATMENT <- config$max_treatment_pixels
 CONTROL_MULTIPLIER <- config$control_multiplier
 MIN_GLM <- config$min_glm_treatment_pixels
 
-# Load data
-sites <- readRDS(file.path(config$output_dir, "sites_processed.rds")) %>%
+# Load data — step 1 now outputs Parquet (from the Python rewrite)
+sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %>%
     as_tibble()
-treatment_key <- readRDS(file.path(config$output_dir, "treatment_cell_key.rds"))
-base_data <- readRDS(file.path(config$output_dir, "treatments_and_controls.rds"))
-f <- readRDS(file.path(config$output_dir, "formula.rds"))
+# Reconstruct sf geometry from the WKB column written by GeoPandas
+if ("geometry" %in% names(sites)) {
+    sites <- st_as_sf(sites, wkt = "geometry", crs = 4326)
+}
+treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
+base_data <- read_parquet(file.path(config$output_dir, "treatments_and_controls.parquet"))
+
+# Load formula from JSON
+formula_json <- fromJSON(file.path(config$output_dir, "formula.json"))
+f <- as.formula(formula_json$formula_str)
 
 # Determine which site(s) to process
 if (!is.null(config$site_id)) {

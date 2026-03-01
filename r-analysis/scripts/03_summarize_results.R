@@ -20,6 +20,7 @@
 library(tidyverse)
 library(foreach)
 library(jsonlite)
+library(arrow)
 
 source("/app/scripts/utils.R")
 rollbar_init()
@@ -29,8 +30,8 @@ with_rollbar({
 config <- parse_config()
 message("Step 3: Summarizing results")
 
-# Load site metadata
-sites <- readRDS(file.path(config$output_dir, "sites_processed.rds")) %>%
+# Load site metadata (Parquet from Python step 1)
+sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %>%
     as_tibble()
 
 # Load all match files
