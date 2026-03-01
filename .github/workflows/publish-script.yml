@@ -9,6 +9,7 @@ on:
       - 'r-analysis/configuration.json'
       - 'r-analysis/requirements.txt'
       - 'r-analysis/src/**'
+      - '.github/workflows/publish-script.yml'
   workflow_dispatch:
     inputs:
       api_environment:
