@@ -1,0 +1,83 @@
+name: Publish R-Analysis Script
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'r-analysis/configuration.json'
+      - 'r-analysis/requirements.txt'
+      - 'r-analysis/src/**'
+  workflow_dispatch:
+    inputs:
+      api_environment:
+        description: 'Target API environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  STAGING_API_URL: https://api-staging.trends.earth
+  PRODUCTION_API_URL: https://api.trends.earth
+
+jobs:
+  publish-script:
+    name: Publish to trends.earth API
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install trends.earth CLI
+        run: pip install git+https://github.com/ConservationInternational/trends.earth-CLI.git
+
+      - name: Determine API URL
+        id: api-url
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ inputs.api_environment }}"
+          else
+            ENV="staging"
+          fi
+
+          if [ "$ENV" = "production" ]; then
+            echo "url=${{ env.PRODUCTION_API_URL }}" >> "$GITHUB_OUTPUT"
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=${{ env.STAGING_API_URL }}" >> "$GITHUB_OUTPUT"
+            echo "environment=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure CLI
+        env:
+          API_URL: ${{ steps.api-url.outputs.url }}
+          API_EMAIL: ${{ secrets.TRENDS_EARTH_API_EMAIL }}
+          API_PASSWORD: ${{ secrets.TRENDS_EARTH_API_PASSWORD }}
+        run: |
+          printf 'url_api: "%s"\nemail: "%s"\npassword: "%s"\n' \
+            "$API_URL" "$API_EMAIL" "$API_PASSWORD" > ~/.tecli.yml
+
+      - name: Login to trends.earth API
+        run: |
+          cd r-analysis
+          trends login
+
+      - name: Publish script
+        run: |
+          cd r-analysis
+          trends publish --overwrite
+
+      - name: Verify publication
+        run: |
+          cd r-analysis
+          trends info

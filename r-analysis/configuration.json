@@ -2,12 +2,8 @@
     "name": "avoided-emissions",
     "description": "Avoided deforestation and emissions analysis using propensity score matching. Runs a three-step R pipeline (extract covariates, match treatment/control pixels, summarize results) and returns per-site avoided emissions estimates.",
     "environment": "trends.earth-environment",
-    "environment_version": "0.1.6",
+    "environment_version": "2.2.4",
     "compute_type": "batch",
     "batch_job_definition": "avoided-emissions-r-analysis",
-    "batch_job_queue": "trends-earth-queue",
-    "cpu_reservation": 400000000,
-    "cpu_limit": 4000000000,
-    "memory_reservation": 4000000000,
-    "memory_limit": 16000000000
+    "batch_job_queue": "trends-earth-queue"
 }
