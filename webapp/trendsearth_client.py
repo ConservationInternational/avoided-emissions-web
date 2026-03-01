@@ -10,10 +10,16 @@ Usage
 
     from trendsearth_client import TrendsEarthClient
 
+    # Using OAuth2 client credentials (preferred)
     client = TrendsEarthClient(
         api_url="https://api.trends.earth/api/v1",
-        api_key="te_abc123...",
+        client_id="your-client-id",
+        client_secret="your-client-secret",
     )
+
+    # Or via environment variables (TRENDSEARTH_CLIENT_ID, TRENDSEARTH_CLIENT_SECRET)
+    client = TrendsEarthClient()
+
     execution = client.create_execution(script_id, params)
     status = client.get_execution(execution["id"])
 """
@@ -32,16 +38,17 @@ _TIMEOUT = 30
 class TrendsEarthClient:
     """Lightweight client for the trends.earth API."""
 
-    def __init__(self, api_url=None, api_key=None, email=None, password=None):
-        self.api_url = (
-            api_url
-            or os.environ.get("TRENDSEARTH_API_URL", "")
-        ).rstrip("/")
-        self._api_key = api_key or os.environ.get("TRENDSEARTH_API_KEY", "")
-        self._email = email or os.environ.get("TRENDSEARTH_API_EMAIL", "")
-        self._password = password or os.environ.get(
-            "TRENDSEARTH_API_PASSWORD", ""
+    def __init__(
+        self,
+        api_url=None,
+        client_id=None,
+        client_secret=None,
+    ):
+        self.api_url = (api_url or os.environ.get("TRENDSEARTH_API_URL", "")).rstrip(
+            "/"
         )
+        self._client_id = client_id or ""
+        self._client_secret = client_secret or ""
         self._token = None
 
     # ------------------------------------------------------------------
@@ -49,63 +56,32 @@ class TrendsEarthClient:
     # ------------------------------------------------------------------
 
     def _headers(self):
-        """Return auth headers, preferring API key."""
-        if self._api_key:
-            return {"X-API-Key": self._api_key}
+        """Return auth headers with a Bearer token."""
         if self._token:
             return {"Authorization": f"Bearer {self._token}"}
-        # Log in
-        self._login()
+        # Obtain a token via OAuth2 client credentials
+        self._authenticate()
         return {"Authorization": f"Bearer {self._token}"}
 
-    def _login(self):
-        resp = requests.post(
-            f"{self.api_url}/auth",
-            json={"email": self._email, "password": self._password},
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        self._token = resp.json().get("access_token")
-
-    # ------------------------------------------------------------------
-    # API key management
-    # ------------------------------------------------------------------
-
-    def create_api_key(self, name="avoided-emissions-web"):
-        """Create a new API key (requires JWT auth)."""
-        resp = requests.post(
-            f"{self.api_url}/api/v1/api-key",
-            json={"name": name},
-            headers=self._headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def list_api_keys(self):
-        resp = requests.get(
-            f"{self.api_url}/api/v1/api-key",
-            headers=self._headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def revoke_api_key(self, key_id):
-        resp = requests.delete(
-            f"{self.api_url}/api/v1/api-key/{key_id}",
-            headers=self._headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    def _authenticate(self):
+        """Authenticate using OAuth2 client credentials grant."""
+        if not self._client_id or not self._client_secret:
+            raise ValueError(
+                "Cannot authenticate: client_id and client_secret are "
+                "required. Set TRENDSEARTH_CLIENT_ID and "
+                "TRENDSEARTH_CLIENT_SECRET environment variables or pass "
+                "them to the constructor."
+            )
+        token_data = self.oauth2_token(self._client_id, self._client_secret)
+        self._token = token_data["access_token"]
 
     # ------------------------------------------------------------------
     # OAuth2 client management (Client Credentials grant)
     # ------------------------------------------------------------------
 
-    def create_oauth2_client(self, name="avoided-emissions-web",
-                             scopes="", expires_in_days=None):
+    def create_oauth2_client(
+        self, name="avoided-emissions-web", scopes="", expires_in_days=None
+    ):
         """Register a new OAuth2 service client on the API.
 
         Requires JWT authentication (email/password login).  The response

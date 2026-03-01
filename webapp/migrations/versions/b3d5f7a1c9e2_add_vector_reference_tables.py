@@ -41,7 +41,9 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_geoboundaries_adm0_shape_group", "geoboundaries_adm0", ["shape_group"])
+    op.create_index(
+        "ix_geoboundaries_adm0_shape_group", "geoboundaries_adm0", ["shape_group"]
+    )
 
     # -- GeoBoundaries ADM1 --
     op.create_table(
@@ -63,7 +65,9 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_geoboundaries_adm1_shape_group", "geoboundaries_adm1", ["shape_group"])
+    op.create_index(
+        "ix_geoboundaries_adm1_shape_group", "geoboundaries_adm1", ["shape_group"]
+    )
 
     # -- GeoBoundaries ADM2 --
     op.create_table(
@@ -85,7 +89,9 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_geoboundaries_adm2_shape_group", "geoboundaries_adm2", ["shape_group"])
+    op.create_index(
+        "ix_geoboundaries_adm2_shape_group", "geoboundaries_adm2", ["shape_group"]
+    )
 
     # -- RESOLVE Ecoregions --
     op.create_table(

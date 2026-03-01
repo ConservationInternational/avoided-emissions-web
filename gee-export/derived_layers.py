@@ -8,7 +8,6 @@ protected area masks).
 
 import ee
 
-from config import EXPORT_SCALE_METERS
 
 
 def build_slope():
@@ -89,9 +88,9 @@ def build_lc_class(lc_class):
     to the target class, then computes the area of the class within each
     ~1km pixel. Returns area in hectares.
     """
-    lc = ee.Image(
-        "COPERNICUS/Landcover/100m/Proba-V-C3/Global/2015"
-    ).select("discrete_classification")
+    lc = ee.Image("COPERNICUS/Landcover/100m/Proba-V-C3/Global/2015").select(
+        "discrete_classification"
+    )
 
     # Copernicus discrete classification values:
     #   0=Unknown, 20=Shrubs, 30=Herbaceous, 40=Cultivated,
@@ -138,11 +137,7 @@ def build_pa_binary():
     Returns 1 where any WDPA polygon exists, 0 otherwise.
     """
     wdpa = ee.FeatureCollection("WCMC/WDPA/current/polygons")
-    pa_image = (
-        wdpa.reduceToImage(["WDPAID"], ee.Reducer.first())
-        .gt(0)
-        .unmask(0)
-    )
+    pa_image = wdpa.reduceToImage(["WDPAID"], ee.Reducer.first()).gt(0).unmask(0)
     return pa_image.rename("pa").toInt()
 
 
@@ -167,9 +162,9 @@ def build_cropland_fraction():
     dataset, which gives the percentage of each pixel covered by cropland
     (0-100). This serves as a proxy for crop suitability.
     """
-    cropland = ee.Image(
-        "COPERNICUS/Landcover/100m/Proba-V-C3/Global/2015"
-    ).select("crops-coverfraction")
+    cropland = ee.Image("COPERNICUS/Landcover/100m/Proba-V-C3/Global/2015").select(
+        "crops-coverfraction"
+    )
     return cropland.rename("crop_suitability").toFloat()
 
 
@@ -191,9 +186,7 @@ def build_glad_cropland(year):
     """
     valid_years = (2003, 2007, 2011, 2015, 2019)
     if year not in valid_years:
-        raise ValueError(
-            f"GLAD cropland year must be one of {valid_years}, got {year}"
-        )
+        raise ValueError(f"GLAD cropland year must be one of {valid_years}, got {year}")
     asset_id = f"users/potapovpeter/Global_cropland_{year}"
     cropland = ee.Image(asset_id)
     return cropland.rename(f"cropland_{year}").toFloat()
@@ -241,9 +234,7 @@ def build_aez():
     """
     aez_fc = ee.FeatureCollection("ESA/WorldCereal/AEZ/v100")
     aez_image = (
-        aez_fc.reduceToImage(["aez_id"], ee.Reducer.first())
-        .unmask(0)
-        .rename("aez")
+        aez_fc.reduceToImage(["aez_id"], ee.Reducer.first()).unmask(0).rename("aez")
     )
     return aez_image.toInt()
 
@@ -325,6 +316,4 @@ def get_derived_image(covariate_name, covariate_config):
     elif derived_type == "admin_region":
         return build_admin_region()
     else:
-        raise ValueError(
-            f"Unknown derived type '{derived_type}' for {covariate_name}"
-        )
+        raise ValueError(f"Unknown derived type '{derived_type}' for {covariate_name}")

@@ -92,7 +92,10 @@ def register_user(email: str, password: str, name: str):
         )
         db.add(user)
         db.commit()
-        return True, "Account created. An administrator must approve your account before you can log in."
+        return (
+            True,
+            "Account created. An administrator must approve your account before you can log in.",
+        )
     except Exception:
         db.rollback()
         return False, "Registration failed. Please try again."
@@ -109,16 +112,19 @@ def get_current_user():
 
 def require_login(func):
     """Decorator that returns a login redirect for unauthenticated users."""
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         if not flask_login.current_user.is_authenticated:
             return flask.redirect("/login")
         return func(*args, **kwargs)
+
     return wrapper
 
 
 def require_admin(func):
     """Decorator that restricts access to admin users."""
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         if not flask_login.current_user.is_authenticated:
@@ -126,4 +132,5 @@ def require_admin(func):
         if not flask_login.current_user.is_admin:
             return flask.redirect("/")
         return func(*args, **kwargs)
+
     return wrapper

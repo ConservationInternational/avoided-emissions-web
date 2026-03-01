@@ -10,7 +10,6 @@ from config import (
     COVARIATES,
     EXPORT_CRS,
     EXPORT_SCALE_METERS,
-    GLOBAL_REGION,
     MAX_PIXELS_PER_TASK,
 )
 from derived_layers import get_derived_image
@@ -27,9 +26,7 @@ def _load_simple_image(covariate_name, cfg):
 
     if cfg.get("filter_year"):
         # ImageCollection filtered to a specific year
-        col = ee.ImageCollection(asset).filter(
-            ee.Filter.eq("year", cfg["filter_year"])
-        )
+        col = ee.ImageCollection(asset).filter(ee.Filter.eq("year", cfg["filter_year"]))
         image = col.mosaic()
     else:
         # Try as Image first; if it's a FeatureCollection, handle separately
@@ -91,15 +88,14 @@ def _apply_resampling(image, covariate_name, scale, crs):
     }
     reducer = reducers.get(method, ee.Reducer.mean())
 
-    return (
-        image
-        .reduceResolution(reducer=reducer, maxPixels=65536)
-        .reproject(crs=crs, scale=scale)
+    return image.reduceResolution(reducer=reducer, maxPixels=65536).reproject(
+        crs=crs, scale=scale
     )
 
 
-def start_export_task(covariate_name, bucket, prefix, region=None,
-                      scale=None, description_prefix="ae_cov"):
+def start_export_task(
+    covariate_name, bucket, prefix, region=None, scale=None, description_prefix="ae_cov"
+):
     """Start a GEE batch export task for a single covariate.
 
     Exports the covariate as a Cloud-Optimized GeoTIFF to GCS.

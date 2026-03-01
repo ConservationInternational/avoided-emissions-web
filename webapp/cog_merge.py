@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # GCS helpers
 # ---------------------------------------------------------------------------
 
+
 def list_gcs_tiles(bucket: str, prefix: str, covariate_name: str) -> list[str]:
     """Return public GCS URLs for all ``.tif`` tiles of a covariate.
 
@@ -108,7 +109,7 @@ def list_all_gcs_tiles(
 
     # Extract filenames (strip the prefix)
     filenames = [
-        item["name"][len(norm_prefix):]
+        item["name"][len(norm_prefix) :]
         for item in all_items
         if item["name"].endswith(".tif")
     ]
@@ -159,7 +160,7 @@ def list_gcs_cog_objects(bucket: str, prefix: str) -> list[dict]:
         resp.raise_for_status()
         data = resp.json()
         items = data.get("items", [])
-        
+
         for item in items:
             obj_name = item["name"]
             if not obj_name.endswith(".tif"):
@@ -167,21 +168,24 @@ def list_gcs_cog_objects(bucket: str, prefix: str) -> list[dict]:
             # Extract covariate name from filename:  prefix/elev.tif -> elev
             filename = obj_name.rsplit("/", 1)[-1]
             covariate = filename.removesuffix(".tif")
-            results.append({
-                "name": obj_name,
-                "url": f"https://storage.googleapis.com/{bucket}/{obj_name}",
-                "size": int(item.get("size", 0)),
-                "covariate": covariate,
-            })
-        
+            results.append(
+                {
+                    "name": obj_name,
+                    "url": f"https://storage.googleapis.com/{bucket}/{obj_name}",
+                    "size": int(item.get("size", 0)),
+                    "covariate": covariate,
+                }
+            )
+
         page_token = data.get("nextPageToken")
         if not page_token:
             break
     return results
 
 
-def list_s3_cog_objects(bucket: str, prefix: str,
-                        region: str = "us-east-1") -> list[dict]:
+def list_s3_cog_objects(
+    bucket: str, prefix: str, region: str = "us-east-1"
+) -> list[dict]:
     """List all ``.tif`` objects under a prefix on S3.
 
     Returns a list of dicts with keys:
@@ -202,17 +206,20 @@ def list_s3_cog_objects(bucket: str, prefix: str,
                 continue
             filename = key.rsplit("/", 1)[-1]
             covariate = filename.removesuffix(".tif")
-            results.append({
-                "key": key,
-                "url": f"https://{bucket}.s3.amazonaws.com/{key}",
-                "size": obj["Size"],
-                "covariate": covariate,
-            })
+            results.append(
+                {
+                    "key": key,
+                    "url": f"https://{bucket}.s3.amazonaws.com/{key}",
+                    "size": obj["Size"],
+                    "covariate": covariate,
+                }
+            )
     return results
 
 
-def delete_s3_cog(bucket: str, prefix: str, covariate_name: str,
-                  region: str = "us-east-1") -> bool:
+def delete_s3_cog(
+    bucket: str, prefix: str, covariate_name: str, region: str = "us-east-1"
+) -> bool:
     """Delete a merged COG from S3.
 
     Returns True if the object was deleted, False if it didn't exist.
@@ -229,8 +236,7 @@ def delete_s3_cog(bucket: str, prefix: str, covariate_name: str,
     return True
 
 
-def delete_gcs_tiles(bucket: str, prefix: str,
-                     covariate_name: str) -> int:
+def delete_gcs_tiles(bucket: str, prefix: str, covariate_name: str) -> int:
     """Delete all GCS tiles for a covariate.
 
     Uses the GCS JSON API with an OAuth2 token from the default
@@ -268,10 +274,10 @@ def delete_gcs_tiles(bucket: str, prefix: str,
         # URL: https://storage.googleapis.com/{bucket}/{object_name}
         obj_name = url.split(f"/{bucket}/", 1)[-1]
         import urllib.parse
+
         encoded_name = urllib.parse.quote(obj_name, safe="")
         delete_url = (
-            f"https://storage.googleapis.com/storage/v1/b/{bucket}"
-            f"/o/{encoded_name}"
+            f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{encoded_name}"
         )
         resp = requests.delete(
             delete_url,
@@ -285,10 +291,13 @@ def delete_gcs_tiles(bucket: str, prefix: str,
         else:
             logger.warning(
                 "Failed to delete GCS tile %s: %s %s",
-                obj_name, resp.status_code, resp.text[:200],
+                obj_name,
+                resp.status_code,
+                resp.text[:200],
             )
-    logger.info("Deleted %d/%d GCS tiles for %s", deleted, len(tile_urls),
-                covariate_name)
+    logger.info(
+        "Deleted %d/%d GCS tiles for %s", deleted, len(tile_urls), covariate_name
+    )
     return deleted
 
 
@@ -307,8 +316,9 @@ def _download_tile(url: str, dest_dir: str) -> str:
     return local_path
 
 
-def _upload_to_s3(local_path: str, bucket: str, key: str,
-                  region: str = "us-east-1") -> str:
+def _upload_to_s3(
+    local_path: str, bucket: str, key: str, region: str = "us-east-1"
+) -> str:
     """Upload a file to S3.
 
     Uses the default boto3 credential chain (env vars, instance profile,
@@ -320,12 +330,19 @@ def _upload_to_s3(local_path: str, bucket: str, key: str,
         The HTTPS URL of the uploaded object.
     """
     file_size = os.path.getsize(local_path)
-    logger.info("Uploading %s (%.1f MB) -> s3://%s/%s",
-                local_path, file_size / (1024 * 1024), bucket, key)
+    logger.info(
+        "Uploading %s (%.1f MB) -> s3://%s/%s",
+        local_path,
+        file_size / (1024 * 1024),
+        bucket,
+        key,
+    )
 
     s3 = boto3.client("s3", region_name=region)
     s3.upload_file(
-        local_path, bucket, key,
+        local_path,
+        bucket,
+        key,
         ExtraArgs={"ContentType": "image/tiff"},
     )
     url = f"https://{bucket}.s3.amazonaws.com/{key}"
@@ -336,6 +353,7 @@ def _upload_to_s3(local_path: str, bucket: str, key: str,
 # ---------------------------------------------------------------------------
 # GDAL merge pipeline
 # ---------------------------------------------------------------------------
+
 
 def _run_cmd(cmd: list[str]) -> None:
     """Run a shell command, raising on failure."""
@@ -379,16 +397,23 @@ def merge_tiles_to_cog(tile_paths: list[str], output_path: str) -> str:
     _run_cmd(["gdalbuildvrt", vrt_path] + tile_paths)
 
     # Step 2: Translate VRT -> COG with lossless DEFLATE compression
-    _run_cmd([
-        "gdal_translate",
-        "-of", "COG",
-        "-co", "COMPRESS=DEFLATE",
-        "-co", "PREDICTOR=2",         # horizontal differencing (good for int)
-        "-co", "NUM_THREADS=ALL_CPUS",
-        "-co", "BIGTIFF=IF_SAFER",
-        vrt_path,
-        output_path,
-    ])
+    _run_cmd(
+        [
+            "gdal_translate",
+            "-of",
+            "COG",
+            "-co",
+            "COMPRESS=DEFLATE",
+            "-co",
+            "PREDICTOR=2",  # horizontal differencing (good for int)
+            "-co",
+            "NUM_THREADS=ALL_CPUS",
+            "-co",
+            "BIGTIFF=IF_SAFER",
+            vrt_path,
+            output_path,
+        ]
+    )
 
     # Clean up the intermediate VRT
     if os.path.exists(vrt_path):
@@ -402,6 +427,7 @@ def merge_tiles_to_cog(tile_paths: list[str], output_path: str) -> str:
 # ---------------------------------------------------------------------------
 # End-to-end pipeline
 # ---------------------------------------------------------------------------
+
 
 def merge_covariate_tiles(
     covariate_name: str,
@@ -448,7 +474,10 @@ def merge_covariate_tiles(
     n_tiles = len(tile_urls)
     logger.info(
         "Found %d tile(s) for '%s' in gs://%s/%s",
-        n_tiles, covariate_name, source_bucket, source_prefix,
+        n_tiles,
+        covariate_name,
+        source_bucket,
+        source_prefix,
     )
 
     # If there's only 1 tile, it's already a COG — just re-upload with
@@ -467,9 +496,7 @@ def merge_covariate_tiles(
 
         # 4. Upload merged COG to S3
         s3_key = f"{output_prefix}/{output_filename}".strip("/")
-        s3_url = _upload_to_s3(
-            output_path, output_bucket, s3_key, aws_region
-        )
+        s3_url = _upload_to_s3(output_path, output_bucket, s3_key, aws_region)
 
         return {
             "url": s3_url,

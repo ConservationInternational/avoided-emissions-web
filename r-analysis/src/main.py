@@ -248,12 +248,8 @@ def _collect_results(output_dir, task_id, log):
                         },
                         entity_name=row.get("site_name") or None,
                         metadata={
-                            "n_matched_pixels": int(
-                                row.get("n_matched_pixels", 0)
-                            ),
-                            "sampled_fraction": float(
-                                row.get("sampled_fraction", 1)
-                            ),
+                            "n_matched_pixels": int(row.get("n_matched_pixels", 0)),
+                            "sampled_fraction": float(row.get("sampled_fraction", 1)),
                         },
                     )
                 )
@@ -277,22 +273,14 @@ def _collect_results(output_dir, task_id, log):
                         },
                         entity_name=row.get("site_name") or None,
                         period_start=(
-                            int(row["first_year"])
-                            if row.get("first_year")
-                            else None
+                            int(row["first_year"]) if row.get("first_year") else None
                         ),
                         period_end=(
-                            int(row["last_year"])
-                            if row.get("last_year")
-                            else None
+                            int(row["last_year"]) if row.get("last_year") else None
                         ),
                         metadata={
-                            "n_matched_pixels": int(
-                                row.get("n_matched_pixels", 0)
-                            ),
-                            "sampled_fraction": float(
-                                row.get("sampled_fraction", 1)
-                            ),
+                            "n_matched_pixels": int(row.get("n_matched_pixels", 0)),
+                            "sampled_fraction": float(row.get("sampled_fraction", 1)),
                             "n_years": int(row.get("n_years", 0)),
                         },
                     )

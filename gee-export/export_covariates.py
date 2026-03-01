@@ -20,39 +20,66 @@ from tasks import check_task_status, export_admin_region_key, start_export_task
 
 @click.command()
 @click.option(
-    "--bucket", type=str, default=None,
+    "--bucket",
+    type=str,
+    default=None,
     help="GCS bucket name for exports.",
 )
 @click.option(
-    "--prefix", type=str, default=DEFAULT_GCS_PREFIX,
+    "--prefix",
+    type=str,
+    default=DEFAULT_GCS_PREFIX,
     help="GCS path prefix within the bucket.",
 )
 @click.option(
-    "--covariates", type=str, multiple=True,
+    "--covariates",
+    type=str,
+    multiple=True,
     help="Specific covariate names to export. If omitted, exports all.",
 )
 @click.option(
-    "--list", "list_covariates", is_flag=True, default=False,
+    "--list",
+    "list_covariates",
+    is_flag=True,
+    default=False,
     help="List all available covariates and exit.",
 )
 @click.option(
-    "--status", "check_status", is_flag=True, default=False,
+    "--status",
+    "check_status",
+    is_flag=True,
+    default=False,
     help="Check status of running GEE export tasks.",
 )
 @click.option(
-    "--category", type=str, default=None,
+    "--category",
+    type=str,
+    default=None,
     help="Export only covariates in this category.",
 )
 @click.option(
-    "--wait", "wait_for_completion", is_flag=True, default=False,
+    "--wait",
+    "wait_for_completion",
+    is_flag=True,
+    default=False,
     help="Wait for all tasks to complete (polls every 60s).",
 )
 @click.option(
-    "--scale", type=float, default=None,
+    "--scale",
+    type=float,
+    default=None,
     help="Export scale in meters (default: ~927m / ~1km).",
 )
-def main(bucket, prefix, covariates, list_covariates, check_status,
-         category, wait_for_completion, scale):
+def main(
+    bucket,
+    prefix,
+    covariates,
+    list_covariates,
+    check_status,
+    category,
+    wait_for_completion,
+    scale,
+):
     """Export covariate layers from Google Earth Engine to GCS as COGs."""
 
     if list_covariates:
@@ -66,6 +93,7 @@ def main(bucket, prefix, covariates, list_covariates, check_status,
     ee_sa_json = os.environ.get("EE_SERVICE_ACCOUNT_JSON", "")
     if ee_sa_json:
         import base64
+
         try:
             key_data = base64.b64decode(ee_sa_json).decode("utf-8")
         except Exception:
@@ -91,18 +119,12 @@ def main(bucket, prefix, covariates, list_covariates, check_status,
         names = list(covariates)
         invalid = [n for n in names if n not in COVARIATES]
         if invalid:
-            click.echo(
-                f"Error: unknown covariates: {', '.join(invalid)}", err=True
-            )
+            click.echo(f"Error: unknown covariates: {', '.join(invalid)}", err=True)
             sys.exit(1)
     elif category:
-        names = [
-            k for k, v in COVARIATES.items()
-            if v.get("category") == category
-        ]
+        names = [k for k, v in COVARIATES.items() if v.get("category") == category]
         if not names:
-            click.echo(f"Error: no covariates in category '{category}'",
-                       err=True)
+            click.echo(f"Error: no covariates in category '{category}'", err=True)
             sys.exit(1)
     else:
         names = list(COVARIATES.keys())
@@ -138,8 +160,9 @@ def main(bucket, prefix, covariates, list_covariates, check_status,
 def _print_covariate_list(category_filter=None):
     """Print a formatted list of available covariates."""
     current_category = None
-    for name, cfg in sorted(COVARIATES.items(),
-                            key=lambda x: (x[1].get("category", ""), x[0])):
+    for name, cfg in sorted(
+        COVARIATES.items(), key=lambda x: (x[1].get("category", ""), x[0])
+    ):
         cat = cfg.get("category", "uncategorized")
         if category_filter and cat != category_filter:
             continue
@@ -182,9 +205,7 @@ def _wait_for_tasks(tasks, poll_interval=60):
                 click.echo(f"  Completed: {name}")
                 completed.append(name)
             elif state == "FAILED":
-                click.echo(
-                    f"  FAILED: {name} - {status.get('error_message', '')}"
-                )
+                click.echo(f"  FAILED: {name} - {status.get('error_message', '')}")
                 completed.append(name)
             elif state == "CANCELLED":
                 click.echo(f"  Cancelled: {name}")

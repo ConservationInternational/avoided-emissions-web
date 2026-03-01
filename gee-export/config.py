@@ -5,7 +5,9 @@ parameters, and the default matching formula used in the avoided emissions
 analysis.
 """
 
-EXPORT_SCALE_METERS = 927.67  # (30 arc seconds - approximately 1km at equator in meters)
+EXPORT_SCALE_METERS = (
+    927.67  # (30 arc seconds - approximately 1km at equator in meters)
+)
 EXPORT_CRS = "EPSG:4326"
 
 # Default GCS path prefix for exported COGs
@@ -23,9 +25,7 @@ MAX_PIXELS_PER_TASK = 1e10
 # Full-globe export region
 GLOBAL_REGION = {
     "type": "Polygon",
-    "coordinates": [[
-        [-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]
-    ]]
+    "coordinates": [[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]],
 }
 
 
@@ -57,7 +57,6 @@ COVARIATES = {
         "category": "climate",
         "resample": "mean",
     },
-
     # Terrain
     "elev": {
         "asset": "USGS/SRTMGL1_003",
@@ -74,7 +73,6 @@ COVARIATES = {
         "category": "terrain",
         "resample": "mean",
     },
-
     # Accessibility
     "dist_cities": {
         "asset": "projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0",
@@ -95,7 +93,6 @@ COVARIATES = {
         "category": "accessibility",
         "resample": "mean",
     },
-
     # Demographics
     "pop_2000": {
         "asset": "WorldPop/GP/100m/pop",
@@ -143,7 +140,6 @@ COVARIATES = {
         "category": "demographics",
         "resample": "mean",
     },
-
     # Biomass
     "total_biomass": {
         "derived": "total_biomass",
@@ -151,7 +147,6 @@ COVARIATES = {
         "category": "biomass",
         "resample": "mean",
     },
-
     # Land cover (Copernicus 2015, reclassed to 7 categories, in hectares)
     "lc_2015_forest": {
         "derived": "lc_class",
@@ -202,7 +197,6 @@ COVARIATES = {
         "category": "land_cover",
         "resample": "sum",
     },
-
     # Ecological zones
     "ecoregion": {
         "asset": "RESOLVE/ECOREGIONS/2017",
@@ -218,7 +212,6 @@ COVARIATES = {
         "category": "ecological",
         "resample": "mode",
     },
-
     # Protected areas
     "pa": {
         "asset": "WCMC/WDPA/current/polygons",
@@ -227,7 +220,6 @@ COVARIATES = {
         "category": "ecological",
         "resample": "mode",
     },
-
     # Agro-ecological zones
     "aez": {
         "asset": "ESA/WorldCereal/AEZ/v100",
@@ -236,7 +228,6 @@ COVARIATES = {
         "category": "ecological",
         "resample": "mode",
     },
-
     # Administrative boundaries
     "region": {
         "asset": "WM/geoLab/geoBoundaries/600/ADM1",

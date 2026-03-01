@@ -10,7 +10,6 @@ Usage:
 """
 
 import logging
-import os
 import shutil
 import sys
 import tempfile
@@ -274,9 +273,11 @@ def import_wdpa(engine, tmpdir: Path) -> None:
 
     # Log what was extracted to aid debugging
     extracted_files = list(extract_dir.rglob("*"))
-    log.info("Extracted %d items; top-level: %s",
-             len(extracted_files),
-             [p.name for p in extract_dir.iterdir()])
+    log.info(
+        "Extracted %d items; top-level: %s",
+        len(extracted_files),
+        [p.name for p in extract_dir.iterdir()],
+    )
 
     # Check for File GeoDatabase (.gdb directory) first
     gdb_dirs = list(extract_dir.rglob("*.gdb"))
@@ -299,9 +300,14 @@ def import_wdpa(engine, tmpdir: Path) -> None:
 
     # Fall back to GeoPackage / Shapefile patterns
     if gdf is None:
-        for pattern in ["**/*Polygons*.gpkg", "**/*polygons*.gpkg",
-                        "**/*Polygons*.shp", "**/*polygons*.shp",
-                        "**/*.gpkg", "**/*.shp"]:
+        for pattern in [
+            "**/*Polygons*.gpkg",
+            "**/*polygons*.gpkg",
+            "**/*Polygons*.shp",
+            "**/*polygons*.shp",
+            "**/*.gpkg",
+            "**/*.shp",
+        ]:
             matches = list(extract_dir.glob(pattern))
             if matches:
                 fpath = matches[0]
@@ -367,9 +373,7 @@ def run_import(check_only: bool = False) -> None:
 
     if check_only:
         if needed:
-            log.info(
-                "Tables needing import: %s", [t for t, _ in needed]
-            )
+            log.info("Tables needing import: %s", [t for t, _ in needed])
         else:
             log.info("All tables already populated")
         return

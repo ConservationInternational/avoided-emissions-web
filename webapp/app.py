@@ -9,7 +9,6 @@ import uuid as _uuid
 
 import dash
 import dash_bootstrap_components as dbc
-import flask
 import flask_login
 import rollbar
 import rollbar.contrib.flask
@@ -75,12 +74,11 @@ if Config.ROLLBAR_ACCESS_TOKEN:
         _rollbar_kwargs["code_version"] = Config.GIT_REVISION
     with server.app_context():
         rollbar.init(**_rollbar_kwargs)
-        got_request_exception.connect(
-            rollbar.contrib.flask.report_exception, server
-        )
+        got_request_exception.connect(rollbar.contrib.flask.report_exception, server)
     logger.info("Rollbar initialized (environment=%s)", Config.ROLLBAR_ENVIRONMENT)
 else:
     logger.warning("ROLLBAR_ACCESS_TOKEN not set — error tracking disabled")
+
 
 # Health endpoint (used by Docker healthcheck to confirm app + migrations are ready)
 @server.route("/health")
@@ -93,10 +91,12 @@ login_manager.init_app(server)
 login_manager.login_view = "/login"
 
 # Root layout with URL routing
-app.layout = html.Div([
-    dcc.Location(id="url", refresh=True),
-    html.Div(id="page-content"),
-])
+app.layout = html.Div(
+    [
+        dcc.Location(id="url", refresh=True),
+        html.Div(id="page-content"),
+    ]
+)
 
 
 @app.callback(

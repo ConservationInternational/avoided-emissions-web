@@ -39,6 +39,7 @@ def _get_batch_module():
     if _batch_module is None:
         import importlib
         import sys
+
         # r-analysis is mounted at /app/r-analysis inside the container
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "r-analysis"))
         _batch_module = importlib.import_module("batch_jobs")
@@ -90,8 +91,7 @@ def parse_sites_file(file_content, filename):
                 site_id = row.get("site_id", "N/A")
                 site_name = row.get("site_name", "N/A")
                 details.append(
-                    f"  Feature {idx}: site_id={site_id}, "
-                    f"site_name={site_name}"
+                    f"  Feature {idx}: site_id={site_id}, site_name={site_name}"
                 )
             detail_str = "\n".join(details)
             errors.append(
@@ -148,8 +148,9 @@ def upload_config_to_s3(config_dict, task_id):
     return f"s3://{Config.S3_BUCKET}/{key}"
 
 
-def submit_analysis_task(task_name, description, user_id, gdf,
-                         covariates, fc_years=None):
+def submit_analysis_task(
+    task_name, description, user_id, gdf, covariates, fc_years=None
+):
     """Create and submit a full analysis task.
 
     Routes to the trends.earth API when ``Config.USE_TRENDSEARTH_API`` is
@@ -166,21 +167,18 @@ def submit_analysis_task(task_name, description, user_id, gdf,
         return _submit_via_api(
             task_name, description, user_id, gdf, covariates, fc_years
         )
-    return _submit_via_batch(
-        task_name, description, user_id, gdf, covariates, fc_years
-    )
+    return _submit_via_batch(task_name, description, user_id, gdf, covariates, fc_years)
 
 
-def _submit_via_api(task_name, description, user_id, gdf,
-                     covariates, fc_years=None):
+def _submit_via_api(task_name, description, user_id, gdf, covariates, fc_years=None):
     """Submit the analysis task through the trends.earth API.
 
     Creates an Execution on the API which handles AWS Batch dispatch,
     status tracking, and result collection.
 
-    Uses the submitting user's stored OAuth2 client credentials when
-    available, falling back to the global API key / email+password from
-    environment variables.
+    Requires the submitting user to have linked their trends.earth account
+    (i.e. stored OAuth2 client credentials via the Settings page).  Raises
+    ``ValueError`` if the user has not linked their account.
     """
     from credential_store import get_decrypted_secret
     from trendsearth_client import TrendsEarthClient
@@ -210,7 +208,8 @@ def _submit_via_api(task_name, description, user_id, gdf,
                 site_name=str(row.get("site_name", "")),
                 start_date=pd.to_datetime(row["start_date"]),
                 end_date=pd.to_datetime(row["end_date"])
-                if pd.notna(row.get("end_date")) else None,
+                if pd.notna(row.get("end_date"))
+                else None,
             )
             db.add(site)
         db.commit()
@@ -233,27 +232,24 @@ def _submit_via_api(task_name, description, user_id, gdf,
             "min_glm_treatment_pixels": 15,
             "step": "all",
             "results_s3_uri": (
-                f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}"
-                f"/tasks/{task_id}/output"
+                f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
             ),
         }
 
-        # Submit via trends.earth API — prefer user's stored OAuth2 creds
+        # Submit via trends.earth API using the user's own OAuth2 creds
         user_creds = get_decrypted_secret(user_id)
-        if user_creds:
-            client_id, client_secret = user_creds
-            client = TrendsEarthClient.from_oauth2_credentials(
-                api_url=Config.TRENDSEARTH_API_URL,
-                client_id=client_id,
-                client_secret=client_secret,
+        if not user_creds:
+            raise ValueError(
+                "You must link your trends.earth account before "
+                "submitting analysis tasks.  Go to Settings → "
+                "trends.earth Integration to connect your account."
             )
-        else:
-            client = TrendsEarthClient(
-                api_url=Config.TRENDSEARTH_API_URL,
-                api_key=Config.TRENDSEARTH_API_KEY,
-                email=Config.TRENDSEARTH_API_EMAIL,
-                password=Config.TRENDSEARTH_API_PASSWORD,
-            )
+        client_id, client_secret = user_creds
+        client = TrendsEarthClient.from_oauth2_credentials(
+            api_url=Config.TRENDSEARTH_API_URL,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
         script_id = Config.TRENDSEARTH_SCRIPT_ID
         execution = client.create_execution(script_id, params)
 
@@ -284,8 +280,7 @@ def _submit_via_api(task_name, description, user_id, gdf,
         db.close()
 
 
-def _submit_via_batch(task_name, description, user_id, gdf,
-                      covariates, fc_years=None):
+def _submit_via_batch(task_name, description, user_id, gdf, covariates, fc_years=None):
     """Original direct-to-Batch submission (legacy path)."""
     if fc_years is None:
         fc_years = list(range(2000, 2024))
@@ -314,7 +309,8 @@ def _submit_via_batch(task_name, description, user_id, gdf,
                 site_name=str(row.get("site_name", "")),
                 start_date=pd.to_datetime(row["start_date"]),
                 end_date=pd.to_datetime(row["end_date"])
-                if pd.notna(row.get("end_date")) else None,
+                if pd.notna(row.get("end_date"))
+                else None,
             )
             db.add(site)
 
@@ -380,9 +376,7 @@ def get_task_list(user_id=None, limit=50):
     """Get recent analysis tasks, optionally filtered by user."""
     db = get_db()
     try:
-        query = db.query(AnalysisTask).order_by(
-            AnalysisTask.created_at.desc()
-        )
+        query = db.query(AnalysisTask).order_by(AnalysisTask.created_at.desc())
         if user_id:
             query = query.filter(AnalysisTask.submitted_by == user_id)
         return query.limit(limit).all()
@@ -394,23 +388,22 @@ def get_task_detail(task_id):
     """Get full task details including sites and results."""
     db = get_db()
     try:
-        task = db.query(AnalysisTask).filter(
-            AnalysisTask.id == task_id
-        ).first()
+        task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
         if not task:
             return None
 
-        sites = db.query(TaskSite).filter(
-            TaskSite.task_id == task_id
-        ).all()
+        sites = db.query(TaskSite).filter(TaskSite.task_id == task_id).all()
 
-        results = db.query(TaskResult).filter(
-            TaskResult.task_id == task_id
-        ).order_by(TaskResult.site_id, TaskResult.year).all()
+        results = (
+            db.query(TaskResult)
+            .filter(TaskResult.task_id == task_id)
+            .order_by(TaskResult.site_id, TaskResult.year)
+            .all()
+        )
 
-        totals = db.query(TaskResultTotal).filter(
-            TaskResultTotal.task_id == task_id
-        ).all()
+        totals = (
+            db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).all()
+        )
 
         return {
             "task": task,
@@ -474,6 +467,7 @@ def start_gee_export(covariate_names, user_id):
     ee_sa_json = os.environ.get("EE_SERVICE_ACCOUNT_JSON", "")
     if ee_sa_json:
         import base64
+
         try:
             key_data = base64.b64decode(ee_sa_json).decode("utf-8")
         except Exception:
@@ -544,7 +538,9 @@ def list_export_tiles(bucket, prefix, covariate_name):
     except Exception as exc:
         logger.warning(
             "Failed to list GCS tiles for %s/%s: %s",
-            bucket, covariate_name, exc,
+            bucket,
+            covariate_name,
+            exc,
         )
         return []
 
@@ -554,6 +550,7 @@ def get_user_list():
     db = get_db()
     try:
         from models import User
+
         return db.query(User).order_by(User.created_at.desc()).all()
     finally:
         db.close()
@@ -564,6 +561,7 @@ def approve_user(user_id):
     db = get_db()
     try:
         from models import User
+
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             return False, "User not found."
@@ -587,6 +585,7 @@ def change_user_role(user_id, new_role):
     db = get_db()
     try:
         from models import User
+
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             return False, "User not found."
@@ -606,14 +605,15 @@ def delete_user(user_id):
     db = get_db()
     try:
         from models import User
+
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             return False, "User not found."
         email = user.email
         # Delete the user's analysis tasks (cascades to sites/results via DB)
-        tasks = db.query(AnalysisTask).filter(
-            AnalysisTask.submitted_by == user_id
-        ).all()
+        tasks = (
+            db.query(AnalysisTask).filter(AnalysisTask.submitted_by == user_id).all()
+        )
         for task in tasks:
             db.delete(task)
         db.delete(user)
@@ -684,7 +684,9 @@ def force_reexport(covariate_name, user_id):
         cog_prefix = f"{Config.S3_PREFIX}/cog"
         try:
             delete_s3_cog(
-                Config.S3_BUCKET, cog_prefix, covariate_name,
+                Config.S3_BUCKET,
+                cog_prefix,
+                covariate_name,
                 region=Config.AWS_REGION,
             )
         except Exception:
@@ -694,7 +696,9 @@ def force_reexport(covariate_name, user_id):
     if Config.GCS_BUCKET:
         try:
             delete_gcs_tiles(
-                Config.GCS_BUCKET, Config.GCS_PREFIX, covariate_name,
+                Config.GCS_BUCKET,
+                Config.GCS_PREFIX,
+                covariate_name,
             )
         except Exception:
             logger.warning("Failed to delete GCS tiles for %s", covariate_name)
@@ -703,9 +707,7 @@ def force_reexport(covariate_name, user_id):
     db = get_db()
     try:
         old_records = (
-            db.query(Covariate)
-            .filter(Covariate.covariate_name == covariate_name)
-            .all()
+            db.query(Covariate).filter(Covariate.covariate_name == covariate_name).all()
         )
         for rec in old_records:
             db.delete(rec)
@@ -744,7 +746,9 @@ def force_remerge(covariate_name, user_id):
         cog_prefix = f"{Config.S3_PREFIX}/cog"
         try:
             delete_s3_cog(
-                Config.S3_BUCKET, cog_prefix, covariate_name,
+                Config.S3_BUCKET,
+                cog_prefix,
+                covariate_name,
                 region=Config.AWS_REGION,
             )
         except Exception:
@@ -813,12 +817,8 @@ def get_covariate_inventory():
     from cog_merge import list_all_gcs_tiles, list_s3_cog_objects
 
     # Load covariate definitions from GEE export config
-    gee_config_path = os.path.join(
-        os.path.dirname(__file__), "gee-export", "config.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "gee_export_config", gee_config_path
-    )
+    gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
+    spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
     gee_config = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gee_config)
     covariates = gee_config.COVARIATES
@@ -868,8 +868,7 @@ def get_covariate_inventory():
             if existing is None or (
                 rec.started_at
                 and (
-                    existing.started_at is None
-                    or rec.started_at > existing.started_at
+                    existing.started_at is None or rec.started_at > existing.started_at
                 )
             ):
                 db_records[rec.covariate_name] = rec
@@ -900,11 +899,7 @@ def get_covariate_inventory():
             "size_mb": (
                 round(db_rec.size_bytes / (1024 * 1024), 1)
                 if db_rec and db_rec.size_bytes
-                else (
-                    round(s3_obj["size"] / (1024 * 1024), 1)
-                    if s3_obj
-                    else None
-                )
+                else (round(s3_obj["size"] / (1024 * 1024), 1) if s3_obj else None)
             ),
             "merged_url": (
                 db_rec.merged_url
@@ -914,9 +909,7 @@ def get_covariate_inventory():
             "started_at": _fmt(db_rec.started_at) if db_rec else "",
             "completed_at": _fmt(db_rec.completed_at) if db_rec else "",
             "error_message": (
-                db_rec.error_message
-                if db_rec and db_rec.error_message
-                else ""
+                db_rec.error_message if db_rec and db_rec.error_message else ""
             ),
         }
         rows.append(row)

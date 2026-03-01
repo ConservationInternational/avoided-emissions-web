@@ -11,7 +11,6 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
-    Index,
     Integer,
     String,
     Text,
@@ -39,8 +38,12 @@ class User(Base):
         nullable=False,
         default="user",
     )
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
     last_login = Column(DateTime(timezone=True))
     is_active = Column(Boolean, default=True)
     is_approved = Column(Boolean, default=False)
@@ -97,7 +100,9 @@ class Covariate(Base):
         default="pending_export",
     )
     started_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
-    started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    started_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
     completed_at = Column(DateTime(timezone=True))
     error_message = Column(Text)
     extra_metadata = Column("metadata", JSON, default=dict)
@@ -111,8 +116,15 @@ class AnalysisTask(Base):
     description = Column(Text)
     submitted_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     status = Column(
-        Enum("pending", "submitted", "running", "succeeded", "failed",
-             "cancelled", name="task_status"),
+        Enum(
+            "pending",
+            "submitted",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
+            name="task_status",
+        ),
         nullable=False,
         default="pending",
     )
@@ -125,7 +137,9 @@ class AnalysisTask(Base):
     sites_s3_uri = Column(String(500))
     config_s3_uri = Column(String(500))
     results_s3_uri = Column(String(500))
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
     submitted_at = Column(DateTime(timezone=True))
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
@@ -133,19 +147,24 @@ class AnalysisTask(Base):
     extra_metadata = Column("metadata", JSON, default=dict)
 
     user = relationship("User", back_populates="tasks")
-    sites = relationship("TaskSite", back_populates="task",
-                         cascade="all, delete-orphan")
-    results = relationship("TaskResult", back_populates="task",
-                           cascade="all, delete-orphan")
-    results_total = relationship("TaskResultTotal", back_populates="task",
-                                 cascade="all, delete-orphan")
+    sites = relationship(
+        "TaskSite", back_populates="task", cascade="all, delete-orphan"
+    )
+    results = relationship(
+        "TaskResult", back_populates="task", cascade="all, delete-orphan"
+    )
+    results_total = relationship(
+        "TaskResultTotal", back_populates="task", cascade="all, delete-orphan"
+    )
 
 
 class TaskSite(Base):
     __tablename__ = "task_sites"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    task_id = Column(UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), nullable=False)
+    task_id = Column(
+        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), nullable=False
+    )
     site_id = Column(String(100), nullable=False)
     site_name = Column(String(255))
     start_date = Column(DateTime)
@@ -159,7 +178,9 @@ class TaskResult(Base):
     __tablename__ = "task_results"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    task_id = Column(UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), nullable=False)
+    task_id = Column(
+        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), nullable=False
+    )
     site_id = Column(String(100), nullable=False)
     year = Column(Integer, nullable=False)
     forest_loss_avoided_ha = Column(Float)
@@ -174,7 +195,9 @@ class TaskResultTotal(Base):
     __tablename__ = "task_results_total"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    task_id = Column(UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), nullable=False)
+    task_id = Column(
+        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), nullable=False
+    )
     site_id = Column(String(100), nullable=False)
     site_name = Column(String(255))
     forest_loss_avoided_ha = Column(Float)
@@ -236,8 +259,12 @@ class CovariatePreset(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     name = Column(String(255), nullable=False)
     covariates = Column(ARRAY(Text), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
     user = relationship("User", back_populates="covariate_presets")
 

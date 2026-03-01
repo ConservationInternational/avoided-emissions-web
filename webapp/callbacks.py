@@ -7,7 +7,6 @@ visualization, and admin panel actions.
 
 import base64
 import io
-import json
 import logging
 import os
 import uuid as _uuid
@@ -154,18 +153,23 @@ def register_callbacks(app):
     def handle_register(n_clicks, name, email, password, password_confirm):
         if not name or not email or not password:
             return dbc.Alert(
-                "Please fill in all fields.", color="warning", duration=5000,
+                "Please fill in all fields.",
+                color="warning",
+                duration=5000,
             )
 
         if len(password) < 8:
             return dbc.Alert(
-                "Password must be at least 8 characters.", color="warning",
+                "Password must be at least 8 characters.",
+                color="warning",
                 duration=5000,
             )
 
         if password != password_confirm:
             return dbc.Alert(
-                "Passwords do not match.", color="danger", duration=5000,
+                "Passwords do not match.",
+                color="danger",
+                duration=5000,
             )
 
         success, message = register_user(email, password, name)
@@ -175,9 +179,11 @@ def register_callbacks(app):
     # -- File upload ---------------------------------------------------------
 
     @app.callback(
-        [Output("upload-status", "children"),
-         Output("parsed-sites-store", "data"),
-         Output("site-preview", "children")],
+        [
+            Output("upload-status", "children"),
+            Output("parsed-sites-store", "data"),
+            Output("site-preview", "children"),
+        ],
         Input("upload-sites", "contents"),
         State("upload-sites", "filename"),
         prevent_initial_call=True,
@@ -199,9 +205,7 @@ def register_callbacks(app):
                     if i > 0:
                         parts.append(html.Br())
                     parts.append(line)
-                error_elements.append(
-                    html.P(parts, className="text-danger")
-                )
+                error_elements.append(html.P(parts, className="text-danger"))
             return (
                 html.Div(error_elements),
                 None,
@@ -215,17 +219,28 @@ def register_callbacks(app):
 
         # Build AG Grid preview with all sites
         preview_cols = [
-            {"headerName": "Site ID", "field": "site_id", "flex": 1,
-             "minWidth": 100},
-            {"headerName": "Site Name", "field": "site_name", "flex": 2,
-             "minWidth": 180},
-            {"headerName": "Start Date", "field": "start_date", "flex": 1,
-             "minWidth": 120},
+            {"headerName": "Site ID", "field": "site_id", "flex": 1, "minWidth": 100},
+            {
+                "headerName": "Site Name",
+                "field": "site_name",
+                "flex": 2,
+                "minWidth": 180,
+            },
+            {
+                "headerName": "Start Date",
+                "field": "start_date",
+                "flex": 1,
+                "minWidth": 120,
+            },
         ]
         if "end_date" in gdf.columns:
             preview_cols.append(
-                {"headerName": "End Date", "field": "end_date", "flex": 1,
-                 "minWidth": 120}
+                {
+                    "headerName": "End Date",
+                    "field": "end_date",
+                    "flex": 1,
+                    "minWidth": 120,
+                }
             )
 
         preview_rows = []
@@ -240,16 +255,20 @@ def register_callbacks(app):
             preview_rows.append(r)
 
         preview_table = _make_ag_grid(
-            "site-preview-table", preview_cols,
-            row_data=preview_rows, height="400px",
+            "site-preview-table",
+            preview_cols,
+            row_data=preview_rows,
+            height="400px",
         )
 
-        status_msg = html.Div([
-            html.P(
-                f"Loaded {len(gdf)} sites from {filename}",
-                className="text-success",
-            ),
-        ])
+        status_msg = html.Div(
+            [
+                html.P(
+                    f"Loaded {len(gdf)} sites from {filename}",
+                    className="text-success",
+                ),
+            ]
+        )
 
         store_data = {
             "geojson": gdf.to_json(),
@@ -262,8 +281,7 @@ def register_callbacks(app):
     # -- Task submission -----------------------------------------------------
 
     @app.callback(
-        [Output("submit-errors", "children"),
-         Output("submit-result", "children")],
+        [Output("submit-errors", "children"), Output("submit-result", "children")],
         Input("submit-task-button", "n_clicks"),
         State("task-name", "value"),
         State("task-description", "value"),
@@ -273,8 +291,9 @@ def register_callbacks(app):
         State("fc-end-year", "value"),
         prevent_initial_call=True,
     )
-    def handle_submit(n_clicks, name, description, sites_data,
-                      covariates, fc_start, fc_end):
+    def handle_submit(
+        n_clicks, name, description, sites_data, covariates, fc_start, fc_end
+    ):
         if not name:
             return "Please enter a task name.", None
         if not sites_data:
@@ -299,12 +318,15 @@ def register_callbacks(app):
                 fc_years=fc_years,
             )
 
-            return None, dbc.Alert([
-                html.P("Task submitted successfully."),
-                dcc.Link(f"View task: {task_id}", href=f"/task/{task_id}"),
-            ], color="success")
+            return None, dbc.Alert(
+                [
+                    html.P("Task submitted successfully."),
+                    dcc.Link(f"View task: {task_id}", href=f"/task/{task_id}"),
+                ],
+                color="success",
+            )
 
-        except Exception as e:
+        except Exception:
             logger.exception("Task submission failed")
             report_exception()
             return "Submission failed. Please try again or contact support.", None
@@ -312,10 +334,11 @@ def register_callbacks(app):
     # -- Dashboard task list (AG Grid) ---------------------------------------
 
     @app.callback(
-        [Output("task-list-table", "rowData"),
-         Output("task-total-count", "children")],
-        [Input("refresh-interval", "n_intervals"),
-         Input("refresh-tasks-btn", "n_clicks")],
+        [Output("task-list-table", "rowData"), Output("task-total-count", "children")],
+        [
+            Input("refresh-interval", "n_intervals"),
+            Input("refresh-tasks-btn", "n_clicks"),
+        ],
     )
     def refresh_task_list(_n_intervals, _n_clicks):
         user = get_current_user()
@@ -330,29 +353,35 @@ def register_callbacks(app):
 
         rows = []
         for task in tasks:
-            rows.append({
-                "id": str(task.id),
-                "name": task.name,
-                "status": task.status,
-                "n_sites": task.n_sites or 0,
-                "created_at": _fmt_dt(task.created_at),
-                "submitted_at": _fmt_dt(task.submitted_at),
-                "completed_at": _fmt_dt(task.completed_at),
-            })
+            rows.append(
+                {
+                    "id": str(task.id),
+                    "name": task.name,
+                    "status": task.status,
+                    "n_sites": task.n_sites or 0,
+                    "created_at": _fmt_dt(task.created_at),
+                    "submitted_at": _fmt_dt(task.submitted_at),
+                    "completed_at": _fmt_dt(task.completed_at),
+                }
+            )
 
         return rows, f"Total: {len(rows)}"
 
     # -- Task detail ---------------------------------------------------------
 
     @app.callback(
-        [Output("task-title", "children"),
-         Output("task-status-badge", "children"),
-         Output("task-overview", "children"),
-         Output("task-results-content", "children"),
-         Output("task-plots", "children"),
-         Output("task-map", "children")],
-        [Input("detail-refresh-interval", "n_intervals"),
-         Input("detail-tabs", "active_tab")],
+        [
+            Output("task-title", "children"),
+            Output("task-status-badge", "children"),
+            Output("task-overview", "children"),
+            Output("task-results-content", "children"),
+            Output("task-plots", "children"),
+            Output("task-map", "children"),
+        ],
+        [
+            Input("detail-refresh-interval", "n_intervals"),
+            Input("detail-tabs", "active_tab"),
+        ],
         State("task-id-store", "data"),
     )
     def refresh_task_detail(n, active_tab, task_id):
@@ -377,12 +406,14 @@ def register_callbacks(app):
         # Title and status badge
         title = task.name
         status_color = {
-            "pending": "secondary", "submitted": "info",
-            "running": "primary", "succeeded": "success",
-            "failed": "danger", "cancelled": "warning",
+            "pending": "secondary",
+            "submitted": "info",
+            "running": "primary",
+            "succeeded": "success",
+            "failed": "danger",
+            "cancelled": "warning",
         }.get(task.status, "secondary")
-        badge = dbc.Badge(task.status.upper(), color=status_color,
-                          className="fs-5")
+        badge = dbc.Badge(task.status.upper(), color=status_color, className="fs-5")
 
         # Overview tab
         overview = _build_overview(task, sites, totals)
@@ -391,8 +422,10 @@ def register_callbacks(app):
         results_content = _build_results_content(results, totals)
 
         # Plots tab
-        plots = _build_plots(results, totals) if results else html.P(
-            "Results not yet available.", className="text-muted"
+        plots = (
+            _build_plots(results, totals)
+            if results
+            else html.P("Results not yet available.", className="text-muted")
         )
 
         # Map tab
@@ -404,8 +437,7 @@ def register_callbacks(app):
 
     @app.callback(
         Output("download-results", "data"),
-        [Input("download-by-year", "n_clicks"),
-         Input("download-totals", "n_clicks")],
+        [Input("download-by-year", "n_clicks"), Input("download-totals", "n_clicks")],
         State("task-id-store", "data"),
         prevent_initial_call=True,
     )
@@ -444,7 +476,6 @@ def register_callbacks(app):
             return dbc.Alert("Admin access required.", color="danger")
 
         import importlib.util
-        import os
 
         gee_config_path = os.path.join(
             os.path.dirname(__file__), "gee-export", "config.py"
@@ -459,12 +490,12 @@ def register_callbacks(app):
         if category == "all":
             names = list(COVARIATES.keys())
         else:
-            names = [k for k, v in COVARIATES.items()
-                     if v.get("category") == category]
+            names = [k for k, v in COVARIATES.items() if v.get("category") == category]
 
         if not names:
-            return dbc.Alert(f"No covariates found for category: {category}",
-                             color="warning")
+            return dbc.Alert(
+                f"No covariates found for category: {category}", color="warning"
+            )
 
         try:
             export_ids = start_gee_export(names, user.id)
@@ -481,11 +512,15 @@ def register_callbacks(app):
             )
 
     @app.callback(
-        [Output("covariates-table", "rowData"),
-         Output("covariates-total-count", "children")],
-        [Input("admin-refresh-interval", "n_intervals"),
-         Input("gee-export-result", "children"),
-         Input("covariate-action-result", "children")],
+        [
+            Output("covariates-table", "rowData"),
+            Output("covariates-total-count", "children"),
+        ],
+        [
+            Input("admin-refresh-interval", "n_intervals"),
+            Input("gee-export-result", "children"),
+            Input("covariate-action-result", "children"),
+        ],
     )
     def refresh_covariate_inventory(n, _export_result, _action_result):
         # GEE export status is polled by the Celery Beat worker;
@@ -499,9 +534,7 @@ def register_callbacks(app):
 
         gcs_count = sum(1 for r in rows if r.get("gcs_tiles", 0) > 0)
         s3_count = sum(1 for r in rows if r.get("on_s3"))
-        total_label = (
-            f"Total: {len(rows)} | On GCS: {gcs_count} | On S3: {s3_count}"
-        )
+        total_label = f"Total: {len(rows)} | On GCS: {gcs_count} | On S3: {s3_count}"
 
         return rows, total_label
 
@@ -518,8 +551,7 @@ def register_callbacks(app):
 
         user = get_current_user()
         if not user or not user.is_admin:
-            return dbc.Alert("Admin access required.", color="danger",
-                             duration=4000)
+            return dbc.Alert("Admin access required.", color="danger", duration=4000)
 
         data = renderer_data.get("value", {})
         action = data.get("_action")
@@ -534,14 +566,16 @@ def register_callbacks(app):
                 return dbc.Alert(
                     f"Re-export started for '{covariate_name}'. "
                     "Existing GCS tiles and S3 COG have been deleted.",
-                    color="success", duration=6000,
+                    color="success",
+                    duration=6000,
                 )
             elif action == "remerge":
                 result = force_remerge(covariate_name, user.id)
                 return dbc.Alert(
                     f"Re-merge queued for '{covariate_name}'. "
                     "Existing S3 COG has been deleted.",
-                    color="success", duration=6000,
+                    color="success",
+                    duration=6000,
                 )
             else:
                 raise PreventUpdate
@@ -553,23 +587,29 @@ def register_callbacks(app):
             # Persist a 'failed' record so the table row reflects the error
             try:
                 _record_covariate_action_failure(
-                    covariate_name, action, user.id,
+                    covariate_name,
+                    action,
+                    user.id,
                 )
             except Exception:
                 logger.exception(
-                    "Failed to persist failure record for %s", covariate_name,
+                    "Failed to persist failure record for %s",
+                    covariate_name,
                 )
             return dbc.Alert(
                 f"Action '{action}' failed for '{covariate_name}'. "
                 "Check logs for details.",
-                color="danger", duration=6000,
+                color="danger",
+                duration=6000,
             )
 
     # -- Admin: User management (AG Grid) ------------------------------------
 
     @app.callback(
-        [Output("user-management-table", "rowData"),
-         Output("user-management-total-count", "children")],
+        [
+            Output("user-management-table", "rowData"),
+            Output("user-management-total-count", "children"),
+        ],
         Input("admin-refresh-interval", "n_intervals"),
     )
     def refresh_user_management(n):
@@ -579,16 +619,18 @@ def register_callbacks(app):
 
         rows = []
         for u in users:
-            rows.append({
-                "id": str(u.id),
-                "name": u.name,
-                "email": u.email,
-                "role": u.role,
-                "is_approved": u.is_approved,
-                "created_at": _fmt_dt(u.created_at),
-                "last_login": _fmt_dt(u.last_login),
-                "is_active": u.is_active,
-            })
+            rows.append(
+                {
+                    "id": str(u.id),
+                    "name": u.name,
+                    "email": u.email,
+                    "role": u.role,
+                    "is_approved": u.is_approved,
+                    "created_at": _fmt_dt(u.created_at),
+                    "last_login": _fmt_dt(u.last_login),
+                    "is_active": u.is_active,
+                }
+            )
 
         return rows, f"Total: {len(rows)}"
 
@@ -604,7 +646,7 @@ def register_callbacks(app):
         return [
             {
                 "label": f"{r['name']} ({r['email']})"
-                         + (" [pending]" if not r.get("is_approved") else ""),
+                + (" [pending]" if not r.get("is_approved") else ""),
                 "value": r["id"],
             }
             for r in row_data
@@ -613,8 +655,7 @@ def register_callbacks(app):
     # -- Settings: link trends.earth account ---------------------------------
 
     @app.callback(
-        [Output("te-link-message", "children"),
-         Output("te-link-done-store", "data")],
+        [Output("te-link-message", "children"), Output("te-link-done-store", "data")],
         Input("te-link-btn", "n_clicks"),
         State("te-link-email", "value"),
         State("te-link-password", "value"),
@@ -624,16 +665,18 @@ def register_callbacks(app):
         """Log in to trends.earth, register an OAuth2 client, store creds."""
         if not email or not password:
             return (
-                dbc.Alert("Please enter both email and password.",
-                          color="warning", duration=5000),
+                dbc.Alert(
+                    "Please enter both email and password.",
+                    color="warning",
+                    duration=5000,
+                ),
                 no_update,
             )
 
         user = get_current_user()
         if not user:
             return (
-                dbc.Alert("Please log in first.", color="danger",
-                          duration=5000),
+                dbc.Alert("Please log in first.", color="danger", duration=5000),
                 no_update,
             )
 
@@ -663,8 +706,7 @@ def register_callbacks(app):
             if not client_id or not client_secret:
                 return (
                     dbc.Alert(
-                        "The API did not return client credentials. "
-                        "Please try again.",
+                        "The API did not return client credentials. Please try again.",
                         color="danger",
                     ),
                     no_update,
@@ -727,7 +769,8 @@ def register_callbacks(app):
         creds = get_decrypted_secret(user.id)
         if not creds:
             return dbc.Alert(
-                "No stored credentials found.", color="warning",
+                "No stored credentials found.",
+                color="warning",
                 duration=5000,
             )
 
@@ -738,16 +781,20 @@ def register_callbacks(app):
             if token_data.get("access_token"):
                 return dbc.Alert(
                     "Connection successful! Access token obtained.",
-                    color="success", duration=5000,
+                    color="success",
+                    duration=5000,
                 )
             return dbc.Alert(
-                "Unexpected response from API.", color="warning",
+                "Unexpected response from API.",
+                color="warning",
                 duration=5000,
             )
         except Exception as e:
             logger.exception("trends.earth connection test failed")
             return dbc.Alert(
-                f"Connection failed: {e}", color="danger", duration=8000,
+                f"Connection failed: {e}",
+                color="danger",
+                duration=8000,
             )
 
     # -- Settings: unlink account --------------------------------------------
@@ -803,8 +850,10 @@ def register_callbacks(app):
     # -- Admin: approve user -------------------------------------------------
 
     @app.callback(
-        [Output("admin-user-action-result", "children", allow_duplicate=True),
-         Output("admin-refresh-interval", "n_intervals", allow_duplicate=True)],
+        [
+            Output("admin-user-action-result", "children", allow_duplicate=True),
+            Output("admin-refresh-interval", "n_intervals", allow_duplicate=True),
+        ],
         Input("admin-approve-btn", "n_clicks"),
         State("admin-user-select", "value"),
         State("admin-refresh-interval", "n_intervals"),
@@ -812,12 +861,14 @@ def register_callbacks(app):
     )
     def handle_approve_user(n_clicks, user_id, current_n):
         if not user_id:
-            return dbc.Alert("Please select a user.", color="warning",
-                             duration=4000), no_update
+            return dbc.Alert(
+                "Please select a user.", color="warning", duration=4000
+            ), no_update
         user = get_current_user()
         if not user or not user.is_admin:
-            return dbc.Alert("Admin access required.", color="danger",
-                             duration=4000), no_update
+            return dbc.Alert(
+                "Admin access required.", color="danger", duration=4000
+            ), no_update
         success, message = approve_user(user_id)
         color = "success" if success else "danger"
         # Bump n_intervals to force a refresh of the user table
@@ -826,8 +877,10 @@ def register_callbacks(app):
     # -- Admin: change user role ---------------------------------------------
 
     @app.callback(
-        [Output("admin-user-action-result", "children", allow_duplicate=True),
-         Output("admin-refresh-interval", "n_intervals", allow_duplicate=True)],
+        [
+            Output("admin-user-action-result", "children", allow_duplicate=True),
+            Output("admin-refresh-interval", "n_intervals", allow_duplicate=True),
+        ],
         Input("admin-role-btn", "n_clicks"),
         State("admin-user-select", "value"),
         State("admin-role-select", "value"),
@@ -836,12 +889,14 @@ def register_callbacks(app):
     )
     def handle_change_role(n_clicks, user_id, new_role, current_n):
         if not user_id:
-            return dbc.Alert("Please select a user.", color="warning",
-                             duration=4000), no_update
+            return dbc.Alert(
+                "Please select a user.", color="warning", duration=4000
+            ), no_update
         user = get_current_user()
         if not user or not user.is_admin:
-            return dbc.Alert("Admin access required.", color="danger",
-                             duration=4000), no_update
+            return dbc.Alert(
+                "Admin access required.", color="danger", duration=4000
+            ), no_update
         success, message = change_user_role(user_id, new_role)
         color = "success" if success else "danger"
         return dbc.Alert(message, color=color, duration=4000), (current_n or 0) + 1
@@ -850,14 +905,15 @@ def register_callbacks(app):
 
     @app.callback(
         Output("admin-delete-modal", "is_open"),
-        [Input("admin-delete-btn", "n_clicks"),
-         Input("admin-delete-cancel", "n_clicks"),
-         Input("admin-delete-confirm", "n_clicks")],
+        [
+            Input("admin-delete-btn", "n_clicks"),
+            Input("admin-delete-cancel", "n_clicks"),
+            Input("admin-delete-confirm", "n_clicks"),
+        ],
         State("admin-delete-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def toggle_admin_delete_modal(open_clicks, cancel_clicks, confirm_clicks,
-                                  is_open):
+    def toggle_admin_delete_modal(open_clicks, cancel_clicks, confirm_clicks, is_open):
         ctx = callback_context
         if not ctx.triggered:
             raise PreventUpdate
@@ -867,8 +923,10 @@ def register_callbacks(app):
         return False
 
     @app.callback(
-        [Output("admin-user-action-result", "children", allow_duplicate=True),
-         Output("admin-refresh-interval", "n_intervals", allow_duplicate=True)],
+        [
+            Output("admin-user-action-result", "children", allow_duplicate=True),
+            Output("admin-refresh-interval", "n_intervals", allow_duplicate=True),
+        ],
         Input("admin-delete-confirm", "n_clicks"),
         State("admin-user-select", "value"),
         State("admin-refresh-interval", "n_intervals"),
@@ -876,16 +934,21 @@ def register_callbacks(app):
     )
     def handle_admin_delete_user(n_clicks, user_id, current_n):
         if not user_id:
-            return dbc.Alert("Please select a user.", color="warning",
-                             duration=4000), no_update
+            return dbc.Alert(
+                "Please select a user.", color="warning", duration=4000
+            ), no_update
         user = get_current_user()
         if not user or not user.is_admin:
-            return dbc.Alert("Admin access required.", color="danger",
-                             duration=4000), no_update
+            return dbc.Alert(
+                "Admin access required.", color="danger", duration=4000
+            ), no_update
         # Prevent admins from deleting themselves
         if str(user.id) == str(user_id):
-            return dbc.Alert("You cannot delete your own admin account.",
-                             color="warning", duration=4000), no_update
+            return dbc.Alert(
+                "You cannot delete your own admin account.",
+                color="warning",
+                duration=4000,
+            ), no_update
         success, message = delete_user(user_id)
         color = "success" if success else "danger"
         return dbc.Alert(message, color=color, duration=4000), (current_n or 0) + 1
@@ -894,14 +957,15 @@ def register_callbacks(app):
 
     @app.callback(
         Output("self-delete-modal", "is_open"),
-        [Input("self-delete-btn", "n_clicks"),
-         Input("self-delete-cancel", "n_clicks"),
-         Input("self-delete-confirm", "n_clicks")],
+        [
+            Input("self-delete-btn", "n_clicks"),
+            Input("self-delete-cancel", "n_clicks"),
+            Input("self-delete-confirm", "n_clicks"),
+        ],
         State("self-delete-modal", "is_open"),
         prevent_initial_call=True,
     )
-    def toggle_self_delete_modal(open_clicks, cancel_clicks, confirm_clicks,
-                                 is_open):
+    def toggle_self_delete_modal(open_clicks, cancel_clicks, confirm_clicks, is_open):
         ctx = callback_context
         if not ctx.triggered:
             raise PreventUpdate
@@ -944,10 +1008,8 @@ def register_callbacks(app):
     # -- Covariate presets ---------------------------------------------------
 
     @app.callback(
-        [Output("preset-selector", "options"),
-         Output("presets-store", "data")],
-        [Input("url", "pathname"),
-         Input("presets-store", "modified_timestamp")],
+        [Output("preset-selector", "options"), Output("presets-store", "data")],
+        [Input("url", "pathname"), Input("presets-store", "modified_timestamp")],
     )
     def refresh_presets(_pathname, _ts):
         """Populate the preset dropdown whenever the page loads or the
@@ -961,8 +1023,10 @@ def register_callbacks(app):
         return options, presets
 
     @app.callback(
-        [Output("covariate-selection", "value"),
-         Output("preset-feedback", "children", allow_duplicate=True)],
+        [
+            Output("covariate-selection", "value"),
+            Output("preset-feedback", "children", allow_duplicate=True),
+        ],
         Input("load-preset-btn", "n_clicks"),
         State("preset-selector", "value"),
         State("presets-store", "data"),
@@ -976,18 +1040,23 @@ def register_callbacks(app):
         for p in presets_data:
             if p["id"] == preset_id:
                 return p["covariates"], dbc.Alert(
-                    f"Loaded preset \"{p['name']}\".",
-                    color="info", duration=3000,
+                    f'Loaded preset "{p["name"]}".',
+                    color="info",
+                    duration=3000,
                 )
 
         return no_update, dbc.Alert(
-            "Preset not found.", color="warning", duration=3000,
+            "Preset not found.",
+            color="warning",
+            duration=3000,
         )
 
     @app.callback(
-        [Output("presets-store", "data", allow_duplicate=True),
-         Output("preset-feedback", "children", allow_duplicate=True),
-         Output("preset-name-input", "value")],
+        [
+            Output("presets-store", "data", allow_duplicate=True),
+            Output("preset-feedback", "children", allow_duplicate=True),
+            Output("preset-name-input", "value"),
+        ],
         Input("save-preset-btn", "n_clicks"),
         State("preset-name-input", "value"),
         State("covariate-selection", "value"),
@@ -996,15 +1065,25 @@ def register_callbacks(app):
     def save_preset(_n, name, covariates):
         """Save the current covariate selection as a named preset."""
         if not name or not name.strip():
-            return no_update, dbc.Alert(
-                "Please enter a name for the preset.",
-                color="warning", duration=3000,
-            ), no_update
+            return (
+                no_update,
+                dbc.Alert(
+                    "Please enter a name for the preset.",
+                    color="warning",
+                    duration=3000,
+                ),
+                no_update,
+            )
         if not covariates:
-            return no_update, dbc.Alert(
-                "Select at least one covariate before saving.",
-                color="warning", duration=3000,
-            ), no_update
+            return (
+                no_update,
+                dbc.Alert(
+                    "Select at least one covariate before saving.",
+                    color="warning",
+                    duration=3000,
+                ),
+                no_update,
+            )
 
         user = get_current_user()
         if not user:
@@ -1013,21 +1092,34 @@ def register_callbacks(app):
         try:
             save_covariate_preset(user.id, name.strip(), covariates)
             updated = get_covariate_presets(user.id)
-            return updated, dbc.Alert(
-                f"Preset \"{name.strip()}\" saved.",
-                color="success", duration=3000,
-            ), ""
+            return (
+                updated,
+                dbc.Alert(
+                    f'Preset "{name.strip()}" saved.',
+                    color="success",
+                    duration=3000,
+                ),
+                "",
+            )
         except Exception:
             logger.exception("Failed to save covariate preset")
             report_exception()
-            return no_update, dbc.Alert(
-                "Failed to save preset.", color="danger", duration=3000,
-            ), no_update
+            return (
+                no_update,
+                dbc.Alert(
+                    "Failed to save preset.",
+                    color="danger",
+                    duration=3000,
+                ),
+                no_update,
+            )
 
     @app.callback(
-        [Output("presets-store", "data", allow_duplicate=True),
-         Output("preset-feedback", "children", allow_duplicate=True),
-         Output("preset-selector", "value")],
+        [
+            Output("presets-store", "data", allow_duplicate=True),
+            Output("preset-feedback", "children", allow_duplicate=True),
+            Output("preset-selector", "value"),
+        ],
         Input("delete-preset-btn", "n_clicks"),
         State("preset-selector", "value"),
         State("presets-store", "data"),
@@ -1036,10 +1128,15 @@ def register_callbacks(app):
     def delete_preset(_n, preset_id, presets_data):
         """Delete the currently selected preset."""
         if not preset_id:
-            return no_update, dbc.Alert(
-                "Please select a preset to delete.",
-                color="warning", duration=3000,
-            ), no_update
+            return (
+                no_update,
+                dbc.Alert(
+                    "Please select a preset to delete.",
+                    color="warning",
+                    duration=3000,
+                ),
+                no_update,
+            )
 
         user = get_current_user()
         if not user:
@@ -1053,116 +1150,183 @@ def register_callbacks(app):
         try:
             deleted = delete_covariate_preset(preset_id, user.id)
             if not deleted:
-                return no_update, dbc.Alert(
-                    "Preset not found or already deleted.",
-                    color="warning", duration=3000,
-                ), no_update
+                return (
+                    no_update,
+                    dbc.Alert(
+                        "Preset not found or already deleted.",
+                        color="warning",
+                        duration=3000,
+                    ),
+                    no_update,
+                )
 
             updated = get_covariate_presets(user.id)
-            return updated, dbc.Alert(
-                f"Preset \"{preset_name}\" deleted.",
-                color="info", duration=3000,
-            ), None
+            return (
+                updated,
+                dbc.Alert(
+                    f'Preset "{preset_name}" deleted.',
+                    color="info",
+                    duration=3000,
+                ),
+                None,
+            )
         except Exception:
             logger.exception("Failed to delete covariate preset")
             report_exception()
-            return no_update, dbc.Alert(
-                "Failed to delete preset.", color="danger", duration=3000,
-            ), no_update
+            return (
+                no_update,
+                dbc.Alert(
+                    "Failed to delete preset.",
+                    color="danger",
+                    duration=3000,
+                ),
+                no_update,
+            )
 
 
 # -- Helper functions for building detail page content -----------------------
+
 
 def _build_overview(task, sites, totals):
     """Build the overview cards for a task detail page."""
     cards = []
 
     # Task info card
-    cards.append(dbc.Card([
-        dbc.CardHeader("Task Information"),
-        dbc.CardBody([
-            html.P(f"Description: {task.description or 'None'}"),
-            html.P(f"Sites: {task.n_sites or 0}"),
-            html.P(f"Covariates: {', '.join(task.covariates or [])}"),
-            html.P(f"Created: {task.created_at}"),
-            html.P(f"Status: {task.status}"),
-        ]),
-    ], className="mb-3"))
+    cards.append(
+        dbc.Card(
+            [
+                dbc.CardHeader("Task Information"),
+                dbc.CardBody(
+                    [
+                        html.P(f"Description: {task.description or 'None'}"),
+                        html.P(f"Sites: {task.n_sites or 0}"),
+                        html.P(f"Covariates: {', '.join(task.covariates or [])}"),
+                        html.P(f"Created: {task.created_at}"),
+                        html.P(f"Status: {task.status}"),
+                    ]
+                ),
+            ],
+            className="mb-3",
+        )
+    )
 
     if task.error_message:
-        cards.append(dbc.Alert(
-            f"Error: {task.error_message}", color="danger"
-        ))
+        cards.append(dbc.Alert(f"Error: {task.error_message}", color="danger"))
 
     # Summary stats if results exist
     if totals:
-        total_emissions = sum(
-            t.emissions_avoided_mgco2e or 0 for t in totals
-        )
-        total_forest = sum(
-            t.forest_loss_avoided_ha or 0 for t in totals
-        )
+        total_emissions = sum(t.emissions_avoided_mgco2e or 0 for t in totals)
+        total_forest = sum(t.forest_loss_avoided_ha or 0 for t in totals)
         total_area = sum(t.area_ha or 0 for t in totals)
 
-        cards.append(dbc.Row([
-            dbc.Col(dbc.Card([
-                dbc.CardBody([
-                    html.H4(f"{total_emissions:,.0f}",
-                             className="text-success"),
-                    html.P("Total Avoided Emissions (MgCO₂e)",
-                           className="text-muted mb-0"),
-                ]),
-            ], color="success", outline=True)),
-            dbc.Col(dbc.Card([
-                dbc.CardBody([
-                    html.H4(f"{total_forest:,.0f}",
-                             className="text-info"),
-                    html.P("Forest Loss Avoided (ha)",
-                           className="text-muted mb-0"),
-                ]),
-            ], color="info", outline=True)),
-            dbc.Col(dbc.Card([
-                dbc.CardBody([
-                    html.H4(f"{total_area:,.0f}"),
-                    html.P("Total Site Area (ha)",
-                           className="text-muted mb-0"),
-                ]),
-            ], color="secondary", outline=True)),
-        ], className="mb-3"))
+        cards.append(
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
+                            [
+                                dbc.CardBody(
+                                    [
+                                        html.H4(
+                                            f"{total_emissions:,.0f}",
+                                            className="text-success",
+                                        ),
+                                        html.P(
+                                            "Total Avoided Emissions (MgCO₂e)",
+                                            className="text-muted mb-0",
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            color="success",
+                            outline=True,
+                        )
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            [
+                                dbc.CardBody(
+                                    [
+                                        html.H4(
+                                            f"{total_forest:,.0f}",
+                                            className="text-info",
+                                        ),
+                                        html.P(
+                                            "Forest Loss Avoided (ha)",
+                                            className="text-muted mb-0",
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            color="info",
+                            outline=True,
+                        )
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            [
+                                dbc.CardBody(
+                                    [
+                                        html.H4(f"{total_area:,.0f}"),
+                                        html.P(
+                                            "Total Site Area (ha)",
+                                            className="text-muted mb-0",
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            color="secondary",
+                            outline=True,
+                        )
+                    ),
+                ],
+                className="mb-3",
+            )
+        )
 
     # Sites table (AG Grid)
     if sites:
-        site_rows = [{
-            "site_id": s.site_id,
-            "site_name": s.site_name or "-",
-            "start_date": str(s.start_date)[:10] if s.start_date else "-",
-            "end_date": str(s.end_date)[:10] if s.end_date else "Ongoing",
-            "area_ha": s.area_ha,
-        } for s in sites]
-
-        site_cols = [
-            {"headerName": "Site ID", "field": "site_id", "flex": 1,
-             "minWidth": 120},
-            {"headerName": "Name", "field": "site_name", "flex": 1.5,
-             "minWidth": 150},
-            {"headerName": "Start", "field": "start_date", "flex": 1,
-             "minWidth": 110},
-            {"headerName": "End", "field": "end_date", "flex": 1,
-             "minWidth": 110},
-            {"headerName": "Area (ha)", "field": "area_ha", "flex": 1,
-             "minWidth": 100, "type": "numericColumn",
-             "valueFormatter": {"function": "d3.format(',.0f')(params.value)"}},
+        site_rows = [
+            {
+                "site_id": s.site_id,
+                "site_name": s.site_name or "-",
+                "start_date": str(s.start_date)[:10] if s.start_date else "-",
+                "end_date": str(s.end_date)[:10] if s.end_date else "Ongoing",
+                "area_ha": s.area_ha,
+            }
+            for s in sites
         ]
 
-        cards.append(dbc.Card([
-            dbc.CardHeader("Sites"),
-            dbc.CardBody(
-                _make_ag_grid(
-                    "overview-sites-table", site_cols,
-                    row_data=site_rows, height="300px",
-                ),
-            ),
-        ]))
+        site_cols = [
+            {"headerName": "Site ID", "field": "site_id", "flex": 1, "minWidth": 120},
+            {"headerName": "Name", "field": "site_name", "flex": 1.5, "minWidth": 150},
+            {"headerName": "Start", "field": "start_date", "flex": 1, "minWidth": 110},
+            {"headerName": "End", "field": "end_date", "flex": 1, "minWidth": 110},
+            {
+                "headerName": "Area (ha)",
+                "field": "area_ha",
+                "flex": 1,
+                "minWidth": 100,
+                "type": "numericColumn",
+                "valueFormatter": {"function": "d3.format(',.0f')(params.value)"},
+            },
+        ]
+
+        cards.append(
+            dbc.Card(
+                [
+                    dbc.CardHeader("Sites"),
+                    dbc.CardBody(
+                        _make_ag_grid(
+                            "overview-sites-table",
+                            site_cols,
+                            row_data=site_rows,
+                            height="300px",
+                        ),
+                    ),
+                ]
+            )
+        )
 
     return html.Div(cards)
 
@@ -1173,55 +1337,77 @@ def _build_results_content(results, totals):
         return html.P("Results not yet available.", className="text-muted")
 
     # Totals table
-    totals_rows = [{
-        "site_id": t.site_id,
-        "site_name": t.site_name or "-",
-        "emissions_avoided_mgco2e": t.emissions_avoided_mgco2e or 0,
-        "forest_loss_avoided_ha": t.forest_loss_avoided_ha or 0,
-        "area_ha": t.area_ha or 0,
-        "period": (f"{t.first_year}-{t.last_year}"
-                   if t.first_year else "-"),
-    } for t in totals]
+    totals_rows = [
+        {
+            "site_id": t.site_id,
+            "site_name": t.site_name or "-",
+            "emissions_avoided_mgco2e": t.emissions_avoided_mgco2e or 0,
+            "forest_loss_avoided_ha": t.forest_loss_avoided_ha or 0,
+            "area_ha": t.area_ha or 0,
+            "period": (f"{t.first_year}-{t.last_year}" if t.first_year else "-"),
+        }
+        for t in totals
+    ]
 
     # Yearly results table
     yearly_rows = []
     if results:
-        yearly_rows = [{
-            "site_id": r.site_id,
-            "year": r.year,
-            "emissions_avoided_mgco2e": r.emissions_avoided_mgco2e or 0,
-            "forest_loss_avoided_ha": r.forest_loss_avoided_ha or 0,
-            "n_matched_pixels": r.n_matched_pixels or 0,
-        } for r in results]
+        yearly_rows = [
+            {
+                "site_id": r.site_id,
+                "year": r.year,
+                "emissions_avoided_mgco2e": r.emissions_avoided_mgco2e or 0,
+                "forest_loss_avoided_ha": r.forest_loss_avoided_ha or 0,
+                "n_matched_pixels": r.n_matched_pixels or 0,
+            }
+            for r in results
+        ]
 
     content = [
         html.H5("Totals by Site"),
         _make_ag_grid(
-            "results-totals-table", RESULTS_TOTAL_COLUMNS,
-            row_data=totals_rows, height="350px",
+            "results-totals-table",
+            RESULTS_TOTAL_COLUMNS,
+            row_data=totals_rows,
+            height="350px",
         ),
     ]
 
     if yearly_rows:
-        content.extend([
-            html.H5("Results by Year", className="mt-4"),
-            _make_ag_grid(
-                "results-yearly-table", RESULTS_YEARLY_COLUMNS,
-                row_data=yearly_rows, height="400px",
-            ),
-        ])
+        content.extend(
+            [
+                html.H5("Results by Year", className="mt-4"),
+                _make_ag_grid(
+                    "results-yearly-table",
+                    RESULTS_YEARLY_COLUMNS,
+                    row_data=yearly_rows,
+                    height="400px",
+                ),
+            ]
+        )
 
-    content.extend([
-        dbc.ButtonGroup([
-            dbc.Button("Download CSV (by year)",
-                       id="download-by-year", color="secondary",
-                       size="sm"),
-            dbc.Button("Download CSV (totals)",
-                       id="download-totals", color="secondary",
-                       size="sm"),
-        ], className="mt-3"),
-        dcc.Download(id="download-results"),
-    ])
+    content.extend(
+        [
+            dbc.ButtonGroup(
+                [
+                    dbc.Button(
+                        "Download CSV (by year)",
+                        id="download-by-year",
+                        color="secondary",
+                        size="sm",
+                    ),
+                    dbc.Button(
+                        "Download CSV (totals)",
+                        id="download-totals",
+                        color="secondary",
+                        size="sm",
+                    ),
+                ],
+                className="mt-3",
+            ),
+            dcc.Download(id="download-results"),
+        ]
+    )
 
     return html.Div(content)
 
@@ -1232,18 +1418,26 @@ def _build_plots(results, totals):
         return html.P("No results to plot.", className="text-muted")
 
     # Convert to DataFrame
-    df = pd.DataFrame([{
-        "site_id": r.site_id,
-        "year": r.year,
-        "emissions_avoided_mgco2e": r.emissions_avoided_mgco2e or 0,
-        "forest_loss_avoided_ha": r.forest_loss_avoided_ha or 0,
-    } for r in results])
+    df = pd.DataFrame(
+        [
+            {
+                "site_id": r.site_id,
+                "year": r.year,
+                "emissions_avoided_mgco2e": r.emissions_avoided_mgco2e or 0,
+                "forest_loss_avoided_ha": r.forest_loss_avoided_ha or 0,
+            }
+            for r in results
+        ]
+    )
 
     plots = []
 
     # Emissions avoided over time (stacked by site)
     fig_emissions = px.bar(
-        df, x="year", y="emissions_avoided_mgco2e", color="site_id",
+        df,
+        x="year",
+        y="emissions_avoided_mgco2e",
+        color="site_id",
         title="Avoided Emissions by Year",
         labels={
             "emissions_avoided_mgco2e": "Emissions Avoided (MgCO₂e)",
@@ -1256,7 +1450,10 @@ def _build_plots(results, totals):
 
     # Forest loss avoided over time
     fig_forest = px.bar(
-        df, x="year", y="forest_loss_avoided_ha", color="site_id",
+        df,
+        x="year",
+        y="forest_loss_avoided_ha",
+        color="site_id",
         title="Forest Loss Avoided by Year",
         labels={
             "forest_loss_avoided_ha": "Forest Loss Avoided (ha)",
@@ -1269,15 +1466,22 @@ def _build_plots(results, totals):
 
     # Per-site totals bar chart
     if totals:
-        df_totals = pd.DataFrame([{
-            "site_id": t.site_id,
-            "site_name": t.site_name or t.site_id,
-            "emissions_avoided_mgco2e": t.emissions_avoided_mgco2e or 0,
-            "forest_loss_avoided_ha": t.forest_loss_avoided_ha or 0,
-        } for t in totals])
+        df_totals = pd.DataFrame(
+            [
+                {
+                    "site_id": t.site_id,
+                    "site_name": t.site_name or t.site_id,
+                    "emissions_avoided_mgco2e": t.emissions_avoided_mgco2e or 0,
+                    "forest_loss_avoided_ha": t.forest_loss_avoided_ha or 0,
+                }
+                for t in totals
+            ]
+        )
 
         fig_site_totals = px.bar(
-            df_totals, x="site_name", y="emissions_avoided_mgco2e",
+            df_totals,
+            x="site_name",
+            y="emissions_avoided_mgco2e",
             title="Total Avoided Emissions by Site",
             labels={
                 "emissions_avoided_mgco2e": "Emissions Avoided (MgCO₂e)",
@@ -1305,20 +1509,21 @@ def _build_map(sites, totals):
         t = totals_dict.get(s.site_id)
         emissions = t.emissions_avoided_mgco2e if t else 0
         texts.append(
-            f"{s.site_name or s.site_id}<br>"
-            f"Emissions avoided: {emissions:,.0f} MgCO₂e"
+            f"{s.site_name or s.site_id}<br>Emissions avoided: {emissions:,.0f} MgCO₂e"
         )
         colors.append(emissions or 0)
 
-    fig = go.Figure(go.Scattermapbox(
-        lat=lats, lon=lons, text=texts,
-        marker=dict(size=10, color=colors, colorscale="Greens",
-                    showscale=True),
-        hoverinfo="text",
-    ))
+    fig = go.Figure(
+        go.Scattermapbox(
+            lat=lats,
+            lon=lons,
+            text=texts,
+            marker=dict(size=10, color=colors, colorscale="Greens", showscale=True),
+            hoverinfo="text",
+        )
+    )
     fig.update_layout(
-        mapbox=dict(style="open-street-map", zoom=2,
-                    center=dict(lat=0, lon=0)),
+        mapbox=dict(style="open-street-map", zoom=2, center=dict(lat=0, lon=0)),
         margin=dict(r=0, t=0, l=0, b=0),
         height=500,
     )

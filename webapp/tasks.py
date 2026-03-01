@@ -172,9 +172,7 @@ def poll_gee_exports() -> dict:
                 op_name = f"projects/{project}/operations/{export.gee_task_id}"
                 op = ee.data.getOperation(op_name)
                 metadata = op.get("metadata", {})
-                gee_state = metadata.get(
-                    "state", op.get("done") and "SUCCEEDED"
-                )
+                gee_state = metadata.get("state", op.get("done") and "SUCCEEDED")
                 new_status = state_map.get(gee_state, export.status)
 
                 if new_status != export.status:
@@ -265,16 +263,12 @@ def auto_merge_unmerged() -> dict:
     # Load covariate names from GEE export config
     import os
 
-    gee_config_path = os.path.join(
-        os.path.dirname(__file__), "gee-export", "config.py"
-    )
+    gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
     if not os.path.exists(gee_config_path):
         logger.warning("GEE config not found at %s", gee_config_path)
         return {"scanned": 0, "dispatched": 0}
 
-    spec = importlib.util.spec_from_file_location(
-        "gee_export_config", gee_config_path
-    )
+    spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
     gee_config = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gee_config)
     known_covariates = list(gee_config.COVARIATES.keys())
@@ -417,23 +411,23 @@ def poll_batch_tasks() -> dict:
                 batch_tasks.append(task)
 
         # ---- Poll API-routed tasks ----
+        # Background polling uses the system-level service credentials
+        # (TRENDSEARTH_CLIENT_ID / TRENDSEARTH_CLIENT_SECRET) because
+        # Celery workers have no per-user context.
         if api_tasks:
             from config import Config
             from trendsearth_client import TrendsEarthClient
 
             client = TrendsEarthClient(
                 api_url=Config.TRENDSEARTH_API_URL,
-                api_key=Config.TRENDSEARTH_API_KEY,
-                email=Config.TRENDSEARTH_API_EMAIL,
-                password=Config.TRENDSEARTH_API_PASSWORD,
+                client_id=Config.TRENDSEARTH_CLIENT_ID,
+                client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
             )
             for task in api_tasks:
                 try:
                     exec_id = task.extract_job_id[4:]  # strip "api:"
                     execution = client.get_execution(exec_id)
-                    attrs = (
-                        execution.get("data", {}).get("attributes", {})
-                    )
+                    attrs = execution.get("data", {}).get("attributes", {})
                     api_status = attrs.get("status", "").upper()
                     old_status = task.status
 
@@ -461,9 +455,7 @@ def poll_batch_tasks() -> dict:
 
         # ---- Poll legacy Batch tasks ----
         if batch_tasks:
-            r_analysis_dir = os.path.join(
-                os.path.dirname(__file__), "r-analysis"
-            )
+            r_analysis_dir = os.path.join(os.path.dirname(__file__), "r-analysis")
             if r_analysis_dir not in sys.path:
                 sys.path.insert(0, r_analysis_dir)
             batch = importlib.import_module("batch_jobs")
@@ -506,10 +498,7 @@ def poll_batch_tasks() -> dict:
                     # Check extract job
                     if task.extract_job_id:
                         status = batch.get_job_status(task.extract_job_id)
-                        if (
-                            status["status"] == "RUNNING"
-                            and task.status == "submitted"
-                        ):
+                        if status["status"] == "RUNNING" and task.status == "submitted":
                             task.status = "running"
                             if not task.started_at:
                                 task.started_at = now

@@ -37,7 +37,9 @@ if Config.ROLLBAR_ACCESS_TOKEN:
         data["framework"] = "celery"
 
     rollbar.BASE_DATA_HOOK = _celery_base_data_hook
-    logger.info("Rollbar initialized for Celery (environment=%s)", Config.ROLLBAR_ENVIRONMENT)
+    logger.info(
+        "Rollbar initialized for Celery (environment=%s)", Config.ROLLBAR_ENVIRONMENT
+    )
 else:
     logger.warning("ROLLBAR_ACCESS_TOKEN not set — Celery error tracking disabled")
 
