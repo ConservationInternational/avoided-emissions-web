@@ -59,18 +59,35 @@ jobs:
           fi
 
       - name: Configure CLI
+        run: |
+          printf 'url_api: "%s"\n' "${{ steps.api-url.outputs.url }}" > ~/.tecli.yml
+
+      - name: Obtain access token via OAuth2 Client Credentials
         env:
           API_URL: ${{ steps.api-url.outputs.url }}
-          API_EMAIL: ${{ secrets.TRENDS_EARTH_API_EMAIL }}
-          API_PASSWORD: ${{ secrets.TRENDS_EARTH_API_PASSWORD }}
+          CLIENT_ID: ${{ secrets.TRENDS_EARTH_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.TRENDS_EARTH_CLIENT_SECRET }}
         run: |
-          printf 'url_api: "%s"\nemail: "%s"\npassword: "%s"\n' \
-            "$API_URL" "$API_EMAIL" "$API_PASSWORD" > ~/.tecli.yml
+          RESPONSE=$(curl -sf -X POST "${API_URL}/api/v1/oauth/token" \
+            -H "Content-Type: application/json" \
+            -d "{\"grant_type\":\"client_credentials\",\"client_id\":\"${CLIENT_ID}\",\"client_secret\":\"${CLIENT_SECRET}\"}")
 
-      - name: Login to trends.earth API
-        run: |
-          cd r-analysis
-          trends login
+          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::Failed to obtain access token"
+            exit 1
+          fi
+
+          # Write JWT into CLI config (same key the CLI uses after login)
+          python3 -c "
+          import yaml
+          with open('$HOME/.tecli.yml', 'r') as f:
+              cfg = yaml.safe_load(f) or {}
+          cfg['JWT'] = '${TOKEN}'
+          with open('$HOME/.tecli.yml', 'w') as f:
+              yaml.dump(cfg, f, default_flow_style=False)
+          "
+          echo "::notice::Access token obtained successfully"
 
       - name: Publish script
         run: |
