@@ -21,7 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2-dev \
     libsqlite3-dev \
     gdal-bin \
-    awscli \
     jq \
     python3 \
     python3-pip \

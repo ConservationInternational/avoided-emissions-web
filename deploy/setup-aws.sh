@@ -19,7 +19,7 @@ set -euo pipefail
 AWS_REGION="${AWS_REGION:-us-east-1}"
 AWS_ACCOUNT_ID=""
 AWS_PROFILE_ARG="${AWS_PROFILE:-}"
-GITHUB_ORG="conservationinternational"
+GITHUB_ORG="ConservationInternational"
 GITHUB_REPO="avoided-emissions-web"
 
 APP_NAME="avoided-emissions-web"
@@ -517,6 +517,8 @@ create_deployment_group() {
                 }' >/dev/null
             aws iam attach-role-policy --role-name "$cd_role_name" \
                 --policy-arn "arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole" 2>/dev/null || true
+            info "Waiting for IAM role to propagate..."
+            sleep 10
         fi
         local cd_role_arn
         cd_role_arn=$(aws iam get-role --role-name "$cd_role_name" --query 'Role.Arn' --output text)
