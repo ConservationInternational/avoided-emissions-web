@@ -121,7 +121,10 @@ results_by_year <- m_processed %>%
     )
 
 results_by_year %>%
-    left_join(sites %>% select(site_id, site_name), by = "site_id") %>%
+    left_join(
+        sites %>% select(site_id, site_name),
+        by = "site_id"
+    ) %>%
     write_csv(file.path(config$output_dir, "results_by_site_year.csv"))
 
 message("  Per-site per-year results: ",

@@ -1,17 +1,17 @@
 # Step 2: Propensity score matching for avoided emissions analysis.
 #
 # For each site, matches treatment pixels (within the site) to control pixels
-# (outside the site, same GADM region) using propensity scores estimated via
-# logistic regression or Mahalanobis distance.
+# (outside the site, within the precomputed matching extent) using propensity
+# scores estimated via logistic regression or Mahalanobis distance.
 #
 # When run on AWS Batch as an array job, each array element processes one site
 # (specified by --site-id or AWS_BATCH_JOB_ARRAY_INDEX).
 #
 # Input:
-#   - {output_dir}/sites_processed.rds
-#   - {output_dir}/treatment_cell_key.rds
-#   - {output_dir}/treatments_and_controls.rds
-#   - {output_dir}/formula.rds
+#   - {output_dir}/sites_processed.parquet
+#   - {output_dir}/treatment_cell_key.parquet
+#   - {output_dir}/treatments_and_controls.parquet
+#   - {output_dir}/formula.json
 #
 # Output:
 #   - {matches_dir}/m_{id_numeric}.rds : Matched pairs for each site
@@ -38,6 +38,9 @@ message("Step 2: Propensity score matching")
 MAX_TREATMENT <- config$max_treatment_pixels
 CONTROL_MULTIPLIER <- config$control_multiplier
 MIN_GLM <- config$min_glm_treatment_pixels
+
+# Exact-match variables read from config (e.g. admin1, ecoregion, pa)
+EXACT_MATCH_VARS <- config$exact_match_vars
 
 # Load data — step 1 now outputs Parquet (from the Python rewrite)
 sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %>%
@@ -139,7 +142,7 @@ for (this_id in site_ids) {
     message("  Processing site ", this_id, " (", site$site_id, ")")
 
     # Get treatment cell IDs for this site
-    treatment_cells <- filter(treatment_key, id_numeric == this_id, !is.na(region))
+    treatment_cells <- filter(treatment_key, id_numeric == this_id)
     n_treatment_total <- nrow(treatment_cells)
 
     if (n_treatment_total == 0) {
@@ -147,8 +150,10 @@ for (this_id in site_ids) {
         next
     }
 
-    # Get all pixels in the treatment site's regions
-    vals <- filter(base_data, region %in% unique(treatment_cells$region))
+    # All candidate pixels (treatment + controls) are already spatially
+    # constrained to the matching extent computed in the webapp, so no
+    # region-based filtering is needed here.
+    vals <- base_data
     vals <- vals %>%
         full_join(
             treatment_cells %>% select(cell) %>% mutate(treatment = TRUE),
@@ -162,16 +167,18 @@ for (this_id in site_ids) {
     control_vals <- filter(vals, !(cell %in% treatment_key$cell))
     vals <- bind_rows(treatment_vals, control_vals)
 
-    # Remove pixels with NA in grouping variables
+    # Remove pixels with NA in exact-match grouping variables
     n_before <- nrow(vals)
-    vals <- filter(vals, !is.na(region), !is.na(ecoregion), !is.na(pa))
+    for (emv in EXACT_MATCH_VARS) {
+        vals <- filter(vals, !is.na(.data[[emv]]))
+    }
     n_dropped <- n_before - nrow(vals)
     if (n_dropped > 0) {
         message("  Filtered ", n_dropped, " pixels with missing group data")
     }
 
     # Filter to groups present in both treatment and control
-    vals <- filter_groups(vals)
+    vals <- filter_groups(vals, EXACT_MATCH_VARS)
 
     # Sample to manageable sizes
     sample_sizes <- vals %>% count(treatment, group)
@@ -192,7 +199,7 @@ for (this_id in site_ids) {
         ungroup() %>%
         select(-any_of("this_group"))
 
-    vals <- filter_groups(vals)
+    vals <- filter_groups(vals, EXACT_MATCH_VARS)
 
     # Add pre-intervention deforestation for sites established >= 2005
     estab_year <- site$start_year
@@ -209,7 +216,7 @@ for (this_id in site_ids) {
             vals$defor_pre_intervention[init_fc == 0] <- 0
             # Remove pixels with zero initial forest
             vals <- filter(vals, .data[[fc_init_name]] != 0)
-            vals <- filter_groups(vals)
+            vals <- filter_groups(vals, EXACT_MATCH_VARS)
             this_f <- update(this_f, ~ . + defor_pre_intervention)
         }
     }
