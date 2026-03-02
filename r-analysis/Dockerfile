@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     jq \
     python3 \
+    python3-gdal \
     python3-pip \
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
@@ -60,12 +61,9 @@ RUN chmod +x /app/entrypoint.sh
 
 # Install Python dependencies. Step 1 (extract) now runs in Python for
 # speed using GDAL, rioxarray, and xarray to read COGs.
-# Install GDAL Python bindings matching the system libgdal version first,
-# then the rest of the requirements.
-RUN python3 -m venv /app/.venv \
-    && GDAL_VERSION=$(gdal-config --version) \
-    && /app/.venv/bin/pip install --no-cache-dir \
-        "GDAL==${GDAL_VERSION}" \
+# Use --system-site-packages so the venv can access the pre-built
+# python3-gdal system package (osgeo), avoiding a slow source compile.
+RUN python3 -m venv --system-site-packages /app/.venv \
     && /app/.venv/bin/pip install --no-cache-dir \
         -r /app/requirements.txt \
     && rm -rf /var/lib/apt/lists/*
