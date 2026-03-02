@@ -325,6 +325,12 @@ def submit_analysis_task(
             client_secret=client_secret,
         )
         script_id = Config.TRENDSEARTH_SCRIPT_ID
+        if not script_id:
+            raise ValueError(
+                "TRENDSEARTH_SCRIPT_ID is not configured. Set this "
+                "environment variable to the UUID of the avoided-emissions "
+                "script registered on the trends.earth API."
+            )
         execution = client.create_execution(script_id, params)
 
         # Store the API execution ID for polling

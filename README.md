@@ -84,6 +84,21 @@ required attributes:
 
 Geometries must be valid polygons or multipolygons in EPSG:4326.
 
+## Key Environment Variables
+
+Copy `deploy/.env.example` to `.env` and fill in the values listed below.
+See the example file for the full set of variables and their defaults.
+
+| Variable | Required | Description |
+|---|---|---|
+| `TRENDSEARTH_SCRIPT_ID` | **Yes** (for task submission) | UUID of the avoided-emissions R analysis script registered on the trends.earth API. Obtain this by publishing the script with `trends publish` (see the trends.earth CLI docs) or from the API UI script list. Without this, task submission will fail. |
+| `TRENDSEARTH_API_URL` | No | trends.earth API v1 endpoint. Defaults to `https://api.trends.earth/api/v1`. |
+| `TRENDSEARTH_CLIENT_ID` | **Yes** (for polling) | OAuth2 client ID for background status polling of executions. |
+| `TRENDSEARTH_CLIENT_SECRET` | **Yes** (for polling) | OAuth2 client secret for background status polling. |
+| `S3_BUCKET` | **Yes** | S3 bucket for site uploads and analysis results. |
+| `GCS_BUCKET` | **Yes** (for GEE exports) | GCS bucket where GEE covariate COGs are stored. |
+| `GOOGLE_PROJECT_ID` | **Yes** (for GEE exports) | Google Cloud project registered for Earth Engine access. |
+
 ## Quick Start
 
 ```bash
