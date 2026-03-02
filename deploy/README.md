@@ -258,9 +258,13 @@ aws batch create-job-queue \
 
 #### Job Definitions
 
-Job definitions are registered programmatically by the webapp via `batch_jobs.py`.
-The first analysis run will register the definition automatically. Default resources
-per job:
+Job definitions are registered on the **trends.earth API** as part of the
+`Script` model configuration.  The webapp does not manage Batch job definitions
+directly — it creates an execution on the API, which dispatches to Batch using
+the job definition and queue configured on the Script (or overridden via
+`BATCH_JOB_QUEUE` / `BATCH_JOB_DEFINITION` environment variables).
+
+Default resources per job:
 
 | Resource | Value |
 |---|---|
@@ -288,6 +292,19 @@ unless overridden at the environment level.
 | `POSTGRES_PASSWORD` | Database password |
 | `POSTGRES_DB` | Database name |
 | `EE_SERVICE_ACCOUNT_JSON` | Google Earth Engine service account key (JSON string). Used by the webapp to trigger GEE covariate exports. The R analysis container does **not** need GCS credentials — it reads COGs from the public GCS bucket via GDAL `/vsicurl/`. |
+| `TRENDSEARTH_CLIENT_ID` | OAuth2 service-client ID for the trends.earth API. Used for background polling of execution status. |
+| `TRENDSEARTH_CLIENT_SECRET` | OAuth2 service-client secret for the trends.earth API. |
+| `ROLLBAR_ACCESS_TOKEN` | *(optional)* Rollbar server-side access token for error tracking. |
+
+#### Publish-Script Workflow Secrets
+
+The `publish-script.yml` workflow (publishes the R analysis script definition
+to the trends.earth API) uses its own OAuth2 credentials:
+
+| Secret | Description |
+|---|---|
+| `TRENDS_EARTH_CLIENT_ID` | OAuth2 client ID for the trends.earth CLI (used by the publish workflow only). |
+| `TRENDS_EARTH_CLIENT_SECRET` | OAuth2 client secret for the trends.earth CLI. |
 
 ### Variables
 
@@ -298,10 +315,12 @@ unless overridden at the environment level.
 | `S3_PREFIX` | `avoided-emissions` | Key prefix inside the S3 bucket |
 | `GCS_BUCKET` | *(none — required)* | GCS bucket for GEE covariate exports. Must allow public read access so the R container can read COGs via `/vsicurl/` |
 | `GCS_PREFIX` | `avoided-emissions/covariates` | Key prefix inside the GCS bucket |
-| `GEE_PROJECT_ID` | *(none — required for GEE exports)* | Google Cloud project ID registered for Earth Engine. Passed to `ee.Initialize(project=...)` |
+| `GOOGLE_PROJECT_ID` | *(none — required for GEE exports)* | Google Cloud project ID registered for Earth Engine. Passed to `ee.Initialize(project=...)` |
 | `GEE_ENDPOINT` | *(default EE endpoint)* | Optional Earth Engine API endpoint URL (e.g. `https://earthengine-highvolume.googleapis.com`) |
-| `AWS_BATCH_JOB_QUEUE` | `avoided-emissions-queue` | AWS Batch job queue name |
-| `AWS_BATCH_JOB_DEFINITION` | `avoided-emissions-analysis` | AWS Batch job definition name |
+| `TRENDSEARTH_API_URL` | `https://api.trends.earth/api/v1` | trends.earth API v1 endpoint |
+| `TRENDSEARTH_SCRIPT_ID` | *(none — required)* | UUID of the avoided-emissions R analysis script registered on the trends.earth API |
+| `BATCH_JOB_QUEUE` | *(empty — uses API default)* | Optional AWS Batch job queue override. Passed to the API in `params["batch"]` when creating an execution |
+| `BATCH_JOB_DEFINITION` | *(empty — uses API default)* | Optional AWS Batch job definition override. Passed to the API in `params["batch"]` when creating an execution |
 
 ### Generated `.env` File
 

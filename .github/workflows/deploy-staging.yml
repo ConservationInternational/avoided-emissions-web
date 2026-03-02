@@ -172,8 +172,14 @@ jobs:
         GCS_BUCKET: ${{ vars.GCS_BUCKET }}
         GCS_PREFIX: ${{ vars.GCS_PREFIX || 'avoided-emissions/covariates' }}
         EE_SERVICE_ACCOUNT_JSON: ${{ secrets.EE_SERVICE_ACCOUNT_JSON }}
-        AWS_BATCH_JOB_QUEUE: ${{ vars.AWS_BATCH_JOB_QUEUE || 'avoided-emissions-queue' }}
-        AWS_BATCH_JOB_DEFINITION: ${{ vars.AWS_BATCH_JOB_DEFINITION || 'avoided-emissions-analysis' }}
+        GOOGLE_PROJECT_ID: ${{ vars.GOOGLE_PROJECT_ID }}
+        GEE_ENDPOINT: ${{ vars.GEE_ENDPOINT }}
+        TRENDSEARTH_API_URL: ${{ vars.TRENDSEARTH_API_URL || 'https://api.trends.earth/api/v1' }}
+        TRENDSEARTH_CLIENT_ID: ${{ secrets.TRENDSEARTH_CLIENT_ID }}
+        TRENDSEARTH_CLIENT_SECRET: ${{ secrets.TRENDSEARTH_CLIENT_SECRET }}
+        TRENDSEARTH_SCRIPT_ID: ${{ vars.TRENDSEARTH_SCRIPT_ID }}
+        BATCH_JOB_QUEUE: ${{ vars.BATCH_JOB_QUEUE }}
+        BATCH_JOB_DEFINITION: ${{ vars.BATCH_JOB_DEFINITION }}
         ROLLBAR_ACCESS_TOKEN: ${{ secrets.ROLLBAR_ACCESS_TOKEN }}
       run: |
         ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -204,13 +210,21 @@ jobs:
           echo "AWS_ACCOUNT_ID=$ACCOUNT_ID"
           echo "S3_BUCKET=$S3_BUCKET"
           echo "S3_PREFIX=$S3_PREFIX"
-          echo "AWS_BATCH_JOB_QUEUE=$AWS_BATCH_JOB_QUEUE"
-          echo "AWS_BATCH_JOB_DEFINITION=$AWS_BATCH_JOB_DEFINITION"
           echo ""
           echo "# GCS / GEE"
           echo "GCS_BUCKET=$GCS_BUCKET"
           echo "GCS_PREFIX=$GCS_PREFIX"
+          echo "GOOGLE_PROJECT_ID=$GOOGLE_PROJECT_ID"
+          echo "GEE_ENDPOINT=$GEE_ENDPOINT"
           echo "EE_SERVICE_ACCOUNT_JSON=$EE_SERVICE_ACCOUNT_JSON"
+          echo ""
+          echo "# trends.earth API"
+          echo "TRENDSEARTH_API_URL=$TRENDSEARTH_API_URL"
+          echo "TRENDSEARTH_CLIENT_ID=$TRENDSEARTH_CLIENT_ID"
+          echo "TRENDSEARTH_CLIENT_SECRET=$TRENDSEARTH_CLIENT_SECRET"
+          echo "TRENDSEARTH_SCRIPT_ID=$TRENDSEARTH_SCRIPT_ID"
+          echo "BATCH_JOB_QUEUE=$BATCH_JOB_QUEUE"
+          echo "BATCH_JOB_DEFINITION=$BATCH_JOB_DEFINITION"
           echo ""
           echo "# Deployment info"
           echo "GIT_REVISION=${{ github.sha }}"

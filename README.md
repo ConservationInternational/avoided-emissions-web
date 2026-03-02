@@ -47,7 +47,7 @@ A Dash (Plotly) web application providing:
 
 - User authentication with role-based access (admin/user)
 - Site polygon upload (GeoJSON/GeoPackage)
-- Task submission to AWS Batch
+- Task submission via the trends.earth API (dispatched to AWS Batch)
 - Task status monitoring
 - Results download and interactive visualization (plots, maps)
 - Admin panel for triggering GEE covariate exports
