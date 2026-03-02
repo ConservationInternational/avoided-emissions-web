@@ -22,6 +22,7 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 RUN useradd -m appuser
+RUN mkdir -p /app/celerybeat && chown appuser:appuser /app/celerybeat
 USER appuser
 
 EXPOSE 8050

@@ -129,7 +129,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
+    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info", "--schedule=/app/celerybeat/celerybeat-schedule"]
     networks:
       - backend
 

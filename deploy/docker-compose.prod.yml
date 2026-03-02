@@ -147,7 +147,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
-    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
+    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info", "--schedule=/app/celerybeat/celerybeat-schedule"]
     depends_on:
       - redis
     networks:
