@@ -437,12 +437,15 @@ def _cleanup_covariate_downstream(covariate_name, db):
         except Exception:
             logger.warning("Failed to delete GCS tiles for %s", covariate_name)
 
-    # 3. Remove old DB records for this covariate
+    # 3. Remove old DB records for this covariate.
+    #    Flush + commit-worthy so that a concurrent merge worker sees
+    #    the deletion immediately and can bail out.
     old_records = (
         db.query(Covariate).filter(Covariate.covariate_name == covariate_name).all()
     )
     for rec in old_records:
         db.delete(rec)
+    db.flush()
 
 
 def start_gee_export(covariate_names, user_id):

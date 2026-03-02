@@ -485,6 +485,7 @@ def merge_covariate_tiles(
     output_bucket: str,
     output_prefix: str = "avoided-emissions/cog",
     aws_region: str = "us-east-1",
+    layer_id: str | None = None,
 ) -> dict:
     """Download tiles from GCS, merge into COG, upload to S3.
 
@@ -502,6 +503,11 @@ def merge_covariate_tiles(
         S3 key prefix for the merged COG.
     aws_region : str
         AWS region for S3.
+    layer_id : str, optional
+        UUID of the :class:`~models.Covariate` row.  When provided the
+        function checks between tile downloads whether the row has been
+        deleted (a sign that the covariate was re-exported) and raises
+        ``tasks._MergeSuperseded`` to abort early.
 
     Returns
     -------
@@ -512,6 +518,8 @@ def merge_covariate_tiles(
     ------
     RuntimeError
         If no tiles are found, or GDAL commands fail.
+    tasks._MergeSuperseded
+        If the DB record is deleted mid-merge (re-export race).
     """
     # 1. List tiles on GCS (source)
     tile_urls = list_gcs_tiles(source_bucket, source_prefix, covariate_name)
@@ -529,12 +537,31 @@ def merge_covariate_tiles(
         source_prefix,
     )
 
-    # If there's only 1 tile, it's already a COG — just re-upload with
-    # DEFLATE compression applied.
+    def _check_not_superseded() -> None:
+        """Abort if the DB record was deleted by a concurrent re-export."""
+        if not layer_id:
+            return
+        from models import Covariate, get_db
+
+        db = get_db()
+        try:
+            row = db.query(Covariate.id).filter(Covariate.id == layer_id).first()
+            if row is None:
+                from tasks import _MergeSuperseded
+
+                raise _MergeSuperseded(layer_id)
+        finally:
+            db.close()
+
     workdir = tempfile.mkdtemp(prefix=f"cog_{covariate_name}_")
     try:
-        # 2. Download all tiles
-        local_tiles = [_download_tile(url, workdir) for url in tile_urls]
+        # 2. Download all tiles, checking for supersession between each
+        local_tiles = []
+        for url in tile_urls:
+            _check_not_superseded()
+            local_tiles.append(_download_tile(url, workdir))
+
+        _check_not_superseded()
 
         # 3. Merge into a single COG
         output_filename = f"{covariate_name}.tif"
@@ -542,6 +569,8 @@ def merge_covariate_tiles(
         merge_tiles_to_cog(local_tiles, output_path)
 
         merged_size = os.path.getsize(output_path)
+
+        _check_not_superseded()
 
         # 4. Upload merged COG to S3
         s3_key = f"{output_prefix}/{output_filename}".strip("/")

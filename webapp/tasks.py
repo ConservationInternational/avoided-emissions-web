@@ -179,6 +179,10 @@ def rasterize_vectors_task(self) -> dict:
         db.close()
 
 
+class _MergeSuperseded(Exception):
+    """Raised when a merge is aborted because the covariate was re-exported."""
+
+
 @celery_app.task(name="tasks.run_cog_merge", bind=True, max_retries=1)
 def run_cog_merge(self, layer_id: str) -> dict:
     """Merge GCS tiles into a single COG and upload to S3.
@@ -204,8 +208,11 @@ def run_cog_merge(self, layer_id: str) -> dict:
     try:
         layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
         if not layer:
-            logger.error("Covariate %s not found", layer_id)
-            return {"status": "failed", "error": "record not found"}
+            logger.warning(
+                "Covariate %s not found — likely superseded by a re-export",
+                layer_id,
+            )
+            return {"status": "superseded", "error": "record deleted"}
 
         # Transition to 'merging'
         layer.status = "merging"
@@ -218,7 +225,18 @@ def run_cog_merge(self, layer_id: str) -> dict:
             output_bucket=layer.output_bucket,
             output_prefix=layer.output_prefix or f"{Config.S3_PREFIX}/cog",
             aws_region=Config.AWS_REGION,
+            layer_id=layer_id,
         )
+
+        # Re-check the record still exists after the (slow) merge
+        db.expire_all()
+        layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
+        if not layer:
+            logger.warning(
+                "Covariate %s deleted during merge — discarding result",
+                layer_id,
+            )
+            return {"status": "superseded"}
 
         layer.status = "merged"
         layer.merged_url = result["url"]
@@ -232,6 +250,10 @@ def run_cog_merge(self, layer_id: str) -> dict:
             "url": result["url"],
             "size_bytes": result["size_bytes"],
         }
+
+    except _MergeSuperseded:
+        logger.info("Merge for %s superseded by re-export — aborting", layer_id)
+        return {"status": "superseded"}
 
     except Exception as exc:
         logger.exception("COG merge failed for layer %s", layer_id)
