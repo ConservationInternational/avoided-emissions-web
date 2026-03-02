@@ -33,20 +33,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN install2.r --error --skipinstalled --ncpus -1 \
     sf \
     terra \
-    raster \
-    exactextractr \
-    fasterize \
     tidyverse \
     optmatch \
     lubridate \
     units \
     foreach \
-    doParallel \
-    Rcpp \
     dtplyr \
-    biglm \
     jsonlite \
-    gdalUtilities \
     arrow \
     httr \
     && rm -rf /tmp/downloaded_packages
