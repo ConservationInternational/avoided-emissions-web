@@ -367,6 +367,8 @@ def import_wdpa(engine, tmpdir: Path) -> None:
             f"Contents: {[p.name for p in extract_dir.iterdir()]}"
         )
 
+    log.info("Using layer %r from %s", poly_layer, src_path.name)
+
     # ------------------------------------------------------------------
     # Phase 2: chunked read and import
     # ------------------------------------------------------------------
