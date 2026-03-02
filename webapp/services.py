@@ -1,4 +1,4 @@
-"""Service layer for interacting with AWS Batch and GEE.
+"""Service layer for interacting with the trends.earth API and GEE.
 
 Provides functions for submitting analysis tasks, checking job status,
 uploading site files, and managing GEE covariate exports. Used by the
@@ -29,21 +29,6 @@ from models import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Lazy-import batch_jobs to avoid requiring boto3 at module level in tests
-_batch_module = None
-
-
-def _get_batch_module():
-    global _batch_module
-    if _batch_module is None:
-        import importlib
-        import sys
-
-        # r-analysis is mounted at /app/r-analysis inside the container
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "r-analysis"))
-        _batch_module = importlib.import_module("batch_jobs")
-    return _batch_module
 
 
 def get_s3_client():
@@ -122,23 +107,6 @@ def upload_sites_to_s3(gdf, task_id):
                 lambda v: v.strftime("%Y-%m-%d") if isinstance(v, pd.Timestamp) else v
             )
     body = gdf.to_json()
-    s3.put_object(
-        Bucket=Config.S3_BUCKET,
-        Key=key,
-        Body=body.encode("utf-8"),
-        ContentType="application/json",
-    )
-    return f"s3://{Config.S3_BUCKET}/{key}"
-
-
-def upload_config_to_s3(config_dict, task_id):
-    """Upload a task configuration JSON to S3.
-
-    Returns the S3 URI.
-    """
-    s3 = get_s3_client()
-    key = f"{Config.S3_PREFIX}/tasks/{task_id}/config.json"
-    body = json.dumps(config_dict, indent=2)
     s3.put_object(
         Bucket=Config.S3_BUCKET,
         Key=key,
@@ -238,10 +206,10 @@ def compute_matching_extent(
 def submit_analysis_task(
     task_name, description, user_id, gdf, covariates, exact_match_vars, fc_years=None
 ):
-    """Create and submit a full analysis task.
+    """Create and submit a full analysis task via the trends.earth API.
 
-    Routes to the trends.earth API when ``Config.USE_TRENDSEARTH_API`` is
-    True, otherwise falls back to direct AWS Batch submission.
+    Creates an Execution on the API which handles AWS Batch dispatch,
+    status tracking, and result collection.
 
     ``exact_match_vars`` must contain at least one variable name from
     ``["admin0", "admin1", "admin2", "ecoregion", "pa"]``.  A
@@ -254,11 +222,15 @@ def submit_analysis_task(
     where they can potentially share exact-match values with treatment
     sites.
 
+    Requires the submitting user to have linked their trends.earth account
+    (i.e. stored OAuth2 client credentials via the Settings page).  Raises
+    ``ValueError`` if the user has not linked their account.
+
     1. Validates exact match selection
     2. Computes matching extent via PostGIS
     3. Creates the local database record
     4. Uploads sites and config to S3
-    5. Submits to the appropriate backend
+    5. Submits to the trends.earth API
     6. Updates the database with tracking IDs
 
     Returns the task ID.
@@ -271,49 +243,6 @@ def submit_analysis_task(
 
     # Compute the matching extent polygon from PostGIS
     matching_extent = compute_matching_extent(gdf, exact_match_vars)
-
-    if Config.USE_TRENDSEARTH_API:
-        return _submit_via_api(
-            task_name,
-            description,
-            user_id,
-            gdf,
-            covariates,
-            exact_match_vars,
-            matching_extent,
-            fc_years,
-        )
-    return _submit_via_batch(
-        task_name,
-        description,
-        user_id,
-        gdf,
-        covariates,
-        exact_match_vars,
-        matching_extent,
-        fc_years,
-    )
-
-
-def _submit_via_api(
-    task_name,
-    description,
-    user_id,
-    gdf,
-    covariates,
-    exact_match_vars,
-    matching_extent,
-    fc_years=None,
-):
-    """Submit the analysis task through the trends.earth API.
-
-    Creates an Execution on the API which handles AWS Batch dispatch,
-    status tracking, and result collection.
-
-    Requires the submitting user to have linked their trends.earth account
-    (i.e. stored OAuth2 client credentials via the Settings page).  Raises
-    ``ValueError`` if the user has not linked their account.
-    """
     from credential_store import get_decrypted_secret
     from trendsearth_client import TrendsEarthClient
 
@@ -371,6 +300,16 @@ def _submit_via_api(
             ),
         }
 
+        # Attach AWS Batch overrides so the API routes this execution to
+        # the correct job queue / job definition (if configured).
+        batch_overrides = {}
+        if Config.BATCH_JOB_QUEUE:
+            batch_overrides["job_queue"] = Config.BATCH_JOB_QUEUE
+        if Config.BATCH_JOB_DEFINITION:
+            batch_overrides["job_definition"] = Config.BATCH_JOB_DEFINITION
+        if batch_overrides:
+            params["batch"] = batch_overrides
+
         # Submit via trends.earth API using the user's own OAuth2 creds
         user_creds = get_decrypted_secret(user_id)
         if not user_creds:
@@ -404,108 +343,6 @@ def _submit_via_api(
 
     except Exception as e:
         db.rollback()
-        if "task_id" in dir():
-            task = db.query(AnalysisTask).get(task_id)
-            if task:
-                task.status = "failed"
-                task.error_message = str(e)
-                db.commit()
-        raise
-    finally:
-        db.close()
-
-
-def _submit_via_batch(
-    task_name,
-    description,
-    user_id,
-    gdf,
-    covariates,
-    exact_match_vars,
-    matching_extent,
-    fc_years=None,
-):
-    """Original direct-to-Batch submission (legacy path)."""
-    if fc_years is None:
-        fc_years = list(range(2000, 2024))
-
-    db = get_db()
-    try:
-        task_id = str(uuid.uuid4())
-
-        # Create task record
-        task = AnalysisTask(
-            id=task_id,
-            name=task_name,
-            description=description,
-            submitted_by=user_id,
-            status="pending",
-            covariates=covariates,
-            n_sites=len(gdf),
-        )
-        db.add(task)
-
-        # Store site metadata
-        for _, row in gdf.iterrows():
-            site = TaskSite(
-                task_id=task_id,
-                site_id=str(row["site_id"]),
-                site_name=str(row.get("site_name", "")),
-                start_date=pd.to_datetime(row["start_date"]),
-                end_date=pd.to_datetime(row["end_date"])
-                if pd.notna(row.get("end_date"))
-                else None,
-            )
-            db.add(site)
-
-        db.commit()
-
-        # Upload to S3
-        sites_uri = upload_sites_to_s3(gdf, task_id)
-        config_dict = {
-            "task_id": task_id,
-            "data_dir": "/data",
-            "cog_bucket": Config.S3_BUCKET,
-            "cog_prefix": f"{Config.S3_PREFIX}/cog",
-            "sites_file": "/data/input/sites.geojson",
-            "covariates": covariates,
-            "exact_match_vars": exact_match_vars,
-            "matching_extent": matching_extent,
-            "fc_years": fc_years,
-            "max_treatment_pixels": 1000,
-            "control_multiplier": 50,
-            "min_site_area_ha": 100,
-            "min_glm_treatment_pixels": 15,
-        }
-        config_uri = upload_config_to_s3(config_dict, task_id)
-
-        # Submit to AWS Batch
-        data_s3_uri = f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}"
-        batch = _get_batch_module()
-        job_ids = batch.submit_full_pipeline(
-            job_queue=Config.AWS_BATCH_JOB_QUEUE,
-            job_definition=Config.AWS_BATCH_JOB_DEFINITION,
-            n_sites=len(gdf),
-            config_s3_uri=config_uri,
-            data_s3_uri=data_s3_uri,
-        )
-
-        # Update task with job IDs
-        task.extract_job_id = job_ids["extract_job_id"]
-        task.match_job_id = job_ids["match_job_id"]
-        task.summarize_job_id = job_ids["summarize_job_id"]
-        task.sites_s3_uri = sites_uri
-        task.config_s3_uri = config_uri
-        task.results_s3_uri = f"{data_s3_uri}/output"
-        task.status = "submitted"
-        task.submitted_at = datetime.now(timezone.utc)
-        db.commit()
-
-        return task_id
-
-    except Exception as e:
-        db.rollback()
-        # If task was created, mark it as failed
         if "task_id" in dir():
             task = db.query(AnalysisTask).get(task_id)
             if task:
@@ -560,8 +397,60 @@ def get_task_detail(task_id):
         db.close()
 
 
+def _cleanup_covariate_downstream(covariate_name, db):
+    """Delete downstream artefacts for a covariate before re-export.
+
+    Removes the S3 COG, GCS tiles, and existing DB records so that a
+    fresh GEE export starts from a clean slate.  Called from both
+    :func:`start_gee_export` and :func:`force_reexport`.
+
+    Parameters
+    ----------
+    covariate_name : str
+        Covariate key from config.COVARIATES.
+    db : sqlalchemy.orm.Session
+        An open database session (caller manages commit/close).
+    """
+    from cog_merge import delete_gcs_tiles, delete_s3_cog
+
+    # 1. Delete S3 COG (if exists)
+    if Config.S3_BUCKET:
+        cog_prefix = f"{Config.S3_PREFIX}/cog"
+        try:
+            delete_s3_cog(
+                Config.S3_BUCKET,
+                cog_prefix,
+                covariate_name,
+                region=Config.AWS_REGION,
+            )
+        except Exception:
+            logger.warning("Failed to delete S3 COG for %s", covariate_name)
+
+    # 2. Delete GCS tiles (if exists)
+    if Config.GCS_BUCKET:
+        try:
+            delete_gcs_tiles(
+                Config.GCS_BUCKET,
+                Config.GCS_PREFIX,
+                covariate_name,
+            )
+        except Exception:
+            logger.warning("Failed to delete GCS tiles for %s", covariate_name)
+
+    # 3. Remove old DB records for this covariate
+    old_records = (
+        db.query(Covariate).filter(Covariate.covariate_name == covariate_name).all()
+    )
+    for rec in old_records:
+        db.delete(rec)
+
+
 def start_gee_export(covariate_names, user_id):
     """Start GEE export tasks for the specified covariates.
+
+    Any existing downstream artefacts (GCS tiles, S3 COGs, DB records)
+    are cleaned up before starting the new export so that re-exports
+    always produce a consistent fresh state.
 
     Creates database records and starts GEE batch tasks. Returns a list
     of export record IDs.
@@ -630,6 +519,9 @@ def start_gee_export(covariate_names, user_id):
     export_ids = []
     try:
         for name in covariate_names:
+            # Clean up any existing downstream artefacts before re-export
+            _cleanup_covariate_downstream(name, db)
+
             task = start_export_task(
                 covariate_name=name,
                 bucket=Config.GCS_BUCKET,
@@ -807,8 +699,9 @@ def download_results_csv(task_id, result_type="by_site_year"):
 def force_reexport(covariate_name, user_id):
     """Force re-export a covariate from GEE.
 
-    Deletes any existing S3 COG and GCS tiles, removes/resets the DB
-    record, then starts a fresh GEE export.
+    Delegates to :func:`start_gee_export`, which cleans up any existing
+    downstream artefacts (S3 COG, GCS tiles, DB records) before starting
+    a fresh GEE export.
 
     Parameters
     ----------
@@ -822,45 +715,6 @@ def force_reexport(covariate_name, user_id):
     dict
         ``{"status": "ok", "export_id": …}`` on success.
     """
-    from cog_merge import delete_gcs_tiles, delete_s3_cog
-
-    # 1. Delete S3 COG (if exists)
-    if Config.S3_BUCKET:
-        cog_prefix = f"{Config.S3_PREFIX}/cog"
-        try:
-            delete_s3_cog(
-                Config.S3_BUCKET,
-                cog_prefix,
-                covariate_name,
-                region=Config.AWS_REGION,
-            )
-        except Exception:
-            logger.warning("Failed to delete S3 COG for %s", covariate_name)
-
-    # 2. Delete GCS tiles (if exists)
-    if Config.GCS_BUCKET:
-        try:
-            delete_gcs_tiles(
-                Config.GCS_BUCKET,
-                Config.GCS_PREFIX,
-                covariate_name,
-            )
-        except Exception:
-            logger.warning("Failed to delete GCS tiles for %s", covariate_name)
-
-    # 3. Remove old DB records for this covariate
-    db = get_db()
-    try:
-        old_records = (
-            db.query(Covariate).filter(Covariate.covariate_name == covariate_name).all()
-        )
-        for rec in old_records:
-            db.delete(rec)
-        db.commit()
-    finally:
-        db.close()
-
-    # 4. Start a fresh GEE export
     export_ids = start_gee_export([covariate_name], user_id)
     return {"status": "ok", "export_id": export_ids[0] if export_ids else None}
 
@@ -1132,7 +986,8 @@ def discover_existing_cogs():
 def get_covariate_presets(user_id):
     """Return all covariate presets for the given user, ordered by name.
 
-    Each item is a dict with keys ``id``, ``name``, and ``covariates``.
+    Each item is a dict with keys ``id``, ``name``, ``covariates``, and
+    ``exact_match_vars``.
     """
     db = get_db()
     try:
@@ -1143,14 +998,21 @@ def get_covariate_presets(user_id):
             .all()
         )
         return [
-            {"id": str(p.id), "name": p.name, "covariates": list(p.covariates)}
+            {
+                "id": str(p.id),
+                "name": p.name,
+                "covariates": list(p.covariates),
+                "exact_match_vars": list(p.exact_match_vars)
+                if p.exact_match_vars
+                else [],
+            }
             for p in presets
         ]
     finally:
         db.close()
 
 
-def save_covariate_preset(user_id, name, covariates):
+def save_covariate_preset(user_id, name, covariates, exact_match_vars=None):
     """Create or update a covariate preset for the given user.
 
     If a preset with the same *name* already exists for this user it is
@@ -1169,6 +1031,9 @@ def save_covariate_preset(user_id, name, covariates):
         )
         if existing:
             existing.covariates = list(covariates)
+            existing.exact_match_vars = (
+                list(exact_match_vars) if exact_match_vars else []
+            )
             existing.updated_at = datetime.now(timezone.utc)
             db.commit()
             return str(existing.id)
@@ -1177,6 +1042,7 @@ def save_covariate_preset(user_id, name, covariates):
             user_id=user_id,
             name=name,
             covariates=list(covariates),
+            exact_match_vars=list(exact_match_vars) if exact_match_vars else [],
         )
         db.add(preset)
         db.commit()

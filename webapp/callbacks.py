@@ -1040,6 +1040,7 @@ def register_callbacks(app):
     @app.callback(
         [
             Output("covariate-selection", "value"),
+            Output("exact-match-selection", "value"),
             Output("preset-feedback", "children", allow_duplicate=True),
         ],
         Input("load-preset-btn", "n_clicks"),
@@ -1048,22 +1049,32 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def load_preset(_n, preset_id, presets_data):
-        """Set the checklist values to the covariates in the selected preset."""
+        """Set the checklist values to the covariates and exact match
+        variables stored in the selected preset."""
         if not preset_id or not presets_data:
-            return no_update, "Please select a preset to load."
+            return no_update, no_update, "Please select a preset to load."
 
         for p in presets_data:
             if p["id"] == preset_id:
-                return p["covariates"], dbc.Alert(
-                    f'Loaded preset "{p["name"]}".',
-                    color="info",
-                    duration=3000,
+                exact = p.get("exact_match_vars") or no_update
+                return (
+                    p["covariates"],
+                    exact,
+                    dbc.Alert(
+                        f'Loaded preset "{p["name"]}".',
+                        color="info",
+                        duration=3000,
+                    ),
                 )
 
-        return no_update, dbc.Alert(
-            "Preset not found.",
-            color="warning",
-            duration=3000,
+        return (
+            no_update,
+            no_update,
+            dbc.Alert(
+                "Preset not found.",
+                color="warning",
+                duration=3000,
+            ),
         )
 
     @app.callback(
@@ -1075,10 +1086,12 @@ def register_callbacks(app):
         Input("save-preset-btn", "n_clicks"),
         State("preset-name-input", "value"),
         State("covariate-selection", "value"),
+        State("exact-match-selection", "value"),
         prevent_initial_call=True,
     )
-    def save_preset(_n, name, covariates):
-        """Save the current covariate selection as a named preset."""
+    def save_preset(_n, name, covariates, exact_match_vars):
+        """Save the current covariate and exact-match selection as a
+        named preset."""
         if not name or not name.strip():
             return (
                 no_update,
@@ -1105,7 +1118,7 @@ def register_callbacks(app):
             raise PreventUpdate
 
         try:
-            save_covariate_preset(user.id, name.strip(), covariates)
+            save_covariate_preset(user.id, name.strip(), covariates, exact_match_vars)
             updated = get_covariate_presets(user.id)
             return (
                 updated,

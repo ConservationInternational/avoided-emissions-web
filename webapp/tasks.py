@@ -519,18 +519,15 @@ def auto_merge_unmerged() -> dict:
 def poll_batch_tasks() -> dict:
     """Poll for active analysis task statuses and update the DB.
 
-    Supports both API-routed tasks (extract_job_id starts with ``api:``)
-    and legacy direct-Batch tasks.  Called periodically by Celery Beat
-    (every 30 s).
+    Checks API-routed tasks (extract_job_id starts with ``api:``)
+    by querying the trends.earth API for execution status.  Called
+    periodically by Celery Beat (every 30 s).
 
     Returns
     -------
     dict
         ``{"checked": N, "updated": N}``
     """
-    import importlib
-    import os
-    import sys
     from datetime import datetime, timezone
 
     from models import AnalysisTask, get_db
@@ -548,19 +545,11 @@ def poll_batch_tasks() -> dict:
         now = datetime.now(timezone.utc)
         updated = 0
 
-        # Partition tasks into API-tracked and Batch-tracked
-        api_tasks = []
-        batch_tasks = []
-        for task in active:
-            if (task.extract_job_id or "").startswith("api:"):
-                api_tasks.append(task)
-            else:
-                batch_tasks.append(task)
-
         # ---- Poll API-routed tasks ----
         # Background polling uses the system-level service credentials
         # (TRENDSEARTH_CLIENT_ID / TRENDSEARTH_CLIENT_SECRET) because
         # Celery workers have no per-user context.
+        api_tasks = [t for t in active if (t.extract_job_id or "").startswith("api:")]
         if api_tasks:
             from config import Config
             from trendsearth_client import TrendsEarthClient
@@ -574,94 +563,42 @@ def poll_batch_tasks() -> dict:
                 try:
                     exec_id = task.extract_job_id[4:]  # strip "api:"
                     execution = client.get_execution(exec_id)
-                    attrs = execution.get("data", {}).get("attributes", {})
-                    api_status = attrs.get("status", "").upper()
+                    # The API returns {"data": {"status": ...}}
+                    exec_data = execution.get("data", {})
+                    api_status = exec_data.get("status", "").upper()
                     old_status = task.status
+
+                    logger.info(
+                        "Polling API task %s (exec %s): api_status=%s, local_status=%s",
+                        task.id,
+                        exec_id,
+                        api_status,
+                        old_status,
+                    )
 
                     if api_status == "FINISHED":
                         task.status = "succeeded"
                         task.completed_at = now
                     elif api_status == "FAILED":
                         task.status = "failed"
-                        task.error_message = "Execution failed on API"
+                        task.error_message = exec_data.get("results", {}).get(
+                            "error", "Execution failed on API"
+                        )
+                        task.completed_at = now
+                    elif api_status == "CANCELLED":
+                        task.status = "cancelled"
                         task.completed_at = now
                     elif api_status in ("RUNNING", "READY"):
                         task.status = "running"
                         if not task.started_at:
                             task.started_at = now
+                    # PENDING / SUBMITTED → keep as "submitted"
 
                     if task.status != old_status:
                         updated += 1
                 except Exception as exc:
                     logger.warning(
                         "Failed to poll API status for task %s: %s",
-                        task.id,
-                        exc,
-                    )
-                    report_exception(task_id=str(task.id))
-
-        # ---- Poll legacy Batch tasks ----
-        if batch_tasks:
-            r_analysis_dir = os.path.join(os.path.dirname(__file__), "r-analysis")
-            if r_analysis_dir not in sys.path:
-                sys.path.insert(0, r_analysis_dir)
-            batch = importlib.import_module("batch_jobs")
-
-            for task in batch_tasks:
-                try:
-                    old_status = task.status
-
-                    # Check the summarize job first (last step)
-                    if task.summarize_job_id:
-                        status = batch.get_job_status(task.summarize_job_id)
-                        if status["status"] == "SUCCEEDED":
-                            task.status = "succeeded"
-                            task.completed_at = now
-                            updated += 1
-                            continue
-                        elif status["status"] == "FAILED":
-                            task.status = "failed"
-                            task.error_message = status.get(
-                                "reason", "Summarize job failed"
-                            )
-                            task.completed_at = now
-                            updated += 1
-                            continue
-
-                    # Check matching job
-                    if task.match_job_id:
-                        status = batch.get_job_status(task.match_job_id)
-                        if status["status"] == "RUNNING":
-                            task.status = "running"
-                            if not task.started_at:
-                                task.started_at = now
-                        elif status["status"] == "FAILED":
-                            task.status = "failed"
-                            task.error_message = status.get(
-                                "reason", "Match job failed"
-                            )
-                            task.completed_at = now
-
-                    # Check extract job
-                    if task.extract_job_id:
-                        status = batch.get_job_status(task.extract_job_id)
-                        if status["status"] == "RUNNING" and task.status == "submitted":
-                            task.status = "running"
-                            if not task.started_at:
-                                task.started_at = now
-                        elif status["status"] == "FAILED":
-                            task.status = "failed"
-                            task.error_message = status.get(
-                                "reason", "Extract job failed"
-                            )
-                            task.completed_at = now
-
-                    if task.status != old_status:
-                        updated += 1
-
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to poll Batch status for task %s: %s",
                         task.id,
                         exc,
                     )

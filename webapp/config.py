@@ -24,8 +24,6 @@ class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-production")
     DATABASE_URL = _build_database_url()
     AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-    AWS_BATCH_JOB_QUEUE = os.environ.get("AWS_BATCH_JOB_QUEUE", "")
-    AWS_BATCH_JOB_DEFINITION = os.environ.get("AWS_BATCH_JOB_DEFINITION", "")
     S3_BUCKET = os.environ.get("S3_BUCKET", "")
     S3_PREFIX = os.environ.get("S3_PREFIX", "avoided-emissions")
     GCS_BUCKET = os.environ.get("GCS_BUCKET", "")
@@ -51,11 +49,11 @@ class Config:
     TRENDSEARTH_CLIENT_ID = os.environ.get("TRENDSEARTH_CLIENT_ID", "")
     TRENDSEARTH_CLIENT_SECRET = os.environ.get("TRENDSEARTH_CLIENT_SECRET", "")
     TRENDSEARTH_SCRIPT_ID = os.environ.get("TRENDSEARTH_SCRIPT_ID", "")
-    # Set to True to route analysis tasks through the trends.earth API
-    # instead of direct AWS Batch submission.
-    USE_TRENDSEARTH_API = (
-        os.environ.get("USE_TRENDSEARTH_API", "false").lower() == "true"
-    )
+
+    # AWS Batch overrides sent in params["batch"] when creating an execution.
+    # Leave blank to use the defaults configured on the API / Script model.
+    BATCH_JOB_QUEUE = os.environ.get("BATCH_JOB_QUEUE", "")
+    BATCH_JOB_DEFINITION = os.environ.get("BATCH_JOB_DEFINITION", "")
 
 
 def report_exception(**extra):

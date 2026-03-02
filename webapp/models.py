@@ -260,6 +260,7 @@ class CovariatePreset(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     name = Column(String(255), nullable=False)
     covariates = Column(ARRAY(Text), nullable=False)
+    exact_match_vars = Column(ARRAY(Text), nullable=True)
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

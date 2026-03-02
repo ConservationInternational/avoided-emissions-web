@@ -236,18 +236,72 @@ def delete_s3_cog(
     return True
 
 
+def _get_gcs_credentials():
+    """Obtain GCS credentials for authenticated operations.
+
+    Tries, in order:
+    1. ``google.auth.default()`` — works when ``GOOGLE_APPLICATION_CREDENTIALS``
+       is set or on GCE/Cloud Run with a metadata server.
+    2. ``EE_SERVICE_ACCOUNT_JSON`` env var — the same service-account key the
+       webapp already uses for Earth Engine.  Decoded (from base64 if needed)
+       and loaded via ``google.oauth2.service_account.Credentials``.
+
+    Returns ``None`` when no credentials are available.
+    """
+    import google.auth
+    import google.auth.transport.requests
+
+    # Attempt 1: Application Default Credentials
+    try:
+        credentials, _project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/devstorage.full_control"]
+        )
+        auth_req = google.auth.transport.requests.Request()
+        credentials.refresh(auth_req)
+        return credentials
+    except Exception:
+        pass
+
+    # Attempt 2: EE_SERVICE_ACCOUNT_JSON env var
+    ee_sa_json = os.environ.get("EE_SERVICE_ACCOUNT_JSON", "")
+    if ee_sa_json:
+        import base64
+        import json
+
+        from google.oauth2 import service_account
+
+        try:
+            try:
+                key_data = base64.b64decode(ee_sa_json).decode("utf-8")
+            except Exception:
+                key_data = ee_sa_json
+            sa_info = json.loads(key_data)
+            credentials = service_account.Credentials.from_service_account_info(
+                sa_info,
+                scopes=["https://www.googleapis.com/auth/devstorage.full_control"],
+            )
+            auth_req = google.auth.transport.requests.Request()
+            credentials.refresh(auth_req)
+            return credentials
+        except Exception:
+            logger.warning(
+                "Failed to load GCS credentials from EE_SERVICE_ACCOUNT_JSON",
+                exc_info=True,
+            )
+
+    return None
+
+
 def delete_gcs_tiles(bucket: str, prefix: str, covariate_name: str) -> int:
     """Delete all GCS tiles for a covariate.
 
-    Uses the GCS JSON API with an OAuth2 token from the default
-    application credentials (``GOOGLE_APPLICATION_CREDENTIALS`` or
-    service account).  Returns the number of objects deleted.
+    Authenticates using :func:`_get_gcs_credentials` (ADC first, then
+    ``EE_SERVICE_ACCOUNT_JSON`` fallback).  Returns the number of objects
+    deleted.
 
     Falls back to doing nothing if no credentials are available
     (GCS public buckets don't support unauthenticated deletes).
     """
-    import google.auth
-    import google.auth.transport.requests
 
     # List all tile objects for this covariate
     tile_urls = list_gcs_tiles(bucket, prefix, covariate_name)
@@ -255,26 +309,21 @@ def delete_gcs_tiles(bucket: str, prefix: str, covariate_name: str) -> int:
         return 0
 
     # Get authenticated credentials
-    try:
-        credentials, _project = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/devstorage.full_control"]
-        )
-        auth_req = google.auth.transport.requests.Request()
-        credentials.refresh(auth_req)
-    except Exception:
+    credentials = _get_gcs_credentials()
+    if credentials is None:
         logger.warning(
             "No GCS credentials available — cannot delete tiles for %s",
             covariate_name,
         )
         return 0
 
+    import urllib.parse
+
     deleted = 0
     for url in tile_urls:
         # Extract object name from URL
         # URL: https://storage.googleapis.com/{bucket}/{object_name}
         obj_name = url.split(f"/{bucket}/", 1)[-1]
-        import urllib.parse
-
         encoded_name = urllib.parse.quote(obj_name, safe="")
         delete_url = (
             f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{encoded_name}"

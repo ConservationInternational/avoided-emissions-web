@@ -142,7 +142,7 @@ class TrendsEarthClient:
             body["expires_in_days"] = expires_in_days
 
         resp = requests.post(
-            f"{self.api_url}/api/v1/oauth/clients",
+            f"{self.api_url}/oauth/clients",
             json=body,
             headers=self._headers(),
             timeout=_TIMEOUT,
@@ -153,7 +153,7 @@ class TrendsEarthClient:
     def list_oauth2_clients(self):
         """List the caller's active OAuth2 service clients."""
         resp = requests.get(
-            f"{self.api_url}/api/v1/oauth/clients",
+            f"{self.api_url}/oauth/clients",
             headers=self._headers(),
             timeout=_TIMEOUT,
         )
@@ -163,7 +163,7 @@ class TrendsEarthClient:
     def revoke_oauth2_client(self, client_db_id):
         """Revoke an OAuth2 service client by its database UUID."""
         resp = requests.delete(
-            f"{self.api_url}/api/v1/oauth/clients/{client_db_id}",
+            f"{self.api_url}/oauth/clients/{client_db_id}",
             headers=self._headers(),
             timeout=_TIMEOUT,
         )
@@ -186,7 +186,7 @@ class TrendsEarthClient:
             ``{"access_token": "...", "token_type": "bearer", "expires_in": ...}``
         """
         resp = requests.post(
-            f"{self.api_url}/api/v1/oauth/token",
+            f"{self.api_url}/oauth/token",
             json={
                 "grant_type": "client_credentials",
                 "client_id": client_id,
@@ -242,7 +242,7 @@ class TrendsEarthClient:
             Execution record including ``id``, ``status``.
         """
         resp = requests.post(
-            f"{self.api_url}/api/v1/script/{script_id}/run",
+            f"{self.api_url}/script/{script_id}/run",
             json=params,
             headers=self._headers(),
             timeout=_TIMEOUT,
@@ -253,7 +253,7 @@ class TrendsEarthClient:
     def get_execution(self, execution_id):
         """Fetch an execution's current state."""
         resp = requests.get(
-            f"{self.api_url}/api/v1/execution/{execution_id}",
+            f"{self.api_url}/execution/{execution_id}",
             headers=self._headers(),
             timeout=_TIMEOUT,
         )
@@ -263,7 +263,7 @@ class TrendsEarthClient:
     def get_execution_results(self, execution_id):
         """Convenience: fetch execution and return its results payload."""
         data = self.get_execution(execution_id)
-        return data.get("data", {}).get("attributes", {}).get("results")
+        return data.get("data", {}).get("results")
 
     def list_executions(self, script_id=None, status=None, per_page=50):
         """List executions, optionally filtered."""
@@ -273,7 +273,7 @@ class TrendsEarthClient:
         if status:
             params["status"] = status
         resp = requests.get(
-            f"{self.api_url}/api/v1/execution",
+            f"{self.api_url}/execution",
             params=params,
             headers=self._headers(),
             timeout=_TIMEOUT,
@@ -287,7 +287,7 @@ class TrendsEarthClient:
 
     def get_script(self, script_id):
         resp = requests.get(
-            f"{self.api_url}/api/v1/script/{script_id}",
+            f"{self.api_url}/script/{script_id}",
             headers=self._headers(),
             timeout=_TIMEOUT,
         )
@@ -297,7 +297,7 @@ class TrendsEarthClient:
     def find_script_by_slug(self, slug):
         """Find a script by its slug name."""
         resp = requests.get(
-            f"{self.api_url}/api/v1/script",
+            f"{self.api_url}/script",
             params={"slug": slug},
             headers=self._headers(),
             timeout=_TIMEOUT,
