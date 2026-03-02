@@ -5,10 +5,26 @@ parameters, and the default matching formula used in the avoided emissions
 analysis.
 """
 
-EXPORT_SCALE_METERS = (
-    927.67  # (30 arc seconds - approximately 1km at equator in meters)
-)
 EXPORT_CRS = "EPSG:4326"
+
+# Pixel size in degrees.  30 arc-seconds = 1/120 of a degree ≈ 927.67 m at
+# the equator.  Defined in degrees (the native unit of EPSG:4326) so the
+# crsTransform can be stated exactly.
+EXPORT_PIXEL_SIZE_DEG = 1 / 120  # 30 arc-seconds
+
+# Affine transform that locks every export to the same pixel grid.
+#   [xScale, xShearing, xTranslation, yShearing, yScale, yTranslation]
+# Origin at (0°E, 0°N) means pixel edges fall on exact multiples of
+# 1/120° (including ±180° and ±90°), so all covariates share the same
+# grid regardless of their native resolution.
+EXPORT_CRS_TRANSFORM = [
+    EXPORT_PIXEL_SIZE_DEG,  # xScale
+    0,  # xShearing
+    0,  # xTranslation  (origin 0° E)
+    0,  # yShearing
+    -EXPORT_PIXEL_SIZE_DEG,  # yScale  (negative = rows go south)
+    0,  # yTranslation  (origin 0° N)
+]
 
 # Default GCS path prefix for exported COGs
 DEFAULT_GCS_PREFIX = "avoided-emissions/covariates"
@@ -197,45 +213,15 @@ COVARIATES = {
         "category": "land_cover",
         "resample": "sum",
     },
-    # Ecological zones
-    "ecoregion": {
-        "asset": "RESOLVE/ECOREGIONS/2017",
-        "select": ["ECO_ID"],
-        "description": "WWF ecoregion ID",
-        "category": "ecological",
-        "resample": "mode",
-    },
-    "biome": {
-        "asset": "RESOLVE/ECOREGIONS/2017",
-        "select": ["BIOME_NUM"],
-        "description": "WWF biome number",
-        "category": "ecological",
-        "resample": "mode",
-    },
-    # Protected areas
-    "pa": {
-        "asset": "WCMC/WDPA/current/polygons",
-        "derived": "pa_binary",
-        "description": "Protected area (binary: 1=protected, 0=not)",
-        "category": "ecological",
-        "resample": "mode",
-    },
-    # Agro-ecological zones
-    "aez": {
-        "asset": "ESA/WorldCereal/AEZ/v100",
-        "derived": "aez",
-        "description": "ESA WorldCereal agro-ecological zone ID",
-        "category": "ecological",
-        "resample": "mode",
-    },
-    # Administrative boundaries
-    "region": {
-        "asset": "WM/geoLab/geoBoundaries/600/ADM1",
-        "derived": "admin_region",
-        "description": "geoBoundaries ADM1 administrative region ID",
-        "category": "administrative",
-        "resample": "mode",
-    },
+}
+
+# Agro-ecological zones
+COVARIATES["aez"] = {
+    "asset": "ESA/WorldCereal/AEZ/v100",
+    "derived": "aez",
+    "description": "ESA WorldCereal agro-ecological zone ID",
+    "category": "ecological",
+    "resample": "mode",
 }
 
 # Forest cover layers: Hansen GFC annual cover by year (2000-2024)
@@ -280,7 +266,7 @@ DEFAULT_MATCHING_COVARIATES = [
 ]
 
 # These are used for exact matching (stratification), not propensity scores
-EXACT_MATCHING_VARIABLES = ["region", "ecoregion", "pa"]
+EXACT_MATCHING_VARIABLES = ["admin0", "region", "admin2", "ecoregion", "pa"]
 
 # ESA CCI land cover class mapping (raw value -> category)
 ESA_LC_REMAP = {

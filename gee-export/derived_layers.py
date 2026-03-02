@@ -130,14 +130,45 @@ def build_lc_class(lc_class):
     return class_area.rename(f"lc_2015_{lc_class}").toFloat()
 
 
-def build_pa_binary():
-    """Build a binary protected area layer from WDPA.
+def build_glad_cropland(year):
+    """Build a GLAD cropland extent layer for a given epoch year.
 
-    Returns 1 where any WDPA polygon exists, 0 otherwise.
+    Uses the GLAD Global Cropland Expansion Time-series (Potapov et al.,
+    2021, Nature Food) which provides binary cropland maps at 30m
+    resolution for five epochs: 2003, 2007, 2011, 2015, and 2019.
+    Cropland is defined as land used for annual and perennial herbaceous
+    crops for human consumption, forage (including hay), and biofuel.
+
+    At the ~1km export resolution the binary mask is resampled via mean
+    aggregation, yielding the fraction of each pixel that is cropland
+    (0.0-1.0).
+
+    Returns:
+        ee.Image with a single band named ``cropland_{year}``.
     """
-    wdpa = ee.FeatureCollection("WCMC/WDPA/current/polygons")
-    pa_image = wdpa.reduceToImage(["WDPAID"], ee.Reducer.first()).gt(0).unmask(0)
-    return pa_image.rename("pa").toInt()
+    valid_years = (2003, 2007, 2011, 2015, 2019)
+    if year not in valid_years:
+        raise ValueError(f"GLAD cropland year must be one of {valid_years}, got {year}")
+    asset_id = f"users/potapovpeter/Global_cropland_{year}"
+    cropland = ee.Image(asset_id)
+    return cropland.rename(f"cropland_{year}").toFloat()
+
+
+def build_aez():
+    """Build an agro-ecological zone ID raster from ESA WorldCereal AEZ.
+
+    Uses the ESA WorldCereal Agro-Ecological Zones v100 FeatureCollection.
+    Each feature has an ``aez_id`` property (integer) that uniquely identifies
+    the agro-ecological zone.  The FeatureCollection is rasterized to produce
+    a single-band integer image.
+
+    See: https://developers.google.com/earth-engine/datasets/catalog/ESA_WorldCereal_AEZ_v100
+    """
+    aez_fc = ee.FeatureCollection("ESA/WorldCereal/AEZ/v100")
+    aez_image = (
+        aez_fc.reduceToImage(["aez_id"], ee.Reducer.first()).unmask(0).rename("aez")
+    )
+    return aez_image.toInt()
 
 
 def build_friction_surface():
@@ -167,119 +198,6 @@ def build_cropland_fraction():
     return cropland.rename("crop_suitability").toFloat()
 
 
-def build_glad_cropland(year):
-    """Build a GLAD cropland extent layer for a given epoch year.
-
-    Uses the GLAD Global Cropland Expansion Time-series (Potapov et al.,
-    2021, Nature Food) which provides binary cropland maps at 30m
-    resolution for five epochs: 2003, 2007, 2011, 2015, and 2019.
-    Cropland is defined as land used for annual and perennial herbaceous
-    crops for human consumption, forage (including hay), and biofuel.
-
-    At the ~1km export resolution the binary mask is resampled via mean
-    aggregation, yielding the fraction of each pixel that is cropland
-    (0.0-1.0).
-
-    Returns:
-        ee.Image with a single band named ``cropland_{year}``.
-    """
-    valid_years = (2003, 2007, 2011, 2015, 2019)
-    if year not in valid_years:
-        raise ValueError(f"GLAD cropland year must be one of {valid_years}, got {year}")
-    asset_id = f"users/potapovpeter/Global_cropland_{year}"
-    cropland = ee.Image(asset_id)
-    return cropland.rename(f"cropland_{year}").toFloat()
-
-
-# geoBoundaries ADM1 properties to include in the CSV key
-_GEOBOUNDARIES_KEY_PROPERTIES = [
-    "shapeGroup",
-    "shapeName",
-    "shapeISO",
-    "shapeID",
-    "shapeType",
-]
-
-
-def _build_indexed_admin_fc():
-    """Load the geoBoundaries ADM1 FeatureCollection with sequential IDs.
-
-    Returns the FeatureCollection with an added 'region_id' property
-    (1-based integer) on each feature.
-    """
-    fc = ee.FeatureCollection("WM/geoLab/geoBoundaries/600/ADM1")
-    n = fc.size()
-    indexed_fc = ee.FeatureCollection(
-        fc.toList(n)
-        .zip(ee.List.sequence(1, n))
-        .map(
-            lambda pair: ee.Feature(ee.List(pair).get(0)).set(
-                "region_id", ee.List(pair).get(1)
-            )
-        )
-    )
-    return indexed_fc
-
-
-def build_aez():
-    """Build an agro-ecological zone ID raster from ESA WorldCereal AEZ.
-
-    Uses the ESA WorldCereal Agro-Ecological Zones v100 FeatureCollection.
-    Each feature has an ``aez_id`` property (integer) that uniquely identifies
-    the agro-ecological zone.  The FeatureCollection is rasterized to produce
-    a single-band integer image.
-
-    See: https://developers.google.com/earth-engine/datasets/catalog/ESA_WorldCereal_AEZ_v100
-    """
-    aez_fc = ee.FeatureCollection("ESA/WorldCereal/AEZ/v100")
-    aez_image = (
-        aez_fc.reduceToImage(["aez_id"], ee.Reducer.first()).unmask(0).rename("aez")
-    )
-    return aez_image.toInt()
-
-
-def build_admin_region():
-    """Build an administrative region ID raster from geoBoundaries ADM1.
-
-    Loads the WM/geoLab/geoBoundaries/600/ADM1 FeatureCollection, assigns
-    each feature a unique sequential integer ID, and rasterizes the result.
-    Used for exact matching (stratification) in the avoided-emissions analysis.
-    """
-    indexed_fc = _build_indexed_admin_fc()
-
-    region_image = (
-        indexed_fc.reduceToImage(["region_id"], ee.Reducer.first())
-        .unmask(0)
-        .rename("region")
-    )
-    return region_image.toInt()
-
-
-def fetch_admin_region_key():
-    """Fetch the mapping between sequential region_id and geoBoundaries properties.
-
-    Queries GEE for the indexed geoBoundaries ADM1 FeatureCollection and
-    returns a list of dicts with region_id and the original feature attributes.
-
-    Returns:
-        list[dict]: Each dict has 'region_id' plus the geoBoundaries
-        attribute columns (shapeGroup, shapeName, shapeISO, shapeID,
-        shapeType).
-    """
-    indexed_fc = _build_indexed_admin_fc()
-
-    # Select only the columns we need (drops geometry for faster transfer)
-    keep_cols = ["region_id"] + _GEOBOUNDARIES_KEY_PROPERTIES
-    key_fc = indexed_fc.select(keep_cols)
-
-    features = key_fc.getInfo()["features"]
-    rows = []
-    for f in features:
-        props = f["properties"]
-        rows.append({col: props.get(col) for col in keep_cols})
-    return rows
-
-
 def get_derived_image(covariate_name, covariate_config):
     """Dispatch to the appropriate builder for a derived covariate.
 
@@ -302,8 +220,6 @@ def get_derived_image(covariate_name, covariate_config):
         return build_hansen_fc(covariate_config["year"])
     elif derived_type == "lc_class":
         return build_lc_class(covariate_config["lc_class"])
-    elif derived_type == "pa_binary":
-        return build_pa_binary()
     elif derived_type == "friction_surface":
         return build_friction_surface()
     elif derived_type == "cropland_fraction":
@@ -312,7 +228,5 @@ def get_derived_image(covariate_name, covariate_config):
         return build_glad_cropland(covariate_config["year"])
     elif derived_type == "aez":
         return build_aez()
-    elif derived_type == "admin_region":
-        return build_admin_region()
     else:
         raise ValueError(f"Unknown derived type '{derived_type}' for {covariate_name}")

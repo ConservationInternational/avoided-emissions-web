@@ -87,7 +87,7 @@ _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
 
-from py_utils import rollbar_init, rollbar_report_error, with_rollbar  # noqa: E402
+from py_utils import rollbar_init, with_rollbar  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -151,11 +151,7 @@ def load_sites(sites_path: str, min_area_ha: float) -> gpd.GeoDataFrame:
         sites["end_date"] = pd.NaT
 
     sites["start_year"] = sites["start_date"].dt.year.astype("Int64")
-    sites["end_year"] = (
-        sites["end_date"]
-        .dt.year.fillna(2099)
-        .astype(int)
-    )
+    sites["end_year"] = sites["end_date"].dt.year.fillna(2099).astype(int)
 
     # Area in hectares (equal-area projection)
     sites_cea = sites.to_crs("+proj=cea")
@@ -167,8 +163,12 @@ def load_sites(sites_path: str, min_area_ha: float) -> gpd.GeoDataFrame:
     # Filter
     n_before = len(sites)
     sites = sites[sites["area_ha"] >= min_area_ha].copy()
-    log.info("Sites: %d loaded, %d after area filter (>= %.0f ha)",
-             n_before, len(sites), min_area_ha)
+    log.info(
+        "Sites: %d loaded, %d after area filter (>= %.0f ha)",
+        n_before,
+        len(sites),
+        min_area_ha,
+    )
     if len(sites) == 0:
         raise RuntimeError("No sites remaining after area filter.")
 
@@ -207,9 +207,7 @@ def load_covariates_lazy(
         try:
             da = rioxarray.open_rasterio(uri, chunks="auto")
         except Exception as exc:
-            raise RuntimeError(
-                f"Failed to open covariate '{name}' at {uri}"
-            ) from exc
+            raise RuntimeError(f"Failed to open covariate '{name}' at {uri}") from exc
 
         # Squeeze band dimension if single-band
         if "band" in da.dims and da.sizes["band"] == 1:
@@ -224,13 +222,11 @@ def load_covariates_lazy(
         else:
             if layer_crs != ref_crs:
                 raise RuntimeError(
-                    f"CRS mismatch: '{name}' has {layer_crs}, "
-                    f"expected {ref_crs}"
+                    f"CRS mismatch: '{name}' has {layer_crs}, expected {ref_crs}"
                 )
             if layer_res != ref_res:
                 raise RuntimeError(
-                    f"Resolution mismatch: '{name}' has {layer_res}, "
-                    f"expected {ref_res}"
+                    f"Resolution mismatch: '{name}' has {layer_res}, expected {ref_res}"
                 )
 
         arrays[name] = da
@@ -251,8 +247,8 @@ def calc_pixel_area_ha(
     xres: float,
 ) -> np.ndarray:
     """Compute the area (ha) of raster cells on the WGS-84 ellipsoid."""
-    a = 6_378_137.0          # semi-major axis (m)
-    b = 6_356_752.314_2      # semi-minor axis (m)
+    a = 6_378_137.0  # semi-major axis (m)
+    b = 6_356_752.314_2  # semi-minor axis (m)
     e = math.sqrt(1 - (b / a) ** 2)
 
     y = np.asarray(y, dtype=np.float64)
@@ -263,9 +259,7 @@ def calc_pixel_area_ha(
         sin_phi = np.sin(phi)
         zp = 1 + e * sin_phi
         zm = 1 - e * sin_phi
-        return math.pi * b**2 * (
-            np.arctanh(e * sin_phi) / e + sin_phi / (zp * zm)
-        )
+        return math.pi * b**2 * (np.arctanh(e * sin_phi) / e + sin_phi / (zp * zm))
 
     area_m2 = (_slice_area(ymax_rad) - _slice_area(ymin_rad)) * (xres / 360)
     return area_m2 / 10_000
@@ -381,12 +375,14 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     y_coords_treatment = ys[rows_t]
     pixel_areas = calc_pixel_area_ha(y_coords_treatment, yres, xres)
 
-    treatment_key = pd.DataFrame({
-        "cell": treatment_indices,
-        "id_numeric": site_ids_flat[treatment_indices],
-        "region": region_arr.ravel()[treatment_indices],
-        "area_ha": pixel_areas,
-    })
+    treatment_key = pd.DataFrame(
+        {
+            "cell": treatment_indices,
+            "id_numeric": site_ids_flat[treatment_indices],
+            "region": region_arr.ravel()[treatment_indices],
+            "area_ha": pixel_areas,
+        }
+    )
 
     # Attach site_id
     id_to_site = dict(zip(sites["id_numeric"], sites["site_id"]))
@@ -419,8 +415,9 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     candidate_mask = in_treatment_region | treatment_mask
     candidate_indices = np.nonzero(candidate_mask)[0]
 
-    log.info("Extracting covariate values for %d candidate pixels...",
-             len(candidate_indices))
+    log.info(
+        "Extracting covariate values for %d candidate pixels...", len(candidate_indices)
+    )
 
     # Build DataFrame column-by-column (fast NumPy slicing)
     data: dict[str, np.ndarray] = {"cell": candidate_indices}
@@ -482,8 +479,14 @@ def main(argv: list[str] | None = None) -> None:
         sites = load_sites(config["sites_file"], config["min_site_area_ha"])
 
         # Save site ID key (CSV for interop)
-        key_cols = ["site_id", "id_numeric", "site_name",
-                    "start_year", "end_year", "area_ha"]
+        key_cols = [
+            "site_id",
+            "id_numeric",
+            "site_name",
+            "start_year",
+            "end_year",
+            "area_ha",
+        ]
         sites[key_cols].to_csv(
             os.path.join(config["output_dir"], "site_id_key.csv"), index=False
         )

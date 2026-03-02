@@ -20,16 +20,114 @@ def import_vector_data_task(self) -> dict:
     Runs as a background task so the webapp can start serving requests
     immediately.  Only imports tables that are empty, making it safe to
     retry or call repeatedly.
+
+    On successful import, automatically dispatches
+    :func:`rasterize_vectors_task` to produce grid-aligned COGs from
+    the freshly-imported vector data.
     """
     try:
         from import_vector_data import run_import
 
         run_import(check_only=False)
+
+        # Chain rasterization of the imported vector layers.
+        rasterize_vectors_task.delay()
+        logger.info("Dispatched rasterize_vectors_task after successful import")
+
         return {"status": "complete"}
     except Exception as exc:
         logger.exception("Vector data import failed")
         report_exception()
         raise self.retry(exc=exc, countdown=60)
+
+
+@celery_app.task(name="tasks.rasterize_vectors", bind=True, max_retries=1)
+def rasterize_vectors_task(self) -> dict:
+    """Rasterize vector reference layers to COGs aligned with the GEE grid.
+
+    Converts PostGIS vector tables (admin boundaries, ecoregions, biome,
+    protected areas) into Cloud-Optimized GeoTIFFs sharing the same grid
+    as the GEE-exported covariates.  Also uploads a CSV key for each
+    layer that maps raster values to source polygon attributes.
+
+    Typically dispatched automatically after :func:`import_vector_data_task`
+    completes.  Safe to call independently — will rasterize whatever data
+    is currently in the database.
+
+    Returns
+    -------
+    dict
+        ``{"status": "complete", "layers": {name: {cog_url, csv_url, ...}}}``
+        on success, or ``{"status": "failed", "error": ...}`` on failure.
+    """
+    from datetime import datetime, timezone
+
+    from config import Config
+    from models import Covariate, get_db
+    from rasterize_vectors import VECTOR_LAYERS, rasterize_and_upload
+
+    db = get_db()
+    try:
+        results = {}
+        for layer_def in VECTOR_LAYERS:
+            name = layer_def["output_name"]
+            logger.info("Rasterizing vector layer: %s", name)
+
+            # Create (or update) a Covariate record so the layer shows
+            # up in the dashboard alongside GEE-exported covariates.
+            existing = (
+                db.query(Covariate)
+                .filter(Covariate.covariate_name == name)
+                .order_by(Covariate.started_at.desc())
+                .first()
+            )
+            if existing and existing.status in ("merged", "rasterizing"):
+                layer = existing
+            else:
+                layer = Covariate(
+                    covariate_name=name,
+                    status="rasterizing",
+                    output_bucket=Config.S3_BUCKET,
+                    output_prefix=f"{Config.S3_PREFIX}/cog",
+                    started_at=datetime.now(timezone.utc),
+                )
+                db.add(layer)
+                db.flush()
+
+            layer.status = "rasterizing"
+            db.commit()
+
+            try:
+                result = rasterize_and_upload(layer_def)
+                layer.status = "merged"
+                layer.merged_url = result["cog_url"]
+                layer.size_bytes = result["size_bytes"]
+                layer.completed_at = datetime.now(timezone.utc)
+                meta = dict(layer.extra_metadata or {})
+                if result.get("csv_url"):
+                    meta["csv_key_url"] = result["csv_url"]
+                meta["source"] = "postgis_rasterize"
+                layer.extra_metadata = meta
+                db.commit()
+                results[name] = result
+                logger.info("Rasterized %s -> %s", name, result["cog_url"])
+            except Exception as exc:
+                logger.exception("Failed to rasterize %s", name)
+                layer.status = "failed"
+                layer.error_message = str(exc)[:2000]
+                layer.completed_at = datetime.now(timezone.utc)
+                db.commit()
+                results[name] = {"error": str(exc)[:500]}
+
+        return {"status": "complete", "layers": results}
+
+    except Exception as exc:
+        logger.exception("Vector rasterization failed")
+        report_exception()
+        db.rollback()
+        raise self.retry(exc=exc, countdown=120)
+    finally:
+        db.close()
 
 
 @celery_app.task(name="tasks.run_cog_merge", bind=True, max_retries=1)

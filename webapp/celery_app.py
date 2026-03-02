@@ -68,6 +68,7 @@ celery_app.conf.update(
     # never starve the lightweight polling tasks on the default queue.
     task_routes={
         "tasks.run_cog_merge": {"queue": "merge"},
+        "tasks.rasterize_vectors": {"queue": "merge"},
     },
 )
 

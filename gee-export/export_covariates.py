@@ -15,7 +15,7 @@ import click
 import ee
 
 from config import COVARIATES, DEFAULT_GCS_PREFIX
-from tasks import check_task_status, export_admin_region_key, start_export_task
+from tasks import check_task_status, start_export_task
 
 
 @click.command()
@@ -64,12 +64,6 @@ from tasks import check_task_status, export_admin_region_key, start_export_task
     default=False,
     help="Wait for all tasks to complete (polls every 60s).",
 )
-@click.option(
-    "--scale",
-    type=float,
-    default=None,
-    help="Export scale in meters (default: ~927m / ~1km).",
-)
 def main(
     bucket,
     prefix,
@@ -78,7 +72,6 @@ def main(
     check_status,
     category,
     wait_for_completion,
-    scale,
 ):
     """Export covariate layers from Google Earth Engine to GCS as COGs."""
 
@@ -138,20 +131,10 @@ def main(
             covariate_name=name,
             bucket=bucket,
             prefix=prefix,
-            scale=scale,
         )
         tasks.append((name, task))
 
     click.echo(f"\n{len(tasks)} task(s) submitted to GEE.")
-
-    # If the 'region' covariate was exported, also upload its CSV key
-    if "region" in names:
-        click.echo("\nUploading region ID key CSV...")
-        try:
-            csv_path = export_admin_region_key(bucket, prefix)
-            click.echo(f"  Region key saved to {csv_path}")
-        except Exception as exc:
-            click.echo(f"  WARNING: failed to upload region key: {exc}", err=True)
 
     if wait_for_completion:
         _wait_for_tasks(tasks)
