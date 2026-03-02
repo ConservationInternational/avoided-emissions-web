@@ -287,12 +287,20 @@ def register_callbacks(app):
         State("task-description", "value"),
         State("parsed-sites-store", "data"),
         State("covariate-selection", "value"),
+        State("exact-match-selection", "value"),
         State("fc-start-year", "value"),
         State("fc-end-year", "value"),
         prevent_initial_call=True,
     )
     def handle_submit(
-        n_clicks, name, description, sites_data, covariates, fc_start, fc_end
+        n_clicks,
+        name,
+        description,
+        sites_data,
+        covariates,
+        exact_match_vars,
+        fc_start,
+        fc_end,
     ):
         if not name:
             return "Please enter a task name.", None
@@ -300,6 +308,12 @@ def register_callbacks(app):
             return "Please upload a sites file.", None
         if not covariates:
             return "Please select at least one covariate.", None
+        if not exact_match_vars:
+            return (
+                "Please select at least one exact match variable "
+                "(admin boundary, ecoregion, or protected area).",
+                None,
+            )
 
         user = get_current_user()
         if not user:
@@ -315,6 +329,7 @@ def register_callbacks(app):
                 user_id=user.id,
                 gdf=gdf,
                 covariates=covariates,
+                exact_match_vars=exact_match_vars,
                 fc_years=fc_years,
             )
 

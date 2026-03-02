@@ -39,7 +39,8 @@ All scripts read a JSON configuration file specifying:
         "dist_cities", "dist_roads", "crop_suitability",
         "pop_2015", "pop_growth", "total_biomass"
     ],
-    "exact_match_vars": ["region", "ecoregion", "pa"],
+    "exact_match_vars": ["admin1", "ecoregion", "pa"],
+    "matching_extent": {"type": "Polygon", "coordinates": [[[...]]]},
     "fc_years": [2000, 2001, "...", 2023],
     "max_treatment_pixels": 1000,
     "control_multiplier": 50,

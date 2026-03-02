@@ -324,10 +324,10 @@ calc_pixel_area_ha <- function(y, yres, xres) {
 
 # -- Matching helpers --------------------------------------------------------
 
-filter_groups <- function(vals) {
-    # Assign group interaction and keep only groups present in both
-    # treatment and control sets
-    vals$group <- interaction(vals$region, vals$ecoregion, vals$pa)
+filter_groups <- function(vals, exact_match_vars) {
+    # Assign group interaction from the exact-match variables and keep
+    # only groups present in both treatment and control sets.
+    vals$group <- interaction(vals[, exact_match_vars, drop = FALSE])
     vals <- filter(vals, group %in% unique(filter(vals, treatment)$group))
 
     treatment_groups <- unique(filter(vals, treatment)$group)
@@ -342,9 +342,9 @@ filter_groups <- function(vals) {
 
 foreach_rbind <- function(d1, d2) {
     # Robust rbind for use with foreach .combine, handles NULL inputs
-    if (is.null(d1) & is.null(d2)) return(NULL)
-    if (!is.null(d1) & is.null(d2)) return(d1)
-    if (is.null(d1) & !is.null(d2)) return(d2)
+    if (is.null(d1) && is.null(d2)) return(NULL)
+    if (!is.null(d1) && is.null(d2)) return(d1)
+    if (is.null(d1) && !is.null(d2)) return(d2)
     return(bind_rows(d1, d2))
 }
 

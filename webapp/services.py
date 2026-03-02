@@ -148,29 +148,163 @@ def upload_config_to_s3(config_dict, task_id):
     return f"s3://{Config.S3_BUCKET}/{key}"
 
 
+# ---------------------------------------------------------------------------
+# PostGIS matching-extent computation
+# ---------------------------------------------------------------------------
+
+# Maps exact-match variable names to their PostGIS table.  Variables
+# not present here (e.g. ``pa``, which is binary) are skipped when
+# computing the spatial extent because they don't constrain the search
+# area to discrete polygon regions.
+_EXTENT_TABLE_MAP: dict[str, str] = {
+    "admin0": "geoboundaries_adm0",
+    "admin1": "geoboundaries_adm1",
+    "admin2": "geoboundaries_adm2",
+    "ecoregion": "ecoregions",
+}
+
+
+def compute_matching_extent(
+    gdf: gpd.GeoDataFrame,
+    exact_match_vars: list[str],
+) -> dict | None:
+    """Compute the spatial extent for control-pixel selection.
+
+    For each polygon-type exact-match variable the function queries
+    PostGIS to find every polygon that intersects any of the treatment
+    *sites*.  The per-layer polygons are unioned, then all layers are
+    intersected together.  The resulting geometry is the tightest
+    bounding area in which a pixel could share the same exact-match
+    attribute values as at least one treatment site.
+
+    Binary variables (``pa``) do not contribute to the extent because
+    they partition all of space into only two classes and therefore
+    provide no spatial restriction.
+
+    Returns a GeoJSON-compatible dict (``{"type": "...", ...}``) or
+    ``None`` when no polygon-type variables are selected.
+    """
+    from shapely.geometry import mapping, shape
+    from sqlalchemy import text
+
+    polygon_vars = [v for v in exact_match_vars if v in _EXTENT_TABLE_MAP]
+    if not polygon_vars:
+        return None
+
+    # Build a single GeoJSON geometry representing all sites
+    sites_geojson = json.dumps(mapping(gdf.unary_union))
+
+    db = get_db()
+    try:
+        layer_extents = []
+        for var_name in polygon_vars:
+            table = _EXTENT_TABLE_MAP[var_name]
+            result = db.execute(
+                text(
+                    f"SELECT ST_AsGeoJSON(ST_Union(geom)) "
+                    f"FROM {table} "
+                    f"WHERE ST_Intersects("
+                    f"  geom, "
+                    f"  ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326)"
+                    f")"
+                ),
+                {"sites": sites_geojson},
+            )
+            row = result.fetchone()
+            if row and row[0]:
+                layer_extents.append(shape(json.loads(row[0])))
+
+        if not layer_extents:
+            return None
+
+        # Intersect all layer extents to get the tightest envelope
+        extent = layer_extents[0]
+        for geom in layer_extents[1:]:
+            extent = extent.intersection(geom)
+
+        if extent.is_empty:
+            logger.warning(
+                "Matching extent is empty — the intersection of the "
+                "selected exact-match layers does not cover any area."
+            )
+            return None
+
+        return mapping(extent)
+
+    finally:
+        db.close()
+
+
 def submit_analysis_task(
-    task_name, description, user_id, gdf, covariates, fc_years=None
+    task_name, description, user_id, gdf, covariates, exact_match_vars, fc_years=None
 ):
     """Create and submit a full analysis task.
 
     Routes to the trends.earth API when ``Config.USE_TRENDSEARTH_API`` is
     True, otherwise falls back to direct AWS Batch submission.
 
-    1. Creates the local database record
-    2. Uploads sites and config to S3
-    3. Submits to the appropriate backend
-    4. Updates the database with tracking IDs
+    ``exact_match_vars`` must contain at least one variable name from
+    ``["admin0", "admin1", "admin2", "ecoregion", "pa"]``.  A
+    ``ValueError`` is raised if the list is empty.
+
+    Before submission the function queries PostGIS to compute the
+    *matching extent* — the intersection of all polygon-type exact-match
+    layers that overlap the uploaded sites.  This extent is passed to
+    the analysis pipeline so control pixels are only drawn from areas
+    where they can potentially share exact-match values with treatment
+    sites.
+
+    1. Validates exact match selection
+    2. Computes matching extent via PostGIS
+    3. Creates the local database record
+    4. Uploads sites and config to S3
+    5. Submits to the appropriate backend
+    6. Updates the database with tracking IDs
 
     Returns the task ID.
     """
+    if not exact_match_vars:
+        raise ValueError(
+            "At least one exact match variable must be selected "
+            "(admin0, admin1, admin2, ecoregion, or pa)."
+        )
+
+    # Compute the matching extent polygon from PostGIS
+    matching_extent = compute_matching_extent(gdf, exact_match_vars)
+
     if Config.USE_TRENDSEARTH_API:
         return _submit_via_api(
-            task_name, description, user_id, gdf, covariates, fc_years
+            task_name,
+            description,
+            user_id,
+            gdf,
+            covariates,
+            exact_match_vars,
+            matching_extent,
+            fc_years,
         )
-    return _submit_via_batch(task_name, description, user_id, gdf, covariates, fc_years)
+    return _submit_via_batch(
+        task_name,
+        description,
+        user_id,
+        gdf,
+        covariates,
+        exact_match_vars,
+        matching_extent,
+        fc_years,
+    )
 
 
-def _submit_via_api(task_name, description, user_id, gdf, covariates, fc_years=None):
+def _submit_via_api(
+    task_name,
+    description,
+    user_id,
+    gdf,
+    covariates,
+    exact_match_vars,
+    matching_extent,
+    fc_years=None,
+):
     """Submit the analysis task through the trends.earth API.
 
     Creates an Execution on the API which handles AWS Batch dispatch,
@@ -224,7 +358,8 @@ def _submit_via_api(task_name, description, user_id, gdf, covariates, fc_years=N
             "cog_bucket": Config.S3_BUCKET,
             "cog_prefix": f"{Config.S3_PREFIX}/cog",
             "covariates": covariates,
-            "exact_match_vars": ["region", "ecoregion", "pa"],
+            "exact_match_vars": exact_match_vars,
+            "matching_extent": matching_extent,
             "fc_years": fc_years,
             "max_treatment_pixels": 1000,
             "control_multiplier": 50,
@@ -280,7 +415,16 @@ def _submit_via_api(task_name, description, user_id, gdf, covariates, fc_years=N
         db.close()
 
 
-def _submit_via_batch(task_name, description, user_id, gdf, covariates, fc_years=None):
+def _submit_via_batch(
+    task_name,
+    description,
+    user_id,
+    gdf,
+    covariates,
+    exact_match_vars,
+    matching_extent,
+    fc_years=None,
+):
     """Original direct-to-Batch submission (legacy path)."""
     if fc_years is None:
         fc_years = list(range(2000, 2024))
@@ -325,7 +469,8 @@ def _submit_via_batch(task_name, description, user_id, gdf, covariates, fc_years
             "cog_prefix": f"{Config.S3_PREFIX}/cog",
             "sites_file": "/data/input/sites.geojson",
             "covariates": covariates,
-            "exact_match_vars": ["region", "ecoregion", "pa"],
+            "exact_match_vars": exact_match_vars,
+            "matching_extent": matching_extent,
             "fc_years": fc_years,
             "max_treatment_pixels": 1000,
             "control_multiplier": 50,

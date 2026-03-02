@@ -7,6 +7,8 @@ Celery worker process.  The web application dispatches work by calling
 
 import logging
 
+import boto3
+
 from celery_app import celery_app
 from config import report_exception
 
@@ -45,14 +47,16 @@ def import_vector_data_task(self) -> dict:
 def rasterize_vectors_task(self) -> dict:
     """Rasterize vector reference layers to COGs aligned with the GEE grid.
 
-    Converts PostGIS vector tables (admin boundaries, ecoregions, biome,
+    Converts PostGIS vector tables (admin boundaries, ecoregions,
     protected areas) into Cloud-Optimized GeoTIFFs sharing the same grid
     as the GEE-exported covariates.  Also uploads a CSV key for each
     layer that maps raster values to source polygon attributes.
 
+    Layers whose COGs already exist on S3 are skipped, making this safe
+    to call on every webapp startup without redundant work.
+
     Typically dispatched automatically after :func:`import_vector_data_task`
-    completes.  Safe to call independently — will rasterize whatever data
-    is currently in the database.
+    completes.
 
     Returns
     -------
@@ -66,11 +70,57 @@ def rasterize_vectors_task(self) -> dict:
     from models import Covariate, get_db
     from rasterize_vectors import VECTOR_LAYERS, rasterize_and_upload
 
+    bucket = Config.S3_BUCKET
+    prefix = f"{Config.S3_PREFIX}/cog".strip("/")
+
+    # Build set of layer names whose COG already exists on S3.
+    existing_on_s3: set[str] = set()
+    if bucket:
+        try:
+            from botocore.exceptions import ClientError
+
+            s3 = boto3.client("s3", region_name=Config.AWS_REGION)
+            for layer_def in VECTOR_LAYERS:
+                name = layer_def["output_name"]
+                key = f"{prefix}/{name}.tif"
+                try:
+                    s3.head_object(Bucket=bucket, Key=key)
+                    existing_on_s3.add(name)
+                except ClientError:
+                    pass
+        except Exception:
+            logger.warning(
+                "Failed to check S3 for existing rasterized layers — "
+                "will rasterize all layers.",
+                exc_info=True,
+            )
+
     db = get_db()
     try:
         results = {}
         for layer_def in VECTOR_LAYERS:
             name = layer_def["output_name"]
+
+            # Skip layers that already have a COG on S3 and a
+            # corresponding "merged" Covariate record in the DB.
+            if name in existing_on_s3:
+                existing = (
+                    db.query(Covariate)
+                    .filter(
+                        Covariate.covariate_name == name,
+                        Covariate.status == "merged",
+                    )
+                    .first()
+                )
+                if existing:
+                    logger.info(
+                        "Skipping %s — COG already exists on S3 (%s)",
+                        name,
+                        existing.merged_url,
+                    )
+                    results[name] = {"cog_url": existing.merged_url, "skipped": True}
+                    continue
+
             logger.info("Rasterizing vector layer: %s", name)
 
             # Create (or update) a Covariate record so the layer shows
@@ -81,12 +131,11 @@ def rasterize_vectors_task(self) -> dict:
                 .order_by(Covariate.started_at.desc())
                 .first()
             )
-            if existing and existing.status in ("merged", "rasterizing"):
+            if existing:
                 layer = existing
             else:
                 layer = Covariate(
                     covariate_name=name,
-                    status="rasterizing",
                     output_bucket=Config.S3_BUCKET,
                     output_prefix=f"{Config.S3_PREFIX}/cog",
                     started_at=datetime.now(timezone.utc),

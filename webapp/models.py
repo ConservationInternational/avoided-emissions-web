@@ -92,6 +92,7 @@ class Covariate(Base):
             "pending_merge",
             "merging",
             "merged",
+            "rasterizing",
             "failed",
             "cancelled",
             name="covariate_status",
@@ -344,19 +345,25 @@ class Ecoregion(Base):
 
 
 class ProtectedArea(Base):
-    """WDPA protected areas."""
+    """WDPA protected areas.
+
+    Column names match the WDPA Feb 2026 GDB field names (lowercased).
+    """
 
     __tablename__ = "wdpa"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    wdpaid = Column(Integer, nullable=False, index=True)
+    site_id = Column(Integer, nullable=False, index=True)
+    site_pid = Column(Integer)
+    site_type = Column(String(50))
+    name_eng = Column(String(500))
     name = Column(String(500))
-    orig_name = Column(String(500))
     desig = Column(String(500))
+    desig_eng = Column(String(500))
     desig_type = Column(String(100))
     iucn_cat = Column(String(20))
     int_crit = Column(String(100))
-    marine = Column(String(10))
+    realm = Column(String(50))
     rep_m_area = Column(Float)
     gis_m_area = Column(Float)
     rep_area = Column(Float)
@@ -366,12 +373,19 @@ class ProtectedArea(Base):
     status = Column(String(100))
     status_yr = Column(Integer)
     gov_type = Column(String(255))
+    govsubtype = Column(String(255))
     own_type = Column(String(100))
+    ownsubtype = Column(String(255))
     mang_auth = Column(String(500))
     mang_plan = Column(String(500))
     verif = Column(String(100))
+    metadataid = Column(String(100))
+    prnt_iso3 = Column(String(10))
     iso3 = Column(String(10), index=True)
-    parent_iso3 = Column(String(10))
+    supp_info = Column(Text)
+    cons_obj = Column(Text)
+    inlnd_wtrs = Column(String(50))
+    oecm_asmt = Column(String(50))
     geom = Column(
         Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
     )

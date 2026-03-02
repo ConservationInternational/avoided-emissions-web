@@ -41,6 +41,18 @@ ALL_COVARIATES = DEFAULT_COVARIATES + [
     "pop_2020",
 ]
 
+# Exact match variables — at least one must be selected for each task.
+# Names must match the output_name values in webapp/rasterize_vectors.py.
+EXACT_MATCH_OPTIONS = [
+    {"label": "Admin 0 (Country)", "value": "admin0"},
+    {"label": "Admin 1 (Province / State)", "value": "admin1"},
+    {"label": "Admin 2 (District)", "value": "admin2"},
+    {"label": "Ecoregion", "value": "ecoregion"},
+    {"label": "Protected Area (WDPA)", "value": "pa"},
+]
+
+DEFAULT_EXACT_MATCH = ["admin1", "ecoregion", "pa"]
+
 # -- Column definitions (AG Grid) -------------------------------------------
 
 TRUNCATED_CELL = {
@@ -1084,6 +1096,25 @@ def submit_layout(user):
                             ),
                             dbc.Col(
                                 [
+                                    dbc.Label(
+                                        "Exact Match Variables",
+                                        className="fw-bold",
+                                    ),
+                                    html.Small(
+                                        "At least one must be selected. "
+                                        "Controls are drawn only from areas "
+                                        "sharing these attributes with "
+                                        "treatment sites.",
+                                        className="text-muted d-block mb-2",
+                                    ),
+                                    dbc.Checklist(
+                                        id="exact-match-selection",
+                                        options=EXACT_MATCH_OPTIONS,
+                                        value=DEFAULT_EXACT_MATCH,
+                                        inline=False,
+                                        className="ms-2",
+                                    ),
+                                    html.Hr(),
                                     dbc.Label("Forest Cover Years"),
                                     dbc.Row(
                                         [

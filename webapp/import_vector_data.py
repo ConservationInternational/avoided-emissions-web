@@ -83,14 +83,17 @@ ECOREGION_COL_MAP = {
 }
 
 WDPA_COL_MAP = {
-    "WDPAID": "wdpaid",
+    "SITE_ID": "site_id",
+    "SITE_PID": "site_pid",
+    "SITE_TYPE": "site_type",
+    "NAME_ENG": "name_eng",
     "NAME": "name",
-    "ORIG_NAME": "orig_name",
     "DESIG": "desig",
+    "DESIG_ENG": "desig_eng",
     "DESIG_TYPE": "desig_type",
     "IUCN_CAT": "iucn_cat",
     "INT_CRIT": "int_crit",
-    "MARINE": "marine",
+    "REALM": "realm",
     "REP_M_AREA": "rep_m_area",
     "GIS_M_AREA": "gis_m_area",
     "REP_AREA": "rep_area",
@@ -100,12 +103,19 @@ WDPA_COL_MAP = {
     "STATUS": "status",
     "STATUS_YR": "status_yr",
     "GOV_TYPE": "gov_type",
+    "GOVSUBTYPE": "govsubtype",
     "OWN_TYPE": "own_type",
+    "OWNSUBTYPE": "ownsubtype",
     "MANG_AUTH": "mang_auth",
     "MANG_PLAN": "mang_plan",
     "VERIF": "verif",
+    "METADATAID": "metadataid",
+    "PRNT_ISO3": "prnt_iso3",
     "ISO3": "iso3",
-    "PARENT_ISO3": "parent_iso3",
+    "SUPP_INFO": "supp_info",
+    "CONS_OBJ": "cons_obj",
+    "INLND_WTRS": "inlnd_wtrs",
+    "OECM_ASMT": "oecm_asmt",
 }
 
 
@@ -174,17 +184,34 @@ def _ensure_multipolygon(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 def _select_and_rename(
     gdf: gpd.GeoDataFrame, col_map: dict[str, str]
 ) -> gpd.GeoDataFrame:
-    """Select columns present in the source, rename them, keep geometry."""
-    available = {c for c in col_map if c in gdf.columns}
-    missing = set(col_map) - available
-    if missing:
-        log.warning("Source is missing columns: %s", missing)
+    """Select columns present in the source, rename them, keep geometry.
 
-    # Keep only mapped columns + geometry
-    keep = list(available) + ["geometry"]
+    Column matching is case-insensitive: the col_map keys are compared
+    against the source column names ignoring case.  This handles
+    variations across GDB releases (e.g. ``SITE_ID`` vs ``site_id``).
+    """
+    # Build a lookup from lower-cased source column name → actual name
+    src_lower = {c.lower(): c for c in gdf.columns if c != "geometry"}
+
+    # Match col_map keys (case-insensitive) to actual source columns
+    matched: dict[str, str] = {}  # actual_src_col → target_col
+    for map_key, target in col_map.items():
+        actual = src_lower.get(map_key.lower())
+        if actual is not None:
+            matched[actual] = target
+
+    missing = {k for k in col_map if k.lower() not in src_lower}
+    if missing:
+        log.warning(
+            "Source is missing columns: %s (available: %s)",
+            missing,
+            sorted(src_lower.keys()),
+        )
+
+    # Keep only matched columns + geometry
+    keep = list(matched.keys()) + ["geometry"]
     gdf = gdf[keep].copy()
-    rename_map = {src: dst for src, dst in col_map.items() if src in available}
-    gdf = gdf.rename(columns=rename_map)
+    gdf = gdf.rename(columns=matched)
     return gdf
 
 
@@ -257,7 +284,16 @@ def import_ecoregions(engine, tmpdir: Path) -> None:
 
 
 def import_wdpa(engine, tmpdir: Path) -> None:
-    """Download and import WDPA protected areas (polygon layer only)."""
+    """Download and import WDPA protected areas (polygon layer only).
+
+    The WDPA polygon layer contains ~300 k features with complex
+    geometries.  Loading it all at once via ``gpd.read_file()`` easily
+    exhausts worker memory and triggers an OOM kill.  To avoid this,
+    we first *locate* the data source, then read it in batches using
+    pyogrio's ``skip_features`` / ``max_features`` parameters.
+    """
+    import pyogrio
+
     dest = tmpdir / "wdpa.zip"
     _download(DOWNLOAD_URLS["wdpa"], dest)
 
@@ -267,10 +303,6 @@ def import_wdpa(engine, tmpdir: Path) -> None:
     with zipfile.ZipFile(dest, "r") as zf:
         zf.extractall(extract_dir)
 
-    # Find the polygon layer – could be a GeoPackage, shapefile, or GDB
-    # Try common patterns
-    gdf = None
-
     # Log what was extracted to aid debugging
     extracted_files = list(extract_dir.rglob("*"))
     log.info(
@@ -279,27 +311,31 @@ def import_wdpa(engine, tmpdir: Path) -> None:
         [p.name for p in extract_dir.iterdir()],
     )
 
+    # ------------------------------------------------------------------
+    # Phase 1: locate the polygon data source (path + layer name)
+    # ------------------------------------------------------------------
+    src_path: Path | None = None
+    poly_layer: str | None = None
+
     # Check for File GeoDatabase (.gdb directory) first
     gdb_dirs = list(extract_dir.rglob("*.gdb"))
     if gdb_dirs:
-        gdb_path = gdb_dirs[0]
-        log.info("Found GeoDatabase: %s", gdb_path)
+        src_path = gdb_dirs[0]
+        log.info("Found GeoDatabase: %s", src_path)
         try:
             import fiona
 
-            layers = fiona.listlayers(gdb_path)
+            layers = fiona.listlayers(src_path)
             log.info("Available layers: %s", layers)
-            poly_layer = None
             for lyr in layers:
                 if "poly" in lyr.lower() or "polygon" in lyr.lower():
                     poly_layer = lyr
                     break
-            gdf = _load_geopackage(gdb_path, layer=poly_layer)
         except Exception:
-            gdf = _load_geopackage(gdb_path)
+            pass  # will read the default layer
 
     # Fall back to GeoPackage / Shapefile patterns
-    if gdf is None:
+    if src_path is None:
         for pattern in [
             "**/*Polygons*.gpkg",
             "**/*polygons*.gpkg",
@@ -310,36 +346,73 @@ def import_wdpa(engine, tmpdir: Path) -> None:
         ]:
             matches = list(extract_dir.glob(pattern))
             if matches:
-                fpath = matches[0]
-                log.info("Found vector file: %s", fpath)
+                src_path = matches[0]
+                log.info("Found vector file: %s", src_path)
                 try:
                     import fiona
 
-                    layers = fiona.listlayers(fpath)
+                    layers = fiona.listlayers(src_path)
                     log.info("Available layers: %s", layers)
-                    poly_layer = None
                     for lyr in layers:
                         if "poly" in lyr.lower() or "polygon" in lyr.lower():
                             poly_layer = lyr
                             break
-                    gdf = _load_geopackage(fpath, layer=poly_layer)
                 except Exception:
-                    gdf = _load_geopackage(fpath)
+                    pass
                 break
 
-    if gdf is None:
+    if src_path is None:
         raise RuntimeError(
             f"Could not find a supported vector file in {extract_dir}. "
             f"Contents: {[p.name for p in extract_dir.iterdir()]}"
         )
 
-    gdf = _select_and_rename(gdf, WDPA_COL_MAP)
-    # Drop rows without geometry (WDPA can include point records)
-    gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
-    gdf = _ensure_multipolygon(gdf)
-    gdf = gdf.set_crs(epsg=4326, allow_override=True)
+    # ------------------------------------------------------------------
+    # Phase 2: chunked read and import
+    # ------------------------------------------------------------------
+    info = pyogrio.read_info(str(src_path), layer=poly_layer)
+    total_features = info["features"]
+    if total_features < 0:
+        # Some drivers don't report count; force a scan.
+        info = pyogrio.read_info(
+            str(src_path), layer=poly_layer, force_feature_count=True
+        )
+        total_features = info["features"]
 
-    _write_to_postgis(gdf, "wdpa", engine, chunksize=2000)
+    batch_size = 10_000
+    log.info(
+        "WDPA source has %d features — reading in batches of %d",
+        total_features,
+        batch_size,
+    )
+
+    total_written = 0
+    for start in range(0, total_features, batch_size):
+        n = min(batch_size, total_features - start)
+        log.info(
+            "Reading WDPA batch %d – %d of %d",
+            start + 1,
+            start + n,
+            total_features,
+        )
+        gdf = pyogrio.read_dataframe(
+            str(src_path),
+            layer=poly_layer,
+            skip_features=start,
+            max_features=n,
+        )
+
+        gdf = _select_and_rename(gdf, WDPA_COL_MAP)
+        # Drop rows without geometry (WDPA can include point records)
+        gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        gdf = _ensure_multipolygon(gdf)
+        gdf = gdf.set_crs(epsg=4326, allow_override=True)
+
+        _write_to_postgis(gdf, "wdpa", engine, chunksize=2000)
+        total_written += len(gdf)
+        del gdf
+
+    log.info("WDPA import complete: %d features written", total_written)
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +456,7 @@ def run_import(check_only: bool = False) -> None:
         return
 
     tmpdir = Path(tempfile.mkdtemp(prefix="vector_import_"))
+    failed: list[str] = []
     try:
         for table_name, importer in needed:
             log.info("=" * 60)
@@ -392,10 +466,14 @@ def run_import(check_only: bool = False) -> None:
                 importer(engine, tmpdir)
             except Exception:
                 log.exception("Failed to import %s", table_name)
+                failed.append(table_name)
                 # Continue with remaining datasets
     finally:
         log.info("Cleaning up temp directory %s", tmpdir)
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+    if failed:
+        raise RuntimeError(f"Vector data import failed for: {', '.join(failed)}")
 
     log.info("Vector data import complete")
 

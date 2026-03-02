@@ -38,7 +38,7 @@ import rioxarray  # noqa: F401 – registers the rio accessor
 import xarray as xr
 from osgeo import gdal
 from rasterio.features import rasterize
-from shapely.geometry import box, mapping
+from shapely.geometry import box, mapping, shape
 
 # Silence GDAL/rasterio deprecation noise
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -304,11 +304,15 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
 
     Strategy:
     1. Open all COGs lazily via rioxarray  (only metadata is fetched).
-    2. Compute the union bounding box of *buffered* sites (2° buffer).
+    2. Determine the spatial clip window from the pre-computed
+       ``matching_extent`` polygon (the intersection of all polygon-type
+       exact-match layers that overlap the sites, computed by the webapp
+       via PostGIS).
     3. Clip the lazy dataset to that window  (triggers range-request reads
        for only the needed tiles).
     4. Rasterize sites onto the covariate grid to label treatment pixels.
-    5. Build treatment_cell_key and the full pixel DataFrame in-memory.
+    5. Rasterize the matching_extent to identify candidate control pixels.
+    6. Build treatment_cell_key and the full pixel DataFrame in-memory.
     """
     cog_bucket = config["cog_bucket"]
     cog_prefix = config["cog_prefix"]
@@ -324,17 +328,26 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     # --- 1. open lazily ---
     ds = load_covariates_lazy(cog_bucket, cog_prefix, all_layers)
 
-    # --- 2. spatial window from buffered sites ---
-    buffer_deg = 2.0
-    bounds = sites.total_bounds  # (minx, miny, maxx, maxy)
+    # --- 2. spatial window from matching extent ---
+    matching_extent_geojson = config.get("matching_extent")
+    if not matching_extent_geojson:
+        raise RuntimeError(
+            "Config must include 'matching_extent' — the intersection of "
+            "exact-match layers that overlap the sites, "
+            "computed by the webapp via PostGIS."
+        )
+    extent_geom = shape(matching_extent_geojson)
+    ext_bounds = extent_geom.bounds  # (minx, miny, maxx, maxy)
+    # Small buffer to avoid edge clipping artefacts
+    buffer_deg = 0.1
     clip_box = box(
-        bounds[0] - buffer_deg,
-        bounds[1] - buffer_deg,
-        bounds[2] + buffer_deg,
-        bounds[3] + buffer_deg,
+        ext_bounds[0] - buffer_deg,
+        ext_bounds[1] - buffer_deg,
+        ext_bounds[2] + buffer_deg,
+        ext_bounds[3] + buffer_deg,
     )
+    log.info("Clipping covariates to matching extent bbox: %s", clip_box.bounds)
 
-    log.info("Clipping covariates to buffered AOI: %s", clip_box.bounds)
     ds = ds.rio.clip_box(*clip_box.bounds)
 
     # --- 3. materialise into memory ---
@@ -354,15 +367,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     # --- 4. rasterize sites ---
     site_mask = _rasterize_sites(sites, transform, width, height)
 
-    # --- 5. region layer ---
-    if "region" not in ds:
-        raise RuntimeError("'region' layer must be included in covariate exports")
-
-    region_arr = ds["region"].values
-    if region_arr.ndim == 3:
-        region_arr = region_arr[0]
-
-    # --- 6. build treatment cell key ---
+    # --- 5. build treatment cell key ---
     log.info("Building treatment cell key...")
     site_ids_flat = site_mask.ravel()
     treatment_mask = site_ids_flat > 0
@@ -379,7 +384,6 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         {
             "cell": treatment_indices,
             "id_numeric": site_ids_flat[treatment_indices],
-            "region": region_arr.ravel()[treatment_indices],
             "area_ha": pixel_areas,
         }
     )
@@ -387,32 +391,23 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     # Attach site_id
     id_to_site = dict(zip(sites["id_numeric"], sites["site_id"]))
     treatment_key["site_id"] = treatment_key["id_numeric"].map(id_to_site)
-
-    # Drop pixels with no region
-    treatment_key = treatment_key.dropna(subset=["region"])
-    treatment_key["region"] = treatment_key["region"].astype(int)
     log.info("Treatment cells: %d", len(treatment_key))
 
-    # --- 7. build control + treatment covariate table ---
-    # Control region: all pixels in regions that contain treatment pixels,
-    # within the clipped extent, excluding nodata pixels.
-    treatment_regions = set(treatment_key["region"].unique())
-    region_flat = region_arr.ravel()
+    # --- 6. determine candidate control pixels ---
+    # Rasterize the matching extent polygon to identify the area
+    # where valid controls can exist (the intersection of all
+    # polygon-type exact-match layers that overlap the sites).
+    extent_mask_2d = rasterize(
+        [(mapping(extent_geom), 1)],
+        out_shape=(height, width),
+        transform=transform,
+        fill=0,
+        dtype="uint8",
+        all_touched=True,
+    )
+    in_extent = extent_mask_2d.ravel().astype(bool)
+    candidate_mask = in_extent | treatment_mask
 
-    # Identify valid (non-nodata) region pixels.  Integer rasters use a
-    # sentinel nodata value (e.g. -9999, 255) rather than NaN, so we must
-    # read the actual nodata value from the layer metadata.
-    region_nodata = ds["region"].rio.nodata
-    if region_nodata is not None:
-        valid_region = region_flat != region_nodata
-    else:
-        # Fallback: for float layers, NaN may be used as nodata
-        valid_region = ~np.isnan(region_flat.astype(float))
-    region_int = np.where(valid_region, region_flat.astype(int), -1)
-    in_treatment_region = np.isin(region_int, list(treatment_regions))
-
-    # Candidate pixels: in treatment regions OR are treatment pixels
-    candidate_mask = in_treatment_region | treatment_mask
     candidate_indices = np.nonzero(candidate_mask)[0]
 
     log.info(

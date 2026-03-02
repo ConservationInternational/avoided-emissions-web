@@ -1,0 +1,14 @@
+linters: linters_with_defaults(
+    line_length_linter = line_length_linter(120L),
+    # R scripts use 4-space indentation inside `with_rollbar({ })` wrappers
+    # that makes detection unreliable — disable rather than produce false positives.
+    indentation_linter = NULL,
+    # Tidyverse NSE patterns cause false positives (e.g. dplyr column references).
+    object_usage_linter = NULL,
+    # Scripts use explicit return() consistently — allow this style.
+    return_linter = NULL,
+    # File-path comments in script headers are flagged as code — disable.
+    commented_code_linter = NULL,
+    # UPPER_CASE constants (e.g. MAX_TREATMENT) are intentional.
+    object_name_linter = NULL
+  )

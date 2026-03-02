@@ -265,8 +265,9 @@ DEFAULT_MATCHING_COVARIATES = [
     "total_biomass",
 ]
 
-# These are used for exact matching (stratification), not propensity scores
-EXACT_MATCHING_VARIABLES = ["admin0", "region", "admin2", "ecoregion", "pa"]
+# These are used for exact matching (stratification), not propensity scores.
+# Names must match the output_name values in webapp/rasterize_vectors.py.
+EXACT_MATCHING_VARIABLES = ["admin0", "admin1", "admin2", "ecoregion", "pa"]
 
 # ESA CCI land cover class mapping (raw value -> category)
 ESA_LC_REMAP = {
