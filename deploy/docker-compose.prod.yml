@@ -11,6 +11,11 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_prod_data:/var/lib/postgresql/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -31,6 +36,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -60,6 +70,11 @@ services:
     depends_on:
       - postgres
       - redis
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "5"
     networks:
       - backend
     deploy:
@@ -95,6 +110,11 @@ services:
     depends_on:
       - postgres
       - redis
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "5"
     networks:
       - backend
     deploy:
@@ -119,10 +139,18 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      TMPDIR: /scratch
     command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2", "-Q", "merge"]
+    tmpfs:
+      - /scratch:size=4G
     depends_on:
       - postgres
       - redis
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "5"
     networks:
       - backend
     deploy:
@@ -150,6 +178,11 @@ services:
     command: ["celery", "-A", "celery_app", "beat", "--loglevel=info", "--schedule=/app/celerybeat/celerybeat-schedule"]
     depends_on:
       - redis
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - backend
     deploy:
