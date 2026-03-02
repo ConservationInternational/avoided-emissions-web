@@ -60,7 +60,12 @@ RUN chmod +x /app/entrypoint.sh
 
 # Install Python dependencies. Step 1 (extract) now runs in Python for
 # speed using GDAL, rioxarray, and xarray to read COGs.
+# Install GDAL Python bindings matching the system libgdal version first,
+# then the rest of the requirements.
 RUN python3 -m venv /app/.venv \
+    && GDAL_VERSION=$(gdal-config --version) \
+    && /app/.venv/bin/pip install --no-cache-dir \
+        "GDAL==${GDAL_VERSION}" \
     && /app/.venv/bin/pip install --no-cache-dir \
         -r /app/requirements.txt \
     && rm -rf /var/lib/apt/lists/*

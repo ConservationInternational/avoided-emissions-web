@@ -40,20 +40,16 @@ permissions:
   contents: read
 
 jobs:
-  build-and-push:
-    name: Build and Push Docker Images
+  setup:
+    name: Setup
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
     environment: staging
     outputs:
-      webapp-image-uri: ${{ steps.build-webapp.outputs.image-uri }}
-      ranalysis-image-uri: ${{ steps.build-ranalysis.outputs.image-uri }}
       image-tag: ${{ steps.info.outputs.image-tag }}
+      ecr-registry: ${{ steps.login-ecr.outputs.registry }}
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
     - name: Get deployment info
       id: info
       run: |
@@ -65,19 +61,14 @@ jobs:
       uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
-        role-session-name: GitHubActionsStagingBuild
+        role-session-name: GitHubActionsStagingSetup
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Login to Amazon ECR
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
     - name: Ensure ECR repositories exist
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
       run: |
         for REPO in "${{ env.ECR_REPOSITORY_WEBAPP }}" "${{ env.ECR_REPOSITORY_RANALYSIS }}"; do
           if ! aws ecr describe-repositories --repository-names "$REPO" 2>/dev/null; then
@@ -91,11 +82,38 @@ jobs:
           fi
         done
 
+  build-webapp:
+    name: Build Webapp Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: staging
+    needs: setup
+    outputs:
+      image-uri: ${{ steps.build.outputs.image-uri }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+        role-session-name: GitHubActionsStagingWebapp
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
     - name: Build and push webapp image
-      id: build-webapp
+      id: build
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ steps.info.outputs.image-tag }}
+        IMAGE_TAG: ${{ needs.setup.outputs.image-tag }}
       run: |
         IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY_WEBAPP }}:$IMAGE_TAG"
         docker buildx build \
@@ -109,11 +127,38 @@ jobs:
           webapp/
         echo "image-uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
+  build-ranalysis:
+    name: Build R Analysis Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: staging
+    needs: setup
+    outputs:
+      image-uri: ${{ steps.build.outputs.image-uri }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+        role-session-name: GitHubActionsStagingRanalysis
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
     - name: Build and push R analysis image
-      id: build-ranalysis
+      id: build
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ steps.info.outputs.image-tag }}
+        IMAGE_TAG: ${{ needs.setup.outputs.image-tag }}
       run: |
         IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY_RANALYSIS }}:$IMAGE_TAG"
         docker buildx build \
@@ -132,7 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: staging
-    needs: build-and-push
+    needs: [build-webapp, build-ranalysis, setup]
 
     steps:
     - name: Checkout code
@@ -160,9 +205,9 @@ jobs:
     - name: Create environment file for deployment
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        WEBAPP_IMAGE: ${{ needs.build-and-push.outputs.webapp-image-uri }}
-        RANALYSIS_IMAGE: ${{ needs.build-and-push.outputs.ranalysis-image-uri }}
-        IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+        WEBAPP_IMAGE: ${{ needs.build-webapp.outputs.image-uri }}
+        RANALYSIS_IMAGE: ${{ needs.build-ranalysis.outputs.image-uri }}
+        IMAGE_TAG: ${{ needs.setup.outputs.image-tag }}
         SECRET_KEY: ${{ secrets.SECRET_KEY }}
         POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
         POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
