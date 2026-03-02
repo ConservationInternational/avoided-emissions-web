@@ -111,9 +111,14 @@ the account.
 | Staging group | `avoided-emissions-web-staging` |
 | Production group | `avoided-emissions-web-production` |
 
-Deployment groups use EC2 tag filters:
-- **Staging**: `DeploymentGroupAvoidedEmissions = avoided-emissions-staging`
-- **Production**: `DeploymentGroupAvoidedEmissions = avoided-emissions-production`
+Deployment groups use **separate** EC2 tag keys so the same instances can serve
+both environments simultaneously:
+- **Staging**: `AvoidedEmissionsStaging = true`
+- **Production**: `AvoidedEmissionsProduction = true`
+
+The CodeDeploy hooks detect which environment is being deployed from the
+`DEPLOYMENT_GROUP_NAME` variable and only run the deployment on the Docker
+Swarm leader node.
 
 Auto-rollback is enabled on deployment failure.
 
@@ -130,15 +135,14 @@ Auto-rollback is enabled on deployment failure.
        --iam-instance-profile Name=avoided-emissions-web-ec2-profile
    ```
 
-2. **Tag the instance** for CodeDeploy targeting:
+2. **Tag the instances** for CodeDeploy targeting. Both tags can be applied to
+   the same instances so that staging and production run side-by-side on the
+   same Docker Swarm cluster:
    ```bash
-   # For staging
-   aws ec2 create-tags --resources i-XXXXXXXXX \
-       --tags Key=DeploymentGroupAvoidedEmissions,Value=avoided-emissions-staging
-
-   # For production
-   aws ec2 create-tags --resources i-XXXXXXXXX \
-       --tags Key=DeploymentGroupAvoidedEmissions,Value=avoided-emissions-production
+   # Tag all swarm instances for both environments
+   aws ec2 create-tags --resources i-XXXXXXXXX i-YYYYYYYYY i-ZZZZZZZZZ \
+       --tags Key=AvoidedEmissionsStaging,Value=true \
+              Key=AvoidedEmissionsProduction,Value=true
    ```
 
 3. **Install Docker and initialize Swarm**:

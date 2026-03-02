@@ -489,10 +489,17 @@ else
     success "Created CodeDeploy application"
 fi
 
-# Create deployment groups (uses EC2 tags to target instances)
+# Create deployment groups (uses EC2 tags to target instances).
+#
+# Both staging and production deployment groups target the SAME instances using
+# separate tag keys.  This allows the same Docker Swarm cluster to serve both
+# environments side-by-side (staging on port 8051, production on port 8050).
+# The CodeDeploy hooks detect which environment is being deployed via the
+# DEPLOYMENT_GROUP_NAME variable and only act on the swarm leader node.
 create_deployment_group() {
     local group_name="$1"
-    local env_tag="$2"
+    local tag_key="$2"
+    local tag_value="$3"
 
     if aws deploy get-deployment-group \
         --application-name "$APP_NAME" \
@@ -528,15 +535,15 @@ create_deployment_group() {
             --deployment-group-name "$group_name" \
             --service-role-arn "$cd_role_arn" \
             --deployment-config-name CodeDeployDefault.OneAtATime \
-            --ec2-tag-filters "Key=DeploymentGroupAvoidedEmissions,Value=${env_tag},Type=KEY_AND_VALUE" \
+            --ec2-tag-filters "Key=${tag_key},Value=${tag_value},Type=KEY_AND_VALUE" \
             --auto-rollback-configuration "enabled=true,events=DEPLOYMENT_FAILURE" \
             --region "$AWS_REGION" >/dev/null
         success "Created deployment group: $group_name"
     fi
 }
 
-create_deployment_group "${APP_NAME}-staging" "avoided-emissions-staging"
-create_deployment_group "${APP_NAME}-production" "avoided-emissions-production"
+create_deployment_group "${APP_NAME}-staging"    "AvoidedEmissionsStaging"    "true"
+create_deployment_group "${APP_NAME}-production" "AvoidedEmissionsProduction" "true"
 echo ""
 
 # ============================================================================
@@ -626,7 +633,9 @@ echo "  secrets.POSTGRES_DB    = (database name)"
 echo "  secrets.EE_SERVICE_ACCOUNT_JSON = (GEE service account key JSON)"
 echo ""
 echo "Manual steps remaining:"
-echo "  1. Tag your EC2 instance (see deploy/README.md)"
+echo "  1. Tag your EC2 instances for CodeDeploy targeting:"
+echo "       aws ec2 create-tags --resources i-XXXXX i-YYYYY ... \\"
+echo "           --tags Key=AvoidedEmissionsStaging,Value=true Key=AvoidedEmissionsProduction,Value=true"
 echo "  2. Install CodeDeploy agent on EC2"
 echo "  3. Create Batch compute environment with VPC subnets"
 echo "  4. Configure ELB target group (see deploy/README.md)"
