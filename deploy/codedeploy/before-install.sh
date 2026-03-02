@@ -72,7 +72,8 @@ fi
 
 if [ -n "$DISK_USAGE" ] && [ "$DISK_USAGE" -gt 85 ]; then
     log_warning "Disk usage above 85%, emergency cleanup..."
-    docker system prune -a -f --volumes 2>/dev/null || true
+    # NOTE: Do NOT use --volumes here — it would destroy the postgres data volume.
+    docker system prune -a -f 2>/dev/null || true
 fi
 
 docker system df 2>/dev/null || true

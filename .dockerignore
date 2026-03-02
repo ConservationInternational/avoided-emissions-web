@@ -1,0 +1,38 @@
+# Git
+.git
+.github
+
+# Python artifacts
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.venv
+venv
+.pytest_cache
+htmlcov
+coverage.xml
+.ruff_cache
+
+# Environment files
+*.env
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.idea
+
+# Docs
+*.md
+LICENSE
+
+# Large data files
+WDPA_Feb2026_Public.gdb
+
+# Components not needed in webapp image
+r-analysis
+deploy

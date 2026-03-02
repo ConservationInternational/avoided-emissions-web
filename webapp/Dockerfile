@@ -13,16 +13,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 ENV PYTHONPATH=/app
 
-COPY requirements.txt .
+COPY webapp/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . /app/
+COPY webapp/ /app/
+COPY gee-export/config.py /app/gee-export/config.py
 
-COPY entrypoint.sh /entrypoint.sh
+COPY webapp/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 RUN useradd -m appuser
-RUN mkdir -p /app/celerybeat && chown appuser:appuser /app/celerybeat
+RUN mkdir -p /app/celerybeat /run/gunicorn && chown -R appuser:appuser /app/celerybeat /run/gunicorn
 USER appuser
 
 EXPOSE 8050

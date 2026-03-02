@@ -124,7 +124,7 @@ jobs:
           --tag "$ECR_REGISTRY/${{ env.ECR_REPOSITORY_WEBAPP }}:staging-latest" \
           --push \
           --file webapp/Dockerfile \
-          webapp/
+          .
         echo "image-uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
   build-ranalysis:

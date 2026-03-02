@@ -36,8 +36,8 @@ services:
 
   webapp:
     build:
-      context: ../webapp
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: webapp/Dockerfile
     env_file:
       - ../.env
     environment:
@@ -68,8 +68,8 @@ services:
 
   worker:
     build:
-      context: ../webapp
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: webapp/Dockerfile
     env_file:
       - ../.env
     environment:
@@ -91,8 +91,8 @@ services:
 
   merge-worker:
     build:
-      context: ../webapp
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: webapp/Dockerfile
     env_file:
       - ../.env
     environment:
@@ -114,8 +114,8 @@ services:
 
   beat:
     build:
-      context: ../webapp
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: webapp/Dockerfile
     env_file:
       - ../.env
     environment:
