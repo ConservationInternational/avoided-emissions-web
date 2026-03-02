@@ -10,15 +10,19 @@ Usage
 
     from trendsearth_client import TrendsEarthClient
 
-    # Using OAuth2 client credentials (preferred)
+    # Using OAuth2 client credentials (preferred for long-lived services)
     client = TrendsEarthClient(
         api_url="https://api.trends.earth/api/v1",
         client_id="your-client-id",
         client_secret="your-client-secret",
     )
 
-    # Or via environment variables (TRENDSEARTH_CLIENT_ID, TRENDSEARTH_CLIENT_SECRET)
-    client = TrendsEarthClient()
+    # Using email/password (for interactive flows, e.g. linking accounts)
+    client = TrendsEarthClient(
+        api_url="https://api.trends.earth/api/v1",
+        email="user@example.com",
+        password="secret",
+    )
 
     execution = client.create_execution(script_id, params)
     status = client.get_execution(execution["id"])
@@ -43,12 +47,16 @@ class TrendsEarthClient:
         api_url=None,
         client_id=None,
         client_secret=None,
+        email=None,
+        password=None,
     ):
         self.api_url = (api_url or os.environ.get("TRENDSEARTH_API_URL", "")).rstrip(
             "/"
         )
         self._client_id = client_id or ""
         self._client_secret = client_secret or ""
+        self._email = email or ""
+        self._password = password or ""
         self._token = None
 
     # ------------------------------------------------------------------
@@ -74,6 +82,31 @@ class TrendsEarthClient:
             )
         token_data = self.oauth2_token(self._client_id, self._client_secret)
         self._token = token_data["access_token"]
+
+    def _login(self):
+        """Authenticate with email/password and store the JWT.
+
+        The auth endpoint lives at ``{base}/auth`` (outside ``/api/v1``).
+        """
+        base_url = self.api_url.rstrip("/")
+        if base_url.endswith("/api/v1"):
+            auth_url = base_url[: -len("/api/v1")] + "/auth"
+        else:
+            auth_url = base_url + "/auth"
+
+        resp = requests.post(
+            auth_url,
+            json={"email": self._email, "password": self._password},
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        token = data.get("access_token")
+        if not token:
+            raise ValueError(
+                "Login succeeded but the response did not contain an access_token."
+            )
+        self._token = token
 
     # ------------------------------------------------------------------
     # OAuth2 client management (Client Credentials grant)
