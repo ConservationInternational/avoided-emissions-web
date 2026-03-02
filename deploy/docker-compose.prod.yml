@@ -1,7 +1,6 @@
 # Docker Compose for production deployment via Docker Swarm.
 # Deployed to EC2 using CodeDeploy with `docker stack deploy`.
-
-name: avoided-emissions-web
+# Note: top-level 'name' is not supported by `docker stack deploy`.
 
 services:
   postgres:

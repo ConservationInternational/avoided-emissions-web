@@ -49,7 +49,8 @@ fi
 # -- Stack health check and recovery -----------------------------------------
 
 log_info "Checking stack health before deployment..."
-STACK_EXISTS=$(docker stack ls --format "{{.Name}}" 2>/dev/null | grep -c "^${STACK_NAME}$" || echo "0")
+STACK_EXISTS=$(docker stack ls --format "{{.Name}}" 2>/dev/null | grep -cx "${STACK_NAME}" || true)
+STACK_EXISTS=${STACK_EXISTS:-0}
 
 if [ "$STACK_EXISTS" -gt 0 ]; then
     log_info "Stack $STACK_NAME exists, checking health..."

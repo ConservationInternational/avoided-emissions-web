@@ -1,7 +1,6 @@
 # Docker Compose for staging deployment via Docker Swarm.
 # Mirrors production but with a separate subnet and single replica.
-
-name: avoided-emissions-web
+# Note: top-level 'name' is not supported by `docker stack deploy`.
 
 services:
   postgres:

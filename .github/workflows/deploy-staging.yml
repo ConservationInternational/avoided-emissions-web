@@ -344,16 +344,21 @@ jobs:
         aws deploy wait deployment-successful \
           --deployment-id "$DEPLOYMENT_ID" \
           --cli-read-timeout 1800 || {
-            STATUS=$(aws deploy get-deployment --deployment-id "$DEPLOYMENT_ID" \
-              --query 'deploymentInfo.status' --output text)
-            echo "Deployment failed with status: $STATUS"
-            aws deploy list-deployment-targets --deployment-id "$DEPLOYMENT_ID" \
-              --query 'targetIds' --output text | while read TARGET_ID; do
-              aws deploy get-deployment-target \
-                --deployment-id "$DEPLOYMENT_ID" --target-id "$TARGET_ID" \
-                --query 'deploymentTarget.instanceTarget.lifecycleEvents[*].{Event:lifecycleEventName,Status:status}' \
-                --output table
-            done
+            echo "::error::Deployment $DEPLOYMENT_ID failed"
+            aws deploy get-deployment --deployment-id "$DEPLOYMENT_ID" \
+              --query 'deploymentInfo.{Status:status,Error:errorInformation}' \
+              --output json
+            TARGETS=$(aws deploy list-deployment-targets --deployment-id "$DEPLOYMENT_ID" \
+              --query 'targetIds' --output json)
+            echo "Targets: $TARGETS"
+            if [ "$TARGETS" != "[]" ]; then
+              echo "$TARGETS" | jq -r '.[]' | while read TARGET_ID; do
+                aws deploy get-deployment-target \
+                  --deployment-id "$DEPLOYMENT_ID" --target-id "$TARGET_ID" \
+                  --query 'deploymentTarget.instanceTarget.{Instance:targetId,Status:status,Events:lifecycleEvents[*].{Event:lifecycleEventName,Status:status,Diagnostics:diagnostics.message}}' \
+                  --output json
+              done
+            fi
             exit 1
           }
 
