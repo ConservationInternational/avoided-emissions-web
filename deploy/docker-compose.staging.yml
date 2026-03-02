@@ -48,7 +48,7 @@ services:
   webapp:
     image: ${WEBAPP_IMAGE}
     env_file:
-      - .env
+      - ../.env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -82,7 +82,7 @@ services:
   worker:
     image: ${WEBAPP_IMAGE}
     env_file:
-      - .env
+      - ../.env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -110,7 +110,7 @@ services:
   merge-worker:
     image: ${WEBAPP_IMAGE}
     env_file:
-      - .env
+      - ../.env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -138,7 +138,7 @@ services:
   beat:
     image: ${WEBAPP_IMAGE}
     env_file:
-      - .env
+      - ../.env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://redis:6379/0
