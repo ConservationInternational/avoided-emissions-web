@@ -307,8 +307,8 @@ to the trends.earth API) uses its own OAuth2 credentials:
 
 | Secret | Description |
 |---|---|
-| `TRENDS_EARTH_CLIENT_ID` | OAuth2 client ID for the trends.earth CLI (used by the publish workflow only). |
-| `TRENDS_EARTH_CLIENT_SECRET` | OAuth2 client secret for the trends.earth CLI. |
+| `TRENDSEARTH_CLIENT_ID` | OAuth2 client ID for the trends.earth CLI (used by the publish workflow only). |
+| `TRENDSEARTH_CLIENT_SECRET` | OAuth2 client secret for the trends.earth CLI. |
 
 ### Variables
 

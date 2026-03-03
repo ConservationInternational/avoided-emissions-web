@@ -69,8 +69,8 @@ jobs:
       - name: Obtain access token via OAuth2 Client Credentials
         env:
           API_URL: ${{ steps.api-url.outputs.url }}
-          CLIENT_ID: ${{ secrets.TRENDS_EARTH_CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.TRENDS_EARTH_CLIENT_SECRET }}
+          CLIENT_ID: ${{ secrets.TRENDSEARTH_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.TRENDSEARTH_CLIENT_SECRET }}
         run: |
           RESPONSE=$(curl -sf -X POST "${API_URL}/api/v1/oauth/token" \
             -H "Content-Type: application/json" \

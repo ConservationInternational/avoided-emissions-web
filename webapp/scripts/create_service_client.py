@@ -185,8 +185,8 @@ def main():
         print("  ⚠  The secret is shown ONCE. Store it securely now.")
         print()
         print("  Add these as GitHub repository secrets:")
-        print(f"    TRENDS_EARTH_CLIENT_ID     = {data['client_id']}")
-        print(f"    TRENDS_EARTH_CLIENT_SECRET = {data['client_secret']}")
+        print(f"    TRENDSEARTH_CLIENT_ID     = {data['client_id']}")
+        print(f"    TRENDSEARTH_CLIENT_SECRET = {data['client_secret']}")
         print()
         if data.get("expires_at"):
             print(f"  Expires: {data['expires_at']}")
