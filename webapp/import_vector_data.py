@@ -278,6 +278,21 @@ def _ensure_multipolygon(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gdf
 
 
+def _make_valid(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Repair any invalid geometries using Shapely's make_valid."""
+    from shapely.validation import make_valid
+
+    invalid_mask = ~gdf.geometry.is_valid
+    n_invalid = invalid_mask.sum()
+    if n_invalid:
+        log.warning("Repairing %d invalid geometries with make_valid", n_invalid)
+        gdf = gdf.copy()
+        gdf.loc[invalid_mask, "geometry"] = gdf.loc[invalid_mask, "geometry"].apply(
+            make_valid
+        )
+    return gdf
+
+
 def _select_and_rename(
     gdf: gpd.GeoDataFrame, col_map: dict[str, str]
 ) -> gpd.GeoDataFrame:
@@ -403,6 +418,7 @@ def import_geoboundaries(engine, adm_level: int, tmpdir: Path) -> _SourceInfo:
         )
         gdf = _select_and_rename(gdf, col_map)
         gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        gdf = _make_valid(gdf)
         gdf = _ensure_multipolygon(gdf)
         gdf = gdf.set_crs(epsg=4326, allow_override=True)
 
@@ -466,6 +482,7 @@ def import_ecoregions(engine, tmpdir: Path) -> _SourceInfo:
             if col in gdf.columns:
                 gdf[col] = gdf[col].astype("Int64")
         gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        gdf = _make_valid(gdf)
         gdf = _ensure_multipolygon(gdf)
         gdf = gdf.set_crs(epsg=4326, allow_override=True)
 
@@ -606,6 +623,7 @@ def import_wdpa(engine, tmpdir: Path) -> _SourceInfo:
         gdf = _select_and_rename(gdf, WDPA_COL_MAP)
         # Drop rows without geometry (WDPA can include point records)
         gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        gdf = _make_valid(gdf)
         gdf = _ensure_multipolygon(gdf)
         gdf = gdf.set_crs(epsg=4326, allow_override=True)
 
