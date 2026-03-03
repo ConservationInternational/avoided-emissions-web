@@ -1,8 +1,7 @@
 """Lightweight Batch runner for trends.earth script containers.
 
-Downloads execution parameters from S3 via :func:`gefcore.api.get_params`,
-delegates to ``main.run()``, and uploads the results dict back to S3 via
-:func:`gefcore.api.put_results`.
+Downloads execution parameters from S3, delegates to ``main.run()``,
+and uploads the results dict back to S3.
 
 Status management (RUNNING → FINISHED / FAILED) is handled entirely by
 the API's ``monitor_batch_executions`` periodic task — this runner only
@@ -18,9 +17,16 @@ is set::
     python batch_runner.py extract   # override step
 """
 
+import gzip
+import json
 import logging
 import os
 import sys
+import tempfile
+import uuid
+from pathlib import Path
+
+import boto3
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -29,16 +35,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger("batch_runner")
 
+# ---------------------------------------------------------------------------
+# S3 helpers (self-contained — no gefcore dependency)
+# ---------------------------------------------------------------------------
+
+EXECUTION_ID = os.getenv("EXECUTION_ID", "")
+PARAMS_S3_BUCKET = os.getenv("PARAMS_S3_BUCKET", "")
+PARAMS_S3_PREFIX = os.getenv("PARAMS_S3_PREFIX", "")
+
+
+class _UUIDEncoder(json.JSONEncoder):
+    """JSON encoder that converts UUID objects to strings."""
+
+    def default(self, obj):
+        if isinstance(obj, uuid.UUID):
+            return str(obj)
+        return super().default(obj)
+
+
+def _get_params():
+    """Download and decompress execution params from S3."""
+    key = f"{PARAMS_S3_PREFIX}/{EXECUTION_ID}.json.gz"
+    s3 = boto3.client("s3")
+    with tempfile.TemporaryDirectory() as tmp:
+        local = Path(tmp) / f"{EXECUTION_ID}.json.gz"
+        logger.info("Downloading s3://%s/%s", PARAMS_S3_BUCKET, key)
+        s3.download_file(PARAMS_S3_BUCKET, key, str(local))
+        with gzip.open(local, "r") as f:
+            return json.loads(f.read().decode("utf-8"))
+
+
+def _put_results(results_dict):
+    """Compress and upload results dict to S3."""
+    key = f"{PARAMS_S3_PREFIX}/{EXECUTION_ID}_results.json.gz"
+    s3 = boto3.client("s3")
+    with tempfile.TemporaryDirectory() as tmp:
+        local = Path(tmp) / f"{EXECUTION_ID}_results.json.gz"
+        data = json.dumps(results_dict, cls=_UUIDEncoder).encode("utf-8")
+        with gzip.open(local, "wb") as f:
+            f.write(data)
+        s3.upload_file(str(local), PARAMS_S3_BUCKET, key)
+        logger.info("Results uploaded to s3://%s/%s", PARAMS_S3_BUCKET, key)
+
 
 def main(step_override=None):
     """Download params → run script → upload results."""
     execution_id = os.getenv("EXECUTION_ID", "")
-    if not execution_id or not os.getenv("PARAMS_S3_BUCKET"):
+    if not execution_id or not PARAMS_S3_BUCKET:
         logger.error(
             "EXECUTION_ID and PARAMS_S3_BUCKET must be set. "
             "Got EXECUTION_ID=%r, PARAMS_S3_BUCKET=%r",
             execution_id,
-            os.getenv("PARAMS_S3_BUCKET", ""),
+            PARAMS_S3_BUCKET,
         )
         sys.exit(1)
 
@@ -46,15 +94,13 @@ def main(step_override=None):
         "batch_runner: starting execution %s "
         "(PARAMS_S3_BUCKET=%s, PARAMS_S3_PREFIX=%s)",
         execution_id,
-        os.getenv("PARAMS_S3_BUCKET", ""),
-        os.getenv("PARAMS_S3_PREFIX", ""),
+        PARAMS_S3_BUCKET,
+        PARAMS_S3_PREFIX,
     )
 
-    # ---- download params (reuses gefcore's S3 + retry logic) ----
-    from gefcore.api import get_params, put_results
-
+    # ---- download params from S3 ----
     logger.info("Downloading params from S3...")
-    params = get_params()
+    params = _get_params()
     if params is None:
         logger.error("Failed to download params from S3")
         sys.exit(1)
@@ -87,10 +133,9 @@ def main(step_override=None):
         list(result.keys()) if isinstance(result, dict) else type(result).__name__,
     )
 
-    # ---- upload results (reuses gefcore's S3 + retry logic) ----
+    # ---- upload results to S3 ----
     if result is not None:
-        put_results(result)
-        logger.info("Results uploaded to S3")
+        _put_results(result)
     else:
         logger.warning("Script returned None — no results to upload")
 
