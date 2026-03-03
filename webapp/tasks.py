@@ -282,6 +282,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
 
         # Transition to 'merging'
         layer.status = "merging"
+        layer.started_at = merge_start
         meta.status = "merging"
         meta.merge_started_at = merge_start
         db.commit()
@@ -309,18 +310,29 @@ def run_cog_merge(self, layer_id: str) -> dict:
             db.close()
             return {"status": "superseded"}
 
+        if layer.status == "failed":
+            logger.info(
+                "Covariate %s was reset to 'failed' during merge "
+                "(stale detection race) — overwriting with merge result",
+                layer_id,
+            )
+
         layer.status = "merged"
+        layer.error_message = None
         layer.merged_url = result["url"]
         layer.size_bytes = result["size_bytes"]
         layer.n_tiles = result["n_tiles"]
         layer.completed_at = merge_end
 
-        # Update metadata snapshot with merge results
+        # Update metadata snapshot with merge results.  The stale-
+        # detection code in auto_merge_unmerged may have flipped the
+        # snapshot to 'failed' while the merge was running, so also
+        # accept that status when looking for the snapshot to update.
         meta = (
             db.query(GeeExportMetadata)
             .filter(
                 GeeExportMetadata.covariate_id == layer_id,
-                GeeExportMetadata.status == "merging",
+                GeeExportMetadata.status.in_(["merging", "failed"]),
             )
             .order_by(GeeExportMetadata.created_at.desc())
             .first()
@@ -788,6 +800,8 @@ def auto_merge_unmerged() -> dict:
             )
             if existing:
                 existing.status = "pending_merge"
+                existing.started_at = now
+                existing.error_message = None
                 existing.output_bucket = Config.S3_BUCKET
                 existing.output_prefix = f"{Config.S3_PREFIX}/cog"
                 cov_id = existing.id
