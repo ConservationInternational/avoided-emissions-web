@@ -27,7 +27,10 @@ def _load_simple_image(covariate_name, cfg):
     if cfg.get("filter_year"):
         # ImageCollection filtered to a specific year
         col = ee.ImageCollection(asset).filter(ee.Filter.eq("year", cfg["filter_year"]))
-        image = col.mosaic()
+        # mosaic() drops the default projection; capture it from the first
+        # image so that reduceResolution has a valid source projection.
+        proj = col.first().projection()
+        image = col.mosaic().setDefaultProjection(proj)
     else:
         # Try as Image first; if it's a FeatureCollection, handle separately
         try:

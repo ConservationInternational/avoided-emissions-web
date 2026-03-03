@@ -22,17 +22,21 @@ def build_pop_growth():
     the compound annual growth rate: ((pop_2020 / pop_2000) ^ (1/20)) - 1.
     Areas with zero population in 2000 are set to 0.
     """
+    pop_col = ee.ImageCollection("WorldPop/GP/100m/pop")
+    # mosaic() drops the default projection; capture it from the first
+    # image so that reduceResolution has a valid source projection.
+    proj = pop_col.first().projection()
     pop_2000 = (
-        ee.ImageCollection("WorldPop/GP/100m/pop")
-        .filter(ee.Filter.eq("year", 2000))
+        pop_col.filter(ee.Filter.eq("year", 2000))
         .mosaic()
+        .setDefaultProjection(proj)
         .select("population")
         .rename("pop_2000")
     )
     pop_2020 = (
-        ee.ImageCollection("WorldPop/GP/100m/pop")
-        .filter(ee.Filter.eq("year", 2020))
+        pop_col.filter(ee.Filter.eq("year", 2020))
         .mosaic()
+        .setDefaultProjection(proj)
         .select("population")
         .rename("pop_2020")
     )
@@ -168,7 +172,9 @@ def build_aez():
     aez_image = (
         aez_fc.reduceToImage(["aez_id"], ee.Reducer.first()).unmask(0).rename("aez")
     )
-    return aez_image.toInt()
+    # reduceToImage on a FeatureCollection produces an image with no
+    # default projection; set one so that reduceResolution works.
+    return aez_image.setDefaultProjection(crs="EPSG:4326", scale=1000).toInt()
 
 
 def build_friction_surface():
