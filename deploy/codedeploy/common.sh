@@ -236,7 +236,10 @@ recover_stack() {
 check_for_stuck_services() {
     local stack_name="$1"
     local stuck_tasks
+    # Exclude the one-shot migrate service — it legitimately shows 0/1
+    # replicas after completing (restart_policy: none).
     stuck_tasks=$(docker service ls --filter "name=${stack_name}_" --format "{{.Name}} {{.Replicas}}" 2>/dev/null \
+        | grep -v "_migrate " \
         | grep -E "0/[0-9]+" | head -5 || echo "")
 
     if [ -n "$stuck_tasks" ]; then

@@ -10,7 +10,7 @@ import logging
 import boto3
 
 from celery_app import celery_app
-from config import report_exception
+from config import report_exception, report_message
 
 logger = logging.getLogger(__name__)
 
@@ -889,61 +889,73 @@ def poll_batch_tasks() -> dict:
         # ---- Poll API-routed tasks ----
         # Background polling uses the system-level service credentials
         # (TRENDSEARTH_CLIENT_ID / TRENDSEARTH_CLIENT_SECRET) because
-        # Celery workers have no per-user context.
+        # Celery workers have no per-user context.  User credentials are
+        # only used at submission time.
         api_tasks = [t for t in active if (t.extract_job_id or "").startswith("api:")]
         if api_tasks:
             from config import Config
             from trendsearth_client import TrendsEarthClient
 
-            client = TrendsEarthClient(
-                api_url=Config.TRENDSEARTH_API_URL,
-                client_id=Config.TRENDSEARTH_CLIENT_ID,
-                client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
-            )
-            for task in api_tasks:
-                try:
-                    exec_id = task.extract_job_id[4:]  # strip "api:"
-                    execution = client.get_execution(exec_id)
-                    # The API returns {"data": {"status": ...}}
-                    exec_data = execution.get("data", {})
-                    api_status = exec_data.get("status", "").upper()
-                    old_status = task.status
+            if not Config.TRENDSEARTH_CLIENT_ID or not Config.TRENDSEARTH_CLIENT_SECRET:
+                msg = (
+                    "Skipping API task polling: TRENDSEARTH_CLIENT_ID and "
+                    "TRENDSEARTH_CLIENT_SECRET must be set in the environment "
+                    "for background status polling to work. "
+                    f"{len(api_tasks)} task(s) will not be polled until "
+                    "these are configured."
+                )
+                logger.warning(msg)
+                report_message(msg, level="error", pending_tasks=len(api_tasks))
+            else:
+                client = TrendsEarthClient(
+                    api_url=Config.TRENDSEARTH_API_URL,
+                    client_id=Config.TRENDSEARTH_CLIENT_ID,
+                    client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
+                )
+                for task in api_tasks:
+                    try:
+                        exec_id = task.extract_job_id[4:]  # strip "api:"
+                        execution = client.get_execution(exec_id)
+                        # The API returns {"data": {"status": ...}}
+                        exec_data = execution.get("data", {})
+                        api_status = exec_data.get("status", "").upper()
+                        old_status = task.status
 
-                    logger.info(
-                        "Polling API task %s (exec %s): api_status=%s, local_status=%s",
-                        task.id,
-                        exec_id,
-                        api_status,
-                        old_status,
-                    )
-
-                    if api_status == "FINISHED":
-                        task.status = "succeeded"
-                        task.completed_at = now
-                    elif api_status == "FAILED":
-                        task.status = "failed"
-                        task.error_message = exec_data.get("results", {}).get(
-                            "error", "Execution failed on API"
+                        logger.info(
+                            "Polling API task %s (exec %s): api_status=%s, local_status=%s",
+                            task.id,
+                            exec_id,
+                            api_status,
+                            old_status,
                         )
-                        task.completed_at = now
-                    elif api_status == "CANCELLED":
-                        task.status = "cancelled"
-                        task.completed_at = now
-                    elif api_status in ("RUNNING", "READY"):
-                        task.status = "running"
-                        if not task.started_at:
-                            task.started_at = now
-                    # PENDING / SUBMITTED → keep as "submitted"
 
-                    if task.status != old_status:
-                        updated += 1
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to poll API status for task %s: %s",
-                        task.id,
-                        exc,
-                    )
-                    report_exception(task_id=str(task.id))
+                        if api_status == "FINISHED":
+                            task.status = "succeeded"
+                            task.completed_at = now
+                        elif api_status == "FAILED":
+                            task.status = "failed"
+                            task.error_message = exec_data.get("results", {}).get(
+                                "error", "Execution failed on API"
+                            )
+                            task.completed_at = now
+                        elif api_status == "CANCELLED":
+                            task.status = "cancelled"
+                            task.completed_at = now
+                        elif api_status in ("RUNNING", "READY"):
+                            task.status = "running"
+                            if not task.started_at:
+                                task.started_at = now
+                        # PENDING / SUBMITTED → keep as "submitted"
+
+                        if task.status != old_status:
+                            updated += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to poll API status for task %s: %s",
+                            task.id,
+                            exc,
+                        )
+                        report_exception(task_id=str(task.id))
 
         db.commit()
         return {"checked": len(active), "updated": updated}

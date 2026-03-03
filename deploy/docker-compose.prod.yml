@@ -10,7 +10,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - postgres_prod_data:/var/lib/postgresql/data
+      - type: bind
+        source: /data/avoided-emissions/production/postgres
+        target: /var/lib/postgresql/data
     logging:
       driver: json-file
       options:
@@ -28,9 +30,7 @@ services:
       placement:
         constraints:
           - node.role == manager
-      resources:
-        limits:
-          memory: 1G
+          - node.labels.ae_database == true
         reservations:
           memory: 512M
 
@@ -237,8 +237,3 @@ networks:
       config:
         - subnet: ${BACKEND_SUBNET:-10.30.0.0/16}
 
-volumes:
-  postgres_prod_data:
-    # Named volume — data persists across stack deploys and container restarts.
-    # Do NOT use `docker volume rm` or `docker stack rm --volumes` in production.
-    name: postgres_prod_data

@@ -85,3 +85,30 @@ def report_exception(**extra):
         rollbar.report_exc_info(sys.exc_info(), extra_data=extra or None)
     except Exception:
         _logger.debug("Failed to report exception to Rollbar", exc_info=True)
+
+
+def report_message(message, level="error", **extra):
+    """Send an ad-hoc message to Rollbar (if configured).
+
+    Unlike :func:`report_exception` this does not require an active
+    exception context — use it to flag configuration errors or other
+    noteworthy conditions that aren't Python exceptions.
+
+    Parameters
+    ----------
+    message : str
+        Human-readable description of the problem.
+    level : str
+        Rollbar severity level (``"critical"``, ``"error"``,
+        ``"warning"``, ``"info"``, or ``"debug"``).
+    **extra
+        Arbitrary key/value pairs attached to the Rollbar item.
+    """
+    if not Config.ROLLBAR_ACCESS_TOKEN:
+        return
+    try:
+        import rollbar
+
+        rollbar.report_message(message, level=level, extra_data=extra or None)
+    except Exception:
+        _logger.debug("Failed to report message to Rollbar", exc_info=True)

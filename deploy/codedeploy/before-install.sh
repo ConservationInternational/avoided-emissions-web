@@ -93,5 +93,49 @@ if ! aws ecr get-login-password --region "$REGION" > /dev/null 2>&1; then
 fi
 log_success "ECR access verified"
 
+# -- Label this node for postgres placement ----------------------------------
+# The compose files constrain postgres to node.labels.ae_database == true so it
+# always lands on the same host where the bind-mounted data directory lives.
+NODE_ID=$(docker info --format '{{.Swarm.NodeID}}' 2>/dev/null || echo "")
+if [ -n "$NODE_ID" ]; then
+    docker node update --label-add ae_database=true "$NODE_ID" > /dev/null 2>&1 || true
+    log_info "Added ae_database=true label to node $NODE_ID"
+fi
+
+# -- Ensure persistent database directory exists on host ---------------------
+# Postgres data is bind-mounted from the host filesystem so it survives
+# stack removals, node rescheduling, and Docker volume lifecycle events.
+
+PG_DATA_DIR="/data/avoided-emissions/${ENVIRONMENT}/postgres"
+
+if [ ! -d "$PG_DATA_DIR" ]; then
+    log_info "Creating postgres data directory: $PG_DATA_DIR"
+    mkdir -p "$PG_DATA_DIR"
+    # The official postgres image runs as uid 999 (postgres).
+    chown -R 999:999 "$PG_DATA_DIR"
+    log_success "Directory $PG_DATA_DIR created"
+else
+    log_info "Postgres data directory $PG_DATA_DIR already exists — data will be retained"
+fi
+
+# Migrate from old Docker named volume if it exists and the host dir is empty.
+OLD_VOLUME="postgres_${ENVIRONMENT}_data"
+if [ "$ENVIRONMENT" = "staging" ]; then
+    OLD_VOLUME="postgres_staging_data"
+fi
+if docker volume inspect "$OLD_VOLUME" > /dev/null 2>&1; then
+    if [ -z "$(ls -A "$PG_DATA_DIR" 2>/dev/null)" ]; then
+        log_info "Migrating data from Docker volume $OLD_VOLUME to $PG_DATA_DIR"
+        docker run --rm \
+            -v "${OLD_VOLUME}:/source:ro" \
+            -v "${PG_DATA_DIR}:/dest" \
+            alpine sh -c 'cp -a /source/. /dest/' && \
+        log_success "Data migrated from $OLD_VOLUME" || \
+        log_warning "Volume migration failed — postgres will initialize fresh"
+    else
+        log_info "Host dir already has data — skipping volume migration"
+    fi
+fi
+
 log_success "BeforeInstall hook completed"
 exit 0
