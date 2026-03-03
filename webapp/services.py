@@ -169,11 +169,11 @@ def compute_matching_extent(
             table = _EXTENT_TABLE_MAP[var_name]
             result = db.execute(
                 text(
-                    f"SELECT ST_AsGeoJSON(ST_Union(geom)) "
+                    f"SELECT ST_AsGeoJSON(ST_Union(ST_MakeValid(geom))) "
                     f"FROM {table} "
                     f"WHERE ST_Intersects("
-                    f"  geom, "
-                    f"  ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326)"
+                    f"  ST_MakeValid(geom), "
+                    f"  ST_MakeValid(ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326))"
                     f")"
                 ),
                 {"sites": sites_geojson},

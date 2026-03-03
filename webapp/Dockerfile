@@ -29,4 +29,4 @@ USER appuser
 EXPOSE 8050
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["gunicorn", "--bind", "0.0.0.0:8050", "--workers", "4", "--timeout", "120", "app:server"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8050", "--workers", "4", "--timeout", "120", "--worker-tmp-dir", "/run/gunicorn", "app:server"]
