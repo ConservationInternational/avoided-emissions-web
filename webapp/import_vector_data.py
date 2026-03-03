@@ -13,7 +13,9 @@ import logging
 import shutil
 import sys
 import tempfile
+import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlretrieve
 
@@ -122,6 +124,100 @@ WDPA_COL_MAP = {
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Name of the metadata table managed by Alembic migration 0003.
+_META_TABLE = "_vector_import_metadata"
+
+
+@dataclass
+class _SourceInfo:
+    """Details about the downloaded source file for a vector import."""
+
+    url: str
+    filename: str
+    file_size_bytes: int
+
+
+def _mark_import_complete(
+    engine,
+    table_name: str,
+    row_count: int,
+    source: _SourceInfo | None = None,
+    started_at: float | None = None,
+) -> None:
+    """Record that *table_name* was fully imported with *row_count* rows."""
+    duration = round(time.time() - started_at, 1) if started_at else None
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"INSERT INTO {_META_TABLE} "
+                "  (table_name, row_count, source_url, source_filename,"
+                "   file_size_bytes, import_duration_seconds,"
+                "   started_at, completed_at)"
+                " VALUES "
+                "  (:tbl, :cnt, :url, :fname, :fsize, :dur,"
+                "   TO_TIMESTAMP(:started), NOW() AT TIME ZONE 'UTC')"
+                " ON CONFLICT (table_name) DO UPDATE SET"
+                "  row_count = :cnt,"
+                "  source_url = :url,"
+                "  source_filename = :fname,"
+                "  file_size_bytes = :fsize,"
+                "  import_duration_seconds = :dur,"
+                "  started_at = TO_TIMESTAMP(:started),"
+                "  completed_at = NOW() AT TIME ZONE 'UTC'"
+            ),
+            {
+                "tbl": table_name,
+                "cnt": row_count,
+                "url": source.url if source else None,
+                "fname": source.filename if source else None,
+                "fsize": source.file_size_bytes if source else None,
+                "dur": duration,
+                "started": started_at,
+            },
+        )
+    log.info(
+        "Marked %s as complete (%d rows, %.1fs)",
+        table_name,
+        row_count,
+        duration or 0,
+    )
+
+
+def _is_import_complete(engine, table_name: str) -> bool:
+    """Return True if *table_name* has a completion record in the metadata table."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            text(
+                f"SELECT EXISTS (  SELECT 1 FROM {_META_TABLE} WHERE table_name = :tbl)"
+            ),
+            {"tbl": table_name},
+        )
+        return result.scalar()
+
+
+def _clear_completion_marker(engine, table_name: str) -> None:
+    """Remove the completion marker for *table_name*, if present."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(f"DELETE FROM {_META_TABLE} WHERE table_name = :tbl"),
+            {"tbl": table_name},
+        )
+
+
+def _row_count(engine, table_name: str) -> int:
+    """Return the number of rows in *table_name*."""
+    with engine.connect() as conn:
+        result = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
+        return result.scalar()
+
+
+def _truncate_table(engine, table_name: str) -> None:
+    """TRUNCATE *table_name* and remove its completion marker."""
+    log.warning("Truncating incomplete table %s", table_name)
+    with engine.begin() as conn:
+        conn.execute(text(f"TRUNCATE TABLE {table_name}"))
+    _clear_completion_marker(engine, table_name)
 
 
 def _table_is_empty(engine, table_name: str) -> bool:
@@ -249,7 +345,7 @@ def _write_to_postgis(
 # ---------------------------------------------------------------------------
 
 
-def import_geoboundaries(engine, adm_level: int, tmpdir: Path) -> None:
+def import_geoboundaries(engine, adm_level: int, tmpdir: Path) -> _SourceInfo:
     """Download and import a single geoBoundaries CGAZ admin level.
 
     Country-level polygons have highly detailed geometries (the ADM0
@@ -263,6 +359,11 @@ def import_geoboundaries(engine, adm_level: int, tmpdir: Path) -> None:
 
     dest = tmpdir / f"geoBoundariesCGAZ_ADM{adm_level}.gpkg"
     _download(url, dest)
+    source = _SourceInfo(
+        url=url,
+        filename=dest.name,
+        file_size_bytes=dest.stat().st_size,
+    )
 
     col_map = GEOBOUNDARIES_COL_MAP_ADM0 if adm_level == 0 else GEOBOUNDARIES_COL_MAP
 
@@ -313,9 +414,10 @@ def import_geoboundaries(engine, adm_level: int, tmpdir: Path) -> None:
         adm_level,
         total_written,
     )
+    return source
 
 
-def import_ecoregions(engine, tmpdir: Path) -> None:
+def import_ecoregions(engine, tmpdir: Path) -> _SourceInfo:
     """Download and import RESOLVE Ecoregions.
 
     Uses chunked reading via pyogrio to limit memory usage, consistent
@@ -325,6 +427,11 @@ def import_ecoregions(engine, tmpdir: Path) -> None:
 
     dest = tmpdir / "resolve_ecoregions.gpkg"
     _download(DOWNLOAD_URLS["ecoregions"], dest)
+    source = _SourceInfo(
+        url=DOWNLOAD_URLS["ecoregions"],
+        filename=dest.name,
+        file_size_bytes=dest.stat().st_size,
+    )
 
     info = pyogrio.read_info(str(dest))
     total_features = info["features"]
@@ -366,9 +473,10 @@ def import_ecoregions(engine, tmpdir: Path) -> None:
         del gdf
 
     log.info("Ecoregions import complete: %d features written", total_written)
+    return source
 
 
-def import_wdpa(engine, tmpdir: Path) -> None:
+def import_wdpa(engine, tmpdir: Path) -> _SourceInfo:
     """Download and import WDPA protected areas (polygon layer only).
 
     The WDPA polygon layer contains ~300 k features with complex
@@ -381,6 +489,11 @@ def import_wdpa(engine, tmpdir: Path) -> None:
 
     dest = tmpdir / "wdpa.zip"
     _download(DOWNLOAD_URLS["wdpa"], dest)
+    source = _SourceInfo(
+        url=DOWNLOAD_URLS["wdpa"],
+        filename=dest.name,
+        file_size_bytes=dest.stat().st_size,
+    )
 
     # Extract the zip
     extract_dir = tmpdir / "wdpa_extract"
@@ -500,6 +613,7 @@ def import_wdpa(engine, tmpdir: Path) -> None:
         del gdf
 
     log.info("WDPA import complete: %d features written", total_written)
+    return source
 
 
 # ---------------------------------------------------------------------------
@@ -517,19 +631,39 @@ DATASETS = [
 
 
 def run_import(check_only: bool = False) -> None:
-    """Check each table and import data where missing."""
+    """Check each table and import data where missing.
+
+    Tables that contain rows but were never marked as fully imported
+    (e.g. the worker was OOM-killed mid-import) are automatically
+    truncated and re-imported.
+    """
     engine = create_engine(Config.DATABASE_URL)
 
     needed = []
-    for table_name, _ in DATASETS:
+    for table_name, importer in DATASETS:
         if not _table_exists(engine, table_name):
             log.warning("Table %s does not exist – run migrations first", table_name)
             continue
-        if _table_is_empty(engine, table_name):
+
+        empty = _table_is_empty(engine, table_name)
+        complete = _is_import_complete(engine, table_name)
+
+        if empty:
             log.info("Table %s is empty – import needed", table_name)
-            needed.append((table_name, _))
+            needed.append((table_name, importer))
+        elif not complete:
+            # Data exists but the import never finished — truncate and redo.
+            count = _row_count(engine, table_name)
+            log.warning(
+                "Table %s has %d rows but no completion marker "
+                "– truncating incomplete data",
+                table_name,
+                count,
+            )
+            _truncate_table(engine, table_name)
+            needed.append((table_name, importer))
         else:
-            log.info("Table %s already has data – skipping", table_name)
+            log.info("Table %s already fully imported – skipping", table_name)
 
     if check_only:
         if needed:
@@ -544,20 +678,34 @@ def run_import(check_only: bool = False) -> None:
 
     tmpdir = Path(tempfile.mkdtemp(prefix="vector_import_"))
     failed: list[str] = []
-    try:
-        for table_name, importer in needed:
-            log.info("=" * 60)
-            log.info("Importing %s", table_name)
-            log.info("=" * 60)
-            try:
-                importer(engine, tmpdir)
-            except Exception:
-                log.exception("Failed to import %s", table_name)
-                failed.append(table_name)
-                # Continue with remaining datasets
-    finally:
-        log.info("Cleaning up temp directory %s", tmpdir)
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    for table_name, importer in needed:
+        log.info("=" * 60)
+        log.info("Importing %s", table_name)
+        log.info("=" * 60)
+        # Each import gets its own sub-directory so downloaded files are
+        # cleaned up immediately — avoiding disk pressure from multiple
+        # large datasets sitting around together.
+        import_dir = tmpdir / table_name
+        import_dir.mkdir()
+        try:
+            t0 = time.time()
+            source = importer(engine, import_dir)
+            # Record that this table was fully imported so that future
+            # runs can skip it (and detect incomplete imports).
+            row_ct = _row_count(engine, table_name)
+            _mark_import_complete(
+                engine, table_name, row_ct, source=source, started_at=t0
+            )
+        except Exception:
+            log.exception("Failed to import %s", table_name)
+            failed.append(table_name)
+            # Continue with remaining datasets
+        finally:
+            log.info("Cleaning up temp files for %s", table_name)
+            shutil.rmtree(import_dir, ignore_errors=True)
+
+    # Remove the (now empty) parent temp directory.
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
     if failed:
         raise RuntimeError(f"Vector data import failed for: {', '.join(failed)}")

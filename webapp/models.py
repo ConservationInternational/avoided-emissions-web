@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from geoalchemy2 import Geometry
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -389,6 +390,31 @@ class ProtectedArea(Base):
     oecm_asmt = Column(String(50))
     geom = Column(
         Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
+    )
+
+
+class VectorImportMetadata(Base):
+    """Tracks completion and provenance of vector reference data imports.
+
+    Each row records whether a particular vector table was fully imported,
+    along with details about the source file and timing.  The import
+    pipeline uses this to detect incomplete imports (e.g. after an OOM
+    kill) and automatically truncate & retry.
+    """
+
+    __tablename__ = "_vector_import_metadata"
+
+    table_name = Column(String(100), primary_key=True)
+    row_count = Column(Integer, nullable=False)
+    source_url = Column(Text)
+    source_filename = Column(String(500))
+    file_size_bytes = Column(BigInteger)
+    import_duration_seconds = Column(Float)
+    started_at = Column(
+        DateTime(timezone=True),
+    )
+    completed_at = Column(
+        DateTime(timezone=True),
     )
 
 
