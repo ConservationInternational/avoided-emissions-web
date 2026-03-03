@@ -198,9 +198,11 @@ def build_cropland_fraction():
     dataset, which gives the percentage of each pixel covered by cropland
     (0-100). This serves as a proxy for crop suitability.
     """
-    cropland = ee.Image("COPERNICUS/Landcover/100m/Proba-V-C3/Global/2015").select(
-        "crops-coverfraction"
-    )
+    src = ee.Image("COPERNICUS/Landcover/100m/Proba-V-C3/Global/2015")
+    # Capture the native projection *before* any operations that could
+    # drop it, so that reduceResolution has a valid source CRS.
+    proj = src.select("crops-coverfraction").projection()
+    cropland = src.select("crops-coverfraction").setDefaultProjection(proj)
     return cropland.rename("crop_suitability").toFloat()
 
 
