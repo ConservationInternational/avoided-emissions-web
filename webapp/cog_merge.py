@@ -261,56 +261,6 @@ def compute_tile_etag_hash(tile_details: list[dict]) -> str:
     return hashlib.sha256("|".join(entries).encode()).hexdigest()[:16]
 
 
-def list_gcs_cog_objects(bucket: str, prefix: str) -> list[dict]:
-    """List all ``.tif`` objects under a COG prefix on GCS.
-
-    Returns a list of dicts with keys:
-        * ``name``  – full object name (e.g. ``avoided-emissions/cog/elev.tif``)
-        * ``url``   – public HTTPS URL
-        * ``size``  – file size in bytes (int)
-        * ``covariate`` – inferred covariate name (filename without extension)
-    """
-    api_url = (
-        f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
-        f"?prefix={prefix.strip('/')}/&maxResults=1000"
-    )
-    resp = requests.get(api_url, timeout=30)
-    resp.raise_for_status()
-    items = resp.json().get("items", [])
-
-    results = []
-    page_token = None
-    while True:
-        url = api_url
-        if page_token:
-            url += f"&pageToken={page_token}"
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("items", [])
-
-        for item in items:
-            obj_name = item["name"]
-            if not obj_name.endswith(".tif"):
-                continue
-            # Extract covariate name from filename:  prefix/elev.tif -> elev
-            filename = obj_name.rsplit("/", 1)[-1]
-            covariate = filename.removesuffix(".tif")
-            results.append(
-                {
-                    "name": obj_name,
-                    "url": f"https://storage.googleapis.com/{bucket}/{obj_name}",
-                    "size": int(item.get("size", 0)),
-                    "covariate": covariate,
-                }
-            )
-
-        page_token = data.get("nextPageToken")
-        if not page_token:
-            break
-    return results
-
-
 def list_s3_cog_objects(
     bucket: str, prefix: str, region: str = "us-east-1"
 ) -> list[dict]:

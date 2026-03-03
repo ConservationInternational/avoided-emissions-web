@@ -9,6 +9,7 @@ Usage:
     python import_vector_data.py --check  # only report which tables need data
 """
 
+import gc
 import logging
 import shutil
 import sys
@@ -579,7 +580,7 @@ def import_wdpa(engine, tmpdir: Path) -> _SourceInfo:
         )
         total_features = info["features"]
 
-    batch_size = 2_000
+    batch_size = 500
     log.info(
         "WDPA source has %d features — reading in batches of %d",
         total_features,
@@ -608,9 +609,10 @@ def import_wdpa(engine, tmpdir: Path) -> _SourceInfo:
         gdf = _ensure_multipolygon(gdf)
         gdf = gdf.set_crs(epsg=4326, allow_override=True)
 
-        _write_to_postgis(gdf, "wdpa", engine, chunksize=500)
+        _write_to_postgis(gdf, "wdpa", engine, chunksize=100)
         total_written += len(gdf)
         del gdf
+        gc.collect()
 
     log.info("WDPA import complete: %d features written", total_written)
     return source

@@ -17,7 +17,7 @@ COPY webapp/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY webapp/ /app/
-COPY gee-export/config.py /app/gee-export/config.py
+COPY gee-export/ /app/gee-export/
 
 COPY webapp/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
