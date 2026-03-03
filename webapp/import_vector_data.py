@@ -18,7 +18,8 @@ import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.request import urlretrieve
+
+import requests
 
 import geopandas as gpd
 from sqlalchemy import create_engine, text
@@ -245,13 +246,77 @@ def _table_exists(engine, table_name: str) -> bool:
         return result.scalar()
 
 
-def _download(url: str, dest: Path) -> Path:
-    """Download a file with progress logging.  Returns the local path."""
+def _download(
+    url: str,
+    dest: Path,
+    *,
+    max_retries: int = 5,
+    initial_backoff: float = 5.0,
+    timeout: int = 120,
+    chunk_size: int = 256 * 1024,
+) -> Path:
+    """Download a file with retry/resume logic.  Returns the local path.
+
+    On each attempt the function sends a Range header so that a partially
+    downloaded file is resumed rather than restarted from scratch.  Retries
+    use exponential back-off (5 s, 10 s, 20 s, …).
+    """
     log.info("Downloading %s → %s", url, dest)
-    urlretrieve(url, dest)
-    size_mb = dest.stat().st_size / (1024 * 1024)
-    log.info("Downloaded %.1f MB", size_mb)
-    return dest
+
+    for attempt in range(1, max_retries + 1):
+        downloaded = dest.stat().st_size if dest.exists() else 0
+        headers: dict[str, str] = {}
+        if downloaded > 0:
+            headers["Range"] = f"bytes={downloaded}-"
+            log.info(
+                "Resuming download at byte %d (attempt %d/%d)",
+                downloaded,
+                attempt,
+                max_retries,
+            )
+
+        try:
+            with requests.get(
+                url, headers=headers, stream=True, timeout=timeout
+            ) as resp:
+                # If the server doesn't support Range it sends 200 instead
+                # of 206 — in that case start over.
+                if resp.status_code == 200 and downloaded > 0:
+                    log.info("Server does not support Range; restarting download")
+                    downloaded = 0
+
+                resp.raise_for_status()
+
+                mode = "ab" if resp.status_code == 206 else "wb"
+                with open(dest, mode) as fp:
+                    for chunk in resp.iter_content(chunk_size=chunk_size):
+                        fp.write(chunk)
+
+            size_mb = dest.stat().st_size / (1024 * 1024)
+            log.info("Downloaded %.1f MB", size_mb)
+            return dest
+
+        except (
+            requests.ConnectionError,
+            requests.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+            ConnectionResetError,
+        ) as exc:
+            if attempt == max_retries:
+                log.error("Download failed after %d attempts: %s", max_retries, exc)
+                raise
+            backoff = initial_backoff * (2 ** (attempt - 1))
+            log.warning(
+                "Download attempt %d/%d failed (%s); retrying in %.0fs …",
+                attempt,
+                max_retries,
+                exc,
+                backoff,
+            )
+            time.sleep(backoff)
+
+    # Unreachable, but keeps type-checkers happy.
+    raise RuntimeError("Download failed")
 
 
 def _load_geopackage(path: Path, layer: str | None = None) -> gpd.GeoDataFrame:
