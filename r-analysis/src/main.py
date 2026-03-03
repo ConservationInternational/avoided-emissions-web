@@ -68,7 +68,16 @@ def run(params, log=None):
     step = params.get("step", "all")
     task_id = params.get("task_id", params.get("EXECUTION_ID", "unknown"))
 
-    log.info("avoided_emissions: starting task %s (step=%s)", task_id, step)
+    log.info(
+        "avoided_emissions: starting task %s (step=%s, "
+        "cog_bucket=%s, cog_prefix=%s, sites=%s, n_covariates=%d)",
+        task_id,
+        step,
+        params.get("cog_bucket", "?"),
+        params.get("cog_prefix", "?"),
+        params.get("sites_s3_uri", "?"),
+        len(params.get("covariates", [])),
+    )
 
     # ----- prepare local working directory -----
     data_dir = params.get("data_dir") or tempfile.mkdtemp(prefix="ae_")
@@ -109,10 +118,22 @@ def run(params, log=None):
 
     # ----- run R pipeline steps -----
     steps = _expand_steps(step)
-    for s in steps:
+    log.info(
+        "Pipeline steps to execute: %s (total=%d)",
+        " → ".join(steps),
+        len(steps),
+    )
+    for step_idx, s in enumerate(steps, 1):
         script_path = os.path.join(R_SCRIPTS_DIR, STEP_SCRIPTS[s])
-        log.info("Running R step '%s': %s", s, script_path)
+        log.info(
+            "Running step %d/%d '%s': %s",
+            step_idx,
+            len(steps),
+            s,
+            script_path,
+        )
         _run_r_script(script_path, config_path, params.get("site_id"), log)
+        log.info("Step %d/%d '%s' completed", step_idx, len(steps), s)
 
     # ----- collect results -----
     results = _collect_results(output_dir, task_id, log)

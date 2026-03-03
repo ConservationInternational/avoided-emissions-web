@@ -42,16 +42,30 @@ def main(step_override=None):
         )
         sys.exit(1)
 
-    logger.info("batch_runner: starting execution %s", execution_id)
+    logger.info(
+        "batch_runner: starting execution %s "
+        "(PARAMS_S3_BUCKET=%s, PARAMS_S3_PREFIX=%s)",
+        execution_id,
+        os.getenv("PARAMS_S3_BUCKET", ""),
+        os.getenv("PARAMS_S3_PREFIX", ""),
+    )
 
     # ---- download params (reuses gefcore's S3 + retry logic) ----
     from gefcore.api import get_params, put_results
 
+    logger.info("Downloading params from S3...")
     params = get_params()
     if params is None:
         logger.error("Failed to download params from S3")
         sys.exit(1)
 
+    logger.info(
+        "Params downloaded: task_id=%s, step=%s, n_covariates=%d, n_sites_uri=%s",
+        params.get("task_id", "?"),
+        params.get("step", "?"),
+        len(params.get("covariates", [])),
+        params.get("sites_s3_uri", "?"),
+    )
     params["EXECUTION_ID"] = execution_id
 
     # Allow the entrypoint to override the step (e.g. for pipeline jobs
@@ -62,9 +76,16 @@ def main(step_override=None):
     # ---- run script ----
     from main import run  # noqa: E402 — the script's own main.py
 
-    logger.info("Running analysis script…")
+    logger.info(
+        "Running analysis script (step=%s, task_id=%s)…",
+        params.get("step", "all"),
+        params.get("task_id", "?"),
+    )
     result = run(params, logger)
-    logger.info("Script completed successfully")
+    logger.info(
+        "Script completed successfully (result_keys=%s)",
+        list(result.keys()) if isinstance(result, dict) else type(result).__name__,
+    )
 
     # ---- upload results (reuses gefcore's S3 + retry logic) ----
     if result is not None:

@@ -241,22 +241,42 @@ class TrendsEarthClient:
         dict
             Execution record including ``id``, ``status``.
         """
+        url = f"{self.api_url}/script/{script_id}/run"
+        logger.info(
+            "[TE-API] POST %s (task_id=%s)",
+            url,
+            params.get("task_id", "?"),
+        )
         resp = requests.post(
-            f"{self.api_url}/script/{script_id}/run",
+            url,
             json=params,
             headers=self._headers(),
             timeout=_TIMEOUT,
+        )
+        logger.info(
+            "[TE-API] POST %s → %d %s",
+            url,
+            resp.status_code,
+            resp.reason,
         )
         resp.raise_for_status()
         return resp.json()
 
     def get_execution(self, execution_id):
         """Fetch an execution's current state."""
+        url = f"{self.api_url}/execution/{execution_id}"
         resp = requests.get(
-            f"{self.api_url}/execution/{execution_id}",
+            url,
             headers=self._headers(),
             timeout=_TIMEOUT,
         )
+        if resp.status_code != 200:
+            logger.warning(
+                "[TE-API] GET %s → %d %s",
+                url,
+                resp.status_code,
+                resp.reason,
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -264,6 +284,47 @@ class TrendsEarthClient:
         """Convenience: fetch execution and return its results payload."""
         data = self.get_execution(execution_id)
         return data.get("data", {}).get("results")
+
+    def get_execution_logs(self, execution_id, last_id=None):
+        """Fetch execution logs from the API.
+
+        These are user-visible ``ExecutionLog`` entries created by the
+        API's batch dispatch and monitoring tasks.
+
+        Parameters
+        ----------
+        execution_id : str
+            UUID of the execution.
+        last_id : int | None
+            Only return logs with an id greater than *last_id*.
+            Useful for incremental polling.
+
+        Returns
+        -------
+        list[dict]
+            List of log entries, each with ``id``, ``text``, ``level``,
+            ``register_date``, and ``execution_id``.
+        """
+        url = f"{self.api_url}/execution/{execution_id}/log"
+        params = {}
+        if last_id is not None:
+            params["last-id"] = last_id
+        try:
+            resp = requests.get(
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", [])
+        except Exception as exc:
+            logger.warning(
+                "[TE-API] Failed to fetch logs for execution %s: %s",
+                execution_id,
+                exc,
+            )
+            return []
 
     def list_executions(self, script_id=None, status=None, per_page=50):
         """List executions, optionally filtered."""

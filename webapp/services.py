@@ -252,6 +252,16 @@ def submit_analysis_task(
     db = get_db()
     try:
         task_id = str(uuid.uuid4())
+        logger.info(
+            "[SUBMIT] Creating analysis task %s: name=%r, user=%s, "
+            "n_sites=%d, covariates=%d, exact_match=%s",
+            task_id,
+            task_name,
+            user_id,
+            len(gdf),
+            len(covariates),
+            exact_match_vars,
+        )
 
         task = AnalysisTask(
             id=task_id,
@@ -277,8 +287,13 @@ def submit_analysis_task(
             db.add(site)
         db.commit()
 
+        logger.info(
+            "[SUBMIT] Task %s: DB record created, uploading sites to S3", task_id
+        )
+
         # Upload sites to S3
         sites_uri = upload_sites_to_s3(gdf, task_id)
+        logger.info("[SUBMIT] Task %s: sites uploaded to %s", task_id, sites_uri)
 
         # Build params matching AvoidedEmissionsParams schema
         params = {
@@ -331,11 +346,28 @@ def submit_analysis_task(
                 "environment variable to the UUID of the avoided-emissions "
                 "script registered on the trends.earth API."
             )
+        logger.info(
+            "[SUBMIT] Task %s: calling trends.earth API (script=%s, "
+            "api_url=%s, batch_overrides=%s)",
+            task_id,
+            script_id,
+            Config.TRENDSEARTH_API_URL,
+            batch_overrides if batch_overrides else "none",
+        )
         execution = client.create_execution(script_id, params)
 
         # Store the API execution ID for polling
         exec_data = execution.get("data", {})
         exec_id = exec_data.get("id", "")
+        exec_status = exec_data.get("status", "unknown")
+        logger.info(
+            "[SUBMIT] Task %s: API execution created — exec_id=%s, "
+            "initial_status=%s, full_response_keys=%s",
+            task_id,
+            exec_id,
+            exec_status,
+            list(exec_data.keys()),
+        )
         task.sites_s3_uri = sites_uri
         task.results_s3_uri = params["results_s3_uri"]
         task.status = "submitted"
@@ -344,10 +376,21 @@ def submit_analysis_task(
         # extract_job_id since we no longer need the Batch job IDs.
         task.extract_job_id = f"api:{exec_id}"
         db.commit()
+        logger.info(
+            "[SUBMIT] Task %s: status → submitted (tracking as api:%s)",
+            task_id,
+            exec_id,
+        )
 
         return task_id
 
     except Exception as e:
+        logger.error(
+            "[SUBMIT] Task %s FAILED during submission: %s",
+            task_id if "task_id" in dir() else "(pre-creation)",
+            e,
+            exc_info=True,
+        )
         db.rollback()
         if "task_id" in dir():
             task = db.query(AnalysisTask).get(task_id)
