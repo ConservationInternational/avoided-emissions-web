@@ -272,7 +272,11 @@ def import_geoboundaries(engine, adm_level: int, tmpdir: Path) -> None:
         info = pyogrio.read_info(str(dest), force_feature_count=True)
         total_features = info["features"]
 
-    batch_size = 50
+    # ADM0 countries have extremely detailed coastline geometries (~155 MB
+    # for 218 features) — use small batches.  ADM1/ADM2 polygons are much
+    # simpler so larger batches are fine.
+    batch_size = {0: 50, 1: 500, 2: 5000}.get(adm_level, 500)
+    write_chunk = {0: 50, 1: 500, 2: 2000}.get(adm_level, 500)
     log.info(
         "geoBoundaries ADM%d has %d features — reading in batches of %d",
         adm_level,
@@ -300,7 +304,7 @@ def import_geoboundaries(engine, adm_level: int, tmpdir: Path) -> None:
         gdf = _ensure_multipolygon(gdf)
         gdf = gdf.set_crs(epsg=4326, allow_override=True)
 
-        _write_to_postgis(gdf, table, engine, chunksize=50)
+        _write_to_postgis(gdf, table, engine, chunksize=write_chunk)
         total_written += len(gdf)
         del gdf
 
