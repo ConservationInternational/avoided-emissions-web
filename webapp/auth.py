@@ -44,6 +44,12 @@ def load_user(user_id):
         user = db.query(User).filter(User.id == user_id).first()
         if user and user.is_active and user.is_approved:
             return SessionUser(user)
+    except Exception:
+        # Database may be unavailable (migrations pending, connection
+        # issues, etc.).  Return None so Flask-Login treats the session
+        # as anonymous and redirects to the login page instead of
+        # surfacing a 500 error.
+        logger.warning("load_user failed for %s — treating as anonymous", user_id)
     finally:
         db.close()
     return None

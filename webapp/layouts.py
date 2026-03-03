@@ -593,15 +593,7 @@ def login_layout():
                                         dbc.Input(
                                             id="login-password",
                                             type="password",
-                                            className="mb-1",
-                                        ),
-                                        html.Div(
-                                            dcc.Link(
-                                                "Forgot password?",
-                                                href="/forgot-password",
-                                                className="small",
-                                            ),
-                                            className="text-end mb-2",
+                                            className="mb-2",
                                         ),
                                         html.Div(
                                             id="login-error",
@@ -623,7 +615,15 @@ def login_layout():
                                                     className="fw-bold",
                                                 ),
                                             ],
-                                            className="text-center mb-0 small",
+                                            className="text-center mb-1 small",
+                                        ),
+                                        html.Div(
+                                            dcc.Link(
+                                                "Forgot password?",
+                                                href="/forgot-password",
+                                                className="small",
+                                            ),
+                                            className="text-center mb-0",
                                         ),
                                     ]
                                 ),

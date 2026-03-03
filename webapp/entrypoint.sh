@@ -11,8 +11,37 @@ set -e
 # Ensure celerybeat schedule directory exists (volume mounts may shadow it)
 mkdir -p /app/celerybeat
 
+# Wait for Postgres to be reachable.  In Docker Swarm the overlay network
+# may not resolve service DNS immediately, so we retry for up to 60 s.
+wait_for_postgres() {
+    echo "Waiting for Postgres to become reachable..."
+    attempts=0
+    max_attempts=30
+    while [ $attempts -lt $max_attempts ]; do
+        # Use Python+psycopg2 (already installed) for a lightweight probe.
+        if python -c "
+import os, sys
+try:
+    import psycopg2
+    psycopg2.connect(os.environ['DATABASE_URL'], connect_timeout=2).close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+            echo "Postgres is ready."
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        echo "  Postgres not ready (attempt $attempts/$max_attempts) — retrying in 2 s..."
+        sleep 2
+    done
+    echo "ERROR: Postgres did not become reachable after $max_attempts attempts."
+    return 1
+}
+
 case "$1" in
     migrate)
+        wait_for_postgres
         echo "Running database migrations..."
         alembic upgrade head
         echo "Migrations complete."
