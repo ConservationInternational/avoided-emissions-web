@@ -245,6 +245,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
                 "Covariate %s not found — likely superseded by a re-export",
                 layer_id,
             )
+            db.close()
             return {"status": "superseded", "error": "record deleted"}
 
         # Transition to 'merging'
@@ -269,6 +270,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
                 "Covariate %s deleted during merge — discarding result",
                 layer_id,
             )
+            db.close()
             return {"status": "superseded"}
 
         layer.status = "merged"
@@ -278,6 +280,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
         layer.completed_at = datetime.now(timezone.utc)
         db.commit()
         logger.info("COG merge completed for '%s'", layer.covariate_name)
+        db.close()
         return {
             "status": "merged",
             "url": result["url"],
@@ -286,11 +289,16 @@ def run_cog_merge(self, layer_id: str) -> dict:
 
     except _MergeSuperseded:
         logger.info("Merge for %s superseded by re-export — aborting", layer_id)
+        db.close()
         return {"status": "superseded"}
 
     except Exception as exc:
         logger.exception("COG merge failed for layer %s", layer_id)
         report_exception(layer_id=layer_id)
+        # The original session may have a broken connection, so use a
+        # fresh one to persist the failure status.
+        db.close()
+        db = get_db()
         try:
             layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
             if layer:
@@ -300,9 +308,9 @@ def run_cog_merge(self, layer_id: str) -> dict:
                 db.commit()
         except Exception:
             db.rollback()
+        finally:
+            db.close()
         return {"status": "failed", "error": str(exc)[:500]}
-    finally:
-        db.close()
 
 
 @celery_app.task(name="tasks.poll_gee_exports")
