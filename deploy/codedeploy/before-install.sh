@@ -111,12 +111,13 @@ PG_DATA_DIR="/data/avoided-emissions/${ENVIRONMENT}/postgres"
 if [ ! -d "$PG_DATA_DIR" ]; then
     log_info "Creating postgres data directory: $PG_DATA_DIR"
     mkdir -p "$PG_DATA_DIR"
-    # The official postgres image runs as uid 999 (postgres).
-    chown -R 999:999 "$PG_DATA_DIR"
     log_success "Directory $PG_DATA_DIR created"
 else
     log_info "Postgres data directory $PG_DATA_DIR already exists — data will be retained"
 fi
+
+# Always ensure correct ownership — the official postgres image runs as uid 999.
+chown 999:999 "$PG_DATA_DIR"
 
 # Migrate from old Docker named volume if it exists and the host dir is empty.
 OLD_VOLUME="postgres_${ENVIRONMENT}_data"

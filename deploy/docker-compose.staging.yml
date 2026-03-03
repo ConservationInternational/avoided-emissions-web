@@ -26,6 +26,9 @@ services:
         constraints:
           - node.role == manager
           - node.labels.ae_database == true
+      resources:
+        limits:
+          memory: 512M
 
   redis:
     image: redis:7-alpine

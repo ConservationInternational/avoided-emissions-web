@@ -31,6 +31,9 @@ services:
         constraints:
           - node.role == manager
           - node.labels.ae_database == true
+      resources:
+        limits:
+          memory: 1G
         reservations:
           memory: 512M
 
