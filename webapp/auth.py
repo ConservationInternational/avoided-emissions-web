@@ -13,7 +13,7 @@ import bcrypt
 import flask
 import flask_login
 
-from config import Config
+from config import Config, report_exception
 from models import PasswordResetToken, User, get_db
 
 logger = logging.getLogger(__name__)
@@ -167,16 +167,24 @@ def request_password_reset(email: str) -> bool:
         try:
             from email_service import send_html_email
 
-            send_html_email(
+            result = send_html_email(
                 recipients=[user.email],
                 html=html,
                 subject="[Avoided Emissions] Password Reset Request",
             )
+            if isinstance(result, dict) and result.get("errors"):
+                logger.error(
+                    "Password reset email not sent to %s: %s",
+                    user.email,
+                    result["errors"],
+                )
         except Exception:
             logger.exception("Failed to send password reset email to %s", user.email)
+            report_exception(email=user.email)
     except Exception:
         db.rollback()
         logger.exception("Error during password reset request for %s", email)
+        report_exception(email=email)
     finally:
         db.close()
     return True

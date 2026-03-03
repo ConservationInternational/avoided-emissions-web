@@ -5,6 +5,7 @@ callbacks, and sets up URL routing between pages.
 """
 
 import logging
+import sys
 import uuid as _uuid
 
 import dash
@@ -30,6 +31,20 @@ from layouts import (
     settings_layout,
     submit_layout,
     task_detail_layout,
+)
+
+# ---------------------------------------------------------------------------
+# Logging — configure the root logger so that all application loggers (auth,
+# email_service, services, tasks, etc.) emit to stderr.  Gunicorn captures
+# stderr and writes it to the container log, making messages visible in
+# ``docker service logs``.  ``basicConfig`` is a no-op if the root logger
+# already has handlers (e.g. when running under ``python app.py``), so this
+# is safe to call unconditionally.
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stderr,
 )
 
 logger = logging.getLogger(__name__)

@@ -8,6 +8,7 @@ when defining tasks or when the worker process starts::
 """
 
 import logging
+import sys
 
 import rollbar
 from celery import Celery
@@ -93,10 +94,26 @@ celery_app.conf.beat_schedule = {
 
 
 # ---------------------------------------------------------------------------
-# Rollbar integration — report task failures from worker processes
+# Rollbar integration — report task failures from worker processes.
+# Follows https://github.com/rollbar/rollbar-celery-example
 # ---------------------------------------------------------------------------
 @task_failure.connect
-def handle_task_failure(**kw):
-    """Send every unhandled task exception to Rollbar."""
-    if Config.ROLLBAR_ACCESS_TOKEN:
-        rollbar.report_exc_info(extra_data=kw)
+def handle_task_failure(sender=None, task_id=None, exception=None, einfo=None, **kw):
+    """Send every unhandled task exception to Rollbar.
+
+    Uses ``sys.exc_info()`` when available (i.e. inside the failing
+    worker process) and falls back to the exception/einfo provided by
+    the signal for maximum reliability.
+    """
+    if not Config.ROLLBAR_ACCESS_TOKEN:
+        return
+    exc_info = sys.exc_info()
+    # If sys.exc_info() returns (None, None, None) we are outside the
+    # original exception context — reconstruct from signal kwargs.
+    if exc_info[0] is None and exception is not None:
+        exc_info = (type(exception), exception, getattr(einfo, "tb", None))
+    extra = {
+        "task_name": sender.name if sender else kw.get("sender"),
+        "task_id": task_id,
+    }
+    rollbar.report_exc_info(exc_info, extra_data=extra)

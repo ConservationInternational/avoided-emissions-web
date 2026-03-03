@@ -6,7 +6,7 @@ Falls back to logging when the SparkPost API key is not configured.
 
 import logging
 
-from config import Config
+from config import Config, report_exception
 
 logger = logging.getLogger(__name__)
 
@@ -58,4 +58,5 @@ def send_html_email(recipients, html, subject, from_email=None):
         return response
     except Exception:
         logger.exception("Failed to send email with subject '%s'", subject)
+        report_exception(subject=subject, recipients=str(recipients))
         raise
