@@ -3,8 +3,9 @@ rollbar
 te_schemas @ git+https://github.com/ConservationInternational/trends.earth-schemas.git
 
 # Geospatial extraction (step 1 - Python)
-# GDAL Python bindings are installed in the Dockerfile to match the system libgdal
-numpy
+# GDAL Python bindings are installed in the Dockerfile to match the system libgdal.
+# numpy must stay <2 for ABI compatibility with the system python3-gdal package.
+numpy<2
 pandas
 geopandas
 xarray
