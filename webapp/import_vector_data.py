@@ -466,7 +466,7 @@ def import_wdpa(engine, tmpdir: Path) -> None:
         )
         total_features = info["features"]
 
-    batch_size = 10_000
+    batch_size = 2_000
     log.info(
         "WDPA source has %d features — reading in batches of %d",
         total_features,
@@ -495,7 +495,7 @@ def import_wdpa(engine, tmpdir: Path) -> None:
         gdf = _ensure_multipolygon(gdf)
         gdf = gdf.set_crs(epsg=4326, allow_override=True)
 
-        _write_to_postgis(gdf, "wdpa", engine, chunksize=2000)
+        _write_to_postgis(gdf, "wdpa", engine, chunksize=500)
         total_written += len(gdf)
         del gdf
 
