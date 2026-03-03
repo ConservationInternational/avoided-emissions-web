@@ -57,6 +57,37 @@ services:
         limits:
           memory: 256M
 
+  migrate:
+    image: ${WEBAPP_IMAGE}
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    command: ["migrate"]
+    depends_on:
+      - postgres
+      - redis
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - backend
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        # One-shot: run migrations then exit, never restart.
+        condition: none
+      resources:
+        limits:
+          memory: 512M
+
   webapp:
     image: ${WEBAPP_IMAGE}
     env_file:
@@ -141,6 +172,10 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       TMPDIR: /scratch
     command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=1", "-Q", "merge"]
+    # COG merges can take several minutes for large covariates — give the
+    # worker enough time to finish the in-flight GDAL operation before Docker
+    # sends SIGKILL during deploys / rolling updates.
+    stop_grace_period: 10m
     tmpfs:
       - /scratch:size=4G
     depends_on:

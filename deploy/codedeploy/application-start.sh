@@ -116,6 +116,8 @@ while [ $WAIT_TIME -lt $MAX_WAIT ]; do
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         service_name=$(echo "$line" | awk '{print $1}')
+        # Skip the one-shot migrate service — it is checked separately below.
+        echo "$service_name" | grep -q "_migrate" && continue
         replicas=$(echo "$line" | awk '{print $2}')
         if ! is_service_ready "$replicas"; then
             NOT_READY="${NOT_READY}${line}\n"
@@ -148,7 +150,39 @@ fi
 # -- Final status ------------------------------------------------------------
 
 log_info "Final service status:"
-docker service ls --filter "name=${STACK_NAME}_" --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}"
+docker service ls --filter "name=${STACK_NAME}_" --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}" | grep -v "_migrate"
+
+# -- Wait for migrations (one-shot) ------------------------------------------
+# The migrate service has restart_policy: none — it runs once and exits.
+# Wait for it to reach "Complete" state before declaring success.
+
+log_info "Checking migration service status..."
+MAX_MIGRATE_WAIT=300
+MIGRATE_WAIT=0
+
+while [ $MIGRATE_WAIT -lt $MAX_MIGRATE_WAIT ]; do
+    MIGRATE_STATUS=$(docker service ps "${STACK_NAME}_migrate" \
+        --format "{{.CurrentState}}" --no-trunc 2>/dev/null | head -1)
+
+    if echo "$MIGRATE_STATUS" | grep -q "Complete"; then
+        log_success "Database migrations completed successfully"
+        break
+    elif echo "$MIGRATE_STATUS" | grep -q "Failed\|Rejected"; then
+        log_error "Database migration failed!"
+        docker service logs --tail 50 "${STACK_NAME}_migrate" 2>/dev/null || true
+        exit 1
+    else
+        log_info "Waiting for migrations... ($MIGRATE_WAIT/$MAX_MIGRATE_WAIT seconds) — status: $MIGRATE_STATUS"
+        sleep 10
+        MIGRATE_WAIT=$((MIGRATE_WAIT + 10))
+    fi
+done
+
+if [ $MIGRATE_WAIT -ge $MAX_MIGRATE_WAIT ]; then
+    log_error "Migration did not complete within $MAX_MIGRATE_WAIT seconds"
+    docker service logs --tail 50 "${STACK_NAME}_migrate" 2>/dev/null || true
+    exit 1
+fi
 
 log_success "ApplicationStart hook completed"
 exit 0

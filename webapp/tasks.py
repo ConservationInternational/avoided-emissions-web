@@ -15,65 +15,32 @@ from config import report_exception
 logger = logging.getLogger(__name__)
 
 
-# Advisory-lock ID used to prevent concurrent vector-data imports.
-# Chosen arbitrarily; must not collide with other advisory locks.
-_VECTOR_IMPORT_LOCK_ID = 8675309
-
-
 @celery_app.task(name="tasks.import_vector_data", bind=True, max_retries=2)
 def import_vector_data_task(self) -> dict:
     """Import vector reference data (geoboundaries, ecoregions, wdpa).
 
-    Runs as a background task so the webapp can start serving requests
-    immediately.  Only imports tables that are empty, making it safe to
-    retry or call repeatedly.
-
-    Uses a PostgreSQL advisory lock to prevent multiple workers from
-    running the import concurrently (e.g. when multiple webapp replicas
-    each queue the task on startup).
+    Dispatched once per deploy by the one-shot ``migrate`` service.
+    Only imports tables that are empty, making it safe to retry or
+    call repeatedly.
 
     On successful import, automatically dispatches
     :func:`rasterize_vectors_task` to produce grid-aligned COGs from
     the freshly-imported vector data.
     """
-    from sqlalchemy import create_engine, text
+    try:
+        from import_vector_data import run_import
 
-    from config import Config
+        run_import(check_only=False)
 
-    engine = create_engine(Config.DATABASE_URL)
-    with engine.connect() as conn:
-        acquired = conn.execute(
-            text("SELECT pg_try_advisory_lock(:id)"),
-            {"id": _VECTOR_IMPORT_LOCK_ID},
-        ).scalar()
+        # Chain rasterization of the imported vector layers.
+        rasterize_vectors_task.delay()
+        logger.info("Dispatched rasterize_vectors_task after successful import")
 
-        if not acquired:
-            logger.info(
-                "Another worker is already running the vector data import "
-                "— skipping this invocation"
-            )
-            return {"status": "skipped", "reason": "concurrent import in progress"}
-
-        try:
-            from import_vector_data import run_import
-
-            run_import(check_only=False)
-
-            # Chain rasterization of the imported vector layers.
-            rasterize_vectors_task.delay()
-            logger.info("Dispatched rasterize_vectors_task after successful import")
-
-            return {"status": "complete"}
-        except Exception as exc:
-            logger.exception("Vector data import failed")
-            report_exception()
-            raise self.retry(exc=exc, countdown=60)
-        finally:
-            conn.execute(
-                text("SELECT pg_advisory_unlock(:id)"),
-                {"id": _VECTOR_IMPORT_LOCK_ID},
-            )
-            conn.commit()
+        return {"status": "complete"}
+    except Exception as exc:
+        logger.exception("Vector data import failed")
+        report_exception()
+        raise self.retry(exc=exc, countdown=60)
 
 
 @celery_app.task(name="tasks.rasterize_vectors", bind=True, max_retries=1)
@@ -588,7 +555,7 @@ def auto_merge_unmerged() -> dict:
     """
     import importlib.util
     import os
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
     from config import Config
     from models import Covariate, GeeExportMetadata, get_db
@@ -737,7 +704,50 @@ def auto_merge_unmerged() -> dict:
             if row.tile_etag_hash:
                 latest_hashes[row.covariate_name] = row.tile_etag_hash
 
-        # Skip covariates with an in-progress merge
+        # Reset covariates stuck in "merging" for more than 15 minutes.
+        # This happens when a worker is killed mid-merge (e.g. during a
+        # Docker Swarm rolling update) and the task message is lost.
+        stale_cutoff = now - timedelta(minutes=15)
+        stale_merging = (
+            db.query(Covariate)
+            .filter(
+                Covariate.status.in_(["pending_merge", "merging"]),
+                Covariate.started_at < stale_cutoff,
+            )
+            .all()
+        )
+        for stale in stale_merging:
+            logger.warning(
+                "Resetting stale covariate %s (%s) from '%s' to 'failed' "
+                "(stuck since %s)",
+                stale.covariate_name,
+                stale.id,
+                stale.status,
+                stale.started_at,
+            )
+            stale.status = "failed"
+            stale.error_message = (
+                "Reset by auto_merge: stuck in merge for >15 min "
+                "(likely killed during deploy)"
+            )
+            stale.completed_at = now
+            # Also mark any associated metadata snapshots as failed
+            stale_metas = (
+                db.query(GeeExportMetadata)
+                .filter(
+                    GeeExportMetadata.covariate_id == stale.id,
+                    GeeExportMetadata.status.in_(["pending_merge", "merging"]),
+                )
+                .all()
+            )
+            for sm in stale_metas:
+                sm.status = "failed"
+                sm.error_message = "Reset: worker killed during merge"
+                sm.merge_completed_at = now
+        if stale_merging:
+            db.flush()
+
+        # Skip covariates with an in-progress merge (fresh ones only)
         in_progress = {
             row.covariate_name
             for row in db.query(Covariate.covariate_name)

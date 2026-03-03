@@ -26,7 +26,7 @@ log_info "App port: $APP_PORT"
 
 log_info "Checking service status..."
 docker service ls --filter "name=${STACK_NAME}_" \
-    --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}"
+    --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}" | grep -v "_migrate"
 
 WEBAPP_SERVICE="${STACK_NAME}_webapp"
 WEBAPP_REPLICAS=$(docker service ls --filter "name=${WEBAPP_SERVICE}" \

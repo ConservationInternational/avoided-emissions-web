@@ -1,24 +1,28 @@
 #!/bin/sh
-# Run Alembic migrations (webapp only), then exec the container CMD.
-# Workers and beat schedulers skip migrations since only one process
-# should run them.
+# Entrypoint for all containers built from the webapp image.
+#
+# Commands:
+#   migrate  — run Alembic migrations, dispatch vector-data import, then exit.
+#   celery   — start a Celery worker/beat (no migrations).
+#   *        — start the webapp (gunicorn / dev server).
 
 set -e
 
-# Only run migrations for the webapp process, not for celery workers/beat
 case "$1" in
+    migrate)
+        echo "Running database migrations..."
+        alembic upgrade head
+        echo "Migrations complete."
+
+        echo "Dispatching vector data import to background worker..."
+        python -c "from tasks import import_vector_data_task; import_vector_data_task.delay(); print('Vector data import task queued.')"
+        exit 0
+        ;;
     celery)
-        # Skip migrations for Celery processes
+        # Workers/beat skip migrations — the migrate service handles them.
         ;;
     *)
-        if [ -n "$DATABASE_URL" ]; then
-            echo "Running database migrations..."
-            alembic upgrade head
-            echo "Migrations complete."
-
-            echo "Dispatching vector data import to background worker..."
-            python -c "from tasks import import_vector_data_task; import_vector_data_task.delay(); print('Vector data import task queued.')"
-        fi
+        # Webapp — just start serving.
         ;;
 esac
 
