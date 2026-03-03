@@ -109,6 +109,80 @@ class Covariate(Base):
     error_message = Column(Text)
     extra_metadata = Column("metadata", JSON, default=dict)
 
+    export_snapshots = relationship(
+        "GeeExportMetadata", back_populates="covariate", cascade="all, delete-orphan"
+    )
+
+
+class GeeExportMetadata(Base):
+    """Snapshot of GEE-exported tiles on GCS and their merge into a COG.
+
+    Each row captures the state of the GCS tiles for a single covariate
+    at a point in time.  Comparing :attr:`tile_etag_hash` between
+    snapshots lets the system determine whether tiles have changed
+    since the last merge, avoiding redundant work.
+
+    The ``tile_details`` JSON column stores per-tile metadata returned
+    by the GCS JSON API (name, etag, size, md5Hash, updated), while
+    ``tile_etag_hash`` is a compact SHA-256 fingerprint of those values
+    suitable for quick equality checks.
+    """
+
+    __tablename__ = "gee_export_metadata"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    covariate_id = Column(
+        UUID(as_uuid=True), ForeignKey("covariates.id"), nullable=True
+    )
+    covariate_name = Column(String(100), nullable=False, index=True)
+
+    # GCS tile snapshot
+    gcs_bucket = Column(String(255))
+    gcs_prefix = Column(String(500))
+    tile_count = Column(Integer)
+    tile_total_bytes = Column(BigInteger)
+    # JSON list of {name, etag, size_bytes, md5, updated} per tile
+    tile_details = Column(JSON)
+    # SHA-256 fingerprint of sorted (name, etag, size_bytes) tuples
+    tile_etag_hash = Column(String(64), index=True)
+    tiles_detected_at = Column(DateTime(timezone=True))
+
+    # GEE export info (populated when the originating GEE task is known)
+    gee_task_id = Column(String(255))
+    gee_completed_at = Column(DateTime(timezone=True))
+
+    # Merge lifecycle
+    merge_started_at = Column(DateTime(timezone=True))
+    merge_completed_at = Column(DateTime(timezone=True))
+    merge_duration_seconds = Column(Float)
+
+    # Merged COG on S3
+    merged_cog_key = Column(String(1000))
+    merged_cog_url = Column(String(1000))
+    merged_cog_bytes = Column(BigInteger)
+    merged_cog_etag = Column(String(255))
+
+    # Status
+    status = Column(
+        Enum(
+            "detected",
+            "pending_merge",
+            "merging",
+            "merged",
+            "skipped_existing",
+            "failed",
+            name="gee_export_meta_status",
+        ),
+        nullable=False,
+        default="detected",
+    )
+    error_message = Column(Text)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    covariate = relationship("Covariate", back_populates="export_snapshots")
+
 
 class AnalysisTask(Base):
     __tablename__ = "analysis_tasks"

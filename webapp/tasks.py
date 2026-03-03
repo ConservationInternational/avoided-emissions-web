@@ -220,6 +220,10 @@ class _MergeSuperseded(Exception):
 def run_cog_merge(self, layer_id: str) -> dict:
     """Merge GCS tiles into a single COG and upload to S3.
 
+    Also records tile-level provenance and merge metrics in
+    :class:`~models.GeeExportMetadata` so that a merged COG can be
+    reliably traced back to the exact set of GEE export tiles.
+
     Parameters
     ----------
     layer_id : str
@@ -233,9 +237,13 @@ def run_cog_merge(self, layer_id: str) -> dict:
     """
     from datetime import datetime, timezone
 
-    from cog_merge import merge_covariate_tiles
+    from cog_merge import (
+        compute_tile_etag_hash,
+        list_gcs_tile_details,
+        merge_covariate_tiles,
+    )
     from config import Config
-    from models import Covariate, get_db
+    from models import Covariate, GeeExportMetadata, get_db
 
     db = get_db()
     try:
@@ -248,21 +256,82 @@ def run_cog_merge(self, layer_id: str) -> dict:
             db.close()
             return {"status": "superseded", "error": "record deleted"}
 
+        # Look for an existing metadata snapshot (created by auto_merge
+        # or poll_gee_exports).
+        meta = (
+            db.query(GeeExportMetadata)
+            .filter(
+                GeeExportMetadata.covariate_id == layer_id,
+                GeeExportMetadata.status.in_(["pending_merge", "detected"]),
+            )
+            .order_by(GeeExportMetadata.created_at.desc())
+            .first()
+        )
+
+        # Fetch full tile details from GCS (ETags, sizes, md5 hashes)
+        source_bucket = layer.gcs_bucket or Config.GCS_BUCKET
+        source_prefix = layer.gcs_prefix or Config.GCS_PREFIX
+        tile_details: list[dict] = []
+        tile_urls: list[str] | None = None
+        try:
+            tile_details = list_gcs_tile_details(
+                source_bucket, source_prefix, layer.covariate_name
+            )
+            tile_urls = [
+                f"https://storage.googleapis.com/{source_bucket}/{t['name']}"
+                for t in tile_details
+            ]
+        except Exception:
+            logger.warning(
+                "Failed to fetch tile details for %s — "
+                "merge will still proceed but metadata will be incomplete",
+                layer.covariate_name,
+            )
+
+        tile_hash = compute_tile_etag_hash(tile_details) if tile_details else None
+        merge_start = datetime.now(timezone.utc)
+
+        # Create a metadata snapshot if one doesn't exist yet
+        if not meta:
+            meta = GeeExportMetadata(
+                covariate_id=layer.id,
+                covariate_name=layer.covariate_name,
+                gcs_bucket=source_bucket,
+                gcs_prefix=source_prefix,
+                gee_task_id=layer.gee_task_id,
+                tiles_detected_at=merge_start,
+                status="pending_merge",
+                created_at=merge_start,
+            )
+            db.add(meta)
+            db.flush()
+
+        # Populate tile details on the snapshot
+        if tile_details:
+            meta.tile_count = len(tile_details)
+            meta.tile_total_bytes = sum(t["size_bytes"] for t in tile_details)
+            meta.tile_details = tile_details
+            meta.tile_etag_hash = tile_hash
+
         # Transition to 'merging'
         layer.status = "merging"
+        meta.status = "merging"
+        meta.merge_started_at = merge_start
         db.commit()
 
         result = merge_covariate_tiles(
             covariate_name=layer.covariate_name,
-            source_bucket=layer.gcs_bucket or Config.GCS_BUCKET,
-            source_prefix=layer.gcs_prefix or Config.GCS_PREFIX,
+            source_bucket=source_bucket,
+            source_prefix=source_prefix,
             output_bucket=layer.output_bucket,
             output_prefix=layer.output_prefix or f"{Config.S3_PREFIX}/cog",
             aws_region=Config.AWS_REGION,
             layer_id=layer_id,
+            tile_urls=tile_urls,
         )
 
         # Re-check the record still exists after the (slow) merge
+        merge_end = datetime.now(timezone.utc)
         db.expire_all()
         layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
         if not layer:
@@ -277,7 +346,29 @@ def run_cog_merge(self, layer_id: str) -> dict:
         layer.merged_url = result["url"]
         layer.size_bytes = result["size_bytes"]
         layer.n_tiles = result["n_tiles"]
-        layer.completed_at = datetime.now(timezone.utc)
+        layer.completed_at = merge_end
+
+        # Update metadata snapshot with merge results
+        meta = (
+            db.query(GeeExportMetadata)
+            .filter(
+                GeeExportMetadata.covariate_id == layer_id,
+                GeeExportMetadata.status == "merging",
+            )
+            .order_by(GeeExportMetadata.created_at.desc())
+            .first()
+        )
+        if meta:
+            meta.status = "merged"
+            meta.merge_completed_at = merge_end
+            meta.merge_duration_seconds = (
+                merge_end - (meta.merge_started_at or merge_start)
+            ).total_seconds()
+            meta.merged_cog_key = result.get("s3_key")
+            meta.merged_cog_url = result["url"]
+            meta.merged_cog_bytes = result["size_bytes"]
+            meta.merged_cog_etag = result.get("s3_etag")
+
         db.commit()
         logger.info("COG merge completed for '%s'", layer.covariate_name)
         db.close()
@@ -305,7 +396,21 @@ def run_cog_merge(self, layer_id: str) -> dict:
                 layer.status = "failed"
                 layer.error_message = str(exc)[:2000]
                 layer.completed_at = datetime.now(timezone.utc)
-                db.commit()
+            # Also mark the metadata snapshot as failed
+            meta = (
+                db.query(GeeExportMetadata)
+                .filter(
+                    GeeExportMetadata.covariate_id == layer_id,
+                    GeeExportMetadata.status.in_(["pending_merge", "merging"]),
+                )
+                .order_by(GeeExportMetadata.created_at.desc())
+                .first()
+            )
+            if meta:
+                meta.status = "failed"
+                meta.error_message = str(exc)[:2000]
+                meta.merge_completed_at = datetime.now(timezone.utc)
+            db.commit()
         except Exception:
             db.rollback()
         finally:
@@ -330,7 +435,7 @@ def poll_gee_exports() -> dict:
     from datetime import datetime, timezone
 
     from config import Config
-    from models import Covariate, get_db
+    from models import Covariate, GeeExportMetadata, get_db
 
     db = get_db()
     try:
@@ -398,15 +503,32 @@ def poll_gee_exports() -> dict:
                             export.gcs_prefix,
                             export.covariate_name,
                         )
-                        meta = dict(export.extra_metadata or {})
-                        meta["tile_urls"] = tile_urls
-                        export.extra_metadata = meta
+                        extra = dict(export.extra_metadata or {})
+                        extra["tile_urls"] = tile_urls
+                        export.extra_metadata = extra
 
                         # Auto-trigger COG merge now that tiles are ready
                         export.status = "pending_merge"
                         export.output_bucket = Config.S3_BUCKET
                         export.output_prefix = f"{Config.S3_PREFIX}/cog"
                         _auto_merge_ids.append(str(export.id))
+
+                        # Create a GeeExportMetadata record that links
+                        # the GEE task to the upcoming merge.  Full tile
+                        # details (ETags, sizes) will be populated by
+                        # run_cog_merge when it fetches tiles from GCS.
+                        gee_meta = GeeExportMetadata(
+                            covariate_id=export.id,
+                            covariate_name=export.covariate_name,
+                            gcs_bucket=export.gcs_bucket,
+                            gcs_prefix=export.gcs_prefix,
+                            tile_count=len(tile_urls) if tile_urls else None,
+                            gee_task_id=export.gee_task_id,
+                            gee_completed_at=export.completed_at,
+                            tiles_detected_at=datetime.now(timezone.utc),
+                            status="pending_merge",
+                        )
+                        db.add(gee_meta)
 
                 error = op.get("error")
                 if error:
@@ -445,49 +567,55 @@ def poll_gee_exports() -> dict:
 
 @celery_app.task(name="tasks.auto_merge_unmerged")
 def auto_merge_unmerged() -> dict:
-    """Find covariates with GCS tiles but no merge, and dispatch merges.
+    """Find covariates with GCS tiles but no up-to-date merge, and dispatch.
 
-    Scans GCS for tiles, checks which covariates are already merged or
-    in progress, and auto-dispatches :func:`run_cog_merge` for any
-    covariates that have tiles but haven't been merged yet.
+    Scans GCS for tiles with full metadata (ETags, sizes), computes a
+    fingerprint hash for each covariate, and compares against the most
+    recent :class:`~models.GeeExportMetadata` snapshot.  Merges are
+    dispatched only when the tile fingerprint has changed or no snapshot
+    exists.
 
-    This covers covariates exported outside the app (e.g. manually via
-    GEE), or tiles that were already on GCS before the app was set up.
+    Also creates :class:`~models.Covariate` DB records for merged COGs
+    that already exist on S3 but are not yet tracked in the database
+    (the *fresh-database* scenario).
 
-    Called periodically by Celery Beat.
+    Called periodically by Celery Beat (every 120 s).
 
     Returns
     -------
     dict
-        ``{"scanned": N, "dispatched": N}``
+        ``{"scanned": N, "dispatched": N, "discovered": N}``
     """
     import importlib.util
+    import os
     from datetime import datetime, timezone
 
     from config import Config
-    from models import Covariate, get_db
+    from models import Covariate, GeeExportMetadata, get_db
 
     if not Config.GCS_BUCKET:
-        return {"scanned": 0, "dispatched": 0}
+        return {"scanned": 0, "dispatched": 0, "discovered": 0}
 
     # Load covariate names from GEE export config
-    import os
-
     gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
     if not os.path.exists(gee_config_path):
         logger.warning("GEE config not found at %s", gee_config_path)
-        return {"scanned": 0, "dispatched": 0}
+        return {"scanned": 0, "dispatched": 0, "discovered": 0}
 
     spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
     gee_config = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gee_config)
     known_covariates = list(gee_config.COVARIATES.keys())
 
-    # Scan GCS for tile counts
-    from cog_merge import list_all_gcs_tiles
+    # Scan GCS for tile details (ETags, sizes, md5 hashes)
+    from cog_merge import (
+        compute_tile_etag_hash,
+        list_s3_cog_objects,
+        scan_gcs_tile_details,
+    )
 
     try:
-        gcs_counts = list_all_gcs_tiles(
+        gcs_details = scan_gcs_tile_details(
             Config.GCS_BUCKET,
             Config.GCS_PREFIX,
             known_covariates,
@@ -495,50 +623,155 @@ def auto_merge_unmerged() -> dict:
     except Exception:
         logger.exception("Failed to scan GCS tiles for auto-merge")
         report_exception()
-        return {"scanned": 0, "dispatched": 0}
+        return {"scanned": 0, "dispatched": 0, "discovered": 0}
 
-    # Covariates that have tiles on GCS
-    with_tiles = {name for name, count in gcs_counts.items() if count > 0}
+    with_tiles = {name for name, tiles in gcs_details.items() if tiles}
     if not with_tiles:
-        return {"scanned": len(known_covariates), "dispatched": 0}
+        return {"scanned": len(known_covariates), "dispatched": 0, "discovered": 0}
 
-    # Check DB for covariates already merged or in progress
     db = get_db()
     dispatched_ids: list[str] = []
+    discovered = 0
+    now = datetime.now(timezone.utc)
+
     try:
-        skip_statuses = ["pending_merge", "merging", "merged"]
-        already_handled = {
-            row.covariate_name
-            for row in db.query(Covariate.covariate_name)
-            .filter(Covariate.status.in_(skip_statuses))
-            .all()
-        }
-
-        # Also skip covariates that already have a COG on S3
-        from cog_merge import list_s3_cog_objects
-
+        # ---- Discover pre-existing S3 COGs without DB records ----
+        # Handles the fresh-database scenario: COGs from a prior
+        # deployment are already on S3 but the new DB has no rows.
+        s3_cog_map: dict[str, dict] = {}
         try:
             if Config.S3_BUCKET:
                 cog_prefix = f"{Config.S3_PREFIX}/cog"
                 for obj in list_s3_cog_objects(
                     Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
                 ):
-                    already_handled.add(obj["covariate"])
+                    s3_cog_map[obj["covariate"]] = obj
         except Exception:
             logger.warning("Failed to scan S3 for existing COGs")
             report_exception()
 
-        need_merge = with_tiles - already_handled
-        if not need_merge:
-            return {"scanned": len(known_covariates), "dispatched": 0}
+        existing_covariate_names = {
+            row.covariate_name
+            for row in db.query(Covariate.covariate_name)
+            .filter(Covariate.status.in_(["pending_merge", "merging", "merged"]))
+            .all()
+        }
 
-        for name in sorted(need_merge):
-            # Check if there's an existing exported row to update
+        for cov_name, s3_obj in s3_cog_map.items():
+            if cov_name in existing_covariate_names:
+                continue
+
+            # Create a Covariate record so the UI shows the COG
+            layer = Covariate(
+                covariate_name=cov_name,
+                status="merged",
+                gcs_bucket=Config.GCS_BUCKET,
+                gcs_prefix=Config.GCS_PREFIX,
+                output_bucket=Config.S3_BUCKET,
+                output_prefix=f"{Config.S3_PREFIX}/cog",
+                merged_url=s3_obj["url"],
+                size_bytes=s3_obj["size"],
+                completed_at=now,
+            )
+            db.add(layer)
+            db.flush()
+            existing_covariate_names.add(cov_name)
+
+            # Create an export metadata snapshot for the discovered COG
+            tiles = gcs_details.get(cov_name, [])
+            tile_hash = compute_tile_etag_hash(tiles) if tiles else None
+            meta = GeeExportMetadata(
+                covariate_id=layer.id,
+                covariate_name=cov_name,
+                gcs_bucket=Config.GCS_BUCKET,
+                gcs_prefix=Config.GCS_PREFIX,
+                tile_count=len(tiles),
+                tile_total_bytes=sum(t["size_bytes"] for t in tiles),
+                tile_details=tiles or None,
+                tile_etag_hash=tile_hash,
+                tiles_detected_at=now,
+                merged_cog_key=s3_obj.get("key"),
+                merged_cog_url=s3_obj["url"],
+                merged_cog_bytes=s3_obj["size"],
+                merged_cog_etag=s3_obj.get("etag"),
+                status="skipped_existing",
+                created_at=now,
+            )
+            db.add(meta)
+            discovered += 1
+            logger.info(
+                "Discovered pre-existing COG for %s on S3 — "
+                "created Covariate + GeeExportMetadata records",
+                cov_name,
+            )
+
+        db.flush()
+
+        # ---- Determine which covariates need a (re-)merge ----
+        # Compare the current tile fingerprint against the most recent
+        # successfully merged snapshot.
+        from sqlalchemy import func
+
+        latest_hashes: dict[str, str] = {}
+        subq = (
+            db.query(
+                GeeExportMetadata.covariate_name,
+                func.max(GeeExportMetadata.created_at).label("max_created"),
+            )
+            .filter(
+                GeeExportMetadata.status.in_(["merged", "skipped_existing"]),
+                GeeExportMetadata.tile_etag_hash.isnot(None),
+            )
+            .group_by(GeeExportMetadata.covariate_name)
+            .subquery()
+        )
+        for row in (
+            db.query(GeeExportMetadata)
+            .join(
+                subq,
+                (GeeExportMetadata.covariate_name == subq.c.covariate_name)
+                & (GeeExportMetadata.created_at == subq.c.max_created),
+            )
+            .all()
+        ):
+            if row.tile_etag_hash:
+                latest_hashes[row.covariate_name] = row.tile_etag_hash
+
+        # Skip covariates with an in-progress merge
+        in_progress = {
+            row.covariate_name
+            for row in db.query(Covariate.covariate_name)
+            .filter(Covariate.status.in_(["pending_merge", "merging"]))
+            .all()
+        }
+
+        need_merge: list[str] = []
+        for name in sorted(with_tiles):
+            if name in in_progress:
+                continue
+            current_hash = compute_tile_etag_hash(gcs_details[name])
+            if latest_hashes.get(name) == current_hash:
+                continue  # tiles unchanged since last merge
+            need_merge.append(name)
+
+        if not need_merge:
+            db.commit()
+            return {
+                "scanned": len(known_covariates),
+                "dispatched": 0,
+                "discovered": discovered,
+            }
+
+        for name in need_merge:
+            tiles = gcs_details[name]
+            tile_hash = compute_tile_etag_hash(tiles)
+
+            # Create or update Covariate record
             existing = (
                 db.query(Covariate)
                 .filter(
                     Covariate.covariate_name == name,
-                    Covariate.status == "exported",
+                    Covariate.status.in_(["exported", "merged", "failed"]),
                 )
                 .order_by(Covariate.started_at.desc())
                 .first()
@@ -547,9 +780,9 @@ def auto_merge_unmerged() -> dict:
                 existing.status = "pending_merge"
                 existing.output_bucket = Config.S3_BUCKET
                 existing.output_prefix = f"{Config.S3_PREFIX}/cog"
+                cov_id = existing.id
                 dispatched_ids.append(str(existing.id))
             else:
-                # Create a new record for pre-existing GCS tiles
                 layer = Covariate(
                     covariate_name=name,
                     status="pending_merge",
@@ -557,11 +790,28 @@ def auto_merge_unmerged() -> dict:
                     gcs_prefix=Config.GCS_PREFIX,
                     output_bucket=Config.S3_BUCKET,
                     output_prefix=f"{Config.S3_PREFIX}/cog",
-                    started_at=datetime.now(timezone.utc),
+                    started_at=now,
                 )
                 db.add(layer)
                 db.flush()
+                cov_id = layer.id
                 dispatched_ids.append(str(layer.id))
+
+            # Create metadata snapshot with full tile details
+            meta = GeeExportMetadata(
+                covariate_id=cov_id,
+                covariate_name=name,
+                gcs_bucket=Config.GCS_BUCKET,
+                gcs_prefix=Config.GCS_PREFIX,
+                tile_count=len(tiles),
+                tile_total_bytes=sum(t["size_bytes"] for t in tiles),
+                tile_details=tiles,
+                tile_etag_hash=tile_hash,
+                tiles_detected_at=now,
+                status="pending_merge",
+                created_at=now,
+            )
+            db.add(meta)
 
         db.commit()
     except Exception:
@@ -575,7 +825,11 @@ def auto_merge_unmerged() -> dict:
         run_cog_merge.delay(layer_id)
         logger.info("Auto-merge dispatched for covariate %s", layer_id)
 
-    return {"scanned": len(known_covariates), "dispatched": len(dispatched_ids)}
+    return {
+        "scanned": len(known_covariates),
+        "dispatched": len(dispatched_ids),
+        "discovered": discovered,
+    }
 
 
 @celery_app.task(name="tasks.poll_batch_tasks")

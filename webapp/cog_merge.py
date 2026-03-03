@@ -15,6 +15,7 @@ Usage from the web application is through the service layer
 ``merge_covariate_tiles()`` in a background thread.
 """
 
+import hashlib
 import logging
 import os
 import shutil
@@ -63,6 +64,53 @@ def list_gcs_tiles(bucket: str, prefix: str, covariate_name: str) -> list[str]:
         if item["name"].endswith(".tif")
     ]
     return sorted(urls)
+
+
+def list_gcs_tile_details(bucket: str, prefix: str, covariate_name: str) -> list[dict]:
+    """Return metadata for all ``.tif`` tiles of a single covariate on GCS.
+
+    Like :func:`list_gcs_tiles` but returns full per-tile metadata
+    instead of just public URLs.  Each dict has keys:
+
+    * ``name``       – full GCS object name
+    * ``etag``       – GCS entity tag (content-based for non-composite objects)
+    * ``size_bytes`` – file size in bytes
+    * ``md5``        – base-64 encoded MD5 hash (from ``md5Hash`` field)
+    * ``updated``    – ISO-8601 last-modified timestamp
+    """
+    obj_prefix = f"{prefix}/{covariate_name}".strip("/")
+    api_url = (
+        f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
+        f"?prefix={obj_prefix}&maxResults=1000"
+    )
+    items: list[dict] = []
+    page_token = None
+    while True:
+        url = api_url
+        if page_token:
+            url += f"&pageToken={page_token}"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        items.extend(data.get("items", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    return sorted(
+        [
+            {
+                "name": item["name"],
+                "etag": item.get("etag", ""),
+                "size_bytes": int(item.get("size", 0)),
+                "md5": item.get("md5Hash", ""),
+                "updated": item.get("updated", ""),
+            }
+            for item in items
+            if item["name"].endswith(".tif")
+        ],
+        key=lambda t: t["name"],
+    )
 
 
 def list_all_gcs_tiles(
@@ -131,6 +179,86 @@ def list_all_gcs_tiles(
                 break
 
     return counts
+
+
+def scan_gcs_tile_details(
+    bucket: str, prefix: str, known_covariates: list[str]
+) -> dict[str, list[dict]]:
+    """Scan all tiles on GCS and return per-covariate tile metadata.
+
+    Like :func:`list_all_gcs_tiles`, but returns full metadata (ETag,
+    size, md5Hash, updated) for every tile, grouped by covariate name.
+
+    Parameters
+    ----------
+    bucket : str
+        GCS bucket name (public, no credentials needed).
+    prefix : str
+        Object prefix (e.g. ``avoided-emissions/covariates``).
+    known_covariates : list[str]
+        Covariate names from config to match filenames against.
+
+    Returns
+    -------
+    dict[str, list[dict]]
+        Mapping of covariate name → list of tile detail dicts.
+    """
+    norm_prefix = prefix.strip("/") + "/"
+    base_url = (
+        f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
+        f"?prefix={norm_prefix}&maxResults=1000"
+    )
+
+    all_items: list[dict] = []
+    page_token = None
+    while True:
+        url = base_url
+        if page_token:
+            url += f"&pageToken={page_token}"
+        resp = requests.get(url, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        all_items.extend(data.get("items", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    tif_items = [item for item in all_items if item["name"].endswith(".tif")]
+    if not tif_items:
+        return {}
+
+    sorted_names = sorted(known_covariates, key=len, reverse=True)
+
+    result: dict[str, list[dict]] = {}
+    for item in tif_items:
+        fname = item["name"][len(norm_prefix) :]
+        for cov_name in sorted_names:
+            if fname.startswith(cov_name) and (
+                fname == cov_name + ".tif"
+                or (len(fname) > len(cov_name) and fname[len(cov_name)].isdigit())
+            ):
+                result.setdefault(cov_name, []).append(
+                    {
+                        "name": item["name"],
+                        "etag": item.get("etag", ""),
+                        "size_bytes": int(item.get("size", 0)),
+                        "md5": item.get("md5Hash", ""),
+                        "updated": item.get("updated", ""),
+                    }
+                )
+                break
+
+    return result
+
+
+def compute_tile_etag_hash(tile_details: list[dict]) -> str:
+    """Compute a deterministic fingerprint from tile ETags and sizes.
+
+    Produces a 16-character hex string that changes whenever any tile
+    is added, removed, or its content is replaced on GCS.
+    """
+    entries = sorted(f"{t['name']}:{t['etag']}:{t['size_bytes']}" for t in tile_details)
+    return hashlib.sha256("|".join(entries).encode()).hexdigest()[:16]
 
 
 def list_gcs_cog_objects(bucket: str, prefix: str) -> list[dict]:
@@ -212,9 +340,17 @@ def list_s3_cog_objects(
                     "url": f"https://{bucket}.s3.amazonaws.com/{key}",
                     "size": obj["Size"],
                     "covariate": covariate,
+                    "etag": obj.get("ETag", "").strip('"'),
                 }
             )
     return results
+
+
+def get_s3_object_etag(bucket: str, key: str, region: str = "us-east-1") -> str:
+    """Return the ETag of an S3 object (without surrounding quotes)."""
+    s3 = boto3.client("s3", region_name=region)
+    resp = s3.head_object(Bucket=bucket, Key=key)
+    return resp["ETag"].strip('"')
 
 
 def delete_s3_cog(
@@ -486,6 +622,7 @@ def merge_covariate_tiles(
     output_prefix: str = "avoided-emissions/cog",
     aws_region: str = "us-east-1",
     layer_id: str | None = None,
+    tile_urls: list[str] | None = None,
 ) -> dict:
     """Download tiles from GCS, merge into COG, upload to S3.
 
@@ -521,8 +658,9 @@ def merge_covariate_tiles(
     tasks._MergeSuperseded
         If the DB record is deleted mid-merge (re-export race).
     """
-    # 1. List tiles on GCS (source)
-    tile_urls = list_gcs_tiles(source_bucket, source_prefix, covariate_name)
+    # 1. List tiles on GCS (source) — skip if caller already provided URLs
+    if tile_urls is None:
+        tile_urls = list_gcs_tiles(source_bucket, source_prefix, covariate_name)
     if not tile_urls:
         raise RuntimeError(
             f"No tiles found for covariate '{covariate_name}' in "
@@ -576,10 +714,19 @@ def merge_covariate_tiles(
         s3_key = f"{output_prefix}/{output_filename}".strip("/")
         s3_url = _upload_to_s3(output_path, output_bucket, s3_key, aws_region)
 
+        # 5. Capture the S3 ETag for provenance tracking
+        try:
+            s3_etag = get_s3_object_etag(output_bucket, s3_key, aws_region)
+        except Exception:
+            logger.warning("Failed to read S3 ETag for %s", s3_key)
+            s3_etag = None
+
         return {
             "url": s3_url,
             "size_bytes": merged_size,
             "n_tiles": n_tiles,
+            "s3_key": s3_key,
+            "s3_etag": s3_etag,
         }
     finally:
         # Clean up temp directory
