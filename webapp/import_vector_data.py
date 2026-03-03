@@ -250,37 +250,118 @@ def _write_to_postgis(
 
 
 def import_geoboundaries(engine, adm_level: int, tmpdir: Path) -> None:
-    """Download and import a single geoBoundaries CGAZ admin level."""
+    """Download and import a single geoBoundaries CGAZ admin level.
+
+    Country-level polygons have highly detailed geometries (the ADM0
+    file is ~155 MB) which can easily exhaust worker memory when loaded
+    all at once.  We therefore read and write in batches using pyogrio.
+    """
+    import pyogrio
+
     table = f"geoboundaries_adm{adm_level}"
     url = DOWNLOAD_URLS[table]
 
     dest = tmpdir / f"geoBoundariesCGAZ_ADM{adm_level}.gpkg"
     _download(url, dest)
 
-    gdf = _load_geopackage(dest)
     col_map = GEOBOUNDARIES_COL_MAP_ADM0 if adm_level == 0 else GEOBOUNDARIES_COL_MAP
-    gdf = _select_and_rename(gdf, col_map)
-    gdf = _ensure_multipolygon(gdf)
-    gdf = gdf.set_crs(epsg=4326, allow_override=True)
 
-    _write_to_postgis(gdf, table, engine)
+    info = pyogrio.read_info(str(dest))
+    total_features = info["features"]
+    if total_features < 0:
+        info = pyogrio.read_info(str(dest), force_feature_count=True)
+        total_features = info["features"]
+
+    batch_size = 50
+    log.info(
+        "geoBoundaries ADM%d has %d features — reading in batches of %d",
+        adm_level,
+        total_features,
+        batch_size,
+    )
+
+    total_written = 0
+    for start in range(0, total_features, batch_size):
+        n = min(batch_size, total_features - start)
+        log.info(
+            "Reading ADM%d batch %d – %d of %d",
+            adm_level,
+            start + 1,
+            start + n,
+            total_features,
+        )
+        gdf = pyogrio.read_dataframe(
+            str(dest),
+            skip_features=start,
+            max_features=n,
+        )
+        gdf = _select_and_rename(gdf, col_map)
+        gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        gdf = _ensure_multipolygon(gdf)
+        gdf = gdf.set_crs(epsg=4326, allow_override=True)
+
+        _write_to_postgis(gdf, table, engine, chunksize=50)
+        total_written += len(gdf)
+        del gdf
+
+    log.info(
+        "geoBoundaries ADM%d import complete: %d features written",
+        adm_level,
+        total_written,
+    )
 
 
 def import_ecoregions(engine, tmpdir: Path) -> None:
-    """Download and import RESOLVE Ecoregions."""
+    """Download and import RESOLVE Ecoregions.
+
+    Uses chunked reading via pyogrio to limit memory usage, consistent
+    with the geoBoundaries and WDPA importers.
+    """
+    import pyogrio
+
     dest = tmpdir / "resolve_ecoregions.gpkg"
     _download(DOWNLOAD_URLS["ecoregions"], dest)
 
-    gdf = _load_geopackage(dest)
-    gdf = _select_and_rename(gdf, ECOREGION_COL_MAP)
-    # Source data stores integer fields as floats – cast to int for Postgres
-    for col in ("eco_id", "biome_num"):
-        if col in gdf.columns:
-            gdf[col] = gdf[col].astype("Int64")  # nullable integer
-    gdf = _ensure_multipolygon(gdf)
-    gdf = gdf.set_crs(epsg=4326, allow_override=True)
+    info = pyogrio.read_info(str(dest))
+    total_features = info["features"]
+    if total_features < 0:
+        info = pyogrio.read_info(str(dest), force_feature_count=True)
+        total_features = info["features"]
 
-    _write_to_postgis(gdf, "ecoregions", engine)
+    batch_size = 200
+    log.info(
+        "Ecoregions has %d features — reading in batches of %d",
+        total_features,
+        batch_size,
+    )
+
+    total_written = 0
+    for start in range(0, total_features, batch_size):
+        n = min(batch_size, total_features - start)
+        log.info(
+            "Reading ecoregions batch %d – %d of %d",
+            start + 1,
+            start + n,
+            total_features,
+        )
+        gdf = pyogrio.read_dataframe(
+            str(dest),
+            skip_features=start,
+            max_features=n,
+        )
+        gdf = _select_and_rename(gdf, ECOREGION_COL_MAP)
+        for col in ("eco_id", "biome_num"):
+            if col in gdf.columns:
+                gdf[col] = gdf[col].astype("Int64")
+        gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        gdf = _ensure_multipolygon(gdf)
+        gdf = gdf.set_crs(epsg=4326, allow_override=True)
+
+        _write_to_postgis(gdf, "ecoregions", engine, chunksize=200)
+        total_written += len(gdf)
+        del gdf
+
+    log.info("Ecoregions import complete: %d features written", total_written)
 
 
 def import_wdpa(engine, tmpdir: Path) -> None:

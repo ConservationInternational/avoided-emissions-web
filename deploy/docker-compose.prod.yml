@@ -162,10 +162,10 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 2G
+          memory: 4G
         reservations:
           cpus: "0.25"
-          memory: 512M
+          memory: 1G
 
   beat:
     image: ${WEBAPP_IMAGE}
