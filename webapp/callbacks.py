@@ -381,22 +381,32 @@ def register_callbacks(app):
         fc_start,
         fc_end,
     ):
+        def _error_alert(msg):
+            return dbc.Alert(msg, color="danger", dismissable=True), None
+
         if not name:
-            return "Please enter a task name.", None
+            return _error_alert("Please enter a task name.")
         if not sites_data:
-            return "Please upload a sites file.", None
+            return _error_alert("Please upload a sites file.")
         if not covariates:
-            return "Please select at least one covariate.", None
+            return _error_alert("Please select at least one covariate.")
         if not exact_match_vars:
-            return (
+            return _error_alert(
                 "Please select at least one exact match variable "
-                "(admin boundary, ecoregion, or protected area).",
-                None,
+                "(admin boundary, ecoregion, or protected area)."
+            )
+        if fc_start is None or fc_end is None:
+            return _error_alert(
+                "Please specify both a start and end year for forest cover analysis."
+            )
+        if int(fc_start) > int(fc_end):
+            return _error_alert(
+                "Forest cover start year must not be later than end year."
             )
 
         user = get_current_user()
         if not user:
-            return "Please log in first.", None
+            return _error_alert("Please log in first.")
 
         try:
             gdf = gpd.read_file(io.StringIO(sites_data["geojson"]))
@@ -418,12 +428,20 @@ def register_callbacks(app):
                     dcc.Link(f"View task: {task_id}", href=f"/task/{task_id}"),
                 ],
                 color="success",
+                dismissable=True,
             )
+
+        except ValueError as exc:
+            logger.exception("Task submission failed (validation)")
+            report_exception()
+            return _error_alert(str(exc))
 
         except Exception:
             logger.exception("Task submission failed")
             report_exception()
-            return "Submission failed. Please try again or contact support.", None
+            return _error_alert(
+                "Submission failed. Please try again or contact support."
+            )
 
     # -- Dashboard task list (AG Grid) ---------------------------------------
 

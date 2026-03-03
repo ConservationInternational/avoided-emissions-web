@@ -1311,15 +1311,18 @@ def submit_layout(user):
                         ],
                         className="mb-3",
                     ),
-                    html.Div(id="submit-errors", className="text-danger mb-2"),
-                    dbc.Button(
-                        "Submit Task",
-                        id="submit-task-button",
-                        color="primary",
-                        size="lg",
-                        className="w-100",
+                    html.Div(id="submit-errors", className="mb-2"),
+                    dcc.Loading(
+                        dbc.Button(
+                            "Submit Task",
+                            id="submit-task-button",
+                            color="primary",
+                            size="lg",
+                            className="w-100",
+                        ),
+                        type="circle",
                     ),
-                    html.Div(id="submit-result"),
+                    html.Div(id="submit-result", className="mt-2"),
                 ]
             ),
             # Hidden stores
