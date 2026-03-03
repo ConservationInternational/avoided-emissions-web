@@ -15,6 +15,11 @@ from config import report_exception
 logger = logging.getLogger(__name__)
 
 
+# Advisory-lock ID used to prevent concurrent vector-data imports.
+# Chosen arbitrarily; must not collide with other advisory locks.
+_VECTOR_IMPORT_LOCK_ID = 8675309
+
+
 @celery_app.task(name="tasks.import_vector_data", bind=True, max_retries=2)
 def import_vector_data_task(self) -> dict:
     """Import vector reference data (geoboundaries, ecoregions, wdpa).
@@ -23,24 +28,52 @@ def import_vector_data_task(self) -> dict:
     immediately.  Only imports tables that are empty, making it safe to
     retry or call repeatedly.
 
+    Uses a PostgreSQL advisory lock to prevent multiple workers from
+    running the import concurrently (e.g. when multiple webapp replicas
+    each queue the task on startup).
+
     On successful import, automatically dispatches
     :func:`rasterize_vectors_task` to produce grid-aligned COGs from
     the freshly-imported vector data.
     """
-    try:
-        from import_vector_data import run_import
+    from sqlalchemy import create_engine, text
 
-        run_import(check_only=False)
+    from config import Config
 
-        # Chain rasterization of the imported vector layers.
-        rasterize_vectors_task.delay()
-        logger.info("Dispatched rasterize_vectors_task after successful import")
+    engine = create_engine(Config.DATABASE_URL)
+    with engine.connect() as conn:
+        acquired = conn.execute(
+            text("SELECT pg_try_advisory_lock(:id)"),
+            {"id": _VECTOR_IMPORT_LOCK_ID},
+        ).scalar()
 
-        return {"status": "complete"}
-    except Exception as exc:
-        logger.exception("Vector data import failed")
-        report_exception()
-        raise self.retry(exc=exc, countdown=60)
+        if not acquired:
+            logger.info(
+                "Another worker is already running the vector data import "
+                "— skipping this invocation"
+            )
+            return {"status": "skipped", "reason": "concurrent import in progress"}
+
+        try:
+            from import_vector_data import run_import
+
+            run_import(check_only=False)
+
+            # Chain rasterization of the imported vector layers.
+            rasterize_vectors_task.delay()
+            logger.info("Dispatched rasterize_vectors_task after successful import")
+
+            return {"status": "complete"}
+        except Exception as exc:
+            logger.exception("Vector data import failed")
+            report_exception()
+            raise self.retry(exc=exc, countdown=60)
+        finally:
+            conn.execute(
+                text("SELECT pg_advisory_unlock(:id)"),
+                {"id": _VECTOR_IMPORT_LOCK_ID},
+            )
+            conn.commit()
 
 
 @celery_app.task(name="tasks.rasterize_vectors", bind=True, max_retries=1)
