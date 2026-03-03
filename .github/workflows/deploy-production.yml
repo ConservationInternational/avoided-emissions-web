@@ -228,6 +228,9 @@ jobs:
         BATCH_JOB_QUEUE: ${{ vars.BATCH_JOB_QUEUE }}
         BATCH_JOB_DEFINITION: ${{ vars.BATCH_JOB_DEFINITION }}
         ROLLBAR_ACCESS_TOKEN: ${{ secrets.ROLLBAR_ACCESS_TOKEN }}
+        SPARKPOST_API_KEY: ${{ secrets.SPARKPOST_API_KEY }}
+        SPARKPOST_FROM_EMAIL: ${{ vars.SPARKPOST_FROM_EMAIL || 'noreply@avoided-emissions.org' }}
+        APP_URL: ${{ vars.APP_URL }}
       run: |
         ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         {
@@ -284,6 +287,11 @@ jobs:
           echo "# Rollbar"
           echo "ROLLBAR_ACCESS_TOKEN=$ROLLBAR_ACCESS_TOKEN"
           echo "ROLLBAR_ENVIRONMENT=production"
+          echo ""
+          echo "# Email (SparkPost)"
+          echo "SPARKPOST_API_KEY=$SPARKPOST_API_KEY"
+          echo "SPARKPOST_FROM_EMAIL=$SPARKPOST_FROM_EMAIL"
+          echo "APP_URL=$APP_URL"
         } > prod.env
 
     - name: Update appspec.yml for production

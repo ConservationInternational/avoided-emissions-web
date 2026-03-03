@@ -55,6 +55,14 @@ class Config:
     BATCH_JOB_QUEUE = os.environ.get("BATCH_JOB_QUEUE", "")
     BATCH_JOB_DEFINITION = os.environ.get("BATCH_JOB_DEFINITION", "")
 
+    # SparkPost email configuration
+    SPARKPOST_API_KEY = os.environ.get("SPARKPOST_API_KEY", "")
+    SPARKPOST_FROM_EMAIL = os.environ.get(
+        "SPARKPOST_FROM_EMAIL", "noreply@avoided-emissions.org"
+    )
+    # Public URL used to build password-reset links in emails
+    APP_URL = os.environ.get("APP_URL", "http://localhost:8050")
+
 
 def report_exception(**extra):
     """Report the current exception to Rollbar (if configured).

@@ -20,7 +20,13 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
-from auth import authenticate, get_current_user, register_user
+from auth import (
+    authenticate,
+    get_current_user,
+    register_user,
+    request_password_reset,
+    reset_password_with_token,
+)
 from config import report_exception
 from layouts import (
     RESULTS_TOTAL_COLUMNS,
@@ -175,6 +181,79 @@ def register_callbacks(app):
         success, message = register_user(email, password, name)
         color = "success" if success else "danger"
         return dbc.Alert(message, color=color)
+
+    # -- Forgot password -----------------------------------------------------
+
+    @app.callback(
+        Output("forgot-message", "children"),
+        Input("forgot-button", "n_clicks"),
+        State("forgot-email", "value"),
+        prevent_initial_call=True,
+    )
+    def handle_forgot_password(n_clicks, email):
+        if not email:
+            return dbc.Alert(
+                "Please enter your email address.",
+                color="warning",
+                duration=5000,
+            )
+        request_password_reset(email)
+        return dbc.Alert(
+            "If an account with that email exists, a password reset "
+            "link has been sent. Please check your inbox.",
+            color="success",
+        )
+
+    # -- Reset password ------------------------------------------------------
+
+    @app.callback(
+        Output("reset-message", "children"),
+        Input("reset-button", "n_clicks"),
+        State("reset-token-store", "data"),
+        State("reset-password", "value"),
+        State("reset-password-confirm", "value"),
+        prevent_initial_call=True,
+    )
+    def handle_reset_password(n_clicks, token, password, password_confirm):
+        if not token:
+            return dbc.Alert(
+                "Invalid or missing reset token. Please request a new "
+                "password reset link.",
+                color="danger",
+            )
+        if not password:
+            return dbc.Alert(
+                "Please enter a new password.",
+                color="warning",
+                duration=5000,
+            )
+        if len(password) < 8:
+            return dbc.Alert(
+                "Password must be at least 8 characters.",
+                color="warning",
+                duration=5000,
+            )
+        if password != password_confirm:
+            return dbc.Alert(
+                "Passwords do not match.",
+                color="danger",
+                duration=5000,
+            )
+        success, message = reset_password_with_token(token, password)
+        color = "success" if success else "danger"
+        result = [dbc.Alert(message, color=color)]
+        if success:
+            result.append(
+                html.P(
+                    dcc.Link(
+                        "Go to login",
+                        href="/login",
+                        className="fw-bold",
+                    ),
+                    className="text-center mt-2",
+                )
+            )
+        return html.Div(result)
 
     # -- File upload ---------------------------------------------------------
 

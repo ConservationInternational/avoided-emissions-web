@@ -98,6 +98,9 @@ See the example file for the full set of variables and their defaults.
 | `S3_BUCKET` | **Yes** | S3 bucket for site uploads and analysis results. |
 | `GCS_BUCKET` | **Yes** (for GEE exports) | GCS bucket where GEE covariate COGs are stored. |
 | `GOOGLE_PROJECT_ID` | **Yes** (for GEE exports) | Google Cloud project registered for Earth Engine access. |
+| `SPARKPOST_API_KEY` | **Yes** (for password reset emails) | SparkPost API key for transactional email (password resets). Without this, password reset emails are logged to the console instead of sent. |
+| `APP_URL` | **Yes** (for password reset emails) | Public URL of the web app (e.g. `https://app.avoided-emissions.org`). Used to build password-reset links in emails. Defaults to `http://localhost:8050`. |
+| `SPARKPOST_FROM_EMAIL` | No | Sender address for outgoing emails. Defaults to `noreply@avoided-emissions.org`. Must be a verified sending domain in SparkPost. |
 
 ## Quick Start
 

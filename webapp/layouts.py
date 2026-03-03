@@ -593,7 +593,15 @@ def login_layout():
                                         dbc.Input(
                                             id="login-password",
                                             type="password",
-                                            className="mb-3",
+                                            className="mb-1",
+                                        ),
+                                        html.Div(
+                                            dcc.Link(
+                                                "Forgot password?",
+                                                href="/forgot-password",
+                                                className="small",
+                                            ),
+                                            className="text-end mb-2",
                                         ),
                                         html.Div(
                                             id="login-error",
@@ -699,6 +707,154 @@ def register_layout():
                                                 "Already have an account? ",
                                                 dcc.Link(
                                                     "Login here",
+                                                    href="/login",
+                                                    className="fw-bold",
+                                                ),
+                                            ],
+                                            className="text-center mb-0 small",
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            className="mt-5 shadow-sm",
+                        ),
+                    ],
+                    width={"size": 4, "offset": 4},
+                )
+            ),
+        ]
+    )
+
+
+def forgot_password_layout():
+    """Forgot-password page — accepts an email and sends a reset link."""
+    return dbc.Container(
+        [
+            navbar(),
+            dbc.Row(
+                dbc.Col(
+                    [
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    html.Div(
+                                        [
+                                            html.H4(
+                                                "Avoided Emissions",
+                                                className="text-center mb-1",
+                                                style={"color": "white"},
+                                            ),
+                                            html.H6(
+                                                "Reset Password",
+                                                className="text-center",
+                                                style={"color": "#ffffffcc"},
+                                            ),
+                                        ]
+                                    ),
+                                    style={"backgroundColor": "#2c3e50"},
+                                ),
+                                dbc.CardBody(
+                                    [
+                                        html.P(
+                                            "Enter the email address associated "
+                                            "with your account and we'll send you "
+                                            "a link to reset your password.",
+                                            className="mb-3",
+                                        ),
+                                        dbc.Label("Email"),
+                                        dbc.Input(
+                                            id="forgot-email",
+                                            type="email",
+                                            placeholder="user@example.com",
+                                            className="mb-3",
+                                        ),
+                                        html.Div(id="forgot-message", className="mb-2"),
+                                        dbc.Button(
+                                            "Send Reset Link",
+                                            id="forgot-button",
+                                            color="primary",
+                                            className="w-100",
+                                        ),
+                                        html.Hr(),
+                                        html.P(
+                                            [
+                                                "Remember your password? ",
+                                                dcc.Link(
+                                                    "Login here",
+                                                    href="/login",
+                                                    className="fw-bold",
+                                                ),
+                                            ],
+                                            className="text-center mb-0 small",
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            className="mt-5 shadow-sm",
+                        ),
+                    ],
+                    width={"size": 4, "offset": 4},
+                )
+            ),
+        ]
+    )
+
+
+def reset_password_layout(token=""):
+    """Reset-password page — sets a new password using the emailed token."""
+    return dbc.Container(
+        [
+            navbar(),
+            # Hidden store carries the token from the URL query string
+            dcc.Store(id="reset-token-store", data=token),
+            dbc.Row(
+                dbc.Col(
+                    [
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    html.Div(
+                                        [
+                                            html.H4(
+                                                "Avoided Emissions",
+                                                className="text-center mb-1",
+                                                style={"color": "white"},
+                                            ),
+                                            html.H6(
+                                                "Set New Password",
+                                                className="text-center",
+                                                style={"color": "#ffffffcc"},
+                                            ),
+                                        ]
+                                    ),
+                                    style={"backgroundColor": "#2c3e50"},
+                                ),
+                                dbc.CardBody(
+                                    [
+                                        dbc.Label("New Password"),
+                                        dbc.Input(
+                                            id="reset-password",
+                                            type="password",
+                                            className="mb-2",
+                                        ),
+                                        dbc.Label("Confirm New Password"),
+                                        dbc.Input(
+                                            id="reset-password-confirm",
+                                            type="password",
+                                            className="mb-3",
+                                        ),
+                                        html.Div(id="reset-message", className="mb-2"),
+                                        dbc.Button(
+                                            "Reset Password",
+                                            id="reset-button",
+                                            color="primary",
+                                            className="w-100",
+                                        ),
+                                        html.Hr(),
+                                        html.P(
+                                            [
+                                                dcc.Link(
+                                                    "Back to login",
                                                     href="/login",
                                                     className="fw-bold",
                                                 ),

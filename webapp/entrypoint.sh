@@ -8,6 +8,9 @@
 
 set -e
 
+# Ensure celerybeat schedule directory exists (volume mounts may shadow it)
+mkdir -p /app/celerybeat
+
 case "$1" in
     migrate)
         echo "Running database migrations..."

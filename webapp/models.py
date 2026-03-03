@@ -1,7 +1,8 @@
 """SQLAlchemy database models for the avoided emissions web application."""
 
+import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from geoalchemy2 import Geometry
 from sqlalchemy import (
@@ -490,6 +491,65 @@ class VectorImportMetadata(Base):
     completed_at = Column(
         DateTime(timezone=True),
     )
+
+
+class PasswordResetToken(Base):
+    """Time-limited token for password reset requests.
+
+    Tokens expire after 1 hour and can only be used once.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    TOKEN_EXPIRY_HOURS = 1
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    token = Column(
+        String(128),
+        unique=True,
+        nullable=False,
+        default=lambda: secrets.token_urlsafe(64),
+    )
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    expires_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    used_at = Column(DateTime(timezone=True))
+
+    user = relationship("User")
+
+    @property
+    def is_valid(self):
+        """Return True if the token has not expired and has not been used."""
+        now = datetime.now(timezone.utc)
+        return self.used_at is None and now < self.expires_at
+
+    def mark_used(self):
+        """Mark this token as consumed."""
+        self.used_at = datetime.now(timezone.utc)
+
+    @classmethod
+    def get_valid_token(cls, token_string, db):
+        """Look up a token and return it only if still valid."""
+        reset_token = db.query(cls).filter(cls.token == token_string).first()
+        if reset_token and reset_token.is_valid:
+            return reset_token
+        return None
+
+    @classmethod
+    def invalidate_user_tokens(cls, user_id, db):
+        """Mark all existing tokens for a user as used."""
+        now = datetime.now(timezone.utc)
+        db.query(cls).filter(cls.user_id == user_id, cls.used_at.is_(None)).update(
+            {cls.used_at: now}
+        )
+        db.flush()
 
 
 # Database session management

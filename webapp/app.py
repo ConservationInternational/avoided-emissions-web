@@ -13,7 +13,7 @@ import flask_login
 import rollbar
 import rollbar.contrib.flask
 from dash import Input, Output, dcc, html
-from flask import got_request_exception
+from flask import got_request_exception, request as flask_request
 from flask_wtf.csrf import CSRFProtect
 
 from auth import login_manager
@@ -22,9 +22,11 @@ from config import Config
 from layouts import (
     admin_layout,
     dashboard_layout,
+    forgot_password_layout,
     login_layout,
     not_found_layout,
     register_layout,
+    reset_password_layout,
     settings_layout,
     submit_layout,
     task_detail_layout,
@@ -114,6 +116,14 @@ def display_page(pathname):
 
     if pathname == "/register":
         return register_layout()
+
+    if pathname == "/forgot-password":
+        return forgot_password_layout()
+
+    if pathname == "/reset-password":
+        # Token is passed as a query parameter; extract it via Flask
+        token = flask_request.args.get("token", "")
+        return reset_password_layout(token)
 
     if pathname == "/logout":
         flask_login.logout_user()

@@ -1,17 +1,22 @@
 """Authentication helpers for the Dash application.
 
-Provides password hashing/verification and session-based user management
-using Flask-Login integrated with the Dash server.
+Provides password hashing/verification, session-based user management
+using Flask-Login integrated with the Dash server, and password reset
+via email.
 """
 
 import functools
+import logging
 from datetime import datetime, timezone
 
 import bcrypt
 import flask
 import flask_login
 
-from models import User, get_db
+from config import Config
+from models import PasswordResetToken, User, get_db
+
+logger = logging.getLogger(__name__)
 
 
 login_manager = flask_login.LoginManager()
@@ -108,6 +113,104 @@ def get_current_user():
     if flask_login.current_user.is_authenticated:
         return flask_login.current_user
     return None
+
+
+def request_password_reset(email: str) -> bool:
+    """Create a password-reset token and email it to the user.
+
+    Always returns ``True`` regardless of whether the email exists so that
+    the caller can show a generic message (prevents user enumeration).
+    """
+    db = get_db()
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        if not user or not user.is_active:
+            # Don't reveal whether the account exists
+            logger.info("Password reset requested for unknown email: %s", email)
+            return True
+
+        # Invalidate any previous tokens for this user
+        PasswordResetToken.invalidate_user_tokens(user.id, db)
+
+        # Create a new token
+        reset_token = PasswordResetToken(user_id=user.id)
+        db.add(reset_token)
+        db.commit()
+
+        # Build the reset link
+        reset_url = f"{Config.APP_URL}/reset-password?token={reset_token.token}"
+
+        html = f"""
+        <p>Hello {user.name},</p>
+
+        <p>A password reset was requested for your Avoided Emissions account.</p>
+
+        <p>Click the link below to reset your password. This link will expire
+        in 1 hour.</p>
+
+        <p><a href="{reset_url}">Reset Your Password</a></p>
+
+        <p>If you cannot click the link, copy and paste this URL into your
+        browser:</p>
+        <p>{reset_url}</p>
+
+        <p>If you did not request this password reset, please ignore this email.
+        Your password will remain unchanged.</p>
+        """
+
+        try:
+            from email_service import send_html_email
+
+            send_html_email(
+                recipients=[user.email],
+                html=html,
+                subject="[Avoided Emissions] Password Reset Request",
+            )
+        except Exception:
+            logger.exception("Failed to send password reset email to %s", user.email)
+    except Exception:
+        db.rollback()
+        logger.exception("Error during password reset request for %s", email)
+    finally:
+        db.close()
+    return True
+
+
+def reset_password_with_token(token_string: str, new_password: str):
+    """Reset a user's password using a valid reset token.
+
+    Returns ``(True, message)`` on success or ``(False, error)`` on failure.
+    """
+    if not token_string or not new_password:
+        return False, "Token and new password are required."
+
+    if len(new_password) < 8:
+        return False, "Password must be at least 8 characters."
+
+    db = get_db()
+    try:
+        reset_token = PasswordResetToken.get_valid_token(token_string, db)
+        if not reset_token:
+            return False, "This reset link is invalid or has expired."
+
+        user = db.query(User).filter(User.id == reset_token.user_id).first()
+        if not user:
+            return False, "User not found."
+
+        user.password_hash = hash_password(new_password)
+        reset_token.mark_used()
+        db.add(user)
+        db.add(reset_token)
+        db.commit()
+
+        logger.info("Password reset successful for %s", user.email)
+        return True, "Your password has been reset. You can now log in."
+    except Exception:
+        db.rollback()
+        logger.exception("Error during password reset with token")
+        return False, "An error occurred. Please try again."
+    finally:
+        db.close()
 
 
 def require_login(func):
