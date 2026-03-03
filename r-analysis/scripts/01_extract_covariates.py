@@ -225,9 +225,13 @@ def load_covariates_lazy(
                     f"CRS mismatch: '{name}' has {layer_crs}, expected {ref_crs}"
                 )
             if layer_res != ref_res:
-                raise RuntimeError(
-                    f"Resolution mismatch: '{name}' has {layer_res}, expected {ref_res}"
-                )
+                # Allow tiny floating-point differences in pixel size
+                # (e.g. 1/120 vs GEE's 30 arc-second grid constant).
+                if not all(abs(a - b) < 1e-6 for a, b in zip(layer_res, ref_res)):
+                    raise RuntimeError(
+                        f"Resolution mismatch: '{name}' has {layer_res}, "
+                        f"expected {ref_res}"
+                    )
 
         arrays[name] = da
 
