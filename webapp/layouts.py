@@ -1793,9 +1793,7 @@ def settings_layout(user):
                 [
                     html.P(
                         "Enter your trends.earth account credentials to register "
-                        "this application as an authorized client.  Your password "
-                        "is sent directly to the trends.earth API and is never "
-                        "stored locally.",
+                        "this application as an authorized client.",
                         className="text-muted",
                     ),
                     dbc.Label("trends.earth Email"),
@@ -1834,9 +1832,7 @@ def settings_layout(user):
                     html.H4("trends.earth API Integration"),
                     html.P(
                         "Link your trends.earth account to submit analysis tasks "
-                        "through the trends.earth API.  Once linked, the webapp "
-                        "obtains short-lived access tokens automatically — your "
-                        "password is not stored.",
+                        "through the trends.earth API.",
                         className="text-muted",
                     ),
                 ]

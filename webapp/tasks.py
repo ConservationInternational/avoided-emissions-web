@@ -917,7 +917,7 @@ def poll_batch_tasks() -> dict:
         logger.info(
             "[POLL] Checking %d active task(s): %s",
             len(active),
-            ", ".join(f"{t.id[:8]}({t.status})" for t in active),
+            ", ".join(f"{str(t.id)[:8]}({t.status})" for t in active),
         )
 
         # ---- Poll API-routed tasks ----
