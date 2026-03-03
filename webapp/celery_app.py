@@ -64,11 +64,12 @@ celery_app.conf.update(
     result_expires=86400,
     # Autodiscover tasks in the 'tasks' module
     imports=["tasks"],
-    # Route CPU/IO-heavy merge tasks to a dedicated queue so they
-    # never starve the lightweight polling tasks on the default queue.
+    # Route CPU/IO-heavy tasks to the merge queue (higher memory limit)
+    # so they never starve the lightweight polling tasks on the default queue.
     task_routes={
         "tasks.run_cog_merge": {"queue": "merge"},
         "tasks.rasterize_vectors": {"queue": "merge"},
+        "tasks.import_vector_data": {"queue": "merge"},
     },
 )
 
