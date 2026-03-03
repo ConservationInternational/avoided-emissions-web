@@ -102,7 +102,10 @@ is_service_ready() {
     if echo "$replicas" | grep -qE "^[0-9]+/[0-9]+$"; then
         local current="${replicas%/*}"
         local desired="${replicas#*/}"
-        [ "$current" = "$desired" ] && [ "$desired" != "0" ]
+        # Use >= instead of == because during rolling updates Swarm can
+        # transiently show more running replicas than desired (e.g. 2/1)
+        # while the old task drains.
+        [ "$desired" != "0" ] && [ "$current" -ge "$desired" ]
     else
         return 1
     fi
