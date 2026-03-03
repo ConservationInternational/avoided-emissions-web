@@ -141,6 +141,8 @@ done
 if [ $WAIT_TIME -ge $MAX_WAIT ]; then
     log_error "Services did not start within $MAX_WAIT seconds"
     for service in $(docker service ls --filter "name=${STACK_NAME}_" --format "{{.Name}}" 2>/dev/null); do
+        # Skip the one-shot migrate service (checked separately below).
+        echo "$service" | grep -q "_migrate" && continue
         REPLICAS=$(docker service ls --filter "name=$service" --format "{{.Replicas}}" 2>/dev/null)
         if ! is_service_ready "$REPLICAS"; then
             log_error "Service $service stuck (Replicas: $REPLICAS)"
