@@ -7,14 +7,15 @@ callbacks, and sets up URL routing between pages.
 import logging
 import sys
 import uuid as _uuid
+from urllib.parse import parse_qs
 
 import dash
 import dash_bootstrap_components as dbc
 import flask_login
 import rollbar
 import rollbar.contrib.flask
-from dash import Input, Output, dcc, html
-from flask import got_request_exception, request as flask_request
+from dash import Input, Output, State, dcc, html
+from flask import got_request_exception
 from flask_wtf.csrf import CSRFProtect
 
 from auth import login_manager
@@ -119,8 +120,9 @@ app.layout = html.Div(
 @app.callback(
     Output("page-content", "children"),
     Input("url", "pathname"),
+    State("url", "search"),
 )
-def display_page(pathname):
+def display_page(pathname, search):
     """Route URLs to page layouts."""
     user = None
     if flask_login.current_user.is_authenticated:
@@ -136,8 +138,9 @@ def display_page(pathname):
         return forgot_password_layout()
 
     if pathname == "/reset-password":
-        # Token is passed as a query parameter; extract it via Flask
-        token = flask_request.args.get("token", "")
+        # Token is passed as a query parameter; extract from dcc.Location
+        # search string (e.g. "?token=abc123")
+        token = parse_qs((search or "").lstrip("?")).get("token", [""])[0]
         return reset_password_layout(token)
 
     if pathname == "/logout":

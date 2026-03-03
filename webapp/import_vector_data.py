@@ -328,18 +328,52 @@ def _load_geopackage(path: Path, layer: str | None = None) -> gpd.GeoDataFrame:
 
 
 def _ensure_multipolygon(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Promote any Polygon geometries to MultiPolygon for consistency."""
-    from shapely.geometry import MultiPolygon
+    """Coerce every geometry to MultiPolygon.
+
+    * ``Polygon`` → wrapped in a ``MultiPolygon``.
+    * ``GeometryCollection`` → polygonal parts are extracted with
+      ``shapely.ops.polygonize`` / filtering; non-polygon fragments
+      (lines, points) that ``make_valid`` may introduce are discarded.
+    * ``MultiPolygon`` → kept as-is.
+    * Anything else → set to ``None`` (dropped later by the caller).
+    """
+    from shapely.geometry import MultiPolygon, Polygon
 
     def _to_multi(geom):
         if geom is None:
             return None
-        if geom.geom_type == "Polygon":
+        gt = geom.geom_type
+        if gt == "MultiPolygon":
+            return geom
+        if gt == "Polygon":
             return MultiPolygon([geom])
-        return geom
+        if gt == "GeometryCollection":
+            polys = [g for g in geom.geoms if isinstance(g, (Polygon, MultiPolygon))]
+            # Flatten any nested MultiPolygons
+            flat: list[Polygon] = []
+            for p in polys:
+                if isinstance(p, MultiPolygon):
+                    flat.extend(p.geoms)
+                else:
+                    flat.append(p)
+            if flat:
+                return MultiPolygon(flat)
+            return None  # no polygonal parts — will be filtered out
+        # Unexpected type (LineString, Point, …) — discard
+        log.debug("Dropping unsupported geometry type: %s", gt)
+        return None
 
     gdf = gdf.copy()
     gdf["geometry"] = gdf["geometry"].apply(_to_multi)
+    # Drop any rows whose geometry was reduced to None
+    before = len(gdf)
+    gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty]
+    dropped = before - len(gdf)
+    if dropped:
+        log.warning(
+            "Dropped %d features with no polygonal geometry after make_valid",
+            dropped,
+        )
     return gdf
 
 
