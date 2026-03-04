@@ -309,10 +309,36 @@ def submit_analysis_task(
             "control_multiplier": 50,
             "min_site_area_ha": 100,
             "min_glm_treatment_pixels": 15,
-            "step": "all",
             "results_s3_uri": (
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
             ),
+            "intermediate_s3_uri": (
+                f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}"
+                f"/tasks/{task_id}/intermediate"
+            ),
+            # Pipeline descriptor: the API's batch_run task will call
+            # submit_pipeline() to create chained AWS Batch jobs:
+            #   extract  →  match (array)  →  summarize
+            # Each job runs a single step; intermediate data is passed
+            # through S3 at intermediate_s3_uri.
+            "pipeline": [
+                {
+                    "name": "extract",
+                    "command": ["extract"],
+                    "timeout_seconds": 14400,  # 4 h
+                },
+                {
+                    "name": "match",
+                    "command": ["match"],
+                    "array_size": len(gdf),
+                    "timeout_seconds": 14400,  # 4 h per site
+                },
+                {
+                    "name": "summarize",
+                    "command": ["summarize"],
+                    "timeout_seconds": 7200,  # 2 h
+                },
+            ],
         }
 
         # Attach AWS Batch overrides so the API routes this execution to

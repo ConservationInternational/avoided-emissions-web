@@ -49,6 +49,18 @@ STEP_LABELS = {
     "summarize": "Summarizing results",
 }
 
+# Canonical order of pipeline steps (used for progress calculation).
+PIPELINE_STEP_ORDER = ["extract", "match", "summarize"]
+
+# Files produced by the extract step that subsequent steps need.
+EXTRACT_OUTPUT_FILES = [
+    "sites_processed.parquet",
+    "treatment_cell_key.parquet",
+    "treatments_and_controls.parquet",
+    "formula.json",
+    "site_id_key.csv",
+]
+
 
 # ---------------------------------------------------------------------------
 # Progress / log reporting helpers
@@ -96,31 +108,63 @@ def run(params, log=None):
 
     Returns
     -------
-    dict
-        Results payload (``AnalysisResults.dump()``) suitable for
-        ``Execution.results``.
+    dict or None
+        For the final step (``"all"`` or ``"summarize"``), returns the
+        results payload (``AnalysisResults.dump()``).  For intermediate
+        pipeline steps (``"extract"``, ``"match"``), returns ``None`` so
+        that ``batch_runner`` skips the results upload.
     """
     log = log or logger
     step = params.get("step", "all")
     task_id = params.get("task_id", params.get("EXECUTION_ID", "unknown"))
 
+    # ---- detect pipeline mode ----
+    # When the API dispatches a multi-step pipeline (extract → match →
+    # summarize as separate Batch jobs), each container runs a single
+    # step and uses S3 to pass intermediate data between steps.
+    intermediate_uri = params.get("intermediate_s3_uri")
+    pipeline_mode = step != "all" and intermediate_uri is not None
+
     log.info(
-        "avoided_emissions: starting task %s (step=%s, "
+        "avoided_emissions: starting task %s (step=%s, pipeline=%s, "
         "cog_bucket=%s, cog_prefix=%s, sites=%s, n_covariates=%d)",
         task_id,
         step,
+        pipeline_mode,
         params.get("cog_bucket", "?"),
         params.get("cog_prefix", "?"),
         params.get("sites_s3_uri", "?"),
         len(params.get("covariates", [])),
     )
 
+    # ---- pipeline-aware progress boundaries ----
+    # When running a single step inside a pipeline, map progress to the
+    # step's position in the overall pipeline (0-33-66-100 for 3 steps).
+    if pipeline_mode and step in PIPELINE_STEP_ORDER:
+        p_idx = PIPELINE_STEP_ORDER.index(step)
+        p_total = len(PIPELINE_STEP_ORDER)
+        progress_start = int(p_idx / p_total * 100)
+        progress_end = int((p_idx + 1) / p_total * 100)
+    else:
+        progress_start = 0
+        progress_end = 100
+
     # ----- prepare local working directory -----
     data_dir = params.get("data_dir") or tempfile.mkdtemp(prefix="ae_")
     input_dir = os.path.join(data_dir, "input")
     output_dir = os.path.join(data_dir, "output")
+    matches_dir = os.path.join(output_dir, "matches")
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(matches_dir, exist_ok=True)
+
+    # ----- pipeline: download intermediate data from S3 -----
+    if pipeline_mode and step in ("match", "summarize"):
+        log.info("Downloading intermediate extract outputs from S3")
+        _download_s3_files(intermediate_uri, output_dir, EXTRACT_OUTPUT_FILES, log)
+    if pipeline_mode and step == "summarize":
+        log.info("Downloading match results from S3")
+        _download_s3_prefix(intermediate_uri + "/matches", matches_dir, log)
 
     # ----- download sites file from S3 -----
     sites_s3_uri = params["sites_s3_uri"]
@@ -163,8 +207,13 @@ def run(params, log=None):
     )
     for step_idx, s in enumerate(steps, 1):
         script_path = os.path.join(R_SCRIPTS_DIR, STEP_SCRIPTS[s])
-        pct_start = int((step_idx - 1) / len(steps) * 100)
-        pct_end = int(step_idx / len(steps) * 100)
+        # Map local step progress [0, 1] onto the pipeline-aware range.
+        local_frac_start = (step_idx - 1) / len(steps)
+        local_frac_end = step_idx / len(steps)
+        pct_start = progress_start + int(
+            local_frac_start * (progress_end - progress_start)
+        )
+        pct_end = progress_start + int(local_frac_end * (progress_end - progress_start))
 
         label = STEP_LABELS.get(s, s)
         log.info(
@@ -187,7 +236,20 @@ def run(params, log=None):
             f"Step {step_idx}/{len(steps)}: {label} (completed)",
         )
 
-    # ----- collect results -----
+    # ----- pipeline: upload intermediate data to S3 -----
+    if pipeline_mode and step == "extract":
+        log.info("Uploading intermediate extract outputs to S3")
+        _upload_to_s3_prefix(output_dir, intermediate_uri, log)
+        log.info("avoided_emissions: extract step complete (task %s)", task_id)
+        return None  # no final results yet
+
+    if pipeline_mode and step == "match":
+        log.info("Uploading match results to S3")
+        _upload_to_s3_prefix(matches_dir, intermediate_uri + "/matches", log)
+        log.info("avoided_emissions: match step complete (task %s)", task_id)
+        return None  # no final results yet
+
+    # ----- collect results (for "all" or "summarize") -----
     results = _collect_results(output_dir, task_id, log)
 
     # ----- upload results to S3 if configured -----
@@ -308,6 +370,66 @@ def _parse_s3_uri(uri):
         uri = uri[5:]
     parts = uri.split("/", 1)
     return parts[0], parts[1] if len(parts) > 1 else ""
+
+
+# ---------------------------------------------------------------------------
+# Pipeline intermediate S3 helpers
+# ---------------------------------------------------------------------------
+
+
+def _upload_to_s3_prefix(local_dir, s3_uri, log):
+    """Upload all files under *local_dir* to the S3 prefix in *s3_uri*.
+
+    Walks subdirectories and preserves the relative path structure.
+    """
+    bucket, prefix = _parse_s3_uri(s3_uri)
+    s3 = boto3.client("s3")
+    count = 0
+    for root, _dirs, files in os.walk(local_dir):
+        for fname in files:
+            local_path = os.path.join(root, fname)
+            rel = os.path.relpath(local_path, local_dir)
+            key = f"{prefix}/{rel}".replace("\\", "/")
+            log.info("Uploading %s → s3://%s/%s", local_path, bucket, key)
+            s3.upload_file(local_path, bucket, key)
+            count += 1
+    log.info("Uploaded %d files to s3://%s/%s", count, bucket, prefix)
+
+
+def _download_s3_prefix(s3_uri, local_dir, log):
+    """Download all objects under an S3 prefix to *local_dir*.
+
+    Preserves the key structure relative to the prefix as local sub-paths.
+    """
+    bucket, prefix = _parse_s3_uri(s3_uri)
+    prefix = prefix.rstrip("/")
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    count = 0
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            rel = key[len(prefix) :].lstrip("/")
+            if not rel:
+                continue
+            local_path = os.path.join(local_dir, rel)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            log.info("Downloading s3://%s/%s → %s", bucket, key, local_path)
+            s3.download_file(bucket, key, local_path)
+            count += 1
+    log.info("Downloaded %d files from s3://%s/%s", count, bucket, prefix)
+
+
+def _download_s3_files(s3_uri, local_dir, filenames, log):
+    """Download specific *filenames* from an S3 prefix to *local_dir*."""
+    bucket, prefix = _parse_s3_uri(s3_uri)
+    s3 = boto3.client("s3")
+    os.makedirs(local_dir, exist_ok=True)
+    for fname in filenames:
+        key = f"{prefix}/{fname}"
+        local_path = os.path.join(local_dir, fname)
+        log.info("Downloading s3://%s/%s → %s", bucket, key, local_path)
+        s3.download_file(bucket, key, local_path)
 
 
 def _collect_results(output_dir, task_id, log):

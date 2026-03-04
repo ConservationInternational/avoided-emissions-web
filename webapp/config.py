@@ -54,10 +54,11 @@ class Config:
     # Leave blank to use the defaults configured on the API / Script model.
     BATCH_JOB_QUEUE = os.environ.get("BATCH_JOB_QUEUE", "")
     BATCH_JOB_DEFINITION = os.environ.get("BATCH_JOB_DEFINITION", "")
-    # Total timeout for the Batch job in seconds.  The pipeline runs three
-    # sequential steps (extract, match, summarize) so this must be at least
-    # 3× the per-step timeout configured in the R-analysis container
-    # (R_STEP_TIMEOUT, default 14 400 s = 4 h).  Default: 50 400 s = 14 h.
+    # Total timeout for the Batch job in seconds.  When using pipeline mode
+    # (separate extract → match → summarize jobs), each step has its own
+    # timeout in the pipeline descriptor.  This value is used as the
+    # default fallback for any step that doesn't specify its own timeout.
+    # Default: 50 400 s = 14 h.
     BATCH_TIMEOUT_SECONDS = int(os.environ.get("BATCH_TIMEOUT_SECONDS", "50400"))
 
     # SparkPost email configuration
