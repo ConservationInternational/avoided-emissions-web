@@ -61,6 +61,7 @@ def save_credential(
     client_secret: str,
     client_name: str = "avoided-emissions-web",
     api_client_db_id: str | None = None,
+    te_user_id: str | None = None,
 ) -> TrendsEarthCredential:
     """Store (or replace) the user's trends.earth OAuth2 credential.
 
@@ -80,6 +81,8 @@ def save_credential(
             existing.client_secret_encrypted = encrypted
             existing.client_name = client_name
             existing.api_client_db_id = api_client_db_id
+            if te_user_id is not None:
+                existing.te_user_id = te_user_id
             existing.updated_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(existing)
@@ -88,6 +91,7 @@ def save_credential(
         cred = TrendsEarthCredential(
             user_id=user_id,
             te_email=te_email,
+            te_user_id=te_user_id,
             client_id=client_id,
             client_secret_encrypted=encrypted,
             client_name=client_name,

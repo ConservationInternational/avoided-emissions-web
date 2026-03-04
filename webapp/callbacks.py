@@ -1111,7 +1111,15 @@ def register_callbacks(app):
             # Force login to verify credentials
             client._login()
 
-            # 2. Register an OAuth2 service client
+            # 2. Fetch the API-side user profile to capture te_user_id
+            te_user_id = None
+            try:
+                profile = client.get_user_profile()
+                te_user_id = (profile.get("data") or {}).get("id")
+            except Exception:
+                logger.warning("Could not fetch trends.earth user profile")
+
+            # 3. Register an OAuth2 service client
             result = client.create_oauth2_client(
                 name=f"avoided-emissions-web ({user.email})",
             )
@@ -1129,7 +1137,7 @@ def register_callbacks(app):
                     no_update,
                 )
 
-            # 3. Store encrypted credentials locally
+            # 4. Store encrypted credentials locally
             save_credential(
                 user_id=user.id,
                 te_email=email,
@@ -1137,6 +1145,7 @@ def register_callbacks(app):
                 client_secret=client_secret,
                 client_name=f"avoided-emissions-web ({user.email})",
                 api_client_db_id=api_client_db_id,
+                te_user_id=te_user_id,
             )
 
             return (

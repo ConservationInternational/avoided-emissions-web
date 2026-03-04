@@ -363,6 +363,8 @@ class TrendsEarthCredential(Base):
     )
     # The trends.earth user email used to create the client
     te_email = Column(String(255), nullable=False)
+    # The UUID of the user on the trends.earth API side
+    te_user_id = Column(String(128), nullable=True)
     # OAuth2 client_id (public, non-secret)
     client_id = Column(String(128), nullable=False)
     # OAuth2 client_secret (encrypted with Fernet using SECRET_KEY)

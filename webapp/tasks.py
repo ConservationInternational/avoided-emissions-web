@@ -991,62 +991,76 @@ def poll_batch_tasks() -> dict:
             from config import Config
             from trendsearth_client import TrendsEarthClient
 
+            from models import User
+
             script_id = Config.TRENDSEARTH_SCRIPT_ID
             if script_id and Config.TRENDSEARTH_CLIENT_ID:
-                # Re-use the client created during polling if available
-                if client is None:
-                    client = TrendsEarthClient(
-                        api_url=Config.TRENDSEARTH_API_URL,
-                        client_id=Config.TRENDSEARTH_CLIENT_ID,
-                        client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
+                # Pre-check: skip discovery entirely when no users exist.
+                # adopt_api_execution needs a user to assign ownership to.
+                has_users = db.query(User.id).first() is not None
+                if not has_users:
+                    logger.info(
+                        "Skipping API execution discovery: no users in the "
+                        "database yet. Create a user to enable adoption of "
+                        "API executions."
                     )
+                else:
+                    # Re-use the client created during polling if available
+                    if client is None:
+                        client = TrendsEarthClient(
+                            api_url=Config.TRENDSEARTH_API_URL,
+                            client_id=Config.TRENDSEARTH_CLIENT_ID,
+                            client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
+                        )
 
-                resp = client.list_executions(script_id=script_id) or {}
-                api_executions = resp.get("data", [])
-                if not isinstance(api_executions, list):
-                    api_executions = []
+                    resp = client.list_executions(script_id=script_id) or {}
+                    api_executions = resp.get("data", [])
+                    if not isinstance(api_executions, list):
+                        api_executions = []
 
-                # Build set of API exec IDs we already track locally
-                known_exec_ids = set()
-                all_tasks = (
-                    db.query(AnalysisTask.extract_job_id)
-                    .filter(AnalysisTask.extract_job_id.isnot(None))
-                    .all()
-                )
-                for (job_id,) in all_tasks:
-                    if job_id.startswith("api:"):
-                        known_exec_ids.add(job_id[4:])
+                    # Build set of API exec IDs we already track locally
+                    known_exec_ids = set()
+                    all_tasks = (
+                        db.query(AnalysisTask.extract_job_id)
+                        .filter(AnalysisTask.extract_job_id.isnot(None))
+                        .all()
+                    )
+                    for (job_id,) in all_tasks:
+                        if job_id.startswith("api:"):
+                            known_exec_ids.add(job_id[4:])
 
-                for exec_data in api_executions:
-                    eid = exec_data.get("id", "")
-                    if eid and eid not in known_exec_ids:
-                        try:
-                            from services import (
-                                adopt_api_execution,
-                                import_execution_results,
-                            )
+                    for exec_data in api_executions:
+                        eid = exec_data.get("id", "")
+                        if eid and eid not in known_exec_ids:
+                            try:
+                                from services import (
+                                    adopt_api_execution,
+                                    import_execution_results,
+                                )
 
-                            task_obj = adopt_api_execution(exec_data, db)
-                            if task_obj:
-                                # If finished, also import results
-                                api_status = exec_data.get("status", "").upper()
-                                if api_status == "FINISHED":
-                                    results_payload = client.get_execution_results(eid)
-                                    if results_payload:
-                                        import_execution_results(
-                                            str(task_obj.id),
-                                            results_payload,
-                                            db=db,
+                                task_obj = adopt_api_execution(exec_data, db)
+                                if task_obj:
+                                    # If finished, also import results
+                                    api_status = exec_data.get("status", "").upper()
+                                    if api_status == "FINISHED":
+                                        results_payload = client.get_execution_results(
+                                            eid
                                         )
-                                adopted += 1
-                        except Exception as adopt_exc:
-                            db.rollback()
-                            logger.warning(
-                                "Failed to adopt API execution %s: %s",
-                                eid,
-                                adopt_exc,
-                            )
-                            report_exception(extra_data={"exec_id": eid})
+                                        if results_payload:
+                                            import_execution_results(
+                                                str(task_obj.id),
+                                                results_payload,
+                                                db=db,
+                                            )
+                                    adopted += 1
+                            except Exception as adopt_exc:
+                                db.rollback()
+                                logger.warning(
+                                    "Failed to adopt API execution %s: %s",
+                                    eid,
+                                    adopt_exc,
+                                )
+                                report_exception(extra_data={"exec_id": eid})
 
                 if adopted:
                     db.commit()

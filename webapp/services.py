@@ -1120,17 +1120,28 @@ def adopt_api_execution(exec_data, db):
     }
     local_status = status_map.get(api_status, "submitted")
 
-    # Find a user to own the task — prefer the first admin
-    from models import User
+    # Try to match the execution to the local user who submitted it,
+    # via the trends.earth user ID stored in TrendsEarthCredential.
+    from models import TrendsEarthCredential, User
 
-    owner = db.query(User).filter(User.role == "admin").first()
+    owner = None
+    api_user_id = exec_data.get("user_id")
+    if api_user_id:
+        cred = (
+            db.query(TrendsEarthCredential)
+            .filter(TrendsEarthCredential.te_user_id == str(api_user_id))
+            .first()
+        )
+        if cred:
+            owner = db.query(User).filter(User.id == cred.user_id).first()
+
+    # Fall back to the first admin, then any user
+    if not owner:
+        owner = db.query(User).filter(User.role == "admin").first()
     if not owner:
         owner = db.query(User).first()
     if not owner:
-        logger.error(
-            "adopt_api_execution: no users in database, cannot adopt exec %s",
-            exec_id,
-        )
+        # Caller should check for this and log once, not per-execution
         return None
 
     # Reconstruct n_sites from the pipeline array_size if available

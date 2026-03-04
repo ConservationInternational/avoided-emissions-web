@@ -109,6 +109,26 @@ class TrendsEarthClient:
         self._token = token
 
     # ------------------------------------------------------------------
+    # User profile
+    # ------------------------------------------------------------------
+
+    def get_user_profile(self):
+        """Fetch the authenticated user's profile (``/user/me``).
+
+        Returns
+        -------
+        dict
+            ``{"data": {"id": "...", "email": "...", ...}}``
+        """
+        resp = requests.get(
+            f"{self.api_url}/user/me",
+            headers=self._headers(),
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # ------------------------------------------------------------------
     # OAuth2 client management (Client Credentials grant)
     # ------------------------------------------------------------------
 
