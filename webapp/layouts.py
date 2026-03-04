@@ -1513,6 +1513,41 @@ def submit_layout(user):
                                                                                     dbc.Col(
                                                                                         [
                                                                                             dbc.Label(
+                                                                                                "Matching memory (GB)"
+                                                                                            ),
+                                                                                            dcc.Dropdown(
+                                                                                                id="match-memory-gb",
+                                                                                                options=[
+                                                                                                    {
+                                                                                                        "label": "30 GB (default)",
+                                                                                                        "value": 30,
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "label": "60 GB",
+                                                                                                        "value": 60,
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "label": "120 GB",
+                                                                                                        "value": 120,
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "label": "240 GB",
+                                                                                                        "value": 240,
+                                                                                                    },
+                                                                                                ],
+                                                                                                value=30,
+                                                                                                clearable=False,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Increase if matching jobs fail with exit code -9 (out of memory).",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
                                                                                                 "Batch job queue"
                                                                                             ),
                                                                                             dcc.Dropdown(
@@ -1532,7 +1567,7 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=12,
+                                                                                        width=6,
                                                                                     ),
                                                                                 ],
                                                                                 className="g-3 mt-1",

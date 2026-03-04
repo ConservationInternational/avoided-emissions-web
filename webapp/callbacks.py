@@ -523,6 +523,12 @@ def register_callbacks(app):
         State("parsed-sites-store", "data"),
         State("covariate-selection", "value"),
         State("exact-match-selection", "value"),
+        State("max-treatment-pixels", "value"),
+        State("control-multiplier", "value"),
+        State("min-site-area-ha", "value"),
+        State("min-glm-treatment-pixels", "value"),
+        State("match-memory-gb", "value"),
+        State("matching-job-queue", "value"),
         prevent_initial_call=True,
     )
     def handle_submit(
@@ -532,6 +538,12 @@ def register_callbacks(app):
         sites_data,
         covariates,
         exact_match_vars,
+        max_treatment_pixels,
+        control_multiplier,
+        min_site_area_ha,
+        min_glm_treatment_pixels,
+        match_memory_gb,
+        matching_job_queue,
     ):
         def _error_alert(msg):
             return dbc.Alert(msg, color="danger", dismissable=True), None
@@ -583,6 +595,12 @@ def register_callbacks(app):
                 exact_match_vars=exact_match_vars,
                 fc_years=fc_years,
                 site_set_id=sites_data.get("site_set_id"),
+                max_treatment_pixels=int(max_treatment_pixels or 1000),
+                control_multiplier=int(control_multiplier or 50),
+                min_site_area_ha=int(min_site_area_ha or 100),
+                min_glm_treatment_pixels=int(min_glm_treatment_pixels or 15),
+                match_memory_mib=int(match_memory_gb or 30) * 1024,
+                matching_job_queue=matching_job_queue,
             )
 
             return None, dbc.Alert(

@@ -604,6 +604,7 @@ def submit_analysis_task(
     control_multiplier=50,
     min_site_area_ha=100,
     min_glm_treatment_pixels=15,
+    match_memory_mib=30720,
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
 ):
     """Create and submit a full analysis task via the trends.earth API.
@@ -759,7 +760,9 @@ def submit_analysis_task(
                             "name": "extract",
                             "command": ["extract"],
                             "timeout_seconds": 14400,  # 4 h
-                            "memory_mib": 61440,  # 60 GB — loads full COG grids
+                            "memory_mib": max(
+                                61440, match_memory_mib
+                            ),  # at least 60 GB
                             "vcpus": 4,
                             "retry_attempts": 3,
                         },
@@ -768,15 +771,15 @@ def submit_analysis_task(
                             "command": ["match"],
                             "array_size": len(gdf),
                             "timeout_seconds": 14400,  # 4 h per site
-                            "memory_mib": 30720,  # 30 GB — one site at a time
-                            "vcpus": 2,
-                            "retry_attempts": 5,  # array children retry independently
+                            "memory_mib": match_memory_mib,
+                            "vcpus": max(2, match_memory_mib // 15360),
+                            "retry_attempts": 5,
                         },
                         {
                             "name": "summarize",
                             "command": ["summarize"],
                             "timeout_seconds": 7200,  # 2 h
-                            "memory_mib": 16384,  # 16 GB — aggregation only
+                            "memory_mib": max(16384, match_memory_mib // 2),
                             "vcpus": 2,
                             "retry_attempts": 3,
                         },
@@ -794,7 +797,7 @@ def submit_analysis_task(
         # to cover all of them (default: 14 h, see Config).
         batch_overrides = {
             "timeout_seconds": Config.BATCH_TIMEOUT_SECONDS,
-            "memory_mib": Config.BATCH_MEMORY_MIB,
+            "memory_mib": max(Config.BATCH_MEMORY_MIB, match_memory_mib),
             "vcpus": Config.BATCH_VCPUS,
         }
         if matching_job_queue:
