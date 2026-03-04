@@ -898,6 +898,36 @@ def get_task_list(user_id=None, limit=50):
         db.close()
 
 
+def _fetch_sites_geojson_from_s3(sites_s3_uri):
+    """Download a sites GeoJSON FeatureCollection from S3.
+
+    Parameters
+    ----------
+    sites_s3_uri : str
+        S3 URI (``s3://bucket/key``) pointing to a GeoJSON file.
+
+    Returns
+    -------
+    dict | None
+        Parsed GeoJSON FeatureCollection, or ``None`` on error.
+    """
+    if not sites_s3_uri or not sites_s3_uri.startswith("s3://"):
+        return None
+    try:
+        without_scheme = sites_s3_uri[5:]
+        bucket, _, key = without_scheme.partition("/")
+        if not bucket or not key:
+            return None
+        s3 = get_s3_client()
+        response = s3.get_object(Bucket=bucket, Key=key)
+        return json.loads(response["Body"].read().decode("utf-8"))
+    except Exception:
+        logger.warning(
+            "Failed to download sites GeoJSON from %s", sites_s3_uri, exc_info=True
+        )
+        return None
+
+
 def get_task_detail(task_id):
     """Get full task details including sites and results."""
     db = get_db()
@@ -922,6 +952,14 @@ def get_task_detail(task_id):
         sites_geojson = None
         if task.site_set_id:
             sites_geojson = get_user_site_set_geojson(task.site_set_id)
+        if not sites_geojson or not sites_geojson.get("features"):
+            # Adopted tasks have no local site set — fall back to S3
+            s3_uri = task.sites_s3_uri
+            if not s3_uri:
+                # Also check inside config/params (older adopted tasks)
+                s3_uri = (task.config or {}).get("sites_s3_uri")
+            if s3_uri:
+                sites_geojson = _fetch_sites_geojson_from_s3(s3_uri)
 
         return {
             "task": task,
