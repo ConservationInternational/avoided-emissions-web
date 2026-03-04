@@ -47,8 +47,7 @@ RUN install2.r --error --skipinstalled --ncpus -1 \
 WORKDIR /app
 COPY scripts/ /app/scripts/
 COPY entrypoint.sh /app/entrypoint.sh
-COPY src/main.py /app/main.py
-COPY src/batch_runner.py /app/batch_runner.py
+COPY src/ /app/
 COPY requirements.txt /app/requirements.txt
 RUN chmod +x /app/entrypoint.sh
 
