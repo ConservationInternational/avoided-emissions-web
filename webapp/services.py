@@ -744,46 +744,47 @@ def submit_analysis_task(
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}"
                 f"/tasks/{task_id}/intermediate"
             ),
-            # Pipeline descriptor: the API's batch_run task will call
-            # submit_pipeline() to create chained AWS Batch jobs:
-            #   extract  →  match (array)  →  summarize
-            # Each job runs a single step; intermediate data is passed
-            # through S3 at intermediate_s3_uri.
-            # Pipeline descriptor: the API's batch_run task will call
-            # submit_pipeline() to create chained AWS Batch jobs:
-            #   extract  →  match (array)  →  summarize
-            # Each step runs on Spot instances.  retry_attempts
-            # configures automatic retry when a Spot instance is
-            # reclaimed — only the interrupted portion reruns (for
-            # array jobs, only the affected child is retried, not the
-            # whole array).
-            "pipeline": [
+            # For multi-site jobs, use a pipeline of chained AWS Batch
+            # jobs (extract → match array → summarize) so each site
+            # can run its matching step in parallel as an array child.
+            # For single-site jobs, skip the pipeline entirely and run
+            # all steps in one container (step="all") — this avoids
+            # the overhead of S3 intermediate data transfer and extra
+            # job scheduling.  The R analysis container handles both
+            # modes via the ``step`` parameter.
+            **(
                 {
-                    "name": "extract",
-                    "command": ["extract"],
-                    "timeout_seconds": 14400,  # 4 h
-                    "memory_mib": 61440,  # 60 GB — loads full COG grids
-                    "vcpus": 4,
-                    "retry_attempts": 3,
-                },
-                {
-                    "name": "match",
-                    "command": ["match"],
-                    "array_size": len(gdf),
-                    "timeout_seconds": 14400,  # 4 h per site
-                    "memory_mib": 30720,  # 30 GB — one site at a time
-                    "vcpus": 2,
-                    "retry_attempts": 5,  # array children retry independently
-                },
-                {
-                    "name": "summarize",
-                    "command": ["summarize"],
-                    "timeout_seconds": 7200,  # 2 h
-                    "memory_mib": 16384,  # 16 GB — aggregation only
-                    "vcpus": 2,
-                    "retry_attempts": 3,
-                },
-            ],
+                    "pipeline": [
+                        {
+                            "name": "extract",
+                            "command": ["extract"],
+                            "timeout_seconds": 14400,  # 4 h
+                            "memory_mib": 61440,  # 60 GB — loads full COG grids
+                            "vcpus": 4,
+                            "retry_attempts": 3,
+                        },
+                        {
+                            "name": "match",
+                            "command": ["match"],
+                            "array_size": len(gdf),
+                            "timeout_seconds": 14400,  # 4 h per site
+                            "memory_mib": 30720,  # 30 GB — one site at a time
+                            "vcpus": 2,
+                            "retry_attempts": 5,  # array children retry independently
+                        },
+                        {
+                            "name": "summarize",
+                            "command": ["summarize"],
+                            "timeout_seconds": 7200,  # 2 h
+                            "memory_mib": 16384,  # 16 GB — aggregation only
+                            "vcpus": 2,
+                            "retry_attempts": 3,
+                        },
+                    ],
+                }
+                if len(gdf) > 1
+                else {}
+            ),
         }
 
         # Attach AWS Batch overrides so the API routes this execution to
