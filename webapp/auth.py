@@ -103,6 +103,17 @@ def register_user(email: str, password: str, name: str):
         )
         db.add(user)
         db.commit()
+
+        try:
+            _notify_admins_new_pending_user(db, user)
+        except Exception:
+            # Don't fail registration if admin notification fails.
+            logger.exception(
+                "Failed to send new-user pending-approval notification for %s",
+                user.email,
+            )
+            report_exception(new_user_email=user.email)
+
         return (
             True,
             "Account created. An administrator must approve your account before you can log in.",
@@ -112,6 +123,52 @@ def register_user(email: str, password: str, name: str):
         return False, "Registration failed. Please try again."
     finally:
         db.close()
+
+
+def _notify_admins_new_pending_user(db, new_user):
+    """Email all active admin users about a new pending registration."""
+    admin_emails = [
+        admin.email
+        for admin in db.query(User)
+        .filter(User.role == "admin", User.is_active.is_(True))
+        .all()
+        if admin.email
+    ]
+    if not admin_emails:
+        logger.info(
+            "No active admin users found; skipping pending-user notification for %s",
+            new_user.email,
+        )
+        return
+
+    admin_url = f"{Config.APP_URL}/admin"
+    html = f"""
+    <p>Hello Admin,</p>
+
+    <p>A new user has registered and is awaiting approval:</p>
+
+    <ul>
+      <li><strong>Name:</strong> {new_user.name}</li>
+      <li><strong>Email:</strong> {new_user.email}</li>
+    </ul>
+
+    <p>Review and approve users in the admin panel:</p>
+    <p><a href=\"{admin_url}\">Open Admin Panel</a></p>
+    """
+
+    from email_service import send_html_email
+
+    result = send_html_email(
+        recipients=admin_emails,
+        html=html,
+        subject="[Avoided Emissions] New User Pending Approval",
+    )
+    if isinstance(result, dict) and result.get("errors"):
+        logger.error(
+            "Pending-user notification email not sent for %s: %s",
+            new_user.email,
+            result["errors"],
+        )
 
 
 def get_current_user():
