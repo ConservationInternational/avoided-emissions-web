@@ -21,9 +21,11 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import boto3
 import pandas as pd
@@ -33,19 +35,23 @@ from te_schemas.analysis import AnalysisRecord, AnalysisResults, AnalysisTimeSte
 logger = logging.getLogger(__name__)
 
 
-def _parse_log_level(raw_level):
-    """Convert a log-level string to a logging level, with safe fallback."""
-    return getattr(logging, str(raw_level).upper(), logging.WARNING)
+def _ensure_scripts_dir_on_path():
+    """Add r-analysis/scripts to sys.path for shared Python helpers."""
+    current_dir = Path(__file__).resolve().parent
+    candidate_dirs = (current_dir / "scripts", current_dir.parent / "scripts")
+    for scripts_dir in candidate_dirs:
+        scripts_dir_str = str(scripts_dir)
+        if scripts_dir.is_dir() and scripts_dir_str not in sys.path:
+            sys.path.insert(0, scripts_dir_str)
+            break
 
 
-def _configure_third_party_logging():
-    """Reduce noisy third-party logging while keeping warnings/errors visible."""
-    third_party_level = _parse_log_level(os.getenv("THIRD_PARTY_LOG_LEVEL", "WARNING"))
-    for logger_name in ("boto3", "botocore", "s3transfer", "urllib3"):
-        logging.getLogger(logger_name).setLevel(third_party_level)
+_ensure_scripts_dir_on_path()
+
+from logging_utils import configure_third_party_logging  # noqa: E402
 
 
-_configure_third_party_logging()
+configure_third_party_logging()
 
 # The avoided-emissions pipeline is pure R — no Google Earth Engine needed.
 REQUIRES_GEE = False

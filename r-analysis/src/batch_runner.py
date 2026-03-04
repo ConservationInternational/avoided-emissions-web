@@ -29,15 +29,28 @@ from pathlib import Path
 import boto3
 
 
-def _parse_log_level(raw_level):
-    """Convert a log-level string to a logging level, with safe fallback."""
-    return getattr(logging, str(raw_level).upper(), logging.INFO)
+def _ensure_scripts_dir_on_path():
+    """Add r-analysis/scripts to sys.path for shared Python helpers."""
+    current_dir = Path(__file__).resolve().parent
+    candidate_dirs = (current_dir / "scripts", current_dir.parent / "scripts")
+    for scripts_dir in candidate_dirs:
+        scripts_dir_str = str(scripts_dir)
+        if scripts_dir.is_dir() and scripts_dir_str not in sys.path:
+            sys.path.insert(0, scripts_dir_str)
+            break
+
+
+_ensure_scripts_dir_on_path()
+
+from logging_utils import configure_third_party_logging, parse_log_level  # noqa: E402
 
 
 def _configure_logging():
     """Configure logging with reduced third-party noise by default."""
-    app_log_level = _parse_log_level(os.getenv("BATCH_RUNNER_LOG_LEVEL", "INFO"))
-    third_party_level = _parse_log_level(os.getenv("THIRD_PARTY_LOG_LEVEL", "WARNING"))
+    app_log_level = parse_log_level(
+        os.getenv("BATCH_RUNNER_LOG_LEVEL", "INFO"),
+        default=logging.INFO,
+    )
 
     logging.basicConfig(
         level=app_log_level,
@@ -45,13 +58,7 @@ def _configure_logging():
         stream=sys.stderr,
     )
 
-    for logger_name in (
-        "boto3",
-        "botocore",
-        "s3transfer",
-        "urllib3",
-    ):
-        logging.getLogger(logger_name).setLevel(third_party_level)
+    configure_third_party_logging()
 
     batch_logger = logging.getLogger("batch_runner")
     batch_logger.setLevel(app_log_level)

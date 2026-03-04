@@ -41,6 +41,8 @@ from osgeo import gdal
 from rasterio.features import rasterize
 from shapely.geometry import box, mapping, shape
 
+from logging_utils import configure_third_party_logging
+
 # Silence GDAL/rasterio deprecation noise
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -53,6 +55,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("extract_covariates")
+configure_third_party_logging()
 
 # ---------------------------------------------------------------------------
 # GDAL / S3 tuning for COG range-request performance
