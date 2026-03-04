@@ -20,8 +20,8 @@ on:
           - production
 
 env:
-  STAGING_API_URL: https://api-staging.trends.earth
   PRODUCTION_API_URL: https://api.trends.earth
+  STAGING_API_URL: https://api-staging.trends.earth
 
 jobs:
   publish-script:
