@@ -53,7 +53,11 @@ logger = logging.getLogger(__name__)
 # Create Dash app with Bootstrap theme
 app = dash.Dash(
     __name__,
-    external_stylesheets=[dbc.themes.FLATLY],
+    external_stylesheets=[
+        dbc.themes.FLATLY,
+        "https://cdn.jsdelivr.net/npm/ol@10.6.1/ol.css",
+    ],
+    external_scripts=["https://cdn.jsdelivr.net/npm/ol@10.6.1/dist/ol.js"],
     suppress_callback_exceptions=True,
     title="Avoided Emissions",
 )

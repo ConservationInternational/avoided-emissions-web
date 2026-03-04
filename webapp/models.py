@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -51,6 +52,9 @@ class User(Base):
     is_approved = Column(Boolean, default=False)
 
     tasks = relationship("AnalysisTask", back_populates="user")
+    site_sets = relationship(
+        "UserSiteSet", back_populates="user", cascade="all, delete-orphan"
+    )
     covariate_presets = relationship(
         "CovariatePreset", back_populates="user", cascade="all, delete-orphan"
     )
@@ -192,6 +196,7 @@ class AnalysisTask(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text)
     submitted_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    site_set_id = Column(UUID(as_uuid=True), ForeignKey("user_site_sets.id"))
     status = Column(
         Enum(
             "pending",
@@ -224,6 +229,7 @@ class AnalysisTask(Base):
     extra_metadata = Column("metadata", JSON, default=dict)
 
     user = relationship("User", back_populates="tasks")
+    site_set = relationship("UserSiteSet", back_populates="tasks")
     sites = relationship(
         "TaskSite", back_populates="task", cascade="all, delete-orphan"
     )
@@ -249,6 +255,52 @@ class TaskSite(Base):
     area_ha = Column(Float)
 
     task = relationship("AnalysisTask", back_populates="sites")
+
+
+class UserSiteSet(Base):
+    """User-uploaded site collections stored in PostGIS for reuse."""
+
+    __tablename__ = "user_site_sets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    original_filename = Column(String(500), nullable=False)
+    file_size_bytes = Column(BigInteger, nullable=False)
+    file_format = Column(String(20), nullable=False)
+    uploaded_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    n_sites = Column(Integer, nullable=False)
+    bounds = Column(JSON)
+    extra_metadata = Column("metadata", JSON, default=dict)
+
+    user = relationship("User", back_populates="site_sets")
+    sites = relationship(
+        "UserSiteFeature", back_populates="site_set", cascade="all, delete-orphan"
+    )
+    tasks = relationship("AnalysisTask", back_populates="site_set")
+
+
+class UserSiteFeature(Base):
+    """Individual site polygons belonging to a :class:`UserSiteSet`."""
+
+    __tablename__ = "user_site_features"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    site_set_id = Column(
+        UUID(as_uuid=True), ForeignKey("user_site_sets.id"), nullable=False
+    )
+    site_id = Column(String(100), nullable=False)
+    site_name = Column(String(255), nullable=False)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date)
+    area_ha = Column(Float)
+    geom = Column(
+        Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
+    )
+
+    site_set = relationship("UserSiteSet", back_populates="sites")
 
 
 class TaskResult(Base):

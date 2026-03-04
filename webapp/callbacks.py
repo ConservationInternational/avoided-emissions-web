@@ -6,7 +6,7 @@ visualization, and admin panel actions.
 """
 
 import base64
-import io
+import json
 import logging
 import os
 import uuid as _uuid
@@ -16,7 +16,6 @@ import flask_login
 import geopandas as gpd
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
@@ -45,11 +44,14 @@ from services import (
     get_covariate_presets,
     get_task_detail,
     get_task_list,
+    get_user_site_set_detail,
+    list_user_site_sets,
     get_user_list,
-    parse_sites_file,
     save_covariate_preset,
+    save_user_site_set,
     start_gee_export,
     submit_analysis_task,
+    delete_user_site_set,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,6 +121,38 @@ def _record_covariate_action_failure(covariate_name, action, user_id):
         raise
     finally:
         db.close()
+
+
+def _openlayers_map_component(map_id, geojson_text, height="260px"):
+    return html.Div(
+        id=map_id,
+        className="ol-sites-map",
+        **{
+            "data-geojson": geojson_text or "",
+            "data-height": height,
+        },
+    )
+
+
+def _attach_totals_to_geojson(sites_geojson, totals):
+    if not sites_geojson:
+        return None
+
+    fc = (
+        json.loads(sites_geojson)
+        if isinstance(sites_geojson, str)
+        else dict(sites_geojson)
+    )
+    totals_by_site = {t.site_id: t for t in totals or []}
+    for feature in fc.get("features", []):
+        props = feature.setdefault("properties", {})
+        site_id = str(props.get("site_id", ""))
+        total = totals_by_site.get(site_id)
+        if total:
+            props["emissions_avoided_mgco2e"] = total.emissions_avoided_mgco2e or 0
+            props["forest_loss_avoided_ha"] = total.forest_loss_avoided_ha or 0
+            props["total_area_ha"] = total.area_ha or 0
+    return json.dumps(fc)
 
 
 def register_callbacks(app):
@@ -255,55 +289,176 @@ def register_callbacks(app):
             )
         return html.Div(result)
 
-    # -- File upload ---------------------------------------------------------
+    # -- Reusable site sets --------------------------------------------------
+
+    @app.callback(
+        [Output("site-set-selector", "options"), Output("site-set-selector", "value")],
+        [Input("url", "pathname"), Input("site-set-refresh-store", "data")],
+        State("site-set-selector", "value"),
+    )
+    def refresh_site_set_options(pathname, _refresh_token, current_value):
+        if pathname != "/submit":
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        site_sets = list_user_site_sets(user.id)
+        options = [
+            {
+                "label": (
+                    f"{s['name']} ({s['n_sites']} sites, "
+                    f"{(s['uploaded_at'] or '')[:19].replace('T', ' ')})"
+                ),
+                "value": s["id"],
+            }
+            for s in site_sets
+        ]
+
+        valid_ids = {s["id"] for s in site_sets}
+        value = (
+            current_value
+            if current_value in valid_ids
+            else (options[0]["value"] if options else None)
+        )
+        return options, value
 
     @app.callback(
         [
             Output("upload-status", "children"),
-            Output("parsed-sites-store", "data"),
-            Output("site-preview", "children"),
+            Output("site-set-action-status", "children"),
+            Output("site-set-refresh-store", "data"),
+            Output("site-set-selector", "value", allow_duplicate=True),
         ],
-        Input("upload-sites", "contents"),
-        State("upload-sites", "filename"),
+        [Input("upload-sites", "contents"), Input("delete-site-set-btn", "n_clicks")],
+        [State("upload-sites", "filename"), State("site-set-selector", "value")],
         prevent_initial_call=True,
     )
-    def handle_upload(contents, filename):
-        if contents is None:
+    def handle_site_set_upload_or_delete(
+        contents, _delete_clicks, filename, selected_set_id
+    ):
+        ctx = callback_context
+        if not ctx.triggered:
             raise PreventUpdate
 
-        content_type, content_string = contents.split(",")
-        decoded = base64.b64decode(content_string)
-
-        gdf, errors = parse_sites_file(decoded, filename)
-        if errors:
-            error_elements = []
-            for e in errors:
-                lines = e.split("\n")
-                parts = []
-                for i, line in enumerate(lines):
-                    if i > 0:
-                        parts.append(html.Br())
-                    parts.append(line)
-                error_elements.append(html.P(parts, className="text-danger"))
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        user = get_current_user()
+        if not user:
             return (
-                html.Div(error_elements),
-                None,
-                None,
+                dbc.Alert("Please log in first.", color="danger"),
+                no_update,
+                no_update,
+                no_update,
             )
 
-        # Convert date columns to strings for JSON serialization
-        for col in ["start_date", "end_date"]:
-            if col in gdf.columns:
-                gdf[col] = gdf[col].astype(str)
+        if trigger_id == "upload-sites":
+            if contents is None:
+                raise PreventUpdate
 
-        # Build AG Grid preview with all sites
+            _, content_string = contents.split(",")
+            decoded = base64.b64decode(content_string)
+
+            try:
+                detail = save_user_site_set(user.id, filename, decoded)
+                return (
+                    dbc.Alert(
+                        f"Uploaded and saved {detail['n_sites']} sites as '{detail['name']}'.",
+                        color="success",
+                    ),
+                    no_update,
+                    str(_uuid.uuid4()),
+                    detail["id"],
+                )
+            except ValueError as exc:
+                return (
+                    dbc.Alert(str(exc), color="danger"),
+                    no_update,
+                    no_update,
+                    no_update,
+                )
+            except Exception:
+                logger.exception("Failed to save uploaded site set")
+                report_exception()
+                return (
+                    dbc.Alert("Failed to save uploaded sites.", color="danger"),
+                    no_update,
+                    no_update,
+                    no_update,
+                )
+
+        if trigger_id == "delete-site-set-btn":
+            if not selected_set_id:
+                return (
+                    no_update,
+                    dbc.Alert("Select a site set to delete.", color="warning"),
+                    no_update,
+                    no_update,
+                )
+
+            try:
+                success, message = delete_user_site_set(selected_set_id, user.id)
+                color = "success" if success else "warning"
+                return (
+                    no_update,
+                    dbc.Alert(message, color=color),
+                    str(_uuid.uuid4()),
+                    None,
+                )
+            except Exception:
+                logger.exception("Failed to delete site set")
+                report_exception()
+                return (
+                    no_update,
+                    dbc.Alert("Failed to delete site set.", color="danger"),
+                    no_update,
+                    no_update,
+                )
+
+        raise PreventUpdate
+
+    @app.callback(
+        [
+            Output("parsed-sites-store", "data"),
+            Output("site-preview", "children"),
+            Output("site-preview-map", "children"),
+            Output("site-set-metadata", "children"),
+        ],
+        Input("site-set-selector", "value"),
+        prevent_initial_call=False,
+    )
+    def load_selected_site_set(site_set_id):
+        if not site_set_id:
+            return (
+                None,
+                html.P(
+                    "Upload or select a site set to preview sites.",
+                    className="text-muted",
+                ),
+                html.P("No map to display yet.", className="text-muted small"),
+                html.Small("No site set selected.", className="text-muted"),
+            )
+
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        detail = get_user_site_set_detail(site_set_id, user.id)
+        if not detail:
+            return (
+                None,
+                html.P("Selected site set was not found.", className="text-danger"),
+                html.P("No map to display.", className="text-muted small"),
+                html.Small("Site set unavailable.", className="text-danger"),
+            )
+
         preview_cols = [
-            {"headerName": "Site ID", "field": "site_id", "flex": 1, "minWidth": 100},
+            {"headerName": "Site ID", "field": "site_id", "flex": 1, "minWidth": 110},
             {
                 "headerName": "Site Name",
                 "field": "site_name",
                 "flex": 2,
-                "minWidth": 180,
+                "minWidth": 160,
             },
             {
                 "headerName": "Start Date",
@@ -311,51 +466,50 @@ def register_callbacks(app):
                 "flex": 1,
                 "minWidth": 120,
             },
+            {"headerName": "End Date", "field": "end_date", "flex": 1, "minWidth": 120},
         ]
-        if "end_date" in gdf.columns:
-            preview_cols.append(
-                {
-                    "headerName": "End Date",
-                    "field": "end_date",
-                    "flex": 1,
-                    "minWidth": 120,
-                }
-            )
-
-        preview_rows = []
-        for _, row in gdf.iterrows():
-            r = {
-                "site_id": str(row.get("site_id", "")),
-                "site_name": str(row.get("site_name", "")),
-                "start_date": str(row.get("start_date", ""))[:10],
-            }
-            if "end_date" in gdf.columns:
-                r["end_date"] = str(row.get("end_date", ""))[:10]
-            preview_rows.append(r)
-
         preview_table = _make_ag_grid(
             "site-preview-table",
             preview_cols,
-            row_data=preview_rows,
-            height="400px",
+            row_data=detail["preview_rows"],
+            height="320px",
+            grid_options_extra={
+                "rowSelection": "single",
+                "suppressRowClickSelection": False,
+                "getRowId": {"function": "params.data.site_id"},
+            },
         )
 
-        status_msg = html.Div(
+        metadata = html.Div(
             [
-                html.P(
-                    f"Loaded {len(gdf)} sites from {filename}",
-                    className="text-success",
+                html.Small(f"Name: {detail['name']}", className="d-block text-muted"),
+                html.Small(
+                    f"Source file: {detail['filename']} ({detail['file_size_bytes']:,} bytes)",
+                    className="d-block text-muted",
+                ),
+                html.Small(
+                    f"Uploaded: {(detail['uploaded_at'] or '').replace('T', ' ')[:19]} UTC",
+                    className="d-block text-muted",
                 ),
             ]
         )
 
         store_data = {
-            "geojson": gdf.to_json(),
-            "n_sites": len(gdf),
-            "filename": filename,
+            "site_set_id": detail["id"],
+            "geojson": detail["geojson"],
+            "n_sites": detail["n_sites"],
+            "filename": detail["filename"],
+            "name": detail["name"],
         }
 
-        return status_msg, store_data, preview_table
+        return (
+            store_data,
+            preview_table,
+            _openlayers_map_component(
+                "submit-sites-map", detail["geojson"], height="260px"
+            ),
+            metadata,
+        )
 
     # -- Task submission -----------------------------------------------------
 
@@ -397,7 +551,11 @@ def register_callbacks(app):
             return _error_alert("Please log in first.")
 
         try:
-            gdf = gpd.read_file(io.StringIO(sites_data["geojson"]))
+            geojson_fc = json.loads(sites_data["geojson"])
+            gdf = gpd.GeoDataFrame.from_features(
+                geojson_fc.get("features", []),
+                crs="EPSG:4326",
+            )
 
             # Auto-derive forest cover year range from site dates.
             # Need years back to (earliest start_year - 5) for the
@@ -422,6 +580,7 @@ def register_callbacks(app):
                 covariates=covariates,
                 exact_match_vars=exact_match_vars,
                 fc_years=fc_years,
+                site_set_id=sites_data.get("site_set_id"),
             )
 
             return None, dbc.Alert(
@@ -543,7 +702,7 @@ def register_callbacks(app):
         )
 
         # Map tab
-        map_content = _build_map(sites, totals)
+        map_content = _build_map(detail.get("sites_geojson"), totals)
 
         return title, badge, overview, results_content, plots, map_content
 
@@ -1497,6 +1656,11 @@ def _build_results_content(results, totals):
             RESULTS_TOTAL_COLUMNS,
             row_data=totals_rows,
             height="350px",
+            grid_options_extra={
+                "rowSelection": "single",
+                "suppressRowClickSelection": False,
+                "getRowId": {"function": "params.data.site_id"},
+            },
         ),
     ]
 
@@ -1620,39 +1784,9 @@ def _build_plots(results, totals):
     return html.Div(plots)
 
 
-def _build_map(sites, totals):
-    """Build a Leaflet map showing site locations with result overlays."""
-    if not sites:
+def _build_map(sites_geojson, totals):
+    """Build an OpenLayers map for task sites and summary values."""
+    enriched_geojson = _attach_totals_to_geojson(sites_geojson, totals)
+    if not enriched_geojson:
         return html.P("No site geometries available.", className="text-muted")
-
-    totals_dict = {}
-    if totals:
-        totals_dict = {t.site_id: t for t in totals}
-
-    lats, lons, texts, colors = [], [], [], []
-    for s in sites:
-        lats.append(0)
-        lons.append(0)
-        t = totals_dict.get(s.site_id)
-        emissions = t.emissions_avoided_mgco2e if t else 0
-        texts.append(
-            f"{s.site_name or s.site_id}<br>Emissions avoided: {emissions:,.0f} MgCO₂e"
-        )
-        colors.append(emissions or 0)
-
-    fig = go.Figure(
-        go.Scattermapbox(
-            lat=lats,
-            lon=lons,
-            text=texts,
-            marker=dict(size=10, color=colors, colorscale="Greens", showscale=True),
-            hoverinfo="text",
-        )
-    )
-    fig.update_layout(
-        mapbox=dict(style="open-street-map", zoom=2, center=dict(lat=0, lon=0)),
-        margin=dict(r=0, t=0, l=0, b=0),
-        height=500,
-    )
-
-    return dcc.Graph(figure=fig)
+    return _openlayers_map_component("task-sites-map", enriched_geojson, height="500px")

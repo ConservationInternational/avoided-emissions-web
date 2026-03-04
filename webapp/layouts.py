@@ -1024,7 +1024,64 @@ def submit_layout(user):
                                             dbc.Card(
                                                 [
                                                     dbc.CardHeader(
-                                                        "Upload Sites (GeoJSON or GeoPackage)"
+                                                        "Use Previously Uploaded Sites"
+                                                    ),
+                                                    dbc.CardBody(
+                                                        [
+                                                            dbc.Row(
+                                                                [
+                                                                    dbc.Col(
+                                                                        dbc.Select(
+                                                                            id="site-set-selector",
+                                                                            options=[],
+                                                                            placeholder="Select a saved site set...",
+                                                                        ),
+                                                                        width=9,
+                                                                    ),
+                                                                    dbc.Col(
+                                                                        dbc.Button(
+                                                                            "Delete",
+                                                                            id="delete-site-set-btn",
+                                                                            color="danger",
+                                                                            outline=True,
+                                                                            className="w-100",
+                                                                        ),
+                                                                        width=3,
+                                                                    ),
+                                                                ],
+                                                                className="g-2 mb-2",
+                                                            ),
+                                                            html.Div(
+                                                                id="site-set-metadata"
+                                                            ),
+                                                            html.Div(
+                                                                id="site-set-action-status",
+                                                                className="mt-2",
+                                                            ),
+                                                        ]
+                                                    ),
+                                                ],
+                                                className="ae-section-card mb-3",
+                                            ),
+                                            dbc.Card(
+                                                [
+                                                    dbc.CardHeader("Site Preview"),
+                                                    dbc.CardBody(
+                                                        [
+                                                            html.Div(
+                                                                id="site-preview-map",
+                                                                className="mb-3",
+                                                            ),
+                                                            html.Div(id="site-preview"),
+                                                        ]
+                                                    ),
+                                                ],
+                                                className="ae-section-card mb-3",
+                                            ),
+                                            dbc.Card(
+                                                [
+                                                    dbc.CardHeader(
+                                                        "Upload New Sites (GeoJSON or GeoPackage)"
                                                     ),
                                                     dbc.CardBody(
                                                         [
@@ -1165,7 +1222,7 @@ def submit_layout(user):
                                                     ),
                                                     dbc.CardFooter(
                                                         html.Small(
-                                                            "After uploading, continue to the Matching Setup tab.",
+                                                            "After selecting or uploading a site set, continue to the Matching Setup tab.",
                                                             className="text-muted",
                                                         )
                                                     ),
@@ -1346,19 +1403,6 @@ def submit_layout(user):
                                                                 ],
                                                                 className="mb-3 ae-section-card",
                                                             ),
-                                                            dbc.Card(
-                                                                [
-                                                                    dbc.CardHeader(
-                                                                        "Site Preview"
-                                                                    ),
-                                                                    dbc.CardBody(
-                                                                        html.Div(
-                                                                            id="site-preview"
-                                                                        )
-                                                                    ),
-                                                                ],
-                                                                className="ae-section-card",
-                                                            ),
                                                         ],
                                                         width=6,
                                                     ),
@@ -1418,6 +1462,7 @@ def submit_layout(user):
             # Hidden stores
             dcc.Store(id="parsed-sites-store"),
             dcc.Store(id="presets-store"),
+            dcc.Store(id="site-set-refresh-store"),
         ]
     )
 

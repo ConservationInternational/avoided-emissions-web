@@ -83,6 +83,23 @@ h1, h2, h3, h4, h5 {
     overflow: hidden;
 }
 
+.ol-sites-map {
+    border: 1px solid #dbe1e7;
+    border-radius: 6px;
+    overflow: hidden;
+    background-color: #f8fafb;
+}
+
+.ol-sites-map .ol-zoom-extent {
+    top: 5.5em;
+    left: 0.5em;
+}
+
+.ol-sites-map .ol-zoom-extent-btn {
+    font-size: 16px;
+    line-height: 1;
+}
+
 /* ── AG Grid row performance ─────────────────────────────────────────── */
 .ag-theme-alpine .ag-row {
     contain: layout style;

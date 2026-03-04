@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import boto3
 import geopandas as gpd
 import pandas as pd
+from sqlalchemy import text
 
 from config import Config
 from models import (
@@ -25,6 +26,7 @@ from models import (
     TaskResult,
     TaskResultTotal,
     TaskSite,
+    UserSiteSet,
     get_db,
 )
 
@@ -69,26 +71,310 @@ def parse_sites_file(file_content, filename):
 
     # Validate geometries
     if gdf is not None and not gdf.empty:
-        invalid_geom = gdf[~gdf.geometry.is_valid]
-        if len(invalid_geom) > 0:
-            details = []
-            for idx, row in invalid_geom.iterrows():
-                site_id = row.get("site_id", "N/A")
-                site_name = row.get("site_name", "N/A")
-                details.append(
-                    f"  Feature {idx}: site_id={site_id}, site_name={site_name}"
-                )
-            detail_str = "\n".join(details)
+        bad_type = ~gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])
+        if bad_type.any():
+            bad_rows = gdf[bad_type]
+            details = [
+                f"Feature {idx}: geometry type={row.geometry.geom_type}"
+                for idx, row in bad_rows.iterrows()
+            ]
             errors.append(
-                f"{len(invalid_geom)} invalid geometries found:\n"
-                f"{detail_str}\n"
-                "Please fix geometry errors before uploading."
+                "All geometries must be Polygon or MultiPolygon.\n"
+                + "\n".join(details[:10])
             )
         # Ensure EPSG:4326
         if gdf.crs and gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
 
     return gdf, errors
+
+
+def _derive_site_set_name(filename):
+    stem = os.path.splitext(os.path.basename(filename or "sites"))[0].strip()
+    stem = stem or "sites"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return f"{stem}_{timestamp}"
+
+
+def _site_set_summary_row(row):
+    return {
+        "id": str(row.id),
+        "name": row.name,
+        "filename": row.original_filename,
+        "uploaded_at": row.uploaded_at.isoformat() if row.uploaded_at else None,
+        "n_sites": row.n_sites or 0,
+        "file_size_bytes": int(row.file_size_bytes or 0),
+        "file_format": row.file_format,
+    }
+
+
+def save_user_site_set(user_id, filename, file_content):
+    """Persist uploaded sites as a reusable PostGIS-backed user site set.
+
+    Geometries are repaired with ``ST_MakeValid`` and coerced to
+    ``MULTIPOLYGON`` before storage.
+    """
+    gdf, errors = parse_sites_file(file_content, filename)
+    if errors:
+        raise ValueError("\n".join(errors))
+    if gdf is None or gdf.empty:
+        raise ValueError("No features were found in the uploaded file.")
+
+    if not gdf.crs:
+        gdf = gdf.set_crs(epsg=4326)
+    elif gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(epsg=4326)
+
+    db = get_db()
+    try:
+        site_set = UserSiteSet(
+            user_id=user_id,
+            name=_derive_site_set_name(filename),
+            original_filename=filename,
+            file_size_bytes=len(file_content),
+            file_format=os.path.splitext(filename)[1].lower().lstrip("."),
+            n_sites=len(gdf),
+            bounds={"bbox": list(gdf.total_bounds)} if len(gdf) > 0 else None,
+        )
+        db.add(site_set)
+        db.flush()
+
+        insert_sql = text(
+            """
+            INSERT INTO user_site_features (
+                id, site_set_id, site_id, site_name, start_date, end_date, area_ha, geom
+            )
+            VALUES (
+                uuid_generate_v4(),
+                :site_set_id,
+                :site_id,
+                :site_name,
+                :start_date,
+                :end_date,
+                NULL,
+                ST_Multi(
+                    ST_CollectionExtract(
+                        ST_Force2D(
+                            ST_MakeValid(
+                                ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)
+                            )
+                        ),
+                        3
+                    )
+                )
+            )
+            """
+        )
+
+        for _, row in gdf.iterrows():
+            start_date = pd.to_datetime(row["start_date"]).date()
+            end_date = (
+                pd.to_datetime(row["end_date"]).date()
+                if pd.notna(row.get("end_date")) and str(row.get("end_date"))
+                else None
+            )
+
+            db.execute(
+                insert_sql,
+                {
+                    "site_set_id": str(site_set.id),
+                    "site_id": str(row["site_id"]),
+                    "site_name": str(row.get("site_name", "")),
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "geom_geojson": json.dumps(row.geometry.__geo_interface__),
+                },
+            )
+
+        db.execute(
+            text(
+                """
+                UPDATE user_site_features
+                SET area_ha = ST_Area(geom::geography) / 10000.0
+                WHERE site_set_id = :site_set_id
+                """
+            ),
+            {"site_set_id": str(site_set.id)},
+        )
+
+        db.commit()
+        return get_user_site_set_detail(site_set.id, user_id)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def list_user_site_sets(user_id):
+    """Return reusable site sets for a user ordered by most recent first."""
+    db = get_db()
+    try:
+        site_sets = (
+            db.query(UserSiteSet)
+            .filter(UserSiteSet.user_id == user_id)
+            .order_by(UserSiteSet.uploaded_at.desc())
+            .all()
+        )
+        return [_site_set_summary_row(row) for row in site_sets]
+    finally:
+        db.close()
+
+
+def get_user_site_set_geojson(site_set_id):
+    """Export a user site set from PostGIS as a GeoJSON FeatureCollection."""
+    db = get_db()
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT jsonb_build_object(
+                    'type', 'FeatureCollection',
+                    'features', COALESCE(jsonb_agg(
+                        jsonb_build_object(
+                            'type', 'Feature',
+                            'geometry', ST_AsGeoJSON(f.geom)::jsonb,
+                            'properties', jsonb_build_object(
+                                'site_id', f.site_id,
+                                'site_name', f.site_name,
+                                'start_date', to_char(f.start_date, 'YYYY-MM-DD'),
+                                'end_date', CASE
+                                    WHEN f.end_date IS NULL THEN NULL
+                                    ELSE to_char(f.end_date, 'YYYY-MM-DD')
+                                END,
+                                'area_ha', f.area_ha
+                            )
+                        )
+                        ORDER BY f.site_id
+                    ), '[]'::jsonb)
+                )
+                FROM user_site_features f
+                WHERE f.site_set_id = :site_set_id
+                """
+            ),
+            {"site_set_id": str(site_set_id)},
+        ).fetchone()
+        return (
+            row[0] if row and row[0] else {"type": "FeatureCollection", "features": []}
+        )
+    finally:
+        db.close()
+
+
+def get_user_site_set_detail(site_set_id, user_id):
+    """Return full details for one user-owned site set, including preview rows."""
+    db = get_db()
+    try:
+        site_set = (
+            db.query(UserSiteSet)
+            .filter(UserSiteSet.id == site_set_id, UserSiteSet.user_id == user_id)
+            .first()
+        )
+        if not site_set:
+            return None
+
+        rows = db.execute(
+            text(
+                """
+                SELECT site_id, site_name, start_date, end_date
+                FROM user_site_features
+                WHERE site_set_id = :site_set_id
+                ORDER BY site_id
+                """
+            ),
+            {"site_set_id": str(site_set_id)},
+        ).fetchall()
+
+        preview_rows = [
+            {
+                "site_id": r.site_id,
+                "site_name": r.site_name,
+                "start_date": r.start_date.isoformat() if r.start_date else "",
+                "end_date": r.end_date.isoformat() if r.end_date else "",
+            }
+            for r in rows
+        ]
+
+        geojson_fc = get_user_site_set_geojson(site_set_id)
+
+        return {
+            **_site_set_summary_row(site_set),
+            "geojson": json.dumps(geojson_fc),
+            "preview_rows": preview_rows,
+        }
+    finally:
+        db.close()
+
+
+def get_user_site_set_gdf(site_set_id, user_id=None):
+    """Load one site set as a GeoDataFrame."""
+    geojson_fc = get_user_site_set_geojson(site_set_id)
+    gdf = gpd.GeoDataFrame.from_features(
+        geojson_fc.get("features", []), crs="EPSG:4326"
+    )
+    if gdf.empty:
+        raise ValueError("Selected site set has no site geometries.")
+    if user_id is not None:
+        db = get_db()
+        try:
+            exists = (
+                db.query(UserSiteSet)
+                .filter(UserSiteSet.id == site_set_id, UserSiteSet.user_id == user_id)
+                .first()
+            )
+            if not exists:
+                raise ValueError("Site set not found.")
+        finally:
+            db.close()
+    return gdf
+
+
+def delete_user_site_set(site_set_id, user_id):
+    """Delete a user-owned site set that is not referenced by any task."""
+    db = get_db()
+    try:
+        site_set = (
+            db.query(UserSiteSet)
+            .filter(UserSiteSet.id == site_set_id, UserSiteSet.user_id == user_id)
+            .first()
+        )
+        if not site_set:
+            return False, "Site set not found."
+
+        task_count = (
+            db.query(AnalysisTask)
+            .filter(AnalysisTask.site_set_id == site_set_id)
+            .count()
+        )
+        if task_count > 0:
+            return (
+                False,
+                "This site set is linked to submitted tasks and cannot be deleted.",
+            )
+
+        db.delete(site_set)
+        db.commit()
+        return True, "Site set deleted."
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def upload_user_site_set_geojson_to_s3(site_set_id, task_id):
+    """Export a persisted site set to GeoJSON (via PostGIS) and upload to S3."""
+    site_fc = get_user_site_set_geojson(site_set_id)
+    s3 = get_s3_client()
+    key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.geojson"
+    body = json.dumps(site_fc)
+    s3.put_object(
+        Bucket=Config.S3_BUCKET,
+        Key=key,
+        Body=body.encode("utf-8"),
+        ContentType="application/json",
+    )
+    return f"s3://{Config.S3_BUCKET}/{key}"
 
 
 def upload_sites_to_s3(gdf, task_id):
@@ -204,7 +490,14 @@ def compute_matching_extent(
 
 
 def submit_analysis_task(
-    task_name, description, user_id, gdf, covariates, exact_match_vars, fc_years=None
+    task_name,
+    description,
+    user_id,
+    gdf,
+    covariates,
+    exact_match_vars,
+    fc_years=None,
+    site_set_id=None,
 ):
     """Create and submit a full analysis task via the trends.earth API.
 
@@ -268,6 +561,7 @@ def submit_analysis_task(
             name=task_name,
             description=description,
             submitted_by=user_id,
+            site_set_id=site_set_id,
             status="pending",
             covariates=covariates,
             n_sites=len(gdf),
@@ -291,8 +585,11 @@ def submit_analysis_task(
             "[SUBMIT] Task %s: DB record created, uploading sites to S3", task_id
         )
 
-        # Upload sites to S3
-        sites_uri = upload_sites_to_s3(gdf, task_id)
+        # Upload sites to S3 (prefer PostGIS-exported GeoJSON from a persisted set)
+        if site_set_id:
+            sites_uri = upload_user_site_set_geojson_to_s3(site_set_id, task_id)
+        else:
+            sites_uri = upload_sites_to_s3(gdf, task_id)
         logger.info("[SUBMIT] Task %s: sites uploaded to %s", task_id, sites_uri)
 
         # Build params matching AvoidedEmissionsParams schema
@@ -485,11 +782,16 @@ def get_task_detail(task_id):
             db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).all()
         )
 
+        sites_geojson = None
+        if task.site_set_id:
+            sites_geojson = get_user_site_set_geojson(task.site_set_id)
+
         return {
             "task": task,
             "sites": sites,
             "results": results,
             "totals": totals,
+            "sites_geojson": sites_geojson,
         }
     finally:
         db.close()
