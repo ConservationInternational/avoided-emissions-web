@@ -524,10 +524,10 @@ def navbar(user=None):
     nav_items = [
         dbc.NavItem(dbc.NavLink("Dashboard", href="/")),
         dbc.NavItem(dbc.NavLink("Submit Task", href="/submit")),
-        dbc.NavItem(dbc.NavLink("Settings", href="/settings")),
     ]
     if user and user.is_admin:
         nav_items.append(dbc.NavItem(dbc.NavLink("Admin", href="/admin")))
+    nav_items.append(dbc.NavItem(dbc.NavLink("Profile", href="/settings")))
 
     right_items = []
     if user:
@@ -547,11 +547,12 @@ def navbar(user=None):
                 dbc.NavbarBrand("Avoided Emissions", href="/", className="fw-bold"),
                 dbc.Nav(nav_items, className="me-auto", navbar=True),
                 dbc.Nav(right_items, navbar=True),
-            ]
+            ],
+            fluid="lg",
         ),
         color="dark",
         dark=True,
-        className="mb-4",
+        className="mb-4 ae-navbar shadow-sm",
     )
 
 
@@ -633,7 +634,7 @@ def login_layout():
                                     ]
                                 ),
                             ],
-                            className="mt-5 shadow-sm",
+                            className="mt-5 shadow-sm ae-auth-card",
                         ),
                     ],
                     width={"size": 4, "offset": 4},
@@ -721,7 +722,7 @@ def register_layout():
                                     ]
                                 ),
                             ],
-                            className="mt-5 shadow-sm",
+                            className="mt-5 shadow-sm ae-auth-card",
                         ),
                     ],
                     width={"size": 4, "offset": 4},
@@ -795,7 +796,7 @@ def forgot_password_layout():
                                     ]
                                 ),
                             ],
-                            className="mt-5 shadow-sm",
+                            className="mt-5 shadow-sm ae-auth-card",
                         ),
                     ],
                     width={"size": 4, "offset": 4},
@@ -869,7 +870,7 @@ def reset_password_layout(token=""):
                                     ]
                                 ),
                             ],
-                            className="mt-5 shadow-sm",
+                            className="mt-5 shadow-sm ae-auth-card",
                         ),
                     ],
                     width={"size": 4, "offset": 4},
@@ -886,95 +887,66 @@ def dashboard_layout(user):
             navbar(user),
             dbc.Row(
                 [
-                    dbc.Col(html.H2("Analysis Tasks"), width="auto"),
-                    dbc.Col(
-                        html.Div(
-                            [
-                                html.Span(
-                                    id="task-total-count",
-                                    children="Total: 0",
-                                    className="text-muted fw-bold me-3",
-                                ),
-                                dbc.Button(
-                                    "Refresh",
-                                    id="refresh-tasks-btn",
-                                    color="primary",
-                                    size="sm",
-                                    className="me-2",
-                                ),
-                                dbc.Button(
-                                    "New Task",
-                                    href="/submit",
-                                    color="success",
-                                    size="sm",
-                                ),
-                            ],
-                            className="d-flex align-items-center justify-content-end",
-                        ),
-                        width=True,
-                    ),
-                ],
-                className="align-items-center mb-3",
-            ),
-            html.Hr(className="mt-0"),
-            _make_ag_grid(
-                table_id="task-list-table",
-                column_defs=TASK_LIST_COLUMNS,
-                row_model="clientSide",
-                height="700px",
-                style_conditions=TASK_STATUS_ROW_STYLES,
-            ),
-            # Account management section
-            html.Hr(),
-            dbc.Row(
-                [
                     dbc.Col(
                         [
-                            dbc.Button(
-                                "Delete My Account",
-                                id="self-delete-btn",
-                                color="danger",
-                                outline=True,
-                                size="sm",
+                            html.H2("Analysis Tasks", className="mb-1"),
+                            html.P(
+                                "Track submitted analyses and quickly start new tasks.",
+                                className="text-muted mb-0",
                             ),
-                            dbc.Modal(
+                        ],
+                        width=True,
+                    )
+                ],
+                className="mb-3",
+            ),
+            dbc.Card(
+                [
+                    dbc.CardBody(
+                        [
+                            dbc.Row(
                                 [
-                                    dbc.ModalHeader(dbc.ModalTitle("Delete Account")),
-                                    dbc.ModalBody(
-                                        [
-                                            html.P(
-                                                "Are you sure you want to delete your account? "
-                                                "This will permanently remove your account and all "
-                                                "associated analysis tasks. This action cannot be undone.",
-                                                className="text-danger",
-                                            ),
-                                        ]
+                                    dbc.Col(
+                                        html.Span(
+                                            id="task-total-count",
+                                            children="Total: 0",
+                                            className="text-muted fw-bold",
+                                        ),
+                                        width=True,
                                     ),
-                                    dbc.ModalFooter(
+                                    dbc.Col(
                                         [
                                             dbc.Button(
-                                                "Cancel",
-                                                id="self-delete-cancel",
-                                                color="secondary",
+                                                "Refresh",
+                                                id="refresh-tasks-btn",
+                                                color="primary",
+                                                size="sm",
                                                 className="me-2",
                                             ),
                                             dbc.Button(
-                                                "Delete My Account",
-                                                id="self-delete-confirm",
-                                                color="danger",
+                                                "New Task",
+                                                href="/submit",
+                                                color="success",
+                                                size="sm",
                                             ),
-                                        ]
+                                        ],
+                                        width="auto",
+                                        className="ae-action-buttons",
                                     ),
                                 ],
-                                id="self-delete-modal",
-                                is_open=False,
-                                centered=True,
+                                className="ae-action-bar align-items-center mb-3",
                             ),
-                            html.Div(id="self-delete-result"),
-                        ],
-                        className="text-end",
-                    ),
-                ]
+                            _make_ag_grid(
+                                table_id="task-list-table",
+                                column_defs=TASK_LIST_COLUMNS,
+                                row_model="clientSide",
+                                height="700px",
+                                style_conditions=TASK_STATUS_ROW_STYLES,
+                            ),
+                        ]
+                    )
+                ],
+                className="ae-section-card mb-4",
             ),
             # Stores & intervals
             dcc.Store(id="task-list-store"),
@@ -988,314 +960,459 @@ def submit_layout(user):
     return dbc.Container(
         [
             navbar(user),
-            html.H2("Submit Analysis Task"),
-            html.Hr(),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            html.H2("Submit Analysis Task", className="mb-1"),
+                            html.P(
+                                "Use the guided tabs to upload sites, configure matching, and submit.",
+                                className="text-muted mb-0",
+                            ),
+                        ],
+                        width=True,
+                    )
+                ],
+                className="mb-3",
+            ),
+            html.Div(
+                [
+                    html.Div(id="submit-errors"),
+                    html.Div(id="submit-result", className="mt-2"),
+                ],
+                className="submit-feedback-sticky mb-3",
+            ),
             dbc.Form(
                 [
-                    dbc.Row(
+                    dbc.Tabs(
                         [
-                            dbc.Col(
-                                [
-                                    dbc.Label("Task Name"),
-                                    dbc.Input(
-                                        id="task-name",
-                                        type="text",
-                                        placeholder="My analysis",
-                                    ),
-                                ],
-                                width=6,
-                            ),
-                            dbc.Col(
-                                [
-                                    dbc.Label("Description (optional)"),
-                                    dbc.Input(
-                                        id="task-description",
-                                        type="text",
-                                        placeholder="Brief description",
-                                    ),
-                                ],
-                                width=6,
-                            ),
-                        ],
-                        className="mb-3",
-                    ),
-                    dbc.Row(
-                        [
-                            dbc.Col(
-                                [
-                                    dbc.Label("Upload Sites (GeoJSON or GeoPackage)"),
-                                    dbc.Card(
+                            dbc.Tab(
+                                label="1. Task & Sites",
+                                tab_id="tab-submit-sites",
+                                children=[
+                                    html.Div(
                                         [
-                                            dbc.CardBody(
+                                            dbc.Row(
                                                 [
-                                                    html.P(
+                                                    dbc.Col(
                                                         [
-                                                            "Upload a ",
-                                                            html.Strong("GeoJSON"),
-                                                            " or ",
-                                                            html.Strong("GeoPackage"),
-                                                            " file containing site polygons. "
-                                                            "Geometries must be valid Polygons or "
-                                                            "MultiPolygons in EPSG:4326 (WGS 84).",
-                                                        ],
-                                                        className="mb-2 small",
-                                                    ),
-                                                    dbc.Table(
-                                                        [
-                                                            html.Thead(
-                                                                html.Tr(
-                                                                    [
-                                                                        html.Th(
-                                                                            "Field"
-                                                                        ),
-                                                                        html.Th("Type"),
-                                                                        html.Th(
-                                                                            "Required"
-                                                                        ),
-                                                                        html.Th(
-                                                                            "Description"
-                                                                        ),
-                                                                    ]
-                                                                )
-                                                            ),
-                                                            html.Tbody(
-                                                                [
-                                                                    html.Tr(
-                                                                        [
-                                                                            html.Td(
-                                                                                html.Code(
-                                                                                    "site_id"
-                                                                                )
-                                                                            ),
-                                                                            html.Td(
-                                                                                "string"
-                                                                            ),
-                                                                            html.Td(
-                                                                                "Yes"
-                                                                            ),
-                                                                            html.Td(
-                                                                                "Unique site identifier"
-                                                                            ),
-                                                                        ]
-                                                                    ),
-                                                                    html.Tr(
-                                                                        [
-                                                                            html.Td(
-                                                                                html.Code(
-                                                                                    "site_name"
-                                                                                )
-                                                                            ),
-                                                                            html.Td(
-                                                                                "string"
-                                                                            ),
-                                                                            html.Td(
-                                                                                "Yes"
-                                                                            ),
-                                                                            html.Td(
-                                                                                "Human-readable site name"
-                                                                            ),
-                                                                        ]
-                                                                    ),
-                                                                    html.Tr(
-                                                                        [
-                                                                            html.Td(
-                                                                                html.Code(
-                                                                                    "start_date"
-                                                                                )
-                                                                            ),
-                                                                            html.Td(
-                                                                                "date"
-                                                                            ),
-                                                                            html.Td(
-                                                                                "Yes"
-                                                                            ),
-                                                                            html.Td(
-                                                                                "Intervention start date "
-                                                                                "(YYYY-MM-DD)"
-                                                                            ),
-                                                                        ]
-                                                                    ),
-                                                                    html.Tr(
-                                                                        [
-                                                                            html.Td(
-                                                                                html.Code(
-                                                                                    "end_date"
-                                                                                )
-                                                                            ),
-                                                                            html.Td(
-                                                                                "date"
-                                                                            ),
-                                                                            html.Td(
-                                                                                "No"
-                                                                            ),
-                                                                            html.Td(
-                                                                                "Intervention end date "
-                                                                                "(optional; omit if ongoing)"
-                                                                            ),
-                                                                        ]
-                                                                    ),
-                                                                ]
+                                                            dbc.Label("Task Name"),
+                                                            dbc.Input(
+                                                                id="task-name",
+                                                                type="text",
+                                                                placeholder="My analysis",
                                                             ),
                                                         ],
-                                                        bordered=True,
-                                                        hover=True,
-                                                        size="sm",
-                                                        className="mb-0",
+                                                        width=6,
                                                     ),
-                                                ]
+                                                    dbc.Col(
+                                                        [
+                                                            dbc.Label(
+                                                                "Description (optional)"
+                                                            ),
+                                                            dbc.Input(
+                                                                id="task-description",
+                                                                type="text",
+                                                                placeholder="Brief description",
+                                                            ),
+                                                        ],
+                                                        width=6,
+                                                    ),
+                                                ],
+                                                className="g-3 mb-3",
                                             ),
-                                        ],
-                                        color="light",
-                                        className="mb-2",
-                                    ),
-                                    dcc.Upload(
-                                        id="upload-sites",
-                                        children=dbc.Button(
-                                            "Drag & Drop or Click to Upload",
-                                            color="secondary",
-                                            outline=True,
-                                            className="w-100",
-                                        ),
-                                        multiple=False,
-                                        accept=".geojson,.json,.gpkg",
-                                        className="mb-2",
-                                    ),
-                                    html.Div(id="upload-status"),
-                                ],
-                                width=12,
-                            ),
-                        ],
-                        className="mb-3",
-                    ),
-                    dbc.Row(
-                        [
-                            dbc.Col(
-                                [
-                                    dbc.Label("Matching Covariates"),
-                                    # -- Covariate preset controls --
-                                    dbc.Card(
-                                        [
-                                            dbc.CardBody(
+                                            dbc.Card(
                                                 [
-                                                    dbc.Row(
+                                                    dbc.CardHeader(
+                                                        "Upload Sites (GeoJSON or GeoPackage)"
+                                                    ),
+                                                    dbc.CardBody(
                                                         [
-                                                            dbc.Col(
+                                                            html.P(
                                                                 [
-                                                                    dbc.Select(
-                                                                        id="preset-selector",
-                                                                        placeholder="Load a saved preset…",
+                                                                    "Upload a ",
+                                                                    html.Strong(
+                                                                        "GeoJSON"
                                                                     ),
+                                                                    " or ",
+                                                                    html.Strong(
+                                                                        "GeoPackage"
+                                                                    ),
+                                                                    " file containing site polygons. "
+                                                                    "Geometries must be valid Polygons or "
+                                                                    "MultiPolygons in EPSG:4326 (WGS 84).",
                                                                 ],
-                                                                width=5,
+                                                                className="mb-2 small",
                                                             ),
-                                                            dbc.Col(
+                                                            dbc.Table(
                                                                 [
-                                                                    dbc.Button(
-                                                                        "Load",
-                                                                        id="load-preset-btn",
-                                                                        color="primary",
-                                                                        size="sm",
-                                                                        className="me-1",
+                                                                    html.Thead(
+                                                                        html.Tr(
+                                                                            [
+                                                                                html.Th(
+                                                                                    "Field"
+                                                                                ),
+                                                                                html.Th(
+                                                                                    "Type"
+                                                                                ),
+                                                                                html.Th(
+                                                                                    "Required"
+                                                                                ),
+                                                                                html.Th(
+                                                                                    "Description"
+                                                                                ),
+                                                                            ]
+                                                                        )
                                                                     ),
-                                                                    dbc.Button(
-                                                                        "Delete",
-                                                                        id="delete-preset-btn",
-                                                                        color="danger",
-                                                                        outline=True,
-                                                                        size="sm",
-                                                                    ),
-                                                                ],
-                                                                width=3,
-                                                                className="d-flex align-items-center",
-                                                            ),
-                                                            dbc.Col(
-                                                                [
-                                                                    dbc.InputGroup(
+                                                                    html.Tbody(
                                                                         [
-                                                                            dbc.Input(
-                                                                                id="preset-name-input",
-                                                                                type="text",
-                                                                                placeholder="Preset name",
-                                                                                size="sm",
+                                                                            html.Tr(
+                                                                                [
+                                                                                    html.Td(
+                                                                                        html.Code(
+                                                                                            "site_id"
+                                                                                        )
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "string"
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "Yes"
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "Unique site identifier"
+                                                                                    ),
+                                                                                ]
                                                                             ),
-                                                                            dbc.Button(
-                                                                                "Save",
-                                                                                id="save-preset-btn",
-                                                                                color="success",
-                                                                                size="sm",
+                                                                            html.Tr(
+                                                                                [
+                                                                                    html.Td(
+                                                                                        html.Code(
+                                                                                            "site_name"
+                                                                                        )
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "string"
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "Yes"
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "Human-readable site name"
+                                                                                    ),
+                                                                                ]
                                                                             ),
-                                                                        ],
-                                                                        size="sm",
+                                                                            html.Tr(
+                                                                                [
+                                                                                    html.Td(
+                                                                                        html.Code(
+                                                                                            "start_date"
+                                                                                        )
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "date"
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "Yes"
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "Intervention start date (YYYY-MM-DD)"
+                                                                                    ),
+                                                                                ]
+                                                                            ),
+                                                                            html.Tr(
+                                                                                [
+                                                                                    html.Td(
+                                                                                        html.Code(
+                                                                                            "end_date"
+                                                                                        )
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "date"
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "No"
+                                                                                    ),
+                                                                                    html.Td(
+                                                                                        "Intervention end date (optional; omit if ongoing)"
+                                                                                    ),
+                                                                                ]
+                                                                            ),
+                                                                        ]
                                                                     ),
                                                                 ],
-                                                                width=4,
+                                                                bordered=True,
+                                                                hover=True,
+                                                                size="sm",
+                                                                className="mb-3",
+                                                            ),
+                                                            dcc.Upload(
+                                                                id="upload-sites",
+                                                                children=dbc.Button(
+                                                                    "Drag & Drop or Click to Upload",
+                                                                    color="secondary",
+                                                                    outline=True,
+                                                                    className="w-100",
+                                                                ),
+                                                                multiple=False,
+                                                                accept=".geojson,.json,.gpkg",
+                                                                className="mb-2",
+                                                            ),
+                                                            html.Div(
+                                                                id="upload-status"
                                                             ),
                                                         ]
                                                     ),
-                                                    html.Div(
-                                                        id="preset-feedback",
-                                                        className="mt-1 small",
+                                                    dbc.CardFooter(
+                                                        html.Small(
+                                                            "After uploading, continue to the Matching Setup tab.",
+                                                            className="text-muted",
+                                                        )
                                                     ),
                                                 ],
-                                                className="py-2 px-3",
+                                                className="ae-section-card",
                                             ),
                                         ],
-                                        className="mb-2",
-                                    ),
-                                    dbc.Checklist(
-                                        id="covariate-selection",
-                                        options=[
-                                            {"label": c, "value": c}
-                                            for c in ALL_COVARIATES
-                                        ],
-                                        value=DEFAULT_COVARIATES,
-                                        inline=False,
-                                        className="ms-2",
-                                    ),
+                                        className="pt-3",
+                                    )
                                 ],
-                                width=6,
                             ),
-                            dbc.Col(
-                                [
-                                    dbc.Label(
-                                        "Exact Match Variables",
-                                        className="fw-bold",
-                                    ),
-                                    html.Small(
-                                        "At least one must be selected. "
-                                        "Controls are drawn only from areas "
-                                        "sharing these attributes with "
-                                        "treatment sites.",
-                                        className="text-muted d-block mb-2",
-                                    ),
-                                    dbc.Checklist(
-                                        id="exact-match-selection",
-                                        options=EXACT_MATCH_OPTIONS,
-                                        value=DEFAULT_EXACT_MATCH,
-                                        inline=False,
-                                        className="ms-2",
-                                    ),
-                                    html.Hr(),
-                                    dbc.Label("Site Preview"),
-                                    html.Div(id="site-preview"),
+                            dbc.Tab(
+                                label="2. Matching Setup",
+                                tab_id="tab-submit-matching",
+                                children=[
+                                    html.Div(
+                                        [
+                                            dbc.Row(
+                                                [
+                                                    dbc.Col(
+                                                        [
+                                                            dbc.Label(
+                                                                "Matching Covariates"
+                                                            ),
+                                                            dbc.Card(
+                                                                [
+                                                                    dbc.CardBody(
+                                                                        [
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Select(
+                                                                                                id="preset-selector",
+                                                                                                placeholder="Load a saved preset…",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=5,
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Button(
+                                                                                                "Load",
+                                                                                                id="load-preset-btn",
+                                                                                                color="primary",
+                                                                                                size="sm",
+                                                                                                className="me-1",
+                                                                                            ),
+                                                                                            dbc.Button(
+                                                                                                "Delete",
+                                                                                                id="delete-preset-btn",
+                                                                                                color="danger",
+                                                                                                outline=True,
+                                                                                                size="sm",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=3,
+                                                                                        className="d-flex align-items-center",
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.InputGroup(
+                                                                                                [
+                                                                                                    dbc.Input(
+                                                                                                        id="preset-name-input",
+                                                                                                        type="text",
+                                                                                                        placeholder="Preset name",
+                                                                                                        size="sm",
+                                                                                                    ),
+                                                                                                    dbc.Button(
+                                                                                                        "Save",
+                                                                                                        id="save-preset-btn",
+                                                                                                        color="success",
+                                                                                                        size="sm",
+                                                                                                    ),
+                                                                                                ],
+                                                                                                size="sm",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=4,
+                                                                                    ),
+                                                                                ]
+                                                                            ),
+                                                                            html.Div(
+                                                                                id="preset-feedback",
+                                                                                className="mt-2 small",
+                                                                            ),
+                                                                        ],
+                                                                        className="py-2 px-3",
+                                                                    ),
+                                                                ],
+                                                                className="mb-3 ae-section-card",
+                                                            ),
+                                                            dbc.Card(
+                                                                dbc.CardBody(
+                                                                    dbc.Checklist(
+                                                                        id="covariate-selection",
+                                                                        options=[
+                                                                            {
+                                                                                "label": c,
+                                                                                "value": c,
+                                                                            }
+                                                                            for c in ALL_COVARIATES
+                                                                        ],
+                                                                        value=DEFAULT_COVARIATES,
+                                                                        inline=False,
+                                                                        className="ms-2",
+                                                                    ),
+                                                                    className="ae-scroll-panel",
+                                                                ),
+                                                                className="ae-section-card",
+                                                            ),
+                                                        ],
+                                                        width=6,
+                                                    ),
+                                                    dbc.Col(
+                                                        [
+                                                            dbc.Card(
+                                                                [
+                                                                    dbc.CardHeader(
+                                                                        "Exact Match Variables"
+                                                                    ),
+                                                                    dbc.CardBody(
+                                                                        [
+                                                                            html.Small(
+                                                                                "At least one must be selected. Controls are drawn only from areas sharing these attributes with treatment sites.",
+                                                                                className="text-muted d-block mb-2",
+                                                                            ),
+                                                                            dbc.Checklist(
+                                                                                id="exact-match-selection",
+                                                                                options=EXACT_MATCH_OPTIONS,
+                                                                                value=DEFAULT_EXACT_MATCH,
+                                                                                inline=False,
+                                                                                className="ms-2",
+                                                                            ),
+                                                                            html.Hr(),
+                                                                            dbc.Label(
+                                                                                "Forest Cover Years"
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "Start Year",
+                                                                                                size="sm",
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="fc-start-year",
+                                                                                                type="number",
+                                                                                                value=2000,
+                                                                                                min=2000,
+                                                                                                max=2023,
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "End Year",
+                                                                                                size="sm",
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="fc-end-year",
+                                                                                                type="number",
+                                                                                                value=2023,
+                                                                                                min=2000,
+                                                                                                max=2023,
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
+                                                                                ]
+                                                                            ),
+                                                                        ]
+                                                                    ),
+                                                                ],
+                                                                className="mb-3 ae-section-card",
+                                                            ),
+                                                            dbc.Card(
+                                                                [
+                                                                    dbc.CardHeader(
+                                                                        "Site Preview"
+                                                                    ),
+                                                                    dbc.CardBody(
+                                                                        html.Div(
+                                                                            id="site-preview"
+                                                                        )
+                                                                    ),
+                                                                ],
+                                                                className="ae-section-card",
+                                                            ),
+                                                        ],
+                                                        width=6,
+                                                    ),
+                                                ],
+                                                className="g-3",
+                                            ),
+                                        ],
+                                        className="pt-3",
+                                    )
                                 ],
-                                width=6,
+                            ),
+                            dbc.Tab(
+                                label="3. Review & Submit",
+                                tab_id="tab-submit-review",
+                                children=[
+                                    html.Div(
+                                        [
+                                            dbc.Card(
+                                                [
+                                                    dbc.CardBody(
+                                                        [
+                                                            html.H5(
+                                                                "Ready to submit",
+                                                                className="mb-2",
+                                                            ),
+                                                            html.P(
+                                                                "Confirm your uploaded sites and matching settings in the previous tabs, then submit the task.",
+                                                                className="text-muted mb-3",
+                                                            ),
+                                                            dcc.Loading(
+                                                                dbc.Button(
+                                                                    "Submit Task",
+                                                                    id="submit-task-button",
+                                                                    color="primary",
+                                                                    size="lg",
+                                                                    className="w-100",
+                                                                ),
+                                                                type="circle",
+                                                            ),
+                                                        ]
+                                                    )
+                                                ],
+                                                className="ae-section-card",
+                                            ),
+                                        ],
+                                        className="pt-3",
+                                    )
+                                ],
                             ),
                         ],
-                        className="mb-3",
+                        id="submit-tabs",
+                        active_tab="tab-submit-sites",
+                        className="ae-content-tabs",
                     ),
-                    html.Div(id="submit-errors", className="mb-2"),
-                    dcc.Loading(
-                        dbc.Button(
-                            "Submit Task",
-                            id="submit-task-button",
-                            color="primary",
-                            size="lg",
-                            className="w-100",
-                        ),
-                        type="circle",
-                    ),
-                    html.Div(id="submit-result", className="mt-2"),
                 ]
             ),
             # Hidden stores
@@ -1310,35 +1427,72 @@ def task_detail_layout(user, task_id):
     return dbc.Container(
         [
             navbar(user),
-            html.Div(
+            dbc.Row(
                 [
-                    html.H2(id="task-title", className="d-inline"),
-                    html.Span(id="task-status-badge", className="ms-2"),
+                    dbc.Col(
+                        [
+                            html.Div(
+                                [
+                                    html.H2(id="task-title", className="mb-1"),
+                                    html.Span(id="task-status-badge", className="ms-2"),
+                                ],
+                                className="d-flex align-items-center",
+                            ),
+                            html.P(
+                                "Review progress, outputs, plots, and map layers for this analysis task.",
+                                className="text-muted mb-0",
+                            ),
+                        ],
+                        width=True,
+                    )
                 ],
                 className="mb-3",
             ),
-            html.Hr(),
             dbc.Tabs(
                 [
                     dbc.Tab(
                         label="Overview",
                         tab_id="tab-overview",
                         children=[
-                            html.Div(id="task-overview", className="mt-3"),
+                            html.Div(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        html.Div(id="task-overview"),
+                                    ),
+                                    className="ae-section-card",
+                                ),
+                                className="p-3",
+                            ),
                         ],
                     ),
                     dbc.Tab(
                         label="Results",
                         tab_id="tab-results",
                         children=[
-                            html.Div(id="task-results-content", className="mt-3"),
+                            html.Div(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        html.Div(id="task-results-content"),
+                                    ),
+                                    className="ae-section-card",
+                                ),
+                                className="p-3",
+                            ),
                         ],
                     ),
                     dbc.Tab(
                         label="Plots",
                         tab_id="tab-plots",
                         children=[
-                            html.Div(id="task-plots", className="mt-3"),
+                            html.Div(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        html.Div(id="task-plots"),
+                                    ),
+                                    className="ae-section-card",
+                                ),
+                                className="p-3",
+                            ),
                         ],
                     ),
                     dbc.Tab(
@@ -1346,15 +1500,24 @@ def task_detail_layout(user, task_id):
                         tab_id="tab-map",
                         children=[
                             html.Div(
-                                id="task-map",
-                                className="mt-3",
-                                style={"height": "500px"},
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        html.Div(
+                                            id="task-map",
+                                            style={"height": "500px"},
+                                        ),
+                                        className="p-0",
+                                    ),
+                                    className="ae-section-card ae-map-card",
+                                ),
+                                className="p-3",
                             ),
                         ],
                     ),
                 ],
                 id="detail-tabs",
                 active_tab="tab-overview",
+                className="ae-content-tabs",
             ),
             dcc.Store(id="task-id-store", data=task_id),
             dcc.Interval(id="detail-refresh-interval", interval=15000, n_intervals=0),
@@ -1420,256 +1583,311 @@ def admin_layout(user):
     return dbc.Container(
         [
             navbar(user),
-            html.H2("Admin Panel"),
-            html.Hr(),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            html.H2("Admin Panel", className="mb-1"),
+                            html.P(
+                                "Manage covariate inventory and user accounts.",
+                                className="text-muted mb-0",
+                            ),
+                        ],
+                        width=True,
+                    )
+                ],
+                className="mb-3",
+            ),
             dbc.Tabs(
                 [
                     dbc.Tab(
                         label="Covariates",
                         tab_id="tab-covariates",
                         children=[
-                            # -- Export controls -----------------------------------------
-                            dbc.Card(
+                            html.Div(
                                 [
-                                    dbc.CardHeader("Export Covariate Layers from GEE"),
-                                    dbc.CardBody(
+                                    dbc.Card(
                                         [
-                                            dbc.Row(
+                                            dbc.CardHeader(
+                                                "Export Covariate Layers from GEE"
+                                            ),
+                                            dbc.CardBody(
                                                 [
-                                                    dbc.Col(
+                                                    dbc.Row(
                                                         [
-                                                            dbc.Label("Category"),
-                                                            dbc.Select(
-                                                                id="gee-export-category",
-                                                                options=category_options,
-                                                                value="all",
+                                                            dbc.Col(
+                                                                [
+                                                                    dbc.Label(
+                                                                        "Category"
+                                                                    ),
+                                                                    dbc.Select(
+                                                                        id="gee-export-category",
+                                                                        options=category_options,
+                                                                        value="all",
+                                                                    ),
+                                                                ],
+                                                                width=6,
                                                             ),
-                                                        ],
-                                                        width=6,
+                                                            dbc.Col(
+                                                                [
+                                                                    html.Div(
+                                                                        style={
+                                                                            "height": "32px"
+                                                                        }
+                                                                    ),
+                                                                    dbc.Button(
+                                                                        "Start Export",
+                                                                        id="start-gee-export",
+                                                                        color="warning",
+                                                                    ),
+                                                                ],
+                                                                width="auto",
+                                                                className="d-flex align-items-end",
+                                                            ),
+                                                        ]
                                                     ),
-                                                    dbc.Col(
-                                                        [
-                                                            html.Div(
-                                                                style={"height": "32px"}
-                                                            ),
-                                                            dbc.Button(
-                                                                "Start Export",
-                                                                id="start-gee-export",
-                                                                color="warning",
-                                                            ),
-                                                        ],
-                                                        width="auto",
-                                                        className="d-flex align-items-end",
+                                                    html.Div(
+                                                        id="gee-export-result",
+                                                        className="mt-2",
                                                     ),
                                                 ]
                                             ),
-                                            html.Div(
-                                                id="gee-export-result", className="mt-2"
-                                            ),
-                                        ]
+                                        ],
+                                        className="ae-section-card mb-3",
+                                    ),
+                                    dbc.Card(
+                                        [
+                                            dbc.CardBody(
+                                                [
+                                                    dbc.Row(
+                                                        [
+                                                            dbc.Col(
+                                                                html.H5(
+                                                                    "Covariate Inventory",
+                                                                    className="mb-0",
+                                                                ),
+                                                                width="auto",
+                                                            ),
+                                                            dbc.Col(
+                                                                html.Span(
+                                                                    id="covariates-total-count",
+                                                                    children="Total: 0",
+                                                                    className="text-muted fw-bold",
+                                                                ),
+                                                                width=True,
+                                                                className="text-end",
+                                                            ),
+                                                        ],
+                                                        className="ae-action-bar align-items-center mb-3",
+                                                    ),
+                                                    _make_ag_grid(
+                                                        table_id="covariates-table",
+                                                        column_defs=COVARIATE_COLUMNS,
+                                                        row_model="clientSide",
+                                                        height="500px",
+                                                        style_conditions=COVARIATE_STATUS_ROW_STYLES,
+                                                        grid_options_extra={
+                                                            "rowSelection": "multiple",
+                                                            "suppressRowClickSelection": True,
+                                                            "isRowSelectable": {
+                                                                "function": (
+                                                                    "!!params.data"
+                                                                    " && params.data.gcs_tiles > 0"
+                                                                    " && params.data.status !== 'merging'"
+                                                                    " && params.data.status !== 'pending_merge'"
+                                                                    " && params.data.status !== 'exporting'"
+                                                                    " && params.data.status !== 'pending_export'"
+                                                                )
+                                                            },
+                                                        },
+                                                    ),
+                                                    html.Div(
+                                                        id="covariate-action-result",
+                                                        className="mt-2",
+                                                    ),
+                                                ]
+                                            )
+                                        ],
+                                        className="ae-section-card",
                                     ),
                                 ],
-                                className="mt-3 mb-3",
+                                className="pt-3",
                             ),
-                            # -- Inventory grid ------------------------------------------
-                            dbc.Row(
-                                [
-                                    dbc.Col(
-                                        html.H5("Covariate Inventory"), width="auto"
-                                    ),
-                                    dbc.Col(
-                                        html.Span(
-                                            id="covariates-total-count",
-                                            children="Total: 0",
-                                            className="text-muted fw-bold",
-                                        ),
-                                        width=True,
-                                        className="text-end",
-                                    ),
-                                ],
-                                className="align-items-center mb-2",
-                            ),
-                            _make_ag_grid(
-                                table_id="covariates-table",
-                                column_defs=COVARIATE_COLUMNS,
-                                row_model="clientSide",
-                                height="500px",
-                                style_conditions=COVARIATE_STATUS_ROW_STYLES,
-                                grid_options_extra={
-                                    "rowSelection": "multiple",
-                                    "suppressRowClickSelection": True,
-                                    "isRowSelectable": {
-                                        "function": (
-                                            "!!params.data"
-                                            " && params.data.gcs_tiles > 0"
-                                            " && params.data.status !== 'merging'"
-                                            " && params.data.status !== 'pending_merge'"
-                                            " && params.data.status !== 'exporting'"
-                                            " && params.data.status !== 'pending_export'"
-                                        )
-                                    },
-                                },
-                            ),
-                            html.Div(id="covariate-action-result", className="mt-2"),
                         ],
                     ),
                     dbc.Tab(
                         label="Users",
                         tab_id="tab-users",
                         children=[
-                            dbc.Row(
+                            html.Div(
                                 [
-                                    dbc.Col(
-                                        html.H5("User Management", className="mt-3"),
-                                        width="auto",
-                                    ),
-                                    dbc.Col(
-                                        html.Span(
-                                            id="user-management-total-count",
-                                            children="Total: 0",
-                                            className="text-muted fw-bold mt-3",
-                                        ),
-                                        width=True,
-                                        className="text-end",
-                                    ),
-                                ],
-                                className="align-items-center mb-2",
-                            ),
-                            # User action controls
-                            dbc.Card(
-                                [
-                                    dbc.CardHeader("User Actions"),
-                                    dbc.CardBody(
+                                    dbc.Card(
                                         [
-                                            html.P(
-                                                "Select a user from the table below, then use "
-                                                "these actions.",
-                                                className="text-muted small mb-3",
-                                            ),
-                                            dbc.Row(
+                                            dbc.CardHeader("User Actions"),
+                                            dbc.CardBody(
                                                 [
-                                                    dbc.Col(
-                                                        [
-                                                            dbc.Label(
-                                                                "Selected User",
-                                                                size="sm",
-                                                            ),
-                                                            dbc.Select(
-                                                                id="admin-user-select",
-                                                                options=[],
-                                                                placeholder="Select a user...",
-                                                            ),
-                                                        ],
-                                                        width=4,
+                                                    html.P(
+                                                        "Select a user from the table below, then use these actions.",
+                                                        className="text-muted small mb-3",
                                                     ),
-                                                    dbc.Col(
+                                                    dbc.Row(
                                                         [
-                                                            dbc.Label(
-                                                                "Change Role", size="sm"
-                                                            ),
-                                                            dbc.Select(
-                                                                id="admin-role-select",
-                                                                options=[
-                                                                    {
-                                                                        "label": "User",
-                                                                        "value": "user",
-                                                                    },
-                                                                    {
-                                                                        "label": "Admin",
-                                                                        "value": "admin",
-                                                                    },
+                                                            dbc.Col(
+                                                                [
+                                                                    dbc.Label(
+                                                                        "Selected User",
+                                                                        size="sm",
+                                                                    ),
+                                                                    dbc.Select(
+                                                                        id="admin-user-select",
+                                                                        options=[],
+                                                                        placeholder="Select a user...",
+                                                                    ),
                                                                 ],
-                                                                value="user",
+                                                                width=4,
                                                             ),
-                                                        ],
-                                                        width=2,
+                                                            dbc.Col(
+                                                                [
+                                                                    dbc.Label(
+                                                                        "Change Role",
+                                                                        size="sm",
+                                                                    ),
+                                                                    dbc.Select(
+                                                                        id="admin-role-select",
+                                                                        options=[
+                                                                            {
+                                                                                "label": "User",
+                                                                                "value": "user",
+                                                                            },
+                                                                            {
+                                                                                "label": "Admin",
+                                                                                "value": "admin",
+                                                                            },
+                                                                        ],
+                                                                        value="user",
+                                                                    ),
+                                                                ],
+                                                                width=2,
+                                                            ),
+                                                            dbc.Col(
+                                                                [
+                                                                    html.Div(
+                                                                        style={
+                                                                            "height": "32px"
+                                                                        }
+                                                                    ),
+                                                                    dbc.ButtonGroup(
+                                                                        [
+                                                                            dbc.Button(
+                                                                                "Approve",
+                                                                                id="admin-approve-btn",
+                                                                                color="success",
+                                                                                size="sm",
+                                                                            ),
+                                                                            dbc.Button(
+                                                                                "Change Role",
+                                                                                id="admin-role-btn",
+                                                                                color="info",
+                                                                                size="sm",
+                                                                            ),
+                                                                            dbc.Button(
+                                                                                "Delete",
+                                                                                id="admin-delete-btn",
+                                                                                color="danger",
+                                                                                size="sm",
+                                                                            ),
+                                                                        ]
+                                                                    ),
+                                                                ],
+                                                                width="auto",
+                                                                className="d-flex align-items-end",
+                                                            ),
+                                                        ]
                                                     ),
-                                                    dbc.Col(
+                                                    html.Div(
+                                                        id="admin-user-action-result",
+                                                        className="mt-2",
+                                                    ),
+                                                    dbc.Modal(
                                                         [
-                                                            html.Div(
-                                                                style={"height": "32px"}
+                                                            dbc.ModalHeader(
+                                                                dbc.ModalTitle(
+                                                                    "Confirm Delete User"
+                                                                )
                                                             ),
-                                                            dbc.ButtonGroup(
+                                                            dbc.ModalBody(
+                                                                "Are you sure you want to delete this user and all their analysis tasks? This cannot be undone."
+                                                            ),
+                                                            dbc.ModalFooter(
                                                                 [
                                                                     dbc.Button(
-                                                                        "Approve",
-                                                                        id="admin-approve-btn",
-                                                                        color="success",
-                                                                        size="sm",
+                                                                        "Cancel",
+                                                                        id="admin-delete-cancel",
+                                                                        color="secondary",
+                                                                        className="me-2",
                                                                     ),
                                                                     dbc.Button(
-                                                                        "Change Role",
-                                                                        id="admin-role-btn",
-                                                                        color="info",
-                                                                        size="sm",
-                                                                    ),
-                                                                    dbc.Button(
-                                                                        "Delete",
-                                                                        id="admin-delete-btn",
+                                                                        "Delete User",
+                                                                        id="admin-delete-confirm",
                                                                         color="danger",
-                                                                        size="sm",
                                                                     ),
                                                                 ]
                                                             ),
                                                         ],
-                                                        width="auto",
-                                                        className="d-flex align-items-end",
+                                                        id="admin-delete-modal",
+                                                        is_open=False,
+                                                        centered=True,
                                                     ),
                                                 ]
                                             ),
-                                            html.Div(
-                                                id="admin-user-action-result",
-                                                className="mt-2",
-                                            ),
-                                            # Confirmation modal for admin delete
-                                            dbc.Modal(
+                                        ],
+                                        className="ae-section-card mb-3",
+                                    ),
+                                    dbc.Card(
+                                        [
+                                            dbc.CardBody(
                                                 [
-                                                    dbc.ModalHeader(
-                                                        dbc.ModalTitle(
-                                                            "Confirm Delete User"
-                                                        )
-                                                    ),
-                                                    dbc.ModalBody(
-                                                        "Are you sure you want to delete this user "
-                                                        "and all their analysis tasks? This cannot be "
-                                                        "undone."
-                                                    ),
-                                                    dbc.ModalFooter(
+                                                    dbc.Row(
                                                         [
-                                                            dbc.Button(
-                                                                "Cancel",
-                                                                id="admin-delete-cancel",
-                                                                color="secondary",
-                                                                className="me-2",
+                                                            dbc.Col(
+                                                                html.H5(
+                                                                    "User Management",
+                                                                    className="mb-0",
+                                                                ),
+                                                                width="auto",
                                                             ),
-                                                            dbc.Button(
-                                                                "Delete User",
-                                                                id="admin-delete-confirm",
-                                                                color="danger",
+                                                            dbc.Col(
+                                                                html.Span(
+                                                                    id="user-management-total-count",
+                                                                    children="Total: 0",
+                                                                    className="text-muted fw-bold",
+                                                                ),
+                                                                width=True,
+                                                                className="text-end",
                                                             ),
-                                                        ]
+                                                        ],
+                                                        className="ae-action-bar align-items-center mb-3",
                                                     ),
-                                                ],
-                                                id="admin-delete-modal",
-                                                is_open=False,
-                                                centered=True,
-                                            ),
-                                        ]
+                                                    _make_ag_grid(
+                                                        table_id="user-management-table",
+                                                        column_defs=USER_MANAGEMENT_COLUMNS,
+                                                        row_model="clientSide",
+                                                        height="500px",
+                                                    ),
+                                                ]
+                                            )
+                                        ],
+                                        className="ae-section-card",
                                     ),
                                 ],
-                                className="mt-3 mb-3",
-                            ),
-                            _make_ag_grid(
-                                table_id="user-management-table",
-                                column_defs=USER_MANAGEMENT_COLUMNS,
-                                row_model="clientSide",
-                                height="500px",
+                                className="pt-3",
                             ),
                         ],
                     ),
                 ],
                 id="admin-tabs",
                 active_tab="tab-covariates",
+                className="ae-content-tabs",
             ),
             dcc.Interval(id="admin-refresh-interval", interval=30000, n_intervals=0),
         ]
@@ -1677,7 +1895,7 @@ def admin_layout(user):
 
 
 def settings_layout(user):
-    """User settings page with trends.earth API credential management."""
+    """User profile page with account and trends.earth API management."""
     from credential_store import get_credential
 
     cred = get_credential(user.id)
@@ -1797,8 +2015,21 @@ def settings_layout(user):
 
     children = [
         navbar(user),
-        html.H2("Settings"),
-        html.Hr(),
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        html.H2("Profile", className="mb-1"),
+                        html.P(
+                            "Manage your trends.earth connection and account settings.",
+                            className="text-muted mb-0",
+                        ),
+                    ],
+                    width=True,
+                )
+            ],
+            className="mb-3",
+        ),
         dbc.Row(
             dbc.Col(
                 [
@@ -1817,6 +2048,75 @@ def settings_layout(user):
         children.append(dbc.Row(dbc.Col(credential_card, width=8)))
 
     children.append(dbc.Row(dbc.Col(link_card, width=8)))
+
+    children.append(
+        dbc.Row(
+            dbc.Col(
+                [
+                    dbc.Card(
+                        [
+                            dbc.CardHeader(
+                                html.H5("Account", className="mb-0"),
+                            ),
+                            dbc.CardBody(
+                                [
+                                    html.P(
+                                        "Delete your account and all associated analysis tasks. This action cannot be undone.",
+                                        className="text-muted",
+                                    ),
+                                    dbc.Button(
+                                        "Delete My Account",
+                                        id="self-delete-btn",
+                                        color="danger",
+                                        outline=True,
+                                        size="sm",
+                                    ),
+                                    dbc.Modal(
+                                        [
+                                            dbc.ModalHeader(
+                                                dbc.ModalTitle("Delete Account")
+                                            ),
+                                            dbc.ModalBody(
+                                                [
+                                                    html.P(
+                                                        "Are you sure you want to delete your account? "
+                                                        "This will permanently remove your account and all "
+                                                        "associated analysis tasks. This action cannot be undone.",
+                                                        className="text-danger",
+                                                    ),
+                                                ]
+                                            ),
+                                            dbc.ModalFooter(
+                                                [
+                                                    dbc.Button(
+                                                        "Cancel",
+                                                        id="self-delete-cancel",
+                                                        color="secondary",
+                                                        className="me-2",
+                                                    ),
+                                                    dbc.Button(
+                                                        "Delete My Account",
+                                                        id="self-delete-confirm",
+                                                        color="danger",
+                                                    ),
+                                                ]
+                                            ),
+                                        ],
+                                        id="self-delete-modal",
+                                        is_open=False,
+                                        centered=True,
+                                    ),
+                                    html.Div(id="self-delete-result", className="mt-2"),
+                                ]
+                            ),
+                        ],
+                        className="mb-4 shadow-sm ae-section-card",
+                    )
+                ],
+                width=8,
+            )
+        )
+    )
 
     # Hidden stores for callback coordination
     children.append(dcc.Store(id="te-link-done-store"))

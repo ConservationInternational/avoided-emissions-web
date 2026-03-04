@@ -4,6 +4,85 @@
  * Uses the ag-theme-alpine base with customizations.
  */
 
+/* ── Global shell ─────────────────────────────────────────────────────── */
+body {
+    background-color: #f3f5f7;
+}
+
+.container {
+    max-width: 1180px;
+}
+
+h1, h2, h3, h4, h5 {
+    letter-spacing: -0.01em;
+}
+
+/* ── Navbar polish ────────────────────────────────────────────────────── */
+.ae-navbar {
+    background: linear-gradient(90deg, #1f2733 0%, #2a3442 100%);
+}
+
+.ae-navbar .navbar-brand {
+    font-size: 1.3rem;
+}
+
+.ae-navbar .nav-link {
+    color: rgba(255, 255, 255, 0.9) !important;
+}
+
+.ae-navbar .nav-link:hover {
+    color: #ffffff !important;
+}
+
+/* ── Section surfaces ─────────────────────────────────────────────────── */
+.ae-section-card {
+    border: 1px solid #dbe1e7;
+    border-radius: 8px;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.submit-feedback-sticky {
+    position: sticky;
+    top: 10px;
+    z-index: 1000;
+}
+
+.ae-scroll-panel {
+    max-height: 360px;
+    overflow-y: auto;
+}
+
+.nav-tabs .nav-link {
+    font-weight: 600;
+}
+
+.nav-tabs .nav-link.active {
+    background-color: #ffffff;
+    border-color: #dbe1e7 #dbe1e7 #ffffff;
+}
+
+.ae-content-tabs .tab-content {
+    background-color: #ffffff;
+    border: 1px solid #dbe1e7;
+    border-top: none;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+}
+
+.ae-action-bar {
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #e8edf2;
+}
+
+.ae-action-buttons {
+    display: flex;
+    align-items: center;
+}
+
+.ae-map-card {
+    overflow: hidden;
+}
+
 /* ── AG Grid row performance ─────────────────────────────────────────── */
 .ag-theme-alpine .ag-row {
     contain: layout style;
@@ -82,6 +161,12 @@
 
 /* ── Responsive tweaks ───────────────────────────────────────────────── */
 @media (max-width: 768px) {
+    .ae-action-buttons {
+        width: 100%;
+        justify-content: flex-start;
+        margin-top: 0.5rem;
+    }
+
     .ag-theme-alpine .ag-header-cell-label {
         font-size: 11px;
     }
