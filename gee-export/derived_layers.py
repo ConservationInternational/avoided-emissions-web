@@ -154,7 +154,8 @@ def build_glad_cropland(year):
     if year not in valid_years:
         raise ValueError(f"GLAD cropland year must be one of {valid_years}, got {year}")
     asset_id = f"users/potapovpeter/Global_cropland_{year}"
-    cropland = ee.Image(asset_id)
+    # The asset is an ImageCollection (tiled), so mosaic into a single Image.
+    cropland = ee.ImageCollection(asset_id).mosaic()
     return cropland.rename(f"cropland_{year}").toFloat()
 
 
