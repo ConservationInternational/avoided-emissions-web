@@ -1791,7 +1791,12 @@ def _build_overview(task, sites, totals):
     if failed_sites:
         failed_items = []
         for fs in failed_sites:
-            label = fs.get("site_id") or fs.get("id_numeric", "?")
+            site_id = fs.get("site_id") or fs.get("id_numeric", "?")
+            site_name = fs.get("site_name", "")
+            if site_name and site_name != site_id:
+                label = f"{site_name} ({site_id})"
+            else:
+                label = str(site_id)
             error = fs.get("error", "Unknown error")
             failed_items.append(html.Li(f"{label}: {error}"))
         cards.append(

@@ -52,9 +52,18 @@ n_failed <- length(failed_sites)
 failed_sites_table <- if (length(failed_sites) > 0) {
     bind_rows(lapply(seq_along(failed_sites), function(i) {
         fs <- failed_sites[[i]]
+        # Look up site_name from sites table if not in failure marker
+        site_name <- fs$site_name
+        if (is.null(site_name) && !is.null(fs$id_numeric)) {
+            site_row <- filter(sites, id_numeric == as.integer(fs$id_numeric))
+            if (nrow(site_row) > 0 && "site_name" %in% names(site_row)) {
+                site_name <- site_row$site_name[1]
+            }
+        }
         tibble(
             id_numeric = as.integer(fs$id_numeric %||% NA),
             site_id = as.character(fs$site_id %||% NA),
+            site_name = as.character(site_name %||% NA),
             error = as.character(fs$error %||% "Unknown error"),
             timestamp = as.character(fs$timestamp %||% NA),
             array_index = as.integer(fs$array_index %||% NA),
@@ -65,6 +74,7 @@ failed_sites_table <- if (length(failed_sites) > 0) {
     tibble(
         id_numeric = integer(),
         site_id = character(),
+        site_name = character(),
         error = character(),
         timestamp = character(),
         array_index = integer(),
@@ -337,9 +347,18 @@ if (length(match_files) > 0) {
 # Global summary
 # Build failed sites list for the summary
 failed_sites_summary <- lapply(failed_sites, function(fs) {
+    # Look up site_name from the sites table if not in the failure marker
+    site_name <- fs$site_name
+    if (is.null(site_name) && !is.null(fs$id_numeric)) {
+        site_row <- filter(sites, id_numeric == as.integer(fs$id_numeric))
+        if (nrow(site_row) > 0 && "site_name" %in% names(site_row)) {
+            site_name <- site_row$site_name[1]
+        }
+    }
     list(
         id_numeric = fs$id_numeric,
         site_id = fs$site_id,
+        site_name = site_name,
         error = fs$error
     )
 })

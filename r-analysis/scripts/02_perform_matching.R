@@ -144,6 +144,7 @@ required_match_cols <- c(
 for (this_id in site_ids) {
     site <- filter(sites, id_numeric == this_id)
     this_site_id <- site$site_id[1]
+    this_site_name <- if ("site_name" %in% names(site)) site$site_name[1] else NA_character_
     this_batch_index <- match(this_id, all_site_ids) - 1L
     match_path <- file.path(config$matches_dir, paste0("m_", this_id, ".rds"))
     failure_path <- file.path(config$matches_dir,
@@ -289,6 +290,7 @@ for (this_id in site_ids) {
         failure_info <- list(
             id_numeric = this_id,
             site_id = this_site_id,
+            site_name = this_site_name,
             error = msg,
             timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ")
         )
