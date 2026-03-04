@@ -1357,6 +1357,104 @@ def submit_layout(user):
                                                                 ],
                                                                 className="mb-3 ae-section-card",
                                                             ),
+                                                            dbc.Card(
+                                                                [
+                                                                    dbc.CardHeader(
+                                                                        "Advanced Matching Settings"
+                                                                    ),
+                                                                    dbc.CardBody(
+                                                                        [
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "Max treatment pixels"
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="max-treatment-pixels",
+                                                                                                type="number",
+                                                                                                min=1,
+                                                                                                step=1,
+                                                                                                value=1000,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Maximum treatment pixels sampled per group/site.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "Control multiplier"
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="control-multiplier",
+                                                                                                type="number",
+                                                                                                min=1,
+                                                                                                step=1,
+                                                                                                value=50,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Maximum controls sampled per treatment pixel.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mb-3",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "Minimum site area (ha)"
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="min-site-area-ha",
+                                                                                                type="number",
+                                                                                                min=0,
+                                                                                                step=1,
+                                                                                                value=100,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Sites smaller than this are filtered before extraction.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "Min GLM treatment pixels"
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="min-glm-treatment-pixels",
+                                                                                                type="number",
+                                                                                                min=1,
+                                                                                                step=1,
+                                                                                                value=15,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Below this, matching uses Mahalanobis distance instead of GLM.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3",
+                                                                            ),
+                                                                        ]
+                                                                    ),
+                                                                ],
+                                                                className="ae-section-card",
+                                                            ),
                                                         ],
                                                         width=6,
                                                     ),

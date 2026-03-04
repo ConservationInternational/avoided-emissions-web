@@ -533,6 +533,10 @@ def register_callbacks(app):
         State("parsed-sites-store", "data"),
         State("covariate-selection", "value"),
         State("exact-match-selection", "value"),
+        State("max-treatment-pixels", "value"),
+        State("control-multiplier", "value"),
+        State("min-site-area-ha", "value"),
+        State("min-glm-treatment-pixels", "value"),
         prevent_initial_call=True,
     )
     def handle_submit(
@@ -542,6 +546,10 @@ def register_callbacks(app):
         sites_data,
         covariates,
         exact_match_vars,
+        max_treatment_pixels,
+        control_multiplier,
+        min_site_area_ha,
+        min_glm_treatment_pixels,
     ):
         def _error_alert(msg):
             return dbc.Alert(msg, color="danger", dismissable=True), None
@@ -557,6 +565,23 @@ def register_callbacks(app):
                 "Please select at least one exact match variable "
                 "(admin boundary, ecoregion, or protected area)."
             )
+
+        try:
+            max_treatment_pixels = int(max_treatment_pixels or 1000)
+            control_multiplier = int(control_multiplier or 50)
+            min_site_area_ha = float(min_site_area_ha or 100)
+            min_glm_treatment_pixels = int(min_glm_treatment_pixels or 15)
+        except (TypeError, ValueError):
+            return _error_alert("Advanced matching settings must be numeric values.")
+
+        if max_treatment_pixels < 1:
+            return _error_alert("Max treatment pixels must be at least 1.")
+        if control_multiplier < 1:
+            return _error_alert("Control multiplier must be at least 1.")
+        if min_site_area_ha < 0:
+            return _error_alert("Minimum site area must be zero or greater.")
+        if min_glm_treatment_pixels < 1:
+            return _error_alert("Min GLM treatment pixels must be at least 1.")
 
         user = get_current_user()
         if not user:
@@ -593,6 +618,10 @@ def register_callbacks(app):
                 exact_match_vars=exact_match_vars,
                 fc_years=fc_years,
                 site_set_id=sites_data.get("site_set_id"),
+                max_treatment_pixels=max_treatment_pixels,
+                control_multiplier=control_multiplier,
+                min_site_area_ha=min_site_area_ha,
+                min_glm_treatment_pixels=min_glm_treatment_pixels,
             )
 
             return None, dbc.Alert(

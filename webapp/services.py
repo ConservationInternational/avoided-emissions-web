@@ -498,6 +498,10 @@ def submit_analysis_task(
     exact_match_vars,
     fc_years=None,
     site_set_id=None,
+    max_treatment_pixels=1000,
+    control_multiplier=50,
+    min_site_area_ha=100,
+    min_glm_treatment_pixels=15,
 ):
     """Create and submit a full analysis task via the trends.earth API.
 
@@ -542,6 +546,15 @@ def submit_analysis_task(
             "The following covariates are not fully processed and ready: "
             + ", ".join(unavailable_covariates)
         )
+
+    if max_treatment_pixels < 1:
+        raise ValueError("max_treatment_pixels must be at least 1")
+    if control_multiplier < 1:
+        raise ValueError("control_multiplier must be at least 1")
+    if min_site_area_ha < 0:
+        raise ValueError("min_site_area_ha must be zero or greater")
+    if min_glm_treatment_pixels < 1:
+        raise ValueError("min_glm_treatment_pixels must be at least 1")
 
     # Compute the matching extent polygon from PostGIS
     matching_extent = compute_matching_extent(gdf, exact_match_vars)
@@ -611,10 +624,10 @@ def submit_analysis_task(
             "exact_match_vars": exact_match_vars,
             "matching_extent": matching_extent,
             "fc_years": fc_years,
-            "max_treatment_pixels": 1000,
-            "control_multiplier": 50,
-            "min_site_area_ha": 100,
-            "min_glm_treatment_pixels": 15,
+            "max_treatment_pixels": max_treatment_pixels,
+            "control_multiplier": control_multiplier,
+            "min_site_area_ha": min_site_area_ha,
+            "min_glm_treatment_pixels": min_glm_treatment_pixels,
             "results_s3_uri": (
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
             ),
@@ -1335,6 +1348,8 @@ def get_ready_covariate_names():
 
     A covariate is considered ready when its most recent record in
     ``covariates`` has status ``merged`` and a non-empty ``merged_url``.
+    Forest-cover year layers (``fc_*``) are excluded because they are
+    handled automatically by the analysis pipeline via ``fc_years``.
     The returned order follows the GEE export config definition.
     """
     import importlib.util
@@ -1362,6 +1377,8 @@ def get_ready_covariate_names():
 
     ready_names = []
     for covariate_name in covariate_order:
+        if covariate_name.startswith("fc_"):
+            continue
         record = latest_records.get(covariate_name)
         if record and record.status == "merged" and record.merged_url:
             ready_names.append(covariate_name)
