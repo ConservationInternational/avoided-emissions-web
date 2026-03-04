@@ -64,9 +64,25 @@ message("  Found ", length(match_files), " match files")
 fc_cols <- paste0("fc_", config$fc_years)
 
 if (length(match_files) > 0) {
+    required_match_cols <- c(
+        "cell", "site_id", "id_numeric", "area_ha", "treatment",
+        "sampled_fraction", "total_biomass", "match_group"
+    )
+
     # Process in chunks
     m_processed <- foreach(f = match_files, .combine = bind_rows) %do% {
         m <- readRDS(f)
+        missing_cols <- setdiff(required_match_cols, names(m))
+        if (length(missing_cols) > 0) {
+            stop(
+                paste0(
+                    "Match file ", basename(f),
+                    " is missing required columns: ",
+                    paste(missing_cols, collapse = ", "),
+                    ". Re-run steps 1 and 2 to regenerate match files."
+                )
+            )
+        }
 
         m %>%
             select(cell, site_id, id_numeric, area_ha, treatment,

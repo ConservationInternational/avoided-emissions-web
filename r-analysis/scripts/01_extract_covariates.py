@@ -475,6 +475,12 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     # H×W temporary via .ravel() for every layer.
     rows, cols = np.unravel_index(candidate_indices, (height, width))
 
+    # Pixel area (ha) for all candidate pixels (treatment + control).
+    # This is required by step 3 to convert forest cover fractions to
+    # absolute area and to estimate emissions.
+    y_coords_candidates = ys[rows]
+    candidate_pixel_areas = calc_pixel_area_ha(y_coords_candidates, yres, xres)
+
     # --- 7. layer-by-layer loading ---
     # Load each layer individually from S3, extract the candidate pixel
     # values, then discard the full grid.  Peak memory stays at
@@ -483,7 +489,10 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     # Downcast float64 → float32 to halve memory and Parquet size;
     # covariates (elevation, slope, forest cover, etc.) don't need
     # float64 precision.
-    data: dict[str, np.ndarray] = {"cell": candidate_indices}
+    data: dict[str, np.ndarray] = {
+        "cell": candidate_indices,
+        "area_ha": candidate_pixel_areas,
+    }
     for i, layer_name in enumerate(all_layers, 1):
         log.info("  [%d/%d] Fetching %s", i, len(all_layers), layer_name)
         arr = ds[layer_name].values  # triggers HTTP range-request read
