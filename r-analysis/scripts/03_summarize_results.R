@@ -48,6 +48,34 @@ failed_sites <- lapply(failure_files, function(fp) {
 })
 n_failed <- length(failed_sites)
 
+# Build and write failed-sites table (always emitted)
+failed_sites_table <- if (length(failed_sites) > 0) {
+    bind_rows(lapply(seq_along(failed_sites), function(i) {
+        fs <- failed_sites[[i]]
+        tibble(
+            id_numeric = as.integer(fs$id_numeric %||% NA),
+            site_id = as.character(fs$site_id %||% NA),
+            error = as.character(fs$error %||% "Unknown error"),
+            timestamp = as.character(fs$timestamp %||% NA),
+            array_index = as.integer(fs$array_index %||% NA),
+            failure_marker_file = basename(failure_files[[i]])
+        )
+    }))
+} else {
+    tibble(
+        id_numeric = integer(),
+        site_id = character(),
+        error = character(),
+        timestamp = character(),
+        array_index = integer(),
+        failure_marker_file = character()
+    )
+}
+write_csv(
+    failed_sites_table,
+    file.path(config$output_dir, "results_failed_sites.csv")
+)
+
 if (length(match_files) == 0 && n_failed == 0) {
     stop("No match files and no failure markers found. Run step 2 first.")
 }
@@ -121,6 +149,20 @@ if (length(match_files) > 0) {
     }
 
     message("  Processed ", nrow(m_processed), " pixel-year records")
+
+    # Per-site sampling table (includes indicator for subsampled sites)
+    sampling_by_site <- m_processed %>%
+        distinct(id_numeric, site_id, sampled_fraction) %>%
+        mutate(
+            sampled_percent = sampled_fraction * 100,
+            was_subsampled = sampled_fraction < 1
+        ) %>%
+        arrange(site_id)
+
+    write_csv(
+        sampling_by_site,
+        file.path(config$output_dir, "results_sampling_by_site.csv")
+    )
 
     # Save pixel-level results
     m_processed %>%
@@ -227,6 +269,17 @@ if (length(match_files) > 0) {
               file.path(config$output_dir, "results_by_site_year.csv"))
     write_csv(results_total,
               file.path(config$output_dir, "results_by_site_total.csv"))
+
+    write_csv(
+        tibble(
+            id_numeric = integer(),
+            site_id = character(),
+            sampled_fraction = numeric(),
+            sampled_percent = numeric(),
+            was_subsampled = logical()
+        ),
+        file.path(config$output_dir, "results_sampling_by_site.csv")
+    )
 }
 
 # Global summary
@@ -238,6 +291,25 @@ failed_sites_summary <- lapply(failed_sites, function(fs) {
         error = fs$error
     )
 })
+
+subsampled_sites_summary <- if (exists("sampling_by_site")) {
+    ss <- sampling_by_site %>%
+        filter(was_subsampled) %>%
+        transmute(
+            id_numeric = id_numeric,
+            site_id = site_id,
+            sampled_fraction = sampled_fraction,
+            sampled_percent = sampled_percent
+        )
+    if (nrow(ss) == 0) {
+        list()
+    } else {
+        split(ss, seq_len(nrow(ss))) %>%
+            lapply(function(row) as.list(row[1, ]))
+    }
+} else {
+    list()
+}
 
 summary_data <- list(
     task_id = config$task_id,
@@ -262,7 +334,8 @@ summary_data <- list(
         select(site_id, site_name, emissions_avoided_mgco2e,
                forest_loss_avoided_ha, area_ha, n_years) %>%
         as.list(),
-    failed_sites = failed_sites_summary
+    failed_sites = failed_sites_summary,
+    subsampled_sites = subsampled_sites_summary
 )
 
 write_json(

@@ -51,6 +51,8 @@ if ("geometry" %in% names(sites)) {
 }
 treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
 base_data <- read_parquet(file.path(config$output_dir, "treatments_and_controls.parquet"))
+all_site_ids <- unique(treatment_key$id_numeric)
+all_treatment_cells <- unique(treatment_key$cell)
 
 # Load formula from JSON
 formula_json <- fromJSON(file.path(config$output_dir, "formula.json"))
@@ -69,13 +71,13 @@ if (!is.null(config$site_id)) {
     array_index <- Sys.getenv("AWS_BATCH_JOB_ARRAY_INDEX", "")
     if (array_index != "") {
         idx <- as.integer(array_index) + 1  # AWS uses 0-based indexing
-        site_ids <- unique(treatment_key$id_numeric)[idx]
+        site_ids <- all_site_ids[idx]
         batch_site_id <- filter(sites, id_numeric == site_ids)$site_id[1]
         message("  AWS Batch array index: ", array_index,
                 " -> site_id ", batch_site_id)
     } else {
         # Process all sites sequentially
-        site_ids <- unique(treatment_key$id_numeric)
+        site_ids <- all_site_ids
     }
 }
 
@@ -134,20 +136,50 @@ match_site <- function(d, f) {
 set.seed(31)
 
 n_failed <- 0L
+required_match_cols <- c(
+    "cell", "site_id", "id_numeric", "area_ha", "treatment",
+    "sampled_fraction", "total_biomass", "match_group"
+)
 
 for (this_id in site_ids) {
     site <- filter(sites, id_numeric == this_id)
     this_site_id <- site$site_id[1]
-    this_batch_index <- match(this_id, unique(treatment_key$id_numeric)) - 1L
+    this_batch_index <- match(this_id, all_site_ids) - 1L
     match_path <- file.path(config$matches_dir, paste0("m_", this_id, ".rds"))
     failure_path <- file.path(config$matches_dir,
                               paste0("failed_", this_id, ".json"))
 
     if (file.exists(match_path)) {
-        message("  Skipping site_id ", this_site_id,
-                " (batch_index=", this_batch_index,
-                "): already processed")
-        next
+        existing_ok <- tryCatch({
+            existing <- readRDS(match_path)
+            missing_cols <- setdiff(required_match_cols, names(existing))
+            if (length(missing_cols) > 0) {
+                message(
+                    "  Existing match file for site_id ", this_site_id,
+                    " is missing columns: ",
+                    paste(missing_cols, collapse = ", "),
+                    "; regenerating"
+                )
+                FALSE
+            } else {
+                TRUE
+            }
+        }, error = function(e) {
+            message(
+                "  Existing match file for site_id ", this_site_id,
+                " is unreadable (", conditionMessage(e), "); regenerating"
+            )
+            FALSE
+        })
+
+        if (existing_ok) {
+            message("  Skipping site_id ", this_site_id,
+                    " (batch_index=", this_batch_index,
+                    "): already processed")
+            next
+        }
+
+        unlink(match_path, force = TRUE)
     }
     message("  Processing site_id ", this_site_id,
             " (batch_index=", this_batch_index, ")")
@@ -167,27 +199,15 @@ for (this_id in site_ids) {
             # All candidate pixels (treatment + controls) are already spatially
             # constrained to the matching extent computed in the webapp, so no
             # region-based filtering is needed here.
-            vals <- base_data
-            vals <- vals %>%
-                full_join(
-                    treatment_cells %>%
-                        select(cell) %>%
-                        mutate(treatment = TRUE),
-                    by = "cell"
-                )
-            vals$treatment <- as.logical(vals$treatment)
-            vals$treatment[is.na(vals$treatment)] <- FALSE
-
-            # Exclude control pixels that fall within any other site
-            treatment_vals <- filter(vals, cell %in% treatment_cells$cell)
-            control_vals <- filter(vals, !(cell %in% treatment_key$cell))
-            vals <- bind_rows(treatment_vals, control_vals)
+            site_treatment_cells <- treatment_cells$cell
+            vals <- base_data %>%
+                mutate(treatment = cell %in% site_treatment_cells) %>%
+                filter(treatment | !(cell %in% all_treatment_cells))
 
             # Remove pixels with NA in exact-match grouping variables
             n_before <- nrow(vals)
-            for (emv in EXACT_MATCH_VARS) {
-                vals <- filter(vals, !is.na(.data[[emv]]))
-            }
+            vals <- vals %>%
+                filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.)))
             n_dropped <- n_before - nrow(vals)
             if (n_dropped > 0) {
                 message("  Filtered ", n_dropped,
@@ -215,8 +235,6 @@ for (this_id in site_ids) {
             ) %>%
                 ungroup() %>%
                 select(-any_of("this_group"))
-
-            vals <- filter_groups(vals, EXACT_MATCH_VARS)
 
             # Add pre-intervention deforestation for sites >= 2005
             estab_year <- site$start_year

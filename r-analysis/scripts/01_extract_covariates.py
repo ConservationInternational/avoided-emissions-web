@@ -449,10 +449,13 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     cog_prefix = config["cog_prefix"]
 
     # Layer names to load
-    all_layers = (
-        config["covariates"]
-        + config["exact_match_vars"]
-        + [f"fc_{y}" for y in config["fc_years"]]
+    all_layers = list(
+        dict.fromkeys(
+            config["covariates"]
+            + ["total_biomass"]
+            + config["exact_match_vars"]
+            + [f"fc_{y}" for y in config["fc_years"]]
+        )
     )
     layer_uris = {name: _s3_path(cog_bucket, cog_prefix, name) for name in all_layers}
     log.info("Loading %d covariate layers from S3", len(all_layers))
