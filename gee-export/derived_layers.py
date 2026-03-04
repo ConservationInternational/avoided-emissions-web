@@ -56,6 +56,9 @@ def build_total_biomass():
     biomass = ee.Image(
         "projects/ci_geospatial_assets/Baseline_Carbon_Biomass_2010_30m_v2"
     )
+    # The asset's band is named "constant" and may lack valid projection
+    # metadata; set it explicitly so reduceResolution works.
+    biomass = biomass.setDefaultProjection(crs="EPSG:4326", scale=30)
     return biomass.rename("total_biomass").toFloat()
 
 
@@ -155,7 +158,11 @@ def build_glad_cropland(year):
         raise ValueError(f"GLAD cropland year must be one of {valid_years}, got {year}")
     asset_id = f"users/potapovpeter/Global_cropland_{year}"
     # The asset is an ImageCollection (tiled), so mosaic into a single Image.
-    cropland = ee.ImageCollection(asset_id).mosaic()
+    # mosaic() drops the default projection; capture it from the first
+    # image so that reduceResolution has a valid source projection.
+    col = ee.ImageCollection(asset_id)
+    proj = col.first().projection()
+    cropland = col.mosaic().setDefaultProjection(proj)
     return cropland.rename(f"cropland_{year}").toFloat()
 
 
