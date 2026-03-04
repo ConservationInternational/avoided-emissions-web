@@ -419,9 +419,6 @@ USER_MANAGEMENT_COLUMNS = [
 # -- AG Grid defaults (mirroring api-ui patterns) ---------------------------
 
 DEFAULT_GRID_OPTIONS = {
-    "cacheBlockSize": 50,
-    "maxBlocksInCache": 3,
-    "purgeClosedRowNodes": True,
     "enableCellTextSelection": True,
     "ensureDomOrder": True,
     "animateRows": False,
@@ -1912,8 +1909,10 @@ def admin_layout(user):
                                                         height="500px",
                                                         style_conditions=COVARIATE_STATUS_ROW_STYLES,
                                                         grid_options_extra={
-                                                            "rowSelection": "multiple",
-                                                            "suppressRowClickSelection": True,
+                                                            "rowSelection": {
+                                                                "mode": "multiRow",
+                                                                "enableClickSelection": False,
+                                                            },
                                                             "isRowSelectable": {
                                                                 "function": (
                                                                     "!!params.data"

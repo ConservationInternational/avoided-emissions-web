@@ -488,8 +488,10 @@ def register_callbacks(app):
             row_data=detail["preview_rows"],
             height="320px",
             grid_options_extra={
-                "rowSelection": "single",
-                "suppressRowClickSelection": False,
+                "rowSelection": {
+                    "mode": "singleRow",
+                    "enableClickSelection": True,
+                },
                 "getRowId": {"function": "params.data.site_id"},
             },
         )
@@ -1973,8 +1975,10 @@ def _build_results_content(results, totals, sites=None):
                 row_data=totals_rows,
                 height="350px",
                 grid_options_extra={
-                    "rowSelection": "single",
-                    "suppressRowClickSelection": False,
+                    "rowSelection": {
+                        "mode": "singleRow",
+                        "enableClickSelection": True,
+                    },
                     "getRowId": {"function": "params.data.site_id"},
                 },
             ),
