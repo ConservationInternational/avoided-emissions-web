@@ -1360,7 +1360,7 @@ def submit_layout(user):
                                                             dbc.Card(
                                                                 [
                                                                     dbc.CardHeader(
-                                                                        "Advanced Matching Settings"
+                                                                        "Other Matching Settings"
                                                                     ),
                                                                     dbc.CardBody(
                                                                         [

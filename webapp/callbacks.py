@@ -572,7 +572,7 @@ def register_callbacks(app):
             min_site_area_ha = float(min_site_area_ha or 100)
             min_glm_treatment_pixels = int(min_glm_treatment_pixels or 15)
         except (TypeError, ValueError):
-            return _error_alert("Advanced matching settings must be numeric values.")
+            return _error_alert("Other Matching Settings must be numeric values.")
 
         if max_treatment_pixels < 1:
             return _error_alert("Max treatment pixels must be at least 1.")
