@@ -28,6 +28,8 @@ from auth import (
 )
 from config import report_exception
 from layouts import (
+    DEFAULT_MATCHING_JOB_QUEUE,
+    MATCHING_JOB_QUEUE_OPTIONS,
     RESULTS_TOTAL_COLUMNS,
     RESULTS_YEARLY_COLUMNS,
     _make_ag_grid,
@@ -537,6 +539,7 @@ def register_callbacks(app):
         State("control-multiplier", "value"),
         State("min-site-area-ha", "value"),
         State("min-glm-treatment-pixels", "value"),
+        State("matching-job-queue", "value"),
         prevent_initial_call=True,
     )
     def handle_submit(
@@ -550,6 +553,7 @@ def register_callbacks(app):
         control_multiplier,
         min_site_area_ha,
         min_glm_treatment_pixels,
+        matching_job_queue,
     ):
         def _error_alert(msg):
             return dbc.Alert(msg, color="danger", dismissable=True), None
@@ -582,6 +586,11 @@ def register_callbacks(app):
             return _error_alert("Minimum site area must be zero or greater.")
         if min_glm_treatment_pixels < 1:
             return _error_alert("Min GLM treatment pixels must be at least 1.")
+
+        allowed_job_queues = {opt["value"] for opt in MATCHING_JOB_QUEUE_OPTIONS}
+        matching_job_queue = matching_job_queue or DEFAULT_MATCHING_JOB_QUEUE
+        if matching_job_queue not in allowed_job_queues:
+            return _error_alert("Please select a valid Batch job queue.")
 
         user = get_current_user()
         if not user:
@@ -622,6 +631,7 @@ def register_callbacks(app):
                 control_multiplier=control_multiplier,
                 min_site_area_ha=min_site_area_ha,
                 min_glm_treatment_pixels=min_glm_treatment_pixels,
+                matching_job_queue=matching_job_queue,
             )
 
             return None, dbc.Alert(
@@ -1517,6 +1527,15 @@ def register_callbacks(app):
 def _build_overview(task, sites, totals):
     """Build the overview cards for a task detail page."""
     cards = []
+    task_config = task.config or {}
+    matching_job_queue = task_config.get("matching_job_queue")
+    if not matching_job_queue:
+        matching_job_queue = (
+            (task_config.get("batch") or {}).get("job_queue")
+            if isinstance(task_config.get("batch"), dict)
+            else None
+        )
+    matching_job_queue = matching_job_queue or "Not recorded"
 
     # Task info card
     cards.append(
@@ -1525,9 +1544,11 @@ def _build_overview(task, sites, totals):
                 dbc.CardHeader("Task Information"),
                 dbc.CardBody(
                     [
+                        html.P(f"Task ID: {task.id}"),
                         html.P(f"Description: {task.description or 'None'}"),
                         html.P(f"Sites: {task.n_sites or 0}"),
                         html.P(f"Covariates: {', '.join(task.covariates or [])}"),
+                        html.P(f"Matching job queue: {matching_job_queue}"),
                         html.P(f"Created: {task.created_at}"),
                         html.P(f"Status: {task.status}"),
                     ]

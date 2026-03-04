@@ -58,6 +58,19 @@ EXACT_MATCH_OPTIONS = [
 
 DEFAULT_EXACT_MATCH = ["admin1", "ecoregion", "pa"]
 
+MATCHING_JOB_QUEUE_OPTIONS = [
+    {
+        "label": "spot_fleet_1TB-io2-disk (default)",
+        "value": "spot_fleet_1TB-io2-disk",
+    },
+    {
+        "label": "ondemand_fleet_1TB-io2-disk",
+        "value": "ondemand_fleet_1TB-io2-disk",
+    },
+]
+
+DEFAULT_MATCHING_JOB_QUEUE = "spot_fleet_1TB-io2-disk"
+
 # -- Column definitions (AG Grid) -------------------------------------------
 
 TRUNCATED_CELL = {
@@ -1449,6 +1462,35 @@ def submit_layout(user):
                                                                                     ),
                                                                                 ],
                                                                                 className="g-3",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "Batch job queue"
+                                                                                            ),
+                                                                                            dcc.Dropdown(
+                                                                                                id="matching-job-queue",
+                                                                                                options=MATCHING_JOB_QUEUE_OPTIONS,
+                                                                                                value=DEFAULT_MATCHING_JOB_QUEUE,
+                                                                                                clearable=False,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                [
+                                                                                                    "Use ",
+                                                                                                    html.Code(
+                                                                                                        "ondemand_fleet_1TB-io2-disk"
+                                                                                                    ),
+                                                                                                    " only when needed — it incurs higher cost.",
+                                                                                                ],
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=12,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
                                                                             ),
                                                                         ]
                                                                     ),

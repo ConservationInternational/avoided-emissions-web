@@ -32,6 +32,13 @@ from models import (
 
 logger = logging.getLogger(__name__)
 
+ALLOWED_MATCHING_JOB_QUEUES = {
+    "spot_fleet_1TB-io2-disk",
+    "ondemand_fleet_1TB-io2-disk",
+}
+
+DEFAULT_MATCHING_JOB_QUEUE = "spot_fleet_1TB-io2-disk"
+
 
 def get_s3_client():
     return boto3.client("s3", region_name=Config.AWS_REGION)
@@ -502,6 +509,7 @@ def submit_analysis_task(
     control_multiplier=50,
     min_site_area_ha=100,
     min_glm_treatment_pixels=15,
+    matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
 ):
     """Create and submit a full analysis task via the trends.earth API.
 
@@ -555,6 +563,11 @@ def submit_analysis_task(
         raise ValueError("min_site_area_ha must be zero or greater")
     if min_glm_treatment_pixels < 1:
         raise ValueError("min_glm_treatment_pixels must be at least 1")
+    if matching_job_queue not in ALLOWED_MATCHING_JOB_QUEUES:
+        raise ValueError(
+            "matching_job_queue must be one of: "
+            + ", ".join(sorted(ALLOWED_MATCHING_JOB_QUEUES))
+        )
 
     # Compute the matching extent polygon from PostGIS
     matching_extent = compute_matching_extent(gdf, exact_match_vars)
@@ -585,6 +598,7 @@ def submit_analysis_task(
             submitted_by=user_id,
             site_set_id=site_set_id,
             status="pending",
+            config={"matching_job_queue": matching_job_queue},
             covariates=covariates,
             n_sites=len(gdf),
         )
@@ -687,7 +701,9 @@ def submit_analysis_task(
             "memory_mib": Config.BATCH_MEMORY_MIB,
             "vcpus": Config.BATCH_VCPUS,
         }
-        if Config.BATCH_JOB_QUEUE:
+        if matching_job_queue:
+            batch_overrides["job_queue"] = matching_job_queue
+        elif Config.BATCH_JOB_QUEUE:
             batch_overrides["job_queue"] = Config.BATCH_JOB_QUEUE
         if Config.BATCH_JOB_DEFINITION:
             batch_overrides["job_definition"] = Config.BATCH_JOB_DEFINITION
