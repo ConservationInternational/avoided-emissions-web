@@ -1510,7 +1510,6 @@ def register_callbacks(app):
         site_df = pd.DataFrame(site_rows).sort_values("year")
         site_info = sites_data.get(selected_site, {})
         site_name = site_info.get("site_name", selected_site)
-        start_date = site_info.get("start_date")
         end_date = site_info.get("end_date")
 
         # Check if this site was subsampled
@@ -1561,29 +1560,6 @@ def register_callbacks(app):
                 marker=dict(size=6),
             )
         )
-        # Intervention date markers
-        if start_date:
-            start_year = int(start_date[:4])
-            fig_defor.add_vline(
-                x=start_year,
-                line_dash="dash",
-                line_color="blue",
-                line_width=1.5,
-                annotation_text="Intervention Start",
-                annotation_position="top left",
-                annotation_font_color="blue",
-            )
-        if end_date:
-            end_year = int(end_date[:4])
-            fig_defor.add_vline(
-                x=end_year,
-                line_dash="dash",
-                line_color="orange",
-                line_width=1.5,
-                annotation_text="Intervention End",
-                annotation_position="top right",
-                annotation_font_color="orange",
-            )
         fig_defor.update_layout(
             title=f"Annual Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
@@ -1600,6 +1576,18 @@ def register_callbacks(app):
                 line_width=0,
                 annotation_text="Pre-intervention",
                 annotation_position="top left",
+                annotation_font_color="gray",
+            )
+        if end_date:
+            end_year = int(end_date[:4])
+            fig_defor.add_vrect(
+                x0=end_year + 0.5,
+                x1=site_df["year"].max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Post-intervention",
+                annotation_position="top right",
                 annotation_font_color="gray",
             )
         children.append(dcc.Graph(figure=fig_defor))
@@ -1631,28 +1619,6 @@ def register_callbacks(app):
                     marker=dict(size=6),
                 )
             )
-            if start_date:
-                start_year = int(start_date[:4])
-                fig_em.add_vline(
-                    x=start_year,
-                    line_dash="dash",
-                    line_color="blue",
-                    line_width=1.5,
-                    annotation_text="Intervention Start",
-                    annotation_position="top left",
-                    annotation_font_color="blue",
-                )
-            if end_date:
-                end_year = int(end_date[:4])
-                fig_em.add_vline(
-                    x=end_year,
-                    line_dash="dash",
-                    line_color="orange",
-                    line_width=1.5,
-                    annotation_text="Intervention End",
-                    annotation_position="top right",
-                    annotation_font_color="orange",
-                )
             fig_em.update_layout(
                 title=f"Annual Emissions: {site_name}{sub_note}",
                 xaxis_title="Year",
@@ -1669,6 +1635,18 @@ def register_callbacks(app):
                     line_width=0,
                     annotation_text="Pre-intervention",
                     annotation_position="top left",
+                    annotation_font_color="gray",
+                )
+            if end_date:
+                end_year = int(end_date[:4])
+                fig_em.add_vrect(
+                    x0=end_year + 0.5,
+                    x1=site_df["year"].max() + 0.5,
+                    fillcolor="gray",
+                    opacity=0.12,
+                    line_width=0,
+                    annotation_text="Post-intervention",
+                    annotation_position="top right",
                     annotation_font_color="gray",
                 )
             children.append(dcc.Graph(figure=fig_em))
@@ -1700,27 +1678,17 @@ def register_callbacks(app):
                 annotation_position="top left",
                 annotation_font_color="gray",
             )
-        if start_date:
-            start_year = int(start_date[:4])
-            fig_avoided.add_vline(
-                x=start_year,
-                line_dash="dash",
-                line_color="blue",
-                line_width=1.5,
-                annotation_text="Intervention Start",
-                annotation_position="top left",
-                annotation_font_color="blue",
-            )
         if end_date:
             end_year = int(end_date[:4])
-            fig_avoided.add_vline(
-                x=end_year,
-                line_dash="dash",
-                line_color="orange",
-                line_width=1.5,
-                annotation_text="Intervention End",
+            fig_avoided.add_vrect(
+                x0=end_year + 0.5,
+                x1=site_df["year"].max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Post-intervention",
                 annotation_position="top right",
-                annotation_font_color="orange",
+                annotation_font_color="gray",
             )
         children.append(dcc.Graph(figure=fig_avoided))
 
@@ -2351,6 +2319,25 @@ def _build_plots(results, totals, sites=None, task=None):
                 annotation_position="top left",
                 annotation_font_color="gray",
             )
+        # Shade post-intervention period if any site has an end date
+        if sites:
+            post_start = None
+            for s in sites:
+                if s.end_date:
+                    end_yr = s.end_date.year
+                    if post_start is None or end_yr < post_start:
+                        post_start = end_yr
+            if post_start is not None and post_start < agg_df["year"].max():
+                fig_defor.add_vrect(
+                    x0=post_start + 0.5,
+                    x1=agg_df["year"].max() + 0.5,
+                    fillcolor="gray",
+                    opacity=0.12,
+                    line_width=0,
+                    annotation_text="Post-intervention",
+                    annotation_position="top right",
+                    annotation_font_color="gray",
+                )
         plots.append(dcc.Graph(figure=fig_defor))
 
     # --- Existing avoided-emissions bar charts -----------------------------
