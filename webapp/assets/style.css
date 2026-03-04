@@ -100,6 +100,11 @@ h1, h2, h3, h4, h5 {
     line-height: 1;
 }
 
+.ol-sites-map .ae-scale-line {
+    left: 0.5em;
+    bottom: 0.75em;
+}
+
 /* ── AG Grid row performance ─────────────────────────────────────────── */
 .ag-theme-alpine .ag-row {
     contain: layout style;

@@ -238,6 +238,19 @@
         mapEl._zoomExtentControlAdded = true;
     }
 
+    function ensureScaleBarControl(mapEl, map) {
+        if (mapEl._scaleBarControlAdded) {
+            return;
+        }
+
+        const control = new ol.control.ScaleLine({
+            className: "ol-scale-line ae-scale-line",
+            minWidth: 100,
+        });
+        map.addControl(control);
+        mapEl._scaleBarControlAdded = true;
+    }
+
     function ensureMap(el) {
         if (el._olMap) {
             return el._olMap;
@@ -257,6 +270,7 @@
         el._olMap = map;
         el._olSource = source;
         ensureZoomExtentControl(el, map);
+        ensureScaleBarControl(el, map);
         return map;
     }
 
