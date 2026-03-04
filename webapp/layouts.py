@@ -930,7 +930,9 @@ def dashboard_layout(user):
                         [
                             html.H2("Analysis Tasks", className="mb-1"),
                             html.P(
-                                "Track submitted analyses and quickly start new tasks.",
+                                "Track submitted analyses and quickly start new tasks. "
+                                "Click the name in the table to view results for a "
+                                "completed task.",
                                 className="text-muted mb-0",
                             ),
                         ],
