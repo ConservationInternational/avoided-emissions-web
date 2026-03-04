@@ -778,6 +778,7 @@ def register_callbacks(app):
             Output("task-overview", "children"),
             Output("task-results-content", "children"),
             Output("task-plots", "children"),
+            Output("task-match-quality", "children"),
             Output("task-map", "children"),
             Output("detail-refresh-interval", "disabled"),
         ],
@@ -793,13 +794,13 @@ def register_callbacks(app):
 
         user = get_current_user()
         if not user or not _check_task_access(task_id, user):
-            return ("Task Not Found", None, None, None, None, None, True)
+            return ("Task Not Found", None, None, None, None, None, None, True)
 
         # Batch task status is polled by the Celery Beat worker;
         # this callback just reads the current DB state.
         detail = get_task_detail(task_id)
         if not detail:
-            return ("Task Not Found", None, None, None, None, None, True)
+            return ("Task Not Found", None, None, None, None, None, None, True)
 
         task = detail["task"]
         sites = detail["sites"]
@@ -837,6 +838,9 @@ def register_callbacks(app):
             else html.P("Results not yet available.", className="text-muted")
         )
 
+        # Match Quality tab
+        match_quality = _build_match_quality(task_id, task)
+
         # Map tab
         map_content = _build_map(detail.get("sites_geojson"), totals)
 
@@ -846,6 +850,7 @@ def register_callbacks(app):
             overview,
             results_content,
             plots,
+            match_quality,
             map_content,
             disable_interval,
         )
@@ -877,6 +882,27 @@ def register_callbacks(app):
 
         if csv:
             return dict(content=csv, filename=filename)
+        return no_update
+
+    # -- Match quality download -----------------------------------------------
+
+    @app.callback(
+        Output("download-match-quality", "data"),
+        Input("download-match-covariates", "n_clicks"),
+        State("task-id-store", "data"),
+        prevent_initial_call=True,
+    )
+    def handle_match_quality_download(n_clicks, task_id):
+        if not n_clicks:
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user or not _check_task_access(task_id, user):
+            raise PreventUpdate
+
+        csv = download_results_csv(task_id, "match_covariates")
+        if csv:
+            return dict(content=csv, filename="results_match_covariates.csv")
         return no_update
 
     # -- Admin: Covariates (unified export + merge) ---------------------------
@@ -1430,6 +1456,33 @@ def register_callbacks(app):
         if task_id and cell.get("colId") == "name":
             return f"/task/{task_id}"
         raise PreventUpdate
+
+    # -- Match quality site filter -------------------------------------------
+
+    @app.callback(
+        Output("match-quality-plots-container", "children"),
+        Input("match-quality-site-selector", "value"),
+        State("match-quality-data-store", "data"),
+        prevent_initial_call=True,
+    )
+    def update_match_quality_plots(selected_site, store_data):
+        """Rebuild covariate distribution plots when site filter changes."""
+        if not store_data:
+            raise PreventUpdate
+
+        df = pd.DataFrame(store_data["rows"])
+        covariate_cols = store_data["covariate_cols"]
+
+        if df.empty:
+            return html.P("No data available.", className="text-muted")
+
+        if selected_site and selected_site != "__all__":
+            df = df[df["site_id"] == selected_site]
+
+        if df.empty:
+            return html.P("No data for selected site.", className="text-muted")
+
+        return html.Div(_build_match_quality_plots(df, covariate_cols))
 
     # -- Site-level deforestation drill-down ----------------------------------
 
@@ -2412,6 +2465,247 @@ def _build_plots(results, totals, sites=None, task=None):
         plots.append(html.Div(id="site-defor-plot-container"))
 
     return html.Div(plots)
+
+
+def _build_match_quality(task_id, task):
+    """Build the match quality assessment section.
+
+    Fetches matched-pixel covariate data from S3 and produces overlaid
+    histograms comparing treatment vs control distributions for each
+    covariate. Also provides a download button for the full CSV.
+    """
+    # Always render the callback target IDs so Dash doesn't error when
+    # the callbacks reference them, even if the tab has no data yet.
+    placeholder_ids = html.Div(
+        [
+            dbc.Select(
+                id="match-quality-site-selector",
+                options=[],
+                style={"display": "none"},
+            ),
+            dcc.Store(id="match-quality-data-store", data={}),
+            html.Div(id="match-quality-plots-container"),
+            dbc.Button(
+                id="download-match-covariates",
+                style={"display": "none"},
+            ),
+            dcc.Download(id="download-match-quality"),
+        ],
+        style={"display": "none"},
+    )
+
+    if task.status != "succeeded":
+        return html.Div(
+            [
+                html.P("Results not yet available.", className="text-muted"),
+                placeholder_ids,
+            ]
+        )
+
+    csv_content = download_results_csv(task_id, "match_covariates")
+    if not csv_content:
+        return html.Div(
+            [
+                html.P(
+                    "Match covariate data not available for this analysis.",
+                    className="text-muted",
+                ),
+                placeholder_ids,
+            ]
+        )
+
+    import io
+
+    df = pd.read_csv(io.StringIO(csv_content))
+
+    if df.empty:
+        return html.Div(
+            [
+                html.P("No matched pixels found.", className="text-muted"),
+                placeholder_ids,
+            ]
+        )
+
+    # Identify covariate columns (everything except identifiers)
+    id_cols = {"cell", "site_id", "treatment", "match_group"}
+    covariate_cols = [c for c in df.columns if c not in id_cols]
+
+    if not covariate_cols:
+        return html.Div(
+            [
+                html.P(
+                    "No covariate columns found in match data.",
+                    className="text-muted",
+                ),
+                placeholder_ids,
+            ]
+        )
+
+    content = []
+
+    content.append(
+        html.P(
+            "Distribution of covariate values for matched treatment and "
+            "control pixels across all sites. Well-balanced matches should "
+            "show similar distributions between treatment and control groups.",
+            className="text-muted mb-3",
+        )
+    )
+
+    # Summary stats
+    n_treatment = int(df["treatment"].sum())
+    n_control = int((~df["treatment"]).sum())
+    n_sites = df["site_id"].nunique()
+    content.append(
+        dbc.Row(
+            [
+                dbc.Col(
+                    dbc.Card(
+                        dbc.CardBody(
+                            [
+                                html.H6(
+                                    "Treatment Pixels", className="text-muted mb-1"
+                                ),
+                                html.H4(f"{n_treatment:,}"),
+                            ]
+                        ),
+                        className="text-center",
+                    ),
+                    md=4,
+                ),
+                dbc.Col(
+                    dbc.Card(
+                        dbc.CardBody(
+                            [
+                                html.H6("Control Pixels", className="text-muted mb-1"),
+                                html.H4(f"{n_control:,}"),
+                            ]
+                        ),
+                        className="text-center",
+                    ),
+                    md=4,
+                ),
+                dbc.Col(
+                    dbc.Card(
+                        dbc.CardBody(
+                            [
+                                html.H6("Sites", className="text-muted mb-1"),
+                                html.H4(f"{n_sites:,}"),
+                            ]
+                        ),
+                        className="text-center",
+                    ),
+                    md=4,
+                ),
+            ],
+            className="mb-4",
+        )
+    )
+
+    # Per-site selector for filtering distribution plots
+    site_ids = sorted(df["site_id"].unique())
+    site_options = [{"label": "All sites (aggregate)", "value": "__all__"}]
+    site_options.extend({"label": sid, "value": sid} for sid in site_ids)
+
+    content.append(
+        html.Div(
+            [
+                html.Label("Filter by site:", className="fw-bold me-2"),
+                dbc.Select(
+                    id="match-quality-site-selector",
+                    options=site_options,
+                    value="__all__",
+                    style={"maxWidth": "350px", "display": "inline-block"},
+                ),
+            ],
+            className="mb-3",
+        )
+    )
+
+    # Store the data for client-side filtering via a callback
+    content.append(
+        dcc.Store(
+            id="match-quality-data-store",
+            data={
+                "rows": df.to_dict("records"),
+                "covariate_cols": covariate_cols,
+            },
+        )
+    )
+    # Render initial plots for all sites
+    content.append(
+        html.Div(
+            _build_match_quality_plots(df, covariate_cols),
+            id="match-quality-plots-container",
+        )
+    )
+
+    # Download button
+    content.append(html.Hr(className="my-3"))
+    content.append(
+        dbc.Button(
+            "Download Match Covariates CSV",
+            id="download-match-covariates",
+            color="secondary",
+            size="sm",
+        )
+    )
+    content.append(dcc.Download(id="download-match-quality"))
+
+    return html.Div(content)
+
+
+def _build_match_quality_plots(df, covariate_cols):
+    """Build overlaid histogram figures for each covariate.
+
+    Returns a list of ``dcc.Graph`` components comparing treatment vs
+    control distributions.
+    """
+    plots = []
+
+    treatment_df = df[df["treatment"]]
+    control_df = df[~df["treatment"]]
+
+    for col in covariate_cols:
+        # Skip columns with no variance
+        col_vals = df[col].dropna()
+        if col_vals.empty or col_vals.nunique() < 2:
+            continue
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Histogram(
+                x=treatment_df[col].dropna(),
+                name="Treatment",
+                opacity=0.6,
+                marker_color="#2ca02c",
+                nbinsx=40,
+            )
+        )
+        fig.add_trace(
+            go.Histogram(
+                x=control_df[col].dropna(),
+                name="Control",
+                opacity=0.6,
+                marker_color="#d62728",
+                nbinsx=40,
+            )
+        )
+        fig.update_layout(
+            title=f"Covariate: {col}",
+            xaxis_title=col,
+            yaxis_title="Count",
+            barmode="overlay",
+            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
+            height=350,
+            margin=dict(t=40, b=40, l=50, r=20),
+        )
+        plots.append(dcc.Graph(figure=fig))
+
+    if not plots:
+        return [html.P("No numeric covariates to display.", className="text-muted")]
+
+    return plots
 
 
 def _build_map(sites_geojson, totals):

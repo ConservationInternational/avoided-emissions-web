@@ -16,6 +16,7 @@
 #   - {output_dir}/results_by_site_total.csv   : Per-site totals
 #   - {output_dir}/results_pixel_level.csv     : Pixel-level detail
 #   - {output_dir}/results_summary.json        : Global summary
+#   - {output_dir}/results_match_covariates.csv: Matched pixel covariate values
 
 library(tidyverse)
 library(foreach)
@@ -113,6 +114,60 @@ if (length(match_files) > 0) {
         "cell", "site_id", "id_numeric", "area_ha", "treatment",
         "sampled_fraction", "total_biomass", "match_group"
     )
+
+    # --- Extract matched-pixel covariate data for match-quality assessment ---
+    # Read the formula to identify which covariates the user selected.
+    formula_path <- file.path(config$output_dir, "formula.json")
+    covariate_cols <- character(0)
+    if (file.exists(formula_path)) {
+        formula_json <- fromJSON(formula_path)
+        formula_rhs <- formula_json$rhs
+        if (is.null(formula_rhs)) {
+            # Parse covariates from the formula string as a fallback
+            fstr <- formula_json$formula_str
+            if (!is.null(fstr)) {
+                rhs_str <- trimws(sub("^.*~", "", fstr))
+                formula_rhs <- trimws(strsplit(rhs_str, "\\+")[[1]])
+            }
+        }
+        covariate_cols <- formula_rhs
+    }
+
+    # Collect covariate values for all matched treatment & control pixels
+    match_cov_data <- foreach(f = match_files, .combine = bind_rows) %do% {
+        m <- readRDS(f)
+        # Determine which covariate columns are present in this match file
+        available_covs <- intersect(covariate_cols, names(m))
+        # Also include defor_pre_intervention if present (added dynamically)
+        if ("defor_pre_intervention" %in% names(m) &&
+            !"defor_pre_intervention" %in% available_covs) {
+            available_covs <- c(available_covs, "defor_pre_intervention")
+        }
+        id_cols <- c("cell", "site_id", "treatment", "match_group")
+        keep_cols <- intersect(c(id_cols, available_covs), names(m))
+        m %>% select(all_of(keep_cols)) %>% as_tibble()
+    }
+
+    if (nrow(match_cov_data) > 0) {
+        write_csv(
+            match_cov_data,
+            file.path(config$output_dir, "results_match_covariates.csv")
+        )
+        message("  Match quality data: ", nrow(match_cov_data),
+                " rows, ", length(covariate_cols), " covariates")
+    } else {
+        # Write empty file with expected columns
+        empty_cov <- tibble(
+            cell = integer(),
+            site_id = character(),
+            treatment = logical(),
+            match_group = character()
+        )
+        write_csv(
+            empty_cov,
+            file.path(config$output_dir, "results_match_covariates.csv")
+        )
+    }
 
     # Process in chunks
     m_processed <- foreach(f = match_files, .combine = bind_rows) %do% {
@@ -341,6 +396,17 @@ if (length(match_files) > 0) {
             was_subsampled = logical()
         ),
         file.path(config$output_dir, "results_sampling_by_site.csv")
+    )
+
+    # Empty match covariates file
+    write_csv(
+        tibble(
+            cell = integer(),
+            site_id = character(),
+            treatment = logical(),
+            match_group = character()
+        ),
+        file.path(config$output_dir, "results_match_covariates.csv")
     )
 }
 

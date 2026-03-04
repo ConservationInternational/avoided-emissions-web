@@ -1720,6 +1720,21 @@ def task_detail_layout(user, task_id):
                         ],
                     ),
                     dbc.Tab(
+                        label="Match Quality",
+                        tab_id="tab-match-quality",
+                        children=[
+                            html.Div(
+                                dbc.Card(
+                                    dbc.CardBody(
+                                        html.Div(id="task-match-quality"),
+                                    ),
+                                    className="ae-section-card",
+                                ),
+                                className="p-3",
+                            ),
+                        ],
+                    ),
+                    dbc.Tab(
                         label="Map",
                         tab_id="tab-map",
                         children=[
