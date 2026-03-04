@@ -94,6 +94,14 @@
         });
     }
 
+    function setSelectedSite(mapEl, siteId) {
+        const normalized = normalizeSiteId(siteId);
+        mapEl._selectedSiteId = normalized || "";
+        if (mapEl?._olSource && typeof mapEl._olSource.changed === "function") {
+            mapEl._olSource.changed();
+        }
+    }
+
     function bindMapTableSync(mapEl, map, config) {
         if (!config || !config.mapId || !config.tableId || !config.boundFlag) {
             return;
@@ -115,7 +123,9 @@
             if (!siteId) {
                 return;
             }
+            setSelectedSite(mapEl, siteId);
             focusTableRow(config.tableId, siteId);
+            zoomToFeature(mapEl, map, siteId);
         });
 
         document.addEventListener("click", function (evt) {
@@ -127,6 +137,7 @@
             if (!siteId) {
                 return;
             }
+            setSelectedSite(mapEl, siteId);
             zoomToFeature(mapEl, map, siteId);
         });
     }
@@ -147,11 +158,39 @@
         return el.getAttribute("data-geojson") || "";
     }
 
-    function mapStyle() {
+    function mapStyle(siteId, selectedSiteId) {
+        const isSelected = siteId && siteId === selectedSiteId;
         return new ol.style.Style({
-            fill: new ol.style.Fill({ color: "rgba(38, 166, 91, 0.18)" }),
-            stroke: new ol.style.Stroke({ color: "#2e7d32", width: 2 }),
+            fill: new ol.style.Fill({
+                color: isSelected ? "rgba(245, 124, 0, 0.30)" : "rgba(38, 166, 91, 0.18)",
+            }),
+            stroke: new ol.style.Stroke({
+                color: isSelected ? "#ef6c00" : "#2e7d32",
+                width: isSelected ? 3 : 2,
+            }),
+            text: new ol.style.Text({
+                text: siteId || "",
+                font: "12px sans-serif",
+                fill: new ol.style.Fill({ color: "#1f2937" }),
+                stroke: new ol.style.Stroke({ color: "#ffffff", width: 3 }),
+                overflow: true,
+                padding: [2, 2, 2, 2],
+                backgroundFill: new ol.style.Fill({ color: "rgba(255, 255, 255, 0.75)" }),
+            }),
         });
+    }
+
+    function featureStyle(mapEl) {
+        const styleCache = {};
+        return function (feature) {
+            const siteId = normalizeSiteId(feature.get("site_id"));
+            const selectedSiteId = normalizeSiteId(mapEl._selectedSiteId);
+            const key = siteId + "|" + selectedSiteId;
+            if (!styleCache[key]) {
+                styleCache[key] = mapStyle(siteId, selectedSiteId);
+            }
+            return styleCache[key];
+        };
     }
 
     function fitToAllSites(mapEl, map) {
@@ -205,7 +244,7 @@
         }
 
         const source = new ol.source.Vector();
-        const vectorLayer = new ol.layer.Vector({ source: source, style: mapStyle() });
+        const vectorLayer = new ol.layer.Vector({ source: source, style: featureStyle(el) });
         const map = new ol.Map({
             target: el,
             layers: [
@@ -252,6 +291,13 @@
             }
         });
         el._featureBySiteId = featureBySiteId;
+
+        const currentSelected = normalizeSiteId(el._selectedSiteId);
+        if (currentSelected && !featureBySiteId[currentSelected]) {
+            setSelectedSite(el, "");
+        } else if (currentSelected) {
+            setSelectedSite(el, currentSelected);
+        }
 
         bindMapTableSync(el, map, {
             mapId: "submit-sites-map",
