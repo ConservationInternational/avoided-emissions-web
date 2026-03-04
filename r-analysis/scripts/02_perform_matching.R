@@ -70,7 +70,9 @@ if (!is.null(config$site_id)) {
     if (array_index != "") {
         idx <- as.integer(array_index) + 1  # AWS uses 0-based indexing
         site_ids <- unique(treatment_key$id_numeric)[idx]
-        message("  AWS Batch array index: ", array_index, " -> site ", site_ids)
+        batch_site_id <- filter(sites, id_numeric == site_ids)$site_id[1]
+        message("  AWS Batch array index: ", array_index,
+                " -> site_id ", batch_site_id)
     } else {
         # Process all sites sequentially
         site_ids <- unique(treatment_key$id_numeric)
@@ -135,16 +137,20 @@ n_failed <- 0L
 
 for (this_id in site_ids) {
     site <- filter(sites, id_numeric == this_id)
+    this_site_id <- site$site_id[1]
+    this_batch_index <- match(this_id, unique(treatment_key$id_numeric)) - 1L
     match_path <- file.path(config$matches_dir, paste0("m_", this_id, ".rds"))
     failure_path <- file.path(config$matches_dir,
                               paste0("failed_", this_id, ".json"))
 
     if (file.exists(match_path)) {
-        message("  Skipping site ", this_id, " (", site$site_id,
+        message("  Skipping site_id ", this_site_id,
+                " (batch_index=", this_batch_index,
                 "): already processed")
         next
     }
-    message("  Processing site ", this_id, " (", site$site_id, ")")
+    message("  Processing site_id ", this_site_id,
+            " (batch_index=", this_batch_index, ")")
 
     # Wrap per-site matching in tryCatch so that a failure in one site
     # (e.g. memory allocation error in optmatch) does not abort the
@@ -259,11 +265,12 @@ for (this_id in site_ids) {
         }
     }, error = function(e) {
         msg <- conditionMessage(e)
-        message("  ERROR processing site ", this_id, " (",
-                site$site_id, "): ", msg)
+        message("  ERROR processing site_id ", this_site_id,
+            " (batch_index=", this_batch_index,
+            "): ", msg)
         failure_info <- list(
             id_numeric = this_id,
-            site_id = site$site_id[1],
+            site_id = this_site_id,
             error = msg,
             timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ")
         )
