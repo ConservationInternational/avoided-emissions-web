@@ -143,9 +143,9 @@ def _notify_admins_new_pending_user(db, new_user):
 
     admin_url = f"{Config.APP_URL}/admin"
     html = f"""
-    <p>Hello Admin,</p>
+    <p>Hello Avoided Emissions Admin,</p>
 
-    <p>A new user has registered and is awaiting approval:</p>
+    <p>A new user has registered for the Avoided Emissions app and is awaiting approval:</p>
 
     <ul>
       <li><strong>Name:</strong> {new_user.name}</li>

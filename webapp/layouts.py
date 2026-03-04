@@ -1539,7 +1539,8 @@ def submit_layout(user):
                                                                                                 clearable=False,
                                                                                             ),
                                                                                             html.Small(
-                                                                                                "Increase if matching jobs fail with exit code -9 (out of memory).",
+                                                                                                "Increase if matching jobs fail with exit code -9 (out of memory). "
+                                                                                                "Costs increase if more memory is requested",
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],

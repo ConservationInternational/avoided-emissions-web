@@ -43,6 +43,7 @@ from services import (
     force_remerge,
     get_covariate_inventory,
     get_covariate_presets,
+    get_ready_covariate_names,
     get_task_detail,
     get_task_list,
     get_user_site_set_detail,
@@ -325,6 +326,17 @@ def register_callbacks(app):
             else (options[0]["value"] if options else None)
         )
         return options, value
+
+    @app.callback(
+        Output("covariate-selection", "options"),
+        Input("url", "pathname"),
+    )
+    def refresh_submit_covariate_options(pathname):
+        if pathname != "/submit":
+            raise PreventUpdate
+
+        ready_covariates = get_ready_covariate_names()
+        return [{"label": cov, "value": cov} for cov in ready_covariates]
 
     @app.callback(
         [
