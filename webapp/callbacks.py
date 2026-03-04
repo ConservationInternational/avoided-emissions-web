@@ -367,8 +367,6 @@ def register_callbacks(app):
         State("parsed-sites-store", "data"),
         State("covariate-selection", "value"),
         State("exact-match-selection", "value"),
-        State("fc-start-year", "value"),
-        State("fc-end-year", "value"),
         prevent_initial_call=True,
     )
     def handle_submit(
@@ -378,8 +376,6 @@ def register_callbacks(app):
         sites_data,
         covariates,
         exact_match_vars,
-        fc_start,
-        fc_end,
     ):
         def _error_alert(msg):
             return dbc.Alert(msg, color="danger", dismissable=True), None
@@ -395,14 +391,6 @@ def register_callbacks(app):
                 "Please select at least one exact match variable "
                 "(admin boundary, ecoregion, or protected area)."
             )
-        if fc_start is None or fc_end is None:
-            return _error_alert(
-                "Please specify both a start and end year for forest cover analysis."
-            )
-        if int(fc_start) > int(fc_end):
-            return _error_alert(
-                "Forest cover start year must not be later than end year."
-            )
 
         user = get_current_user()
         if not user:
@@ -410,7 +398,21 @@ def register_callbacks(app):
 
         try:
             gdf = gpd.read_file(io.StringIO(sites_data["geojson"]))
-            fc_years = list(range(int(fc_start), int(fc_end) + 1))
+
+            # Auto-derive forest cover year range from site dates.
+            # Need years back to (earliest start_year - 5) for the
+            # pre-intervention deforestation covariate, and forward
+            # to the latest end_year (or current year if open-ended).
+            start_dates = pd.to_datetime(gdf["start_date"])
+            fc_min = max(2000, int(start_dates.dt.year.min()) - 5)
+            if "end_date" in gdf.columns and gdf["end_date"].notna().any():
+                end_years = pd.to_datetime(
+                    gdf.loc[gdf["end_date"].notna(), "end_date"]
+                ).dt.year
+                fc_max = min(2024, int(end_years.max()))
+            else:
+                fc_max = 2024
+            fc_years = list(range(fc_min, fc_max + 1))
 
             task_id = submit_analysis_task(
                 task_name=name,

@@ -39,6 +39,11 @@ ALL_COVARIATES = DEFAULT_COVARIATES + [
     "pop_2005",
     "pop_2010",
     "pop_2020",
+    "cropland_2003",
+    "cropland_2007",
+    "cropland_2011",
+    "cropland_2015",
+    "cropland_2019",
 ]
 
 # Exact match variables — at least one must be selected for each task.
@@ -1269,38 +1274,6 @@ def submit_layout(user):
                                         value=DEFAULT_EXACT_MATCH,
                                         inline=False,
                                         className="ms-2",
-                                    ),
-                                    html.Hr(),
-                                    dbc.Label("Forest Cover Years"),
-                                    dbc.Row(
-                                        [
-                                            dbc.Col(
-                                                [
-                                                    dbc.Label("Start Year", size="sm"),
-                                                    dbc.Input(
-                                                        id="fc-start-year",
-                                                        type="number",
-                                                        value=2000,
-                                                        min=2000,
-                                                        max=2023,
-                                                    ),
-                                                ],
-                                                width=6,
-                                            ),
-                                            dbc.Col(
-                                                [
-                                                    dbc.Label("End Year", size="sm"),
-                                                    dbc.Input(
-                                                        id="fc-end-year",
-                                                        type="number",
-                                                        value=2023,
-                                                        min=2000,
-                                                        max=2023,
-                                                    ),
-                                                ],
-                                                width=6,
-                                            ),
-                                        ]
                                     ),
                                     html.Hr(),
                                     dbc.Label("Site Preview"),
