@@ -259,6 +259,14 @@ class TrendsEarthClient:
             resp.status_code,
             resp.reason,
         )
+        if not resp.ok:
+            # Log the response body so the actual error detail is visible
+            # in the webapp logs, not just the HTTP status code.
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text[:500]
+            logger.error("[TE-API] Error response from %s: %s", url, body)
         resp.raise_for_status()
         return resp.json()
 
