@@ -692,7 +692,7 @@ def register_callbacks(app):
         overview = _build_overview(task, sites, totals)
 
         # Results tab (AG Grid tables)
-        results_content = _build_results_content(results, totals)
+        results_content = _build_results_content(results, totals, sites)
 
         # Plots tab
         plots = (
@@ -1570,7 +1570,14 @@ def _build_overview(task, sites, totals):
             )
         )
 
-    # Sites table (AG Grid)
+    return html.Div(cards)
+
+
+def _build_results_content(results, totals, sites=None):
+    """Build the results section with sites table, AG Grid tables, and downloads."""
+    content = []
+
+    # Sites table — always shown when sites are available
     if sites:
         site_rows = [
             {
@@ -1598,29 +1605,26 @@ def _build_overview(task, sites, totals):
             },
         ]
 
-        cards.append(
+        content.append(
             dbc.Card(
                 [
                     dbc.CardHeader("Sites"),
                     dbc.CardBody(
                         _make_ag_grid(
-                            "overview-sites-table",
+                            "results-sites-table",
                             site_cols,
                             row_data=site_rows,
                             height="300px",
                         ),
                     ),
-                ]
+                ],
+                className="mb-3",
             )
         )
 
-    return html.Div(cards)
-
-
-def _build_results_content(results, totals):
-    """Build the results section with AG Grid tables and download buttons."""
     if not totals:
-        return html.P("Results not yet available.", className="text-muted")
+        content.append(html.P("Results not yet available.", className="text-muted"))
+        return html.Div(content)
 
     # Totals table
     totals_rows = [
@@ -1649,20 +1653,22 @@ def _build_results_content(results, totals):
             for r in results
         ]
 
-    content = [
-        html.H5("Totals by Site"),
-        _make_ag_grid(
-            "results-totals-table",
-            RESULTS_TOTAL_COLUMNS,
-            row_data=totals_rows,
-            height="350px",
-            grid_options_extra={
-                "rowSelection": "single",
-                "suppressRowClickSelection": False,
-                "getRowId": {"function": "params.data.site_id"},
-            },
-        ),
-    ]
+    content.extend(
+        [
+            html.H5("Totals by Site"),
+            _make_ag_grid(
+                "results-totals-table",
+                RESULTS_TOTAL_COLUMNS,
+                row_data=totals_rows,
+                height="350px",
+                grid_options_extra={
+                    "rowSelection": "single",
+                    "suppressRowClickSelection": False,
+                    "getRowId": {"function": "params.data.site_id"},
+                },
+            ),
+        ]
+    )
 
     if yearly_rows:
         content.extend(

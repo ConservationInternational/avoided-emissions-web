@@ -1358,46 +1358,6 @@ def submit_layout(user):
                                                                                 inline=False,
                                                                                 className="ms-2",
                                                                             ),
-                                                                            html.Hr(),
-                                                                            dbc.Label(
-                                                                                "Forest Cover Years"
-                                                                            ),
-                                                                            dbc.Row(
-                                                                                [
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Label(
-                                                                                                "Start Year",
-                                                                                                size="sm",
-                                                                                            ),
-                                                                                            dbc.Input(
-                                                                                                id="fc-start-year",
-                                                                                                type="number",
-                                                                                                value=2000,
-                                                                                                min=2000,
-                                                                                                max=2023,
-                                                                                            ),
-                                                                                        ],
-                                                                                        width=6,
-                                                                                    ),
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Label(
-                                                                                                "End Year",
-                                                                                                size="sm",
-                                                                                            ),
-                                                                                            dbc.Input(
-                                                                                                id="fc-end-year",
-                                                                                                type="number",
-                                                                                                value=2023,
-                                                                                                min=2000,
-                                                                                                max=2023,
-                                                                                            ),
-                                                                                        ],
-                                                                                        width=6,
-                                                                                    ),
-                                                                                ]
-                                                                            ),
                                                                         ]
                                                                     ),
                                                                 ],
