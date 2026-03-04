@@ -41,6 +41,12 @@ analysis. Supports:
 - AWS Batch integration for parallel multi-site analysis
 - Emissions calculation: biomass change to MgCO2e conversion
 
+Pipeline implementation:
+
+- **Step 1 (extract)**: Python (`r-analysis/scripts/01_extract_covariates.py`)
+- **Step 2 (match)**: R (`r-analysis/scripts/02_perform_matching.R`)
+- **Step 3 (summarize)**: R (`r-analysis/scripts/03_summarize_results.R`)
+
 ### 3. Web Application (`webapp/`)
 
 A Dash (Plotly) web application providing:
@@ -57,12 +63,24 @@ A Dash (Plotly) web application providing:
 PostgreSQL + PostGIS, managed by Alembic migrations (in `webapp/migrations/`).
 Schema is created automatically on first startup via `alembic upgrade head`.
 
-Tracks:
+Core model definitions live in `webapp/models.py`.
+
+Primary application models:
+
+- **Auth & users**: `User`, `TrendsEarthCredential`, `PasswordResetToken`
+- **Tasking & results**: `AnalysisTask`, `TaskSite`, `TaskResult`, `TaskResultTotal`
+- **Site uploads**: `UserSiteSet`, `UserSiteFeature`
+- **Covariates**: `Covariate`, `GeeExportMetadata`, `CovariatePreset`
+- **Reference vectors**: `GeoBoundaryADM0`, `GeoBoundaryADM1`, `GeoBoundaryADM2`, `Ecoregion`, `ProtectedArea`, `VectorImportMetadata`
+
+Database tracks:
 
 - Users and roles
-- Covariate export and merge status
-- AWS Batch analysis tasks
+- Covariate export snapshots and merge status
+- Analysis tasks and per-site run metadata
 - Task results and metadata
+- Uploaded user site sets and site features
+- Imported vector reference-data provenance
 
 ### 5. Deployment (`deploy/`)
 
@@ -160,6 +178,7 @@ treatment ~ lc_2015_agriculture + precip + temp + elev + slope +
     pop_growth + total_biomass
 ```
 
-With exact matching on `region`, `ecoregion`, and `pa` (protected area status).
+With exact matching on selected stratification variables (default:
+`admin0`, `admin1`, `admin2`, `ecoregion`, `pa`).
 For sites established after 2005, `defor_pre_intervention` (5-year
 pre-establishment deforestation rate) is added automatically.
