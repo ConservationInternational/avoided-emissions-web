@@ -364,19 +364,22 @@ failed_sites_summary <- lapply(failed_sites, function(fs) {
 })
 
 subsampled_sites_summary <- if (exists("sampling_by_site")) {
+    sites_lookup <- sites %>%
+        select(id_numeric, site_name)
     ss <- sampling_by_site %>%
         filter(was_subsampled) %>%
+        left_join(sites_lookup, by = "id_numeric") %>%
         transmute(
             id_numeric = id_numeric,
             site_id = site_id,
+            site_name = site_name,
             sampled_fraction = sampled_fraction,
             sampled_percent = sampled_percent
         )
     if (nrow(ss) == 0) {
         list()
     } else {
-        split(ss, seq_len(nrow(ss))) %>%
-            lapply(function(row) as.list(row[1, ]))
+        unname(lapply(seq_len(nrow(ss)), function(i) as.list(ss[i, ])))
     }
 } else {
     list()

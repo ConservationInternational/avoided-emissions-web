@@ -137,6 +137,32 @@ def _openlayers_map_component(map_id, geojson_text, height="260px"):
     )
 
 
+def _normalize_metadata_list(value):
+    """Ensure a metadata field is a list of dicts.
+
+    The R analysis script serialises some lists (e.g. ``subsampled_sites``)
+    as named R lists which ``jsonlite::write_json(auto_unbox=TRUE)`` emits as
+    JSON **objects** (``{"1": {...}, "2": {...}}``).  When Python reads them
+    they become dicts whose values are the actual records.  This helper
+    converts such dicts to a flat list so callers can always iterate over
+    dicts.
+
+    A single-element list may also be unboxed to a flat dict — i.e. the
+    record itself rather than a dict-of-dicts.  We detect this by checking
+    whether the dict values are themselves dicts (nested) or scalars (flat
+    record that should be wrapped).
+    """
+    if isinstance(value, dict):
+        # If every value is a dict, it's a dict-of-dicts (named list).
+        # Otherwise it's a single flat record that was auto-unboxed.
+        if value and all(isinstance(v, dict) for v in value.values()):
+            return list(value.values())
+        return [value]
+    if isinstance(value, list):
+        return value
+    return []
+
+
 def _attach_totals_to_geojson(sites_geojson, totals):
     if not sites_geojson:
         return None
@@ -1417,6 +1443,11 @@ def register_callbacks(app):
             pct = sub_info.get("sampled_percent", 100)
             sub_note = f" [subsampled {pct:.0f}%]"
 
+        # Determine pre-intervention year range for shading
+        pre_years = site_df.loc[
+            site_df.get("is_pre_intervention", pd.Series(dtype=bool)), "year"
+        ]
+
         children = []
 
         # Show subsampling alert if applicable
@@ -1480,9 +1511,20 @@ def register_callbacks(app):
             title=f"Annual Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
             yaxis_title="Deforestation (ha)",
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
             hovermode="x unified",
         )
+        if not pre_years.empty:
+            fig_defor.add_vrect(
+                x0=pre_years.min() - 0.5,
+                x1=pre_years.max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Pre-intervention",
+                annotation_position="top left",
+                annotation_font_color="gray",
+            )
         children.append(dcc.Graph(figure=fig_defor))
 
         # --- Emissions comparison plot ---
@@ -1538,9 +1580,20 @@ def register_callbacks(app):
                 title=f"Annual Emissions: {site_name}{sub_note}",
                 xaxis_title="Year",
                 yaxis_title="Emissions (MgCO₂e)",
-                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+                legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
                 hovermode="x unified",
             )
+            if not pre_years.empty:
+                fig_em.add_vrect(
+                    x0=pre_years.min() - 0.5,
+                    x1=pre_years.max() + 0.5,
+                    fillcolor="gray",
+                    opacity=0.12,
+                    line_width=0,
+                    annotation_text="Pre-intervention",
+                    annotation_position="top left",
+                    annotation_font_color="gray",
+                )
             children.append(dcc.Graph(figure=fig_em))
 
         # --- Avoided values bar chart ---
@@ -1559,6 +1612,17 @@ def register_callbacks(app):
             yaxis_title="Forest Loss Avoided (ha)",
             hovermode="x unified",
         )
+        if not pre_years.empty:
+            fig_avoided.add_vrect(
+                x0=pre_years.min() - 0.5,
+                x1=pre_years.max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Pre-intervention",
+                annotation_position="top left",
+                annotation_font_color="gray",
+            )
         if start_date:
             start_year = int(start_date[:4])
             fig_avoided.add_vline(
@@ -1888,7 +1952,7 @@ def _build_overview(task, sites, totals):
 
     # --- Failed sites alert --------------------------------------------------
     meta = task.extra_metadata or {}
-    failed_sites = meta.get("failed_sites", [])
+    failed_sites = _normalize_metadata_list(meta.get("failed_sites", []))
     if failed_sites:
         failed_items = []
         for fs in failed_sites:
@@ -1920,11 +1984,19 @@ def _build_overview(task, sites, totals):
         )
 
     # --- Subsampled sites info -----------------------------------------------
-    subsampled_sites = meta.get("subsampled_sites", [])
+    subsampled_sites = _normalize_metadata_list(meta.get("subsampled_sites", []))
     if subsampled_sites:
+        site_name_map = {s.site_id: s.site_name for s in (sites or []) if s.site_name}
         sub_items = []
         for ss in subsampled_sites:
-            label = ss.get("site_id") or ss.get("id_numeric", "?")
+            site_id = ss.get("site_id")
+            if site_id is None or site_id == "":
+                site_id = ss.get("id_numeric", "?")
+            site_name = ss.get("site_name") or site_name_map.get(str(site_id), "")
+            if site_name and str(site_name) != str(site_id):
+                label = f"{site_name} ({site_id})"
+            else:
+                label = str(site_id)
             pct = ss.get("sampled_percent", 100)
             frac = ss.get("sampled_fraction", 1.0)
             sub_items.append(
@@ -2112,11 +2184,12 @@ def _build_plots(results, totals, sites=None, task=None):
     # Extract diagnostic metadata from the task
     meta = (task.extra_metadata or {}) if task else {}
     failed_site_ids = {
-        fs.get("site_id") or fs.get("id_numeric") for fs in meta.get("failed_sites", [])
+        fs.get("site_id") or fs.get("id_numeric")
+        for fs in _normalize_metadata_list(meta.get("failed_sites", []))
     }
     subsampled_map = {
         ss.get("site_id") or ss.get("id_numeric"): ss
-        for ss in meta.get("subsampled_sites", [])
+        for ss in _normalize_metadata_list(meta.get("subsampled_sites", []))
     }
 
     # Convert to DataFrame
@@ -2185,7 +2258,7 @@ def _build_plots(results, totals, sites=None, task=None):
             ),
             xaxis_title="Year",
             yaxis_title="Deforestation (ha)",
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
             hovermode="x unified",
         )
         # Shade the pre-intervention period
