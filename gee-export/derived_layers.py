@@ -158,11 +158,20 @@ def build_glad_cropland(year):
         raise ValueError(f"GLAD cropland year must be one of {valid_years}, got {year}")
     asset_id = f"users/potapovpeter/Global_cropland_{year}"
     # The asset is an ImageCollection (tiled), so mosaic into a single Image.
-    # mosaic() drops the default projection; capture it from the first
-    # image so that reduceResolution has a valid source projection.
+    # mosaic() drops the default projection; restore a stable default
+    # projection for downstream reduceResolution/reproject.
+    #
+    # Important: do not copy the first tile's full affine transform onto the
+    # entire mosaic. GLAD tiles can have tile-local transforms and forcing one
+    # tile transform globally can yield invalid coordinates during reprojection
+    # (e.g., out-of-range EPSG:4326 edge transforms). Keep only CRS and
+    # nominal scale instead.
     col = ee.ImageCollection(asset_id)
-    proj = col.first().projection()
-    cropland = col.mosaic().setDefaultProjection(proj)
+    first = col.first()
+    proj = first.projection()
+    crs = proj.crs()
+    scale = proj.nominalScale()
+    cropland = col.mosaic().setDefaultProjection(crs=crs, scale=scale)
     return cropland.rename(f"cropland_{year}").toFloat()
 
 
