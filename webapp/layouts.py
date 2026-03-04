@@ -1094,7 +1094,7 @@ def submit_layout(user):
                                             dbc.Card(
                                                 [
                                                     dbc.CardHeader(
-                                                        "Upload New Sites (GeoJSON or GeoPackage)"
+                                                        "Upload New Sites (GeoJSON, GeoPackage, or Archive)"
                                                     ),
                                                     dbc.CardBody(
                                                         [
@@ -1108,7 +1108,23 @@ def submit_layout(user):
                                                                     html.Strong(
                                                                         "GeoPackage"
                                                                     ),
-                                                                    " file containing site polygons. "
+                                                                    " file, or a ",
+                                                                    html.Strong(
+                                                                        ".zip/.tar.gz"
+                                                                    ),
+                                                                    " archive containing exactly one ",
+                                                                    html.Strong(
+                                                                        "Shapefile"
+                                                                    ),
+                                                                    ", ",
+                                                                    html.Strong(
+                                                                        "GeoJSON"
+                                                                    ),
+                                                                    ", or ",
+                                                                    html.Strong(
+                                                                        "GeoPackage"
+                                                                    ),
+                                                                    " dataset with site polygons. "
                                                                     "Geometries must be valid Polygons or "
                                                                     "MultiPolygons in EPSG:4326 (WGS 84).",
                                                                 ],
@@ -1225,7 +1241,7 @@ def submit_layout(user):
                                                                     className="w-100",
                                                                 ),
                                                                 multiple=False,
-                                                                accept=".geojson,.json,.gpkg",
+                                                                accept=".geojson,.json,.gpkg,.zip,.tar.gz,.tgz",
                                                                 className="mb-2",
                                                             ),
                                                             html.Div(

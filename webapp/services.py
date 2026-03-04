@@ -9,8 +9,10 @@ import io
 import json
 import logging
 import os
+import tarfile
 import tempfile
 import uuid
+import zipfile
 from datetime import datetime, timezone
 
 import boto3
@@ -44,8 +46,99 @@ def get_s3_client():
     return boto3.client("s3", region_name=Config.AWS_REGION)
 
 
+def _get_file_extension(filename):
+    lower_name = (filename or "").lower()
+    if lower_name.endswith(".tar.gz"):
+        return ".tar.gz"
+    if lower_name.endswith(".tgz"):
+        return ".tgz"
+    return os.path.splitext(lower_name)[1]
+
+
+def _is_within_directory(directory, target):
+    abs_directory = os.path.abspath(directory)
+    abs_target = os.path.abspath(target)
+    return os.path.commonpath([abs_directory]) == os.path.commonpath(
+        [abs_directory, abs_target]
+    )
+
+
+def _safe_extract_zip(archive_path, target_dir):
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        for member in archive.namelist():
+            if not member:
+                continue
+            destination = os.path.join(target_dir, member)
+            if not _is_within_directory(target_dir, destination):
+                raise ValueError("Archive contains invalid paths.")
+        archive.extractall(target_dir)
+
+
+def _safe_extract_tar(archive_path, target_dir):
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            destination = os.path.join(target_dir, member.name)
+            if not _is_within_directory(target_dir, destination):
+                raise ValueError("Archive contains invalid paths.")
+        archive.extractall(target_dir, filter="data")
+
+
+def _find_supported_dataset_paths(directory):
+    shapefiles = []
+    geopackages = []
+    geojsons = []
+
+    for root, _dirs, files in os.walk(directory):
+        for filename in files:
+            lower_name = filename.lower()
+            full_path = os.path.join(root, filename)
+            if lower_name.endswith(".shp"):
+                shapefiles.append(full_path)
+            elif lower_name.endswith(".gpkg"):
+                geopackages.append(full_path)
+            elif lower_name.endswith(".geojson") or lower_name.endswith(".json"):
+                geojsons.append(full_path)
+
+    return sorted(shapefiles), sorted(geopackages), sorted(geojsons)
+
+
+def _read_sites_from_archive(file_content, filename):
+    ext = _get_file_extension(filename)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        archive_name = filename or f"sites{ext}"
+        archive_path = os.path.join(tmpdir, os.path.basename(archive_name))
+
+        with open(archive_path, "wb") as archive_file:
+            archive_file.write(file_content)
+
+        if ext == ".zip":
+            _safe_extract_zip(archive_path, tmpdir)
+        else:
+            _safe_extract_tar(archive_path, tmpdir)
+
+        shapefiles, geopackages, geojsons = _find_supported_dataset_paths(tmpdir)
+        candidate_count = len(shapefiles) + len(geopackages) + len(geojsons)
+
+        if candidate_count == 0:
+            raise ValueError(
+                "No supported site dataset found in archive. Include a .shp, .gpkg, or .geojson/.json file."
+            )
+
+        if candidate_count > 1:
+            raise ValueError(
+                "Archive contains multiple supported datasets. Include exactly one site dataset per upload."
+            )
+
+        if shapefiles:
+            return gpd.read_file(shapefiles[0])
+        if geopackages:
+            return gpd.read_file(geopackages[0])
+        return gpd.read_file(geojsons[0], driver="GeoJSON")
+
+
 def parse_sites_file(file_content, filename):
-    """Parse an uploaded GeoJSON or GeoPackage file into a GeoDataFrame.
+    """Parse uploaded site files into a GeoDataFrame.
 
     Validates required columns and geometry types. Returns the GeoDataFrame
     and a list of validation errors (empty if valid).
@@ -54,7 +147,7 @@ def parse_sites_file(file_content, filename):
     gdf = None
 
     try:
-        ext = os.path.splitext(filename)[1].lower()
+        ext = _get_file_extension(filename)
         if ext in (".geojson", ".json"):
             gdf = gpd.read_file(io.BytesIO(file_content), driver="GeoJSON")
         elif ext == ".gpkg":
@@ -63,6 +156,8 @@ def parse_sites_file(file_content, filename):
                 tmp_path = f.name
             gdf = gpd.read_file(tmp_path)
             os.unlink(tmp_path)
+        elif ext in (".zip", ".tar.gz", ".tgz"):
+            gdf = _read_sites_from_archive(file_content, filename)
         else:
             errors.append(f"Unsupported file format: {ext}")
             return None, errors
@@ -139,7 +234,7 @@ def save_user_site_set(user_id, filename, file_content):
             name=_derive_site_set_name(filename),
             original_filename=filename,
             file_size_bytes=len(file_content),
-            file_format=os.path.splitext(filename)[1].lower().lstrip("."),
+            file_format=_get_file_extension(filename).lstrip("."),
             n_sites=len(gdf),
             bounds={"bbox": list(gdf.total_bounds)} if len(gdf) > 0 else None,
         )
