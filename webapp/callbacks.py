@@ -779,6 +779,7 @@ def register_callbacks(app):
             Output("task-results-content", "children"),
             Output("task-plots", "children"),
             Output("task-map", "children"),
+            Output("detail-refresh-interval", "disabled"),
         ],
         [
             Input("detail-refresh-interval", "n_intervals"),
@@ -792,18 +793,24 @@ def register_callbacks(app):
 
         user = get_current_user()
         if not user or not _check_task_access(task_id, user):
-            return ("Task Not Found", None, None, None, None, None)
+            return ("Task Not Found", None, None, None, None, None, True)
 
         # Batch task status is polled by the Celery Beat worker;
         # this callback just reads the current DB state.
         detail = get_task_detail(task_id)
         if not detail:
-            return ("Task Not Found", None, None, None, None, None)
+            return ("Task Not Found", None, None, None, None, None, True)
 
         task = detail["task"]
         sites = detail["sites"]
         results = detail["results"]
         totals = detail["totals"]
+
+        # Disable the refresh interval once the task reaches a terminal
+        # state so periodic re-renders don't reset interactive widgets
+        # (e.g. the site-level drill-down dropdown).
+        terminal_states = {"succeeded", "failed", "cancelled"}
+        disable_interval = task.status in terminal_states
 
         # Title and status badge
         title = task.name
@@ -833,7 +840,15 @@ def register_callbacks(app):
         # Map tab
         map_content = _build_map(detail.get("sites_geojson"), totals)
 
-        return title, badge, overview, results_content, plots, map_content
+        return (
+            title,
+            badge,
+            overview,
+            results_content,
+            plots,
+            map_content,
+            disable_interval,
+        )
 
     # -- Result downloads ----------------------------------------------------
 
