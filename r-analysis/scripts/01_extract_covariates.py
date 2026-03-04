@@ -24,6 +24,7 @@ Output:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import math
@@ -185,6 +186,14 @@ def _s3_path(bucket: str, prefix: str, name: str) -> str:
     return f"/vsis3/{bucket}/{prefix}/{name}.tif"
 
 
+def _open_single_cog(uri: str, name: str) -> tuple[str, xr.DataArray]:
+    """Open a single COG lazily (metadata only).  Thread-pool friendly."""
+    da = rioxarray.open_rasterio(uri, chunks="auto")
+    if "band" in da.dims and da.sizes["band"] == 1:
+        da = da.squeeze("band", drop=True)
+    return name, da
+
+
 def load_covariates_lazy(
     cog_bucket: str,
     cog_prefix: str,
@@ -196,7 +205,34 @@ def load_covariates_lazy(
     ``/vsis3/`` virtual filesystem.  Only metadata is fetched at this stage;
     actual pixel data is pulled on-demand when ``.values`` is accessed or
     ``.load()`` is called.
+
+    COGs are opened in parallel (thread pool) to overlap the per-file
+    HTTP metadata round-trips, then validated sequentially.
     """
+    # -- Phase 1: open all COGs in parallel (metadata-only reads) ----------
+    uris = {name: _s3_path(cog_bucket, cog_prefix, name) for name in covariate_names}
+    opened: dict[str, xr.DataArray] = {}
+    n_workers = min(8, len(covariate_names))
+    log.info(
+        "  Opening %d COGs in parallel (%d workers)...", len(covariate_names), n_workers
+    )
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {
+            pool.submit(_open_single_cog, uri, name): name for name, uri in uris.items()
+        }
+        for future in as_completed(futures):
+            fname = futures[future]
+            try:
+                _, da = future.result()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to open covariate '{fname}' at {uris[fname]}"
+                ) from exc
+            opened[fname] = da
+            log.info("  Opened: %s", uris[fname])
+
+    # -- Phase 2: validate CRS / resolution and snap coordinates -----------
     arrays: dict[str, xr.DataArray] = {}
     ref_crs = None
     ref_res = None
@@ -204,16 +240,7 @@ def load_covariates_lazy(
     ref_y = None
 
     for name in covariate_names:
-        uri = _s3_path(cog_bucket, cog_prefix, name)
-        log.info("  Opening: %s", uri)
-        try:
-            da = rioxarray.open_rasterio(uri, chunks="auto")
-        except Exception as exc:
-            raise RuntimeError(f"Failed to open covariate '{name}' at {uri}") from exc
-
-        # Squeeze band dimension if single-band
-        if "band" in da.dims and da.sizes["band"] == 1:
-            da = da.squeeze("band", drop=True)
+        da = opened[name]
 
         # Validate that all COGs share the same CRS and resolution
         layer_crs = da.rio.crs
@@ -338,10 +365,12 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
        ``matching_extent`` polygon (the intersection of all polygon-type
        exact-match layers that overlap the sites, computed by the webapp
        via PostGIS).
-    3. Clip the lazy dataset to that window  (triggers range-request reads
-       for only the needed tiles).
-    4. Rasterize sites onto the covariate grid to label treatment pixels.
-    5. Rasterize the matching_extent to identify candidate control pixels.
+    3. Clip the lazy dataset to that window.
+    4. Use grid metadata (transform, shape) from the *unloaded* dataset
+       to rasterize sites and compute candidate pixel indices.
+    5. Load layers **one at a time**, extract candidate values, then
+       release the full grid — peak memory is O(1 grid + N_candidates)
+       instead of O(N_layers × grid).
     6. Build treatment_cell_key and the full pixel DataFrame in-memory.
     """
     cog_bucket = config["cog_bucket"]
@@ -380,13 +409,11 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
 
     ds = ds.rio.clip_box(*clip_box.bounds)
 
-    # --- 3. materialise into memory ---
-    log.info("Fetching pixel data from S3 (this may take a while)...")
-    ds = ds.load()  # pulls tiles over HTTP range requests
-
-    # Resolution and grid dimensions from the raster's affine transform
-    # (always available from GeoTIFF metadata, even with a single pixel)
-    transform = ds[all_layers[0]].rio.transform()
+    # --- 3. grid metadata from the *unloaded* dataset ---
+    # rioxarray reads CRS, transform, and shape from COG headers;
+    # no pixel data has been fetched yet.
+    first_var = ds[all_layers[0]]
+    transform = first_var.rio.transform()
     xres = abs(transform.a)
     yres = abs(transform.e)
     ys = ds.coords["y"].values
@@ -444,18 +471,34 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         "Extracting covariate values for %d candidate pixels...", len(candidate_indices)
     )
 
-    # Build DataFrame column-by-column (fast NumPy slicing)
+    # Pre-compute 2-D row/col indices once — avoids creating a full
+    # H×W temporary via .ravel() for every layer.
+    rows, cols = np.unravel_index(candidate_indices, (height, width))
+
+    # --- 7. layer-by-layer loading ---
+    # Load each layer individually from S3, extract the candidate pixel
+    # values, then discard the full grid.  Peak memory stays at
+    # O(grid + N_layers × N_candidates) instead of
+    # O(N_layers × grid + N_layers × N_candidates).
+    # Downcast float64 → float32 to halve memory and Parquet size;
+    # covariates (elevation, slope, forest cover, etc.) don't need
+    # float64 precision.
     data: dict[str, np.ndarray] = {"cell": candidate_indices}
-    for layer_name in all_layers:
-        arr = ds[layer_name].values
+    for i, layer_name in enumerate(all_layers, 1):
+        log.info("  [%d/%d] Fetching %s", i, len(all_layers), layer_name)
+        arr = ds[layer_name].values  # triggers HTTP range-request read
         if arr.ndim == 3:
             arr = arr[0]
-        data[layer_name] = arr.ravel()[candidate_indices]
+        vals = arr[rows, cols]
+        if vals.dtype == np.float64:
+            vals = vals.astype(np.float32)
+        data[layer_name] = vals
+        # Release the full grid to free memory before the next layer.
+        # The xr.Dataset keeps a reference to the loaded numpy array,
+        # so we must drop the variable to allow GC to reclaim it.
+        ds = ds.drop_vars(layer_name)
 
     covariate_df = pd.DataFrame(data)
-
-    # Deduplicate (should already be unique, but safety)
-    covariate_df = covariate_df.drop_duplicates(subset=["cell"])
 
     log.info("Total covariate values extracted: %d pixels", len(covariate_df))
 
@@ -463,10 +506,14 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     output_dir = config["output_dir"]
 
     treatment_key.to_parquet(
-        os.path.join(output_dir, "treatment_cell_key.parquet"), index=False
+        os.path.join(output_dir, "treatment_cell_key.parquet"),
+        index=False,
+        compression="zstd",
     )
     covariate_df.to_parquet(
-        os.path.join(output_dir, "treatments_and_controls.parquet"), index=False
+        os.path.join(output_dir, "treatments_and_controls.parquet"),
+        index=False,
+        compression="zstd",
     )
 
     log.info("Saved treatment_cell_key.parquet and treatments_and_controls.parquet")
@@ -524,6 +571,7 @@ def main(argv: list[str] | None = None) -> None:
         pd.DataFrame(sites_out).to_parquet(
             os.path.join(config["output_dir"], "sites_processed.parquet"),
             index=False,
+            compression="zstd",
         )
 
         # Build and save matching formula
