@@ -15,6 +15,16 @@ def build_slope():
     return ee.Terrain.slope(dem).rename("slope")
 
 
+def build_aspect():
+    """Compute aspect in degrees from the SRTM DEM.
+
+    Aspect is the compass direction that a slope faces (0-360 degrees,
+    measured clockwise from north).  Flat areas are assigned a value of 0.
+    """
+    dem = ee.Image("USGS/SRTMGL1_003").select("elevation")
+    return ee.Terrain.aspect(dem).rename("aspect")
+
+
 def build_pop_growth():
     """Compute annualized population growth rate between 2000 and 2020.
 
@@ -237,6 +247,8 @@ def get_derived_image(covariate_name, covariate_config):
 
     if derived_type == "slope":
         return build_slope()
+    elif derived_type == "aspect":
+        return build_aspect()
     elif derived_type == "pop_growth":
         return build_pop_growth()
     elif derived_type == "total_biomass":

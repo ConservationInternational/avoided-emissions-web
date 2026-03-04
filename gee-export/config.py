@@ -89,6 +89,14 @@ COVARIATES = {
         "category": "terrain",
         "resample": "mean",
     },
+    "aspect": {
+        "asset": "USGS/SRTMGL1_003",
+        "select": ["elevation"],
+        "derived": "aspect",
+        "description": "Aspect (degrees), directional orientation from SRTM",
+        "category": "terrain",
+        "resample": "mean",
+    },
     # Accessibility
     "dist_cities": {
         "asset": "projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0",
