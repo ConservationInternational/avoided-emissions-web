@@ -1170,7 +1170,7 @@ def register_callbacks(app):
             return dbc.Alert(
                 "Admin access required.", color="danger", duration=4000
             ), no_update
-        success, message = change_user_role(user_id, new_role)
+        success, message = change_user_role(user_id, new_role, user.id)
         color = "success" if success else "danger"
         return dbc.Alert(message, color=color, duration=4000), (current_n or 0) + 1
 

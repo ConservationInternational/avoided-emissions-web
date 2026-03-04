@@ -1018,10 +1018,12 @@ def approve_user(user_id):
         db.close()
 
 
-def change_user_role(user_id, new_role):
+def change_user_role(user_id, new_role, acting_user_id=None):
     """Change a user's role. Returns (success, message)."""
     if new_role not in ("admin", "user"):
         return False, "Invalid role."
+    if acting_user_id and str(acting_user_id) == str(user_id) and new_role == "user":
+        return False, "You cannot change your own role to user."
     db = get_db()
     try:
         from models import User
