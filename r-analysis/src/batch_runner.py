@@ -28,12 +28,37 @@ from pathlib import Path
 
 import boto3
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    stream=sys.stderr,
-)
-logger = logging.getLogger("batch_runner")
+
+def _parse_log_level(raw_level):
+    """Convert a log-level string to a logging level, with safe fallback."""
+    return getattr(logging, str(raw_level).upper(), logging.INFO)
+
+
+def _configure_logging():
+    """Configure logging with reduced third-party noise by default."""
+    app_log_level = _parse_log_level(os.getenv("BATCH_RUNNER_LOG_LEVEL", "INFO"))
+    third_party_level = _parse_log_level(os.getenv("THIRD_PARTY_LOG_LEVEL", "WARNING"))
+
+    logging.basicConfig(
+        level=app_log_level,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+    )
+
+    for logger_name in (
+        "boto3",
+        "botocore",
+        "s3transfer",
+        "urllib3",
+    ):
+        logging.getLogger(logger_name).setLevel(third_party_level)
+
+    batch_logger = logging.getLogger("batch_runner")
+    batch_logger.setLevel(app_log_level)
+    return batch_logger
+
+
+logger = _configure_logging()
 
 # ---------------------------------------------------------------------------
 # S3 helpers (self-contained — no gefcore dependency)

@@ -32,6 +32,21 @@ from te_schemas.analysis import AnalysisRecord, AnalysisResults, AnalysisTimeSte
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_log_level(raw_level):
+    """Convert a log-level string to a logging level, with safe fallback."""
+    return getattr(logging, str(raw_level).upper(), logging.WARNING)
+
+
+def _configure_third_party_logging():
+    """Reduce noisy third-party logging while keeping warnings/errors visible."""
+    third_party_level = _parse_log_level(os.getenv("THIRD_PARTY_LOG_LEVEL", "WARNING"))
+    for logger_name in ("boto3", "botocore", "s3transfer", "urllib3"):
+        logging.getLogger(logger_name).setLevel(third_party_level)
+
+
+_configure_third_party_logging()
+
 # The avoided-emissions pipeline is pure R — no Google Earth Engine needed.
 REQUIRES_GEE = False
 
