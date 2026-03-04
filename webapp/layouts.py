@@ -1320,14 +1320,8 @@ def submit_layout(user):
                                                                 dbc.CardBody(
                                                                     dbc.Checklist(
                                                                         id="covariate-selection",
-                                                                        options=[
-                                                                            {
-                                                                                "label": c,
-                                                                                "value": c,
-                                                                            }
-                                                                            for c in ALL_COVARIATES
-                                                                        ],
-                                                                        value=DEFAULT_COVARIATES,
+                                                                        options=[],
+                                                                        value=[],
                                                                         inline=False,
                                                                         className="ms-2",
                                                                     ),

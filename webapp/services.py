@@ -534,6 +534,15 @@ def submit_analysis_task(
             "(admin0, admin1, admin2, ecoregion, or pa)."
         )
 
+    ready_covariates = set(get_ready_covariate_names())
+    requested_covariates = set(covariates or [])
+    unavailable_covariates = sorted(requested_covariates - ready_covariates)
+    if unavailable_covariates:
+        raise ValueError(
+            "The following covariates are not fully processed and ready: "
+            + ", ".join(unavailable_covariates)
+        )
+
     # Compute the matching extent polygon from PostGIS
     matching_extent = compute_matching_extent(gdf, exact_match_vars)
     from credential_store import get_decrypted_secret
@@ -1319,6 +1328,45 @@ def get_covariate_inventory():
         rows.append(row)
 
     return rows
+
+
+def get_ready_covariate_names():
+    """Return covariate names that are fully merged and ready for submission.
+
+    A covariate is considered ready when its most recent record in
+    ``covariates`` has status ``merged`` and a non-empty ``merged_url``.
+    The returned order follows the GEE export config definition.
+    """
+    import importlib.util
+
+    gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
+    spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
+    gee_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gee_config)
+    covariate_order = list(gee_config.COVARIATES.keys())
+
+    latest_records: dict[str, Covariate] = {}
+    db = get_db()
+    try:
+        for rec in db.query(Covariate).all():
+            existing = latest_records.get(rec.covariate_name)
+            if existing is None or (
+                rec.started_at
+                and (
+                    existing.started_at is None or rec.started_at > existing.started_at
+                )
+            ):
+                latest_records[rec.covariate_name] = rec
+    finally:
+        db.close()
+
+    ready_names = []
+    for covariate_name in covariate_order:
+        record = latest_records.get(covariate_name)
+        if record and record.status == "merged" and record.merged_url:
+            ready_names.append(covariate_name)
+
+    return ready_names
 
 
 # -- Covariate presets -------------------------------------------------------
