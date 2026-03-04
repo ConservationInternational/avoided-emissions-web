@@ -16,7 +16,7 @@ import flask_login
 import geopandas as gpd
 import pandas as pd
 import plotly.express as px
-from dash import Input, Output, State, callback_context, dcc, html, no_update
+from dash import ALL, Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from auth import (
@@ -528,6 +528,64 @@ def register_callbacks(app):
     # -- Task submission -----------------------------------------------------
 
     @app.callback(
+        Output("submit-lock-store", "data", allow_duplicate=True),
+        Input("submit-task-button", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def lock_submit_button(_n_clicks):
+        return True
+
+    @app.callback(
+        [
+            Output("submit-task-button", "disabled"),
+            Output("submit-task-button", "children"),
+            Output("submit-progress-message", "children"),
+        ],
+        Input("submit-lock-store", "data"),
+        Input({"type": "submit-alert", "scope": ALL}, "is_open"),
+    )
+    def sync_submit_button_state(is_locked, alert_is_open_values):
+        if not is_locked:
+            return False, "Submit Task", None
+
+        alert_is_open = any(alert_is_open_values or [])
+
+        if alert_is_open:
+            return (
+                True,
+                "Submit Task",
+                html.Small(
+                    "Close the message above to enable another submission.",
+                    className="text-muted",
+                ),
+            )
+
+        return (
+            True,
+            "Submitting…",
+            dbc.Alert(
+                "Submission in progress. Please wait…",
+                color="info",
+                className="mb-0 py-2",
+            ),
+        )
+
+    @app.callback(
+        Output("submit-lock-store", "data", allow_duplicate=True),
+        Input({"type": "submit-alert", "scope": ALL}, "is_open"),
+        State("submit-lock-store", "data"),
+        prevent_initial_call=True,
+    )
+    def unlock_submit_button_when_alert_closed(alert_is_open_values, is_locked):
+        if not is_locked:
+            raise PreventUpdate
+        if not alert_is_open_values:
+            raise PreventUpdate
+        if any(alert_is_open_values):
+            raise PreventUpdate
+        return False
+
+    @app.callback(
         [Output("submit-errors", "children"), Output("submit-result", "children")],
         Input("submit-task-button", "n_clicks"),
         State("task-name", "value"),
@@ -556,7 +614,16 @@ def register_callbacks(app):
         matching_job_queue,
     ):
         def _error_alert(msg):
-            return dbc.Alert(msg, color="danger", dismissable=True), None
+            return (
+                dbc.Alert(
+                    msg,
+                    id={"type": "submit-alert", "scope": "task-submit"},
+                    color="danger",
+                    dismissable=True,
+                    is_open=True,
+                ),
+                None,
+            )
 
         if not name:
             return _error_alert("Please enter a task name.")
@@ -639,8 +706,10 @@ def register_callbacks(app):
                     html.P("Task submitted successfully."),
                     dcc.Link(f"View task: {task_id}", href=f"/task/{task_id}"),
                 ],
+                id={"type": "submit-alert", "scope": "task-submit"},
                 color="success",
                 dismissable=True,
+                is_open=True,
             )
 
         except ValueError as exc:

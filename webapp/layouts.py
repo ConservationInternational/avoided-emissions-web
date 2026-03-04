@@ -1536,6 +1536,10 @@ def submit_layout(user):
                                                                 ),
                                                                 type="circle",
                                                             ),
+                                                            html.Div(
+                                                                id="submit-progress-message",
+                                                                className="mt-2",
+                                                            ),
                                                         ]
                                                     )
                                                 ],
@@ -1557,6 +1561,7 @@ def submit_layout(user):
             dcc.Store(id="parsed-sites-store"),
             dcc.Store(id="presets-store"),
             dcc.Store(id="site-set-refresh-store"),
+            dcc.Store(id="submit-lock-store", data=False),
         ]
     )
 
