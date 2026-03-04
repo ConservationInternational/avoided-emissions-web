@@ -23,8 +23,10 @@ import os
 import subprocess
 import tempfile
 import threading
+from datetime import datetime, timezone
 
 import boto3
+import pandas as pd
 
 from te_schemas.analysis import AnalysisRecord, AnalysisResults, AnalysisTimeStep
 
@@ -228,7 +230,40 @@ def run(params, log=None):
             f"Step {step_idx}/{len(steps)}: {label} (starting)",
         )
 
-        _run_r_script(script_path, config_path, params.get("site_id"), log)
+        if pipeline_mode and s == "match":
+            # In pipeline mode the match step runs as an AWS Batch array
+            # job — one child per site.  If the R subprocess crashes
+            # (e.g. OOM-killed, exit -9) we must NOT propagate the error
+            # because that would mark *this* array child as FAILED,
+            # which in turn marks the whole array job FAILED and blocks
+            # the summarize step.  Instead, write a failure marker JSON
+            # file so the summarize step can report the site as failed
+            # while still producing results for all other sites.
+            try:
+                _run_r_script(
+                    script_path,
+                    config_path,
+                    params.get("site_id"),
+                    log,
+                )
+            except RuntimeError as exc:
+                log.warning(
+                    "Match step failed — writing failure marker: %s",
+                    exc,
+                )
+                _write_match_failure_marker(
+                    matches_dir,
+                    output_dir,
+                    str(exc),
+                    log,
+                )
+        else:
+            _run_r_script(
+                script_path,
+                config_path,
+                params.get("site_id"),
+                log,
+            )
 
         log.info("Step %d/%d '%s' completed", step_idx, len(steps), s)
         _report_progress(
@@ -343,6 +378,53 @@ def _run_r_script(script_path, config_path, site_id, log):
         )
 
 
+def _write_match_failure_marker(matches_dir, output_dir, error_msg, log):
+    """Write a JSON failure marker for a site whose matching crashed.
+
+    Called when the R subprocess was killed (e.g. OOM exit -9) rather
+    than exiting cleanly.  We map the ``AWS_BATCH_JOB_ARRAY_INDEX`` env
+    var back to a site ``id_numeric`` by reading the treatment key
+    written by the extract step.  If the index cannot be resolved we
+    still write a marker with just the array index so the summarize step
+    can report the failure.
+    """
+    array_index = os.environ.get("AWS_BATCH_JOB_ARRAY_INDEX")
+    id_numeric = None
+    site_id = None
+
+    # Try to resolve the array index → id_numeric using the treatment key
+    tk_path = os.path.join(output_dir, "treatment_cell_key.parquet")
+    if array_index is not None and os.path.isfile(tk_path):
+        try:
+            tk = pd.read_parquet(tk_path, columns=["id_numeric"])
+            unique_ids = tk["id_numeric"].unique()  # preserves first-seen order
+            idx = int(array_index)
+            if 0 <= idx < len(unique_ids):
+                id_numeric = int(unique_ids[idx])
+        except Exception:  # noqa: BLE001
+            log.debug("Could not resolve array index to id_numeric", exc_info=True)
+
+    marker = {
+        "array_index": array_index,
+        "id_numeric": id_numeric,
+        "site_id": site_id,
+        "error": error_msg,
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+    if id_numeric is not None:
+        name = f"failed_{id_numeric}.json"
+    elif array_index is not None:
+        name = f"failed_array_{array_index}.json"
+    else:
+        name = "failed_unknown.json"
+
+    path = os.path.join(matches_dir, name)
+    with open(path, "w") as f:
+        json.dump(marker, f)
+    log.info("Failure marker written to %s", path)
+
+
 def _download_s3(s3_uri, local_path, log):
     """Download an S3 object to a local path."""
     bucket, key = _parse_s3_uri(s3_uri)
@@ -452,6 +534,7 @@ def _collect_results(output_dir, task_id, log):
     summary_dict = {
         "task_id": task_id,
         "n_sites": summary.get("n_sites", 0),
+        "n_failed_sites": summary.get("n_failed_sites", 0),
         "total_emissions_avoided_mgco2e": summary.get(
             "total_emissions_avoided_mgco2e", 0.0
         ),
@@ -461,6 +544,7 @@ def _collect_results(output_dir, task_id, log):
         "total_area_ha": summary.get("total_area_ha", 0.0),
         "year_range_min": year_range.get("min"),
         "year_range_max": year_range.get("max"),
+        "failed_sites": summary.get("failed_sites", []),
     }
 
     # --- per-site-year time series ---
@@ -529,8 +613,9 @@ def _collect_results(output_dir, task_id, log):
     )
 
     log.info(
-        "Collected results: %d sites, %.1f MgCO2e avoided",
+        "Collected results: %d sites (%d failed), %.1f MgCO2e avoided",
         summary_dict["n_sites"],
+        summary_dict["n_failed_sites"],
         summary_dict["total_emissions_avoided_mgco2e"],
     )
     return analysis.dump()
