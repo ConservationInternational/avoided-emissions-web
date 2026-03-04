@@ -326,17 +326,23 @@ def submit_analysis_task(
                     "name": "extract",
                     "command": ["extract"],
                     "timeout_seconds": 14400,  # 4 h
+                    "memory_mib": 61440,  # 60 GB — loads full COG grids
+                    "vcpus": 4,
                 },
                 {
                     "name": "match",
                     "command": ["match"],
                     "array_size": len(gdf),
                     "timeout_seconds": 14400,  # 4 h per site
+                    "memory_mib": 30720,  # 30 GB — one site at a time
+                    "vcpus": 2,
                 },
                 {
                     "name": "summarize",
                     "command": ["summarize"],
                     "timeout_seconds": 7200,  # 2 h
+                    "memory_mib": 16384,  # 16 GB — aggregation only
+                    "vcpus": 2,
                 },
             ],
         }
@@ -348,6 +354,8 @@ def submit_analysis_task(
         # to cover all of them (default: 14 h, see Config).
         batch_overrides = {
             "timeout_seconds": Config.BATCH_TIMEOUT_SECONDS,
+            "memory_mib": Config.BATCH_MEMORY_MIB,
+            "vcpus": Config.BATCH_VCPUS,
         }
         if Config.BATCH_JOB_QUEUE:
             batch_overrides["job_queue"] = Config.BATCH_JOB_QUEUE

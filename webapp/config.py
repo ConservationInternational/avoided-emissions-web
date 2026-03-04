@@ -60,6 +60,12 @@ class Config:
     # default fallback for any step that doesn't specify its own timeout.
     # Default: 50 400 s = 14 h.
     BATCH_TIMEOUT_SECONDS = int(os.environ.get("BATCH_TIMEOUT_SECONDS", "50400"))
+    # Default memory (MiB) and vCPU count for Batch containers.
+    # The extract step loads full COG grids into memory, so the default
+    # must be large enough to avoid OOM kills.  Per-step overrides in
+    # the pipeline descriptor can refine this for lighter steps.
+    BATCH_MEMORY_MIB = int(os.environ.get("BATCH_MEMORY_MIB", "61440"))  # 60 GB
+    BATCH_VCPUS = int(os.environ.get("BATCH_VCPUS", "4"))
 
     # SparkPost email configuration
     SPARKPOST_API_KEY = os.environ.get("SPARKPOST_API_KEY", "")
