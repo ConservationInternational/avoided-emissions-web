@@ -118,7 +118,7 @@ TASK_LIST_COLUMNS = [
         "sort": "desc",
         "sortIndex": 0,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
-        "tooltipField": "created_at",
+        "cellRenderer": "LocalDateTime",
     },
     {
         "headerName": "Submitted",
@@ -126,7 +126,7 @@ TASK_LIST_COLUMNS = [
         "flex": 1.5,
         "minWidth": 160,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
-        "tooltipField": "submitted_at",
+        "cellRenderer": "LocalDateTime",
     },
     {
         "headerName": "Completed",
@@ -134,7 +134,7 @@ TASK_LIST_COLUMNS = [
         "flex": 1.5,
         "minWidth": 160,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
-        "tooltipField": "completed_at",
+        "cellRenderer": "LocalDateTime",
     },
 ]
 
@@ -397,6 +397,7 @@ USER_MANAGEMENT_COLUMNS = [
         "sort": "desc",
         "sortIndex": 0,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "cellRenderer": "LocalDateTime",
     },
     {
         "headerName": "Last Login",
@@ -404,6 +405,7 @@ USER_MANAGEMENT_COLUMNS = [
         "flex": 1.5,
         "minWidth": 160,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "cellRenderer": "LocalDateTime",
     },
     {
         "headerName": "Active",
@@ -2116,11 +2118,25 @@ def settings_layout(user):
                                         html.P(
                                             [
                                                 html.Strong("Linked: "),
-                                                cred.created_at.strftime(
-                                                    "%Y-%m-%d %H:%M UTC"
-                                                )
-                                                if cred.created_at
-                                                else "—",
+                                                html.Span(
+                                                    cred.created_at.strftime(
+                                                        "%Y-%m-%dT%H:%M:%SZ"
+                                                    )
+                                                    if cred.created_at
+                                                    else "—",
+                                                    className="utc-datetime"
+                                                    if cred.created_at
+                                                    else "",
+                                                    **(
+                                                        {
+                                                            "data-utc": cred.created_at.strftime(
+                                                                "%Y-%m-%dT%H:%M:%SZ"
+                                                            )
+                                                        }
+                                                        if cred.created_at
+                                                        else {}
+                                                    ),
+                                                ),
                                             ]
                                         ),
                                     ]

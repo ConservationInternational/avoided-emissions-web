@@ -861,13 +861,15 @@ def poll_batch_tasks() -> dict:
     """Poll for active analysis task statuses and update the DB.
 
     Checks API-routed tasks (extract_job_id starts with ``api:``)
-    by querying the trends.earth API for execution status.  Called
-    periodically by Celery Beat (every 30 s).
+    by querying the trends.earth API for execution status.  Also
+    discovers API executions that have no local tracking record and
+    adopts them automatically.  Called periodically by Celery Beat
+    (every 30 s).
 
     Returns
     -------
     dict
-        ``{"checked": N, "updated": N}``
+        ``{"checked": N, "updated": N, "adopted": N}``
     """
     from datetime import datetime, timezone
 
@@ -880,11 +882,10 @@ def poll_batch_tasks() -> dict:
             .filter(AnalysisTask.status.in_(["submitted", "running"]))
             .all()
         )
-        if not active:
-            return {"checked": 0, "updated": 0}
 
         now = datetime.now(timezone.utc)
         updated = 0
+        client = None  # may be shared between polling and discovery
 
         # ---- Poll API-routed tasks ----
         # Background polling uses the system-level service credentials
@@ -980,7 +981,81 @@ def poll_batch_tasks() -> dict:
                         report_exception(task_id=str(task.id))
 
         db.commit()
-        return {"checked": len(active), "updated": updated}
+
+        # ---- Discover untracked API executions ----
+        # After handling locally-known tasks, query the trends.earth API
+        # for *all* executions of the avoided-emissions script and adopt
+        # any that don't already have a local AnalysisTask record.
+        adopted = 0
+        try:
+            from config import Config
+            from trendsearth_client import TrendsEarthClient
+
+            script_id = Config.TRENDSEARTH_SCRIPT_ID
+            if script_id and Config.TRENDSEARTH_CLIENT_ID:
+                # Re-use the client created during polling if available
+                if client is None:
+                    client = TrendsEarthClient(
+                        api_url=Config.TRENDSEARTH_API_URL,
+                        client_id=Config.TRENDSEARTH_CLIENT_ID,
+                        client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
+                    )
+
+                resp = client.list_executions(script_id=script_id) or {}
+                api_executions = resp.get("data", [])
+                if not isinstance(api_executions, list):
+                    api_executions = []
+
+                # Build set of API exec IDs we already track locally
+                known_exec_ids = set()
+                all_tasks = (
+                    db.query(AnalysisTask.extract_job_id)
+                    .filter(AnalysisTask.extract_job_id.isnot(None))
+                    .all()
+                )
+                for (job_id,) in all_tasks:
+                    if job_id.startswith("api:"):
+                        known_exec_ids.add(job_id[4:])
+
+                for exec_data in api_executions:
+                    eid = exec_data.get("id", "")
+                    if eid and eid not in known_exec_ids:
+                        try:
+                            from services import (
+                                adopt_api_execution,
+                                import_execution_results,
+                            )
+
+                            task_obj = adopt_api_execution(exec_data, db)
+                            if task_obj:
+                                # If finished, also import results
+                                api_status = exec_data.get("status", "").upper()
+                                if api_status == "FINISHED":
+                                    results_payload = client.get_execution_results(eid)
+                                    if results_payload:
+                                        import_execution_results(
+                                            str(task_obj.id),
+                                            results_payload,
+                                            db=db,
+                                        )
+                                adopted += 1
+                        except Exception as adopt_exc:
+                            db.rollback()
+                            logger.warning(
+                                "Failed to adopt API execution %s: %s",
+                                eid,
+                                adopt_exc,
+                            )
+                            report_exception(extra_data={"exec_id": eid})
+
+                if adopted:
+                    db.commit()
+                    logger.info("Discovery: adopted %d new API execution(s)", adopted)
+        except Exception as disc_exc:
+            logger.warning("API execution discovery failed: %s", disc_exc)
+            db.rollback()
+
+        return {"checked": len(active), "updated": updated, "adopted": adopted}
     except Exception:
         db.rollback()
         raise

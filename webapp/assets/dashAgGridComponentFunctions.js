@@ -321,7 +321,7 @@ dagcomponentfuncs.CovariateActions = function (props) {
 };
 
 /**
- * S3Status \u2013 renders a boolean S3 presence as a check mark or dash.
+ * S3Status – renders a boolean S3 presence as a check mark or dash.
  */
 dagcomponentfuncs.S3Status = function (props) {
     if (props.value) {
@@ -342,4 +342,21 @@ dagcomponentfuncs.S3Status = function (props) {
         { style: { color: "#adb5bd" } },
         "\u2014"
     );
+};
+
+/**
+ * LocalDateTime – converts a UTC ISO 8601 string to the browser's local
+ * timezone and renders it as plain text (YYYY-MM-DD HH:MM).
+ */
+dagcomponentfuncs.LocalDateTime = function (props) {
+    var v = props.value;
+    if (!v || v === "-") return v || "-";
+    var d = new Date(v);
+    if (isNaN(d.getTime())) return v;
+    var year = d.getFullYear();
+    var month = String(d.getMonth() + 1).padStart(2, "0");
+    var day = String(d.getDate()).padStart(2, "0");
+    var hours = String(d.getHours()).padStart(2, "0");
+    var minutes = String(d.getMinutes()).padStart(2, "0");
+    return year + "-" + month + "-" + day + " " + hours + ":" + minutes;
 };

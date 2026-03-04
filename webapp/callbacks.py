@@ -85,10 +85,11 @@ def _check_task_access(task_id, user):
 
 
 def _fmt_dt(dt):
-    """Format a datetime to a short string, or '-' if None."""
+    """Format a datetime as an ISO 8601 UTC string for client-side
+    conversion to the browser's local timezone, or '-' if *None*."""
     if dt is None:
         return "-"
-    return dt.strftime("%Y-%m-%d %H:%M")
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _record_covariate_action_failure(covariate_name, action, user_id):
@@ -1692,7 +1693,16 @@ def _build_overview(task, sites, totals):
                         html.P(f"Description: {task.description or 'None'}"),
                         html.P(f"Sites: {task.n_sites or 0}"),
                         html.P(f"Covariates: {', '.join(task.covariates or [])}"),
-                        html.P(f"Created: {task.created_at}"),
+                        html.P(
+                            [
+                                "Created: ",
+                                html.Span(
+                                    _fmt_dt(task.created_at),
+                                    className="utc-datetime",
+                                    **{"data-utc": _fmt_dt(task.created_at)},
+                                ),
+                            ]
+                        ),
                         html.P(f"Status: {task.status}"),
                     ]
                 ),

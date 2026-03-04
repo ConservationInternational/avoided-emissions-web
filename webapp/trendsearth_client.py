@@ -334,13 +334,30 @@ class TrendsEarthClient:
             )
             return []
 
-    def list_executions(self, script_id=None, status=None, per_page=50):
-        """List executions, optionally filtered."""
+    def list_executions(
+        self, script_id=None, status=None, updated_at=None, per_page=50
+    ):
+        """List executions, optionally filtered by script, status, or date.
+
+        Parameters
+        ----------
+        script_id : str, optional
+            Filter by script UUID.
+        status : str, optional
+            Filter by execution status (e.g. ``"FINISHED"``).
+        updated_at : str, optional
+            ISO-8601 timestamp — only return executions started after
+            this date.
+        per_page : int
+            Maximum number of results per request.
+        """
         params = {"per_page": per_page}
         if script_id:
             params["script_id"] = script_id
         if status:
             params["status"] = status
+        if updated_at:
+            params["updated_at"] = updated_at
         resp = requests.get(
             f"{self.api_url}/execution",
             params=params,

@@ -1043,6 +1043,105 @@ def import_execution_results(task_id, results_payload, db=None):
             db.close()
 
 
+def adopt_api_execution(exec_data, db):
+    """Create a local AnalysisTask from an API execution not yet tracked.
+
+    Called by the polling task when it discovers an avoided-emissions
+    execution on the trends.earth API that has no corresponding local
+    ``AnalysisTask`` record.  A stub task is created with as much
+    metadata as can be extracted from the execution's ``params``.
+
+    Parameters
+    ----------
+    exec_data : dict
+        Serialised execution record from the API (the ``data`` dict),
+        containing at minimum ``id``, ``status``, ``params``,
+        ``start_date``.
+    db : Session
+        Open DB session (caller manages commit/close).
+
+    Returns
+    -------
+    AnalysisTask
+        The newly created task object (already added to the session).
+    """
+    exec_id = exec_data["id"]
+    params = exec_data.get("params") or {}
+    api_status = (exec_data.get("status") or "PENDING").upper()
+
+    # Map API status to local status
+    status_map = {
+        "FINISHED": "succeeded",
+        "FAILED": "failed",
+        "CANCELLED": "cancelled",
+        "RUNNING": "running",
+        "READY": "running",
+    }
+    local_status = status_map.get(api_status, "submitted")
+
+    # Find a user to own the task — prefer the first admin
+    from models import User
+
+    owner = db.query(User).filter(User.role == "admin").first()
+    if not owner:
+        owner = db.query(User).first()
+    if not owner:
+        logger.error(
+            "adopt_api_execution: no users in database, cannot adopt exec %s",
+            exec_id,
+        )
+        return None
+
+    # Reconstruct n_sites from the pipeline array_size if available
+    n_sites = 1
+    pipeline = params.get("pipeline") or []
+    for step in pipeline:
+        if isinstance(step, dict) and step.get("array_size"):
+            n_sites = step["array_size"]
+            break
+
+    task = AnalysisTask(
+        id=uuid.uuid4(),
+        name=params.get("task_id", f"Discovered: {exec_id[:8]}"),
+        description=f"Auto-discovered from trends.earth API execution {exec_id}",
+        submitted_by=owner.id,
+        status=local_status,
+        extract_job_id=f"api:{exec_id}",
+        config=params,
+        covariates=params.get("covariates", []),
+        n_sites=n_sites,
+        sites_s3_uri=params.get("sites_s3_uri"),
+        results_s3_uri=params.get("results_s3_uri"),
+        submitted_at=_parse_iso_datetime(exec_data.get("start_date")),
+        started_at=_parse_iso_datetime(exec_data.get("start_date")),
+        completed_at=_parse_iso_datetime(exec_data.get("end_date")),
+        extra_metadata={"discovered_from_api": True, "api_exec_id": exec_id},
+    )
+
+    if local_status in ("failed",):
+        results = exec_data.get("results") or {}
+        task.error_message = results.get("error", "Execution failed on API")
+
+    db.add(task)
+    logger.info(
+        "adopt_api_execution: created local task %s for API exec %s (status=%s)",
+        task.id,
+        exec_id,
+        local_status,
+    )
+    return task
+
+
+def _parse_iso_datetime(value):
+    """Parse an ISO-8601 datetime string, returning None on failure."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
 def _cleanup_covariate_downstream(covariate_name, db):
     """Delete downstream artefacts for a covariate before re-export.
 
@@ -1527,7 +1626,7 @@ def get_covariate_inventory():
 
     # 4. Build inventory rows
     def _fmt(dt):
-        return dt.strftime("%Y-%m-%d %H:%M") if dt else ""
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else ""
 
     rows = []
     for name, cfg in covariates.items():
