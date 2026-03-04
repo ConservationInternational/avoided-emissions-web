@@ -321,6 +321,14 @@ def submit_analysis_task(
             #   extract  →  match (array)  →  summarize
             # Each job runs a single step; intermediate data is passed
             # through S3 at intermediate_s3_uri.
+            # Pipeline descriptor: the API's batch_run task will call
+            # submit_pipeline() to create chained AWS Batch jobs:
+            #   extract  →  match (array)  →  summarize
+            # Each step runs on Spot instances.  retry_attempts
+            # configures automatic retry when a Spot instance is
+            # reclaimed — only the interrupted portion reruns (for
+            # array jobs, only the affected child is retried, not the
+            # whole array).
             "pipeline": [
                 {
                     "name": "extract",
@@ -328,6 +336,7 @@ def submit_analysis_task(
                     "timeout_seconds": 14400,  # 4 h
                     "memory_mib": 61440,  # 60 GB — loads full COG grids
                     "vcpus": 4,
+                    "retry_attempts": 3,
                 },
                 {
                     "name": "match",
@@ -336,6 +345,7 @@ def submit_analysis_task(
                     "timeout_seconds": 14400,  # 4 h per site
                     "memory_mib": 30720,  # 30 GB — one site at a time
                     "vcpus": 2,
+                    "retry_attempts": 5,  # array children retry independently
                 },
                 {
                     "name": "summarize",
@@ -343,6 +353,7 @@ def submit_analysis_task(
                     "timeout_seconds": 7200,  # 2 h
                     "memory_mib": 16384,  # 16 GB — aggregation only
                     "vcpus": 2,
+                    "retry_attempts": 3,
                 },
             ],
         }
