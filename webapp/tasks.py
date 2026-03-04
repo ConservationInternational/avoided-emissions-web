@@ -864,15 +864,12 @@ def poll_batch_tasks() -> dict:
     by querying the trends.earth API for execution status.  Called
     periodically by Celery Beat (every 30 s).
 
-    Also detects tasks stuck in ``pending`` status (never submitted)
-    and logs warnings so operators can investigate.
-
     Returns
     -------
     dict
         ``{"checked": N, "updated": N}``
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
     from models import AnalysisTask, get_db
 
@@ -883,42 +880,11 @@ def poll_batch_tasks() -> dict:
             .filter(AnalysisTask.status.in_(["submitted", "running"]))
             .all()
         )
-
-        # Detect tasks stuck in "pending" — these never reached
-        # the API and will never be polled without intervention.
-        stuck_cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
-        stuck_pending = (
-            db.query(AnalysisTask)
-            .filter(
-                AnalysisTask.status == "pending",
-                AnalysisTask.created_at < stuck_cutoff,
-            )
-            .all()
-        )
-        for stuck in stuck_pending:
-            age_min = (
-                datetime.now(timezone.utc) - stuck.created_at
-            ).total_seconds() / 60
-            logger.warning(
-                "[POLL] Task %s stuck in 'pending' for %.0f min "
-                "(never submitted to API). name=%r, error=%s",
-                stuck.id,
-                age_min,
-                stuck.name,
-                stuck.error_message or "none",
-            )
-
         if not active:
             return {"checked": 0, "updated": 0}
 
         now = datetime.now(timezone.utc)
         updated = 0
-
-        logger.info(
-            "[POLL] Checking %d active task(s): %s",
-            len(active),
-            ", ".join(f"{str(t.id)[:8]}({t.status})" for t in active),
-        )
 
         # ---- Poll API-routed tasks ----
         # Background polling uses the system-level service credentials
@@ -955,113 +921,39 @@ def poll_batch_tasks() -> dict:
                         api_status = exec_data.get("status", "").upper()
                         old_status = task.status
 
-                        # Log detailed execution state from the API
-                        batch_jobs = (
-                            exec_data.get("results", {}).get("batch_jobs")
-                            if isinstance(exec_data.get("results"), dict)
-                            else None
-                        )
-                        batch_statuses = (
-                            exec_data.get("results", {}).get("batch_statuses")
-                            if isinstance(exec_data.get("results"), dict)
-                            else None
-                        )
                         logger.info(
-                            "[POLL] Task %s (exec %s): api_status=%s, "
-                            "local_status=%s, batch_jobs=%s, "
-                            "batch_statuses=%s, start=%s",
+                            "Polling API task %s (exec %s): api_status=%s, local_status=%s",
                             task.id,
                             exec_id,
                             api_status,
                             old_status,
-                            batch_jobs,
-                            batch_statuses,
-                            exec_data.get("start_date", "?"),
                         )
 
                         if api_status == "FINISHED":
                             task.status = "succeeded"
                             task.completed_at = now
-                            logger.info("[POLL] Task %s → SUCCEEDED", task.id)
                         elif api_status == "FAILED":
                             task.status = "failed"
                             task.error_message = exec_data.get("results", {}).get(
                                 "error", "Execution failed on API"
                             )
                             task.completed_at = now
-                            logger.error(
-                                "[POLL] Task %s → FAILED: %s",
-                                task.id,
-                                task.error_message,
-                            )
                         elif api_status == "CANCELLED":
                             task.status = "cancelled"
                             task.completed_at = now
-                            logger.info("[POLL] Task %s → CANCELLED", task.id)
-
-                        # Fetch user-visible execution logs from the API
-                        # and store them in extra_metadata so the UI can
-                        # display them.  Use last_id to only pull new logs
-                        # on subsequent polls.
-                        meta = dict(task.extra_metadata or {})
-                        prev_logs = meta.get("api_logs", [])
-                        last_log_id = (
-                            max(entry["id"] for entry in prev_logs)
-                            if prev_logs
-                            else None
-                        )
-                        new_logs = client.get_execution_logs(
-                            exec_id, last_id=last_log_id
-                        )
-                        if new_logs:
-                            for log_entry in new_logs:
-                                logger.info(
-                                    "[POLL] Task %s log: [%s] %s",
-                                    task.id,
-                                    log_entry.get("level", "?"),
-                                    log_entry.get("text", ""),
-                                )
-                            meta["api_logs"] = prev_logs + new_logs
-                            task.extra_metadata = meta
                         elif api_status in ("RUNNING", "READY"):
                             task.status = "running"
                             if not task.started_at:
                                 task.started_at = now
-                            logger.info(
-                                "[POLL] Task %s → running (API %s)",
-                                task.id,
-                                api_status,
-                            )
-                        elif api_status in ("PENDING", "SUBMITTED"):
-                            # Task is queued but not yet picked up.
-                            # Log with age so operators can spot stalls.
-                            age_sec = (
-                                (now - task.submitted_at).total_seconds()
-                                if task.submitted_at
-                                else 0
-                            )
-                            logger.info(
-                                "[POLL] Task %s still %s on API (age=%.0fs, local=%s)",
-                                task.id,
-                                api_status,
-                                age_sec,
-                                old_status,
-                            )
+                        # PENDING / SUBMITTED → keep as "submitted"
 
                         if task.status != old_status:
-                            logger.info(
-                                "[POLL] Task %s status changed: %s → %s",
-                                task.id,
-                                old_status,
-                                task.status,
-                            )
                             updated += 1
                     except Exception as exc:
                         logger.warning(
-                            "[POLL] Failed to poll API status for task %s: %s",
+                            "Failed to poll API status for task %s: %s",
                             task.id,
                             exc,
-                            exc_info=True,
                         )
                         report_exception(task_id=str(task.id))
 

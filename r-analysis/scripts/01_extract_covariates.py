@@ -200,6 +200,8 @@ def load_covariates_lazy(
     arrays: dict[str, xr.DataArray] = {}
     ref_crs = None
     ref_res = None
+    ref_x = None
+    ref_y = None
 
     for name in covariate_names:
         uri = _s3_path(cog_bucket, cog_prefix, name)
@@ -219,6 +221,8 @@ def load_covariates_lazy(
         if ref_crs is None:
             ref_crs = layer_crs
             ref_res = layer_res
+            ref_x = da.coords["x"].values
+            ref_y = da.coords["y"].values
         else:
             if layer_crs != ref_crs:
                 raise RuntimeError(
@@ -232,6 +236,28 @@ def load_covariates_lazy(
                         f"Resolution mismatch: '{name}' has {layer_res}, "
                         f"expected {ref_res}"
                     )
+
+            # Snap coordinates to the reference grid so that all layers
+            # share identical x/y arrays.  Without this, layers whose
+            # resolution differs by a tiny amount (e.g. 1/120 vs GEE's
+            # 30 arc-second constant) end up with divergent coordinate
+            # values, causing rioxarray's clip_box to fail with
+            # "Bounds and transform are inconsistent".
+            if da.sizes["x"] == len(ref_x) and da.sizes["y"] == len(ref_y):
+                if not np.array_equal(da.coords["x"].values, ref_x):
+                    log.info("    Snapping '%s' coords to reference grid", name)
+                    da = da.assign_coords(x=ref_x, y=ref_y)
+            else:
+                log.warning(
+                    "Layer '%s' has different grid shape (%d×%d vs %d×%d) "
+                    "— reindexing to reference grid",
+                    name,
+                    da.sizes["x"],
+                    da.sizes["y"],
+                    len(ref_x),
+                    len(ref_y),
+                )
+                da = da.reindex(x=ref_x, y=ref_y, method="nearest", tolerance=0.01)
 
         arrays[name] = da
 
