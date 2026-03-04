@@ -317,13 +317,17 @@ def submit_analysis_task(
 
         # Attach AWS Batch overrides so the API routes this execution to
         # the correct job queue / job definition (if configured).
-        batch_overrides = {}
+        # Always include timeout_seconds — the pipeline runs three
+        # sequential steps so the Batch job timeout must be large enough
+        # to cover all of them (default: 14 h, see Config).
+        batch_overrides = {
+            "timeout_seconds": Config.BATCH_TIMEOUT_SECONDS,
+        }
         if Config.BATCH_JOB_QUEUE:
             batch_overrides["job_queue"] = Config.BATCH_JOB_QUEUE
         if Config.BATCH_JOB_DEFINITION:
             batch_overrides["job_definition"] = Config.BATCH_JOB_DEFINITION
-        if batch_overrides:
-            params["batch"] = batch_overrides
+        params["batch"] = batch_overrides
 
         # Submit via trends.earth API using the user's own OAuth2 creds
         user_creds = get_decrypted_secret(user_id)

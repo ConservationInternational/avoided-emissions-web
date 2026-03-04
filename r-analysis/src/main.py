@@ -22,6 +22,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 
 import boto3
 
@@ -40,6 +41,41 @@ STEP_SCRIPTS = {
     "match": "02_perform_matching.R",
     "summarize": "03_summarize_results.R",
 }
+
+# Step labels for user-visible log messages
+STEP_LABELS = {
+    "extract": "Extracting covariate values",
+    "match": "Propensity score matching",
+    "summarize": "Summarizing results",
+}
+
+
+# ---------------------------------------------------------------------------
+# Progress / log reporting helpers
+# ---------------------------------------------------------------------------
+
+
+def _report_progress(progress, log_text=None):
+    """Best-effort progress update via the trends.earth API.
+
+    Uses ``gefcore.api.patch_execution`` (requires ``EXECUTION_ID``,
+    ``API_URL``, ``API_USER``, ``API_PASSWORD`` in the environment —
+    all provided by the API's ``batch_run`` task).  Failures are logged
+    but never prevent the pipeline from continuing.
+    """
+    try:
+        from gefcore.api import patch_execution, save_log
+
+        patch_execution(json={"progress": progress})
+        if log_text:
+            save_log(json={"text": log_text, "level": "INFO"})
+    except ImportError:
+        pass  # gefcore not installed — skip silently
+    except Exception as exc:  # noqa: BLE001
+        # Best-effort: never let a reporting failure stop the pipeline
+        logging.getLogger(__name__).debug(
+            "Progress report failed (progress=%s): %s", progress, exc
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +163,10 @@ def run(params, log=None):
     )
     for step_idx, s in enumerate(steps, 1):
         script_path = os.path.join(R_SCRIPTS_DIR, STEP_SCRIPTS[s])
+        pct_start = int((step_idx - 1) / len(steps) * 100)
+        pct_end = int(step_idx / len(steps) * 100)
+
+        label = STEP_LABELS.get(s, s)
         log.info(
             "Running step %d/%d '%s': %s",
             step_idx,
@@ -134,8 +174,18 @@ def run(params, log=None):
             s,
             script_path,
         )
+        _report_progress(
+            pct_start,
+            f"Step {step_idx}/{len(steps)}: {label} (starting)",
+        )
+
         _run_r_script(script_path, config_path, params.get("site_id"), log)
+
         log.info("Step %d/%d '%s' completed", step_idx, len(steps), s)
+        _report_progress(
+            pct_end,
+            f"Step {step_idx}/{len(steps)}: {label} (completed)",
+        )
 
     # ----- collect results -----
     results = _collect_results(output_dir, task_id, log)
@@ -165,7 +215,12 @@ def _expand_steps(step):
 
 
 def _run_r_script(script_path, config_path, site_id, log):
-    """Execute a single R or Python script as a subprocess."""
+    """Execute a single R or Python script as a subprocess.
+
+    Output is streamed line-by-line so that long-running steps produce
+    visible log output in real time rather than buffering everything in
+    memory until completion.
+    """
     if script_path.endswith(".py"):
         cmd = ["python", script_path, "--config", config_path]
     else:
@@ -174,24 +229,55 @@ def _run_r_script(script_path, config_path, site_id, log):
         cmd += ["--site-id", site_id]
 
     log.info("$ %s", " ".join(cmd))
-    result = subprocess.run(  # nosec B603
+
+    proc = subprocess.Popen(  # nosec B603
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=R_STEP_TIMEOUT,
     )
 
-    if result.stdout:
-        for line in result.stdout.strip().splitlines():
-            log.info("[R] %s", line)
-    if result.stderr:
-        for line in result.stderr.strip().splitlines():
-            log.warning("[R stderr] %s", line)
+    def _stream(stream, prefix, level):
+        """Read *stream* line-by-line and log with *prefix*."""
+        try:
+            for line in stream:
+                line = line.rstrip("\n\r")
+                if line:
+                    log.log(level, "[%s] %s", prefix, line)
+        except ValueError:
+            pass  # stream closed
 
-    if result.returncode != 0:
+    # Read stdout and stderr concurrently so neither pipe blocks
+    stdout_thread = threading.Thread(
+        target=_stream,
+        args=(proc.stdout, "R", logging.INFO),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_stream,
+        args=(proc.stderr, "R stderr", logging.WARNING),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    try:
+        proc.wait(timeout=R_STEP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise RuntimeError(
+            f"R script {os.path.basename(script_path)} timed out "
+            f"after {R_STEP_TIMEOUT}s"
+        ) from None
+    finally:
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+
+    if proc.returncode != 0:
         raise RuntimeError(
             f"R script {os.path.basename(script_path)} failed "
-            f"(exit code {result.returncode})"
+            f"(exit code {proc.returncode})"
         )
 
 
