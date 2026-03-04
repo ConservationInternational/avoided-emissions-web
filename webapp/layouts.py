@@ -1482,7 +1482,7 @@ def submit_layout(user):
                                                                                                     html.Code(
                                                                                                         "ondemand_fleet_1TB-io2-disk"
                                                                                                     ),
-                                                                                                    " only when needed — it incurs higher cost.",
+                                                                                                    " only when needed — it incurs much higher costs.",
                                                                                                 ],
                                                                                                 className="text-muted",
                                                                                             ),
