@@ -21,32 +21,20 @@ import json
 import logging
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 
 import boto3
 import pandas as pd
+from bootstrap import ensure_scripts_dir_on_path
 
 from te_schemas.analysis import AnalysisRecord, AnalysisResults, AnalysisTimeStep
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_scripts_dir_on_path():
-    """Add r-analysis/scripts to sys.path for shared Python helpers."""
-    current_dir = Path(__file__).resolve().parent
-    candidate_dirs = (current_dir / "scripts", current_dir.parent / "scripts")
-    for scripts_dir in candidate_dirs:
-        scripts_dir_str = str(scripts_dir)
-        if scripts_dir.is_dir() and scripts_dir_str not in sys.path:
-            sys.path.insert(0, scripts_dir_str)
-            break
-
-
-_ensure_scripts_dir_on_path()
+ensure_scripts_dir_on_path(__file__)
 
 from logging_utils import configure_third_party_logging  # noqa: E402
 

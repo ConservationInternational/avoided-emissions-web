@@ -27,20 +27,9 @@ import uuid
 from pathlib import Path
 
 import boto3
+from bootstrap import ensure_scripts_dir_on_path
 
-
-def _ensure_scripts_dir_on_path():
-    """Add r-analysis/scripts to sys.path for shared Python helpers."""
-    current_dir = Path(__file__).resolve().parent
-    candidate_dirs = (current_dir / "scripts", current_dir.parent / "scripts")
-    for scripts_dir in candidate_dirs:
-        scripts_dir_str = str(scripts_dir)
-        if scripts_dir.is_dir() and scripts_dir_str not in sys.path:
-            sys.path.insert(0, scripts_dir_str)
-            break
-
-
-_ensure_scripts_dir_on_path()
+ensure_scripts_dir_on_path(__file__)
 
 from logging_utils import configure_third_party_logging, parse_log_level  # noqa: E402
 
