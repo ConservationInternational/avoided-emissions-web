@@ -90,6 +90,13 @@ message("  Found ", length(match_files), " match files")
 
 # Forest cover year columns
 fc_cols <- paste0("fc_", config$fc_years)
+fc_year_min <- min(config$fc_years)
+
+# Number of pre-intervention years to include in results (for plotting
+# treatment-vs-control deforestation baselines).  The actual range is
+# clamped to the available fc data (earliest year is fc_year_min + 1,
+# since we lose one year computing the diff).
+PRE_INTERVENTION_YEARS <- 5
 
 if (length(match_files) > 0) {
     required_match_cols <- c(
@@ -127,7 +134,14 @@ if (length(match_files) > 0) {
             ) %>%
             mutate(year = as.integer(str_replace(year, "fc_", ""))) %>%
             group_by(site_id, cell, treatment) %>%
-            filter(between(year, start_year[1] - 1, end_year[1])) %>%
+            # Include PRE_INTERVENTION_YEARS before start for baseline
+            # plotting; need one extra year for the diff() baseline.
+            filter(between(
+                year,
+                max(fc_year_min,
+                    start_year[1] - PRE_INTERVENTION_YEARS - 1),
+                end_year[1]
+            )) %>%
             # Convert forest cover fraction to hectares
             mutate(
                 forest_at_year_end = forest_at_year_end / 100 * area_ha
@@ -143,8 +157,13 @@ if (length(match_files) > 0) {
                 C_change = c(NA, diff(biomass_at_year_end)) * 0.5,
                 Emissions_MgCO2e = C_change * -3.67
             ) %>%
-            # Drop the year before start (only needed for initial fc)
-            filter(between(year, start_year[1], end_year[1])) %>%
+            # Drop the earliest year (only needed for diff() baseline)
+            filter(between(
+                year,
+                max(fc_year_min + 1,
+                    start_year[1] - PRE_INTERVENTION_YEARS),
+                end_year[1]
+            )) %>%
             as_tibble()
     }
 
@@ -176,9 +195,13 @@ if (length(match_files) > 0) {
         group_by(match_group, site_id, year) %>%
         summarise(
             cell = cell[treatment],
+            treatment_defor_ha = abs(forest_change_ha[treatment]),
+            control_defor_ha = abs(forest_change_ha[!treatment]),
             forest_loss_avoided_ha =
                 abs(forest_change_ha[!treatment]) -
                 abs(forest_change_ha[treatment]),
+            treatment_emissions_mgco2e = abs(Emissions_MgCO2e[treatment]),
+            control_emissions_mgco2e = abs(Emissions_MgCO2e[!treatment]),
             emissions_avoided_mgco2e =
                 abs(Emissions_MgCO2e[!treatment]) -
                 abs(Emissions_MgCO2e[treatment]),
@@ -186,8 +209,14 @@ if (length(match_files) > 0) {
         ) %>%
         group_by(site_id, year) %>%
         summarise(
+            treatment_defor_ha = sum(treatment_defor_ha, na.rm = TRUE),
+            control_defor_ha = sum(control_defor_ha, na.rm = TRUE),
             forest_loss_avoided_ha =
                 sum(forest_loss_avoided_ha, na.rm = TRUE),
+            treatment_emissions_mgco2e =
+                sum(treatment_emissions_mgco2e, na.rm = TRUE),
+            control_emissions_mgco2e =
+                sum(control_emissions_mgco2e, na.rm = TRUE),
             emissions_avoided_mgco2e =
                 sum(emissions_avoided_mgco2e, na.rm = TRUE),
             n_matched_pixels = n(),
@@ -200,25 +229,42 @@ if (length(match_files) > 0) {
         ) %>%
         mutate(
             # Scale up for sampled sites
+            treatment_defor_ha =
+                treatment_defor_ha / sampled_fraction,
+            control_defor_ha =
+                control_defor_ha / sampled_fraction,
             forest_loss_avoided_ha =
                 forest_loss_avoided_ha / sampled_fraction,
+            treatment_emissions_mgco2e =
+                treatment_emissions_mgco2e / sampled_fraction,
+            control_emissions_mgco2e =
+                control_emissions_mgco2e / sampled_fraction,
             emissions_avoided_mgco2e =
                 emissions_avoided_mgco2e / sampled_fraction
         )
 
     results_by_year %>%
         left_join(
-            sites %>% select(site_id, site_name),
+            sites %>% select(site_id, site_name, start_year),
             by = "site_id"
         ) %>%
+        mutate(
+            is_pre_intervention = year < start_year
+        ) %>%
+        select(-start_year) %>%
         write_csv(file.path(config$output_dir,
                             "results_by_site_year.csv"))
 
     message("  Per-site per-year results: ",
             nrow(results_by_year), " rows")
 
-    # Summarize totals by site
+    # Summarize totals by site (intervention period only)
     results_total <- results_by_year %>%
+        left_join(
+            sites %>% select(site_id, start_year),
+            by = "site_id"
+        ) %>%
+        filter(year >= start_year) %>%
         group_by(site_id) %>%
         summarise(
             forest_loss_avoided_ha =
@@ -248,10 +294,16 @@ if (length(match_files) > 0) {
     results_by_year <- tibble(
         site_id = character(),
         year = integer(),
+        treatment_defor_ha = numeric(),
+        control_defor_ha = numeric(),
         forest_loss_avoided_ha = numeric(),
+        treatment_emissions_mgco2e = numeric(),
+        control_emissions_mgco2e = numeric(),
         emissions_avoided_mgco2e = numeric(),
         n_matched_pixels = integer(),
-        sampled_fraction = numeric()
+        sampled_fraction = numeric(),
+        site_name = character(),
+        is_pre_intervention = logical()
     )
     results_total <- tibble(
         site_id = character(),

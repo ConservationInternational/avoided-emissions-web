@@ -314,6 +314,11 @@ class TaskResult(Base):
     year = Column(Integer, nullable=False)
     forest_loss_avoided_ha = Column(Float)
     emissions_avoided_mgco2e = Column(Float)
+    treatment_defor_ha = Column(Float)
+    control_defor_ha = Column(Float)
+    treatment_emissions_mgco2e = Column(Float)
+    control_emissions_mgco2e = Column(Float)
+    is_pre_intervention = Column(Boolean, default=False)
     n_matched_pixels = Column(Integer)
     sampled_fraction = Column(Float)
 

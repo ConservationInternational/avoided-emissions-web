@@ -281,6 +281,15 @@ RESULTS_TOTAL_COLUMNS = [
         "flex": 1,
         "minWidth": 110,
     },
+    {
+        "headerName": "Sampled %",
+        "field": "sampled_percent",
+        "flex": 0.8,
+        "minWidth": 100,
+        "filter": "agNumberColumnFilter",
+        "valueFormatter": {"function": "d3.format('.1f')(params.value)"},
+        "type": "numericColumn",
+    },
 ]
 
 RESULTS_YEARLY_COLUMNS = [
@@ -300,6 +309,24 @@ RESULTS_YEARLY_COLUMNS = [
         "filter": "agNumberColumnFilter",
         "sort": "asc",
         "sortIndex": 0,
+    },
+    {
+        "headerName": "Site Defor. (ha)",
+        "field": "treatment_defor_ha",
+        "flex": 1.2,
+        "minWidth": 140,
+        "filter": "agNumberColumnFilter",
+        "valueFormatter": {"function": "d3.format(',.1f')(params.value)"},
+        "type": "numericColumn",
+    },
+    {
+        "headerName": "Control Defor. (ha)",
+        "field": "control_defor_ha",
+        "flex": 1.2,
+        "minWidth": 150,
+        "filter": "agNumberColumnFilter",
+        "valueFormatter": {"function": "d3.format(',.1f')(params.value)"},
+        "type": "numericColumn",
     },
     {
         "headerName": "Emissions Avoided (MgCO₂e)",

@@ -964,6 +964,18 @@ def import_execution_results(task_id, results_payload, db=None):
             )
             return
 
+        # Store summary-level info (failed sites, subsampled sites) on the
+        # AnalysisTask so the UI can display diagnostics.
+        summary = results_payload.get("summary") or {}
+        task_obj = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+        if task_obj:
+            meta = dict(task_obj.extra_metadata or {})
+            meta["failed_sites"] = summary.get("failed_sites", [])
+            meta["n_failed_sites"] = summary.get("n_failed_sites", 0)
+            meta["subsampled_sites"] = summary.get("subsampled_sites", [])
+            meta["n_sites"] = summary.get("n_sites", 0)
+            task_obj.extra_metadata = meta
+
         # Delete any existing results (idempotent re-import)
         db.query(TaskResult).filter(TaskResult.task_id == task_id).delete()
         db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).delete()
@@ -980,6 +992,13 @@ def import_execution_results(task_id, results_payload, db=None):
                     year=ts["year"],
                     forest_loss_avoided_ha=values.get("forest_loss_avoided_ha"),
                     emissions_avoided_mgco2e=values.get("emissions_avoided_mgco2e"),
+                    treatment_defor_ha=values.get("treatment_defor_ha"),
+                    control_defor_ha=values.get("control_defor_ha"),
+                    treatment_emissions_mgco2e=values.get("treatment_emissions_mgco2e"),
+                    control_emissions_mgco2e=values.get("control_emissions_mgco2e"),
+                    is_pre_intervention=bool(
+                        metadata.get("is_pre_intervention", False)
+                    ),
                     n_matched_pixels=metadata.get("n_matched_pixels"),
                     sampled_fraction=metadata.get("sampled_fraction"),
                 )

@@ -16,7 +16,8 @@ import flask_login
 import geopandas as gpd
 import pandas as pd
 import plotly.express as px
-from dash import ALL, Input, Output, State, callback_context, dcc, html, no_update
+import plotly.graph_objects as go
+from dash import Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from auth import (
@@ -28,8 +29,6 @@ from auth import (
 )
 from config import report_exception
 from layouts import (
-    DEFAULT_MATCHING_JOB_QUEUE,
-    MATCHING_JOB_QUEUE_OPTIONS,
     RESULTS_TOTAL_COLUMNS,
     RESULTS_YEARLY_COLUMNS,
     _make_ag_grid,
@@ -44,7 +43,6 @@ from services import (
     force_remerge,
     get_covariate_inventory,
     get_covariate_presets,
-    get_ready_covariate_names,
     get_task_detail,
     get_task_list,
     get_user_site_set_detail,
@@ -328,17 +326,6 @@ def register_callbacks(app):
         return options, value
 
     @app.callback(
-        Output("covariate-selection", "options"),
-        Input("url", "pathname"),
-    )
-    def refresh_submit_covariate_options(pathname):
-        if pathname != "/submit":
-            raise PreventUpdate
-
-        ready_covariates = get_ready_covariate_names()
-        return [{"label": cov, "value": cov} for cov in ready_covariates]
-
-    @app.callback(
         [
             Output("upload-status", "children"),
             Output("site-set-action-status", "children"),
@@ -528,64 +515,6 @@ def register_callbacks(app):
     # -- Task submission -----------------------------------------------------
 
     @app.callback(
-        Output("submit-lock-store", "data", allow_duplicate=True),
-        Input("submit-task-button", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def lock_submit_button(_n_clicks):
-        return True
-
-    @app.callback(
-        [
-            Output("submit-task-button", "disabled"),
-            Output("submit-task-button", "children"),
-            Output("submit-progress-message", "children"),
-        ],
-        Input("submit-lock-store", "data"),
-        Input({"type": "submit-alert", "scope": ALL}, "is_open"),
-    )
-    def sync_submit_button_state(is_locked, alert_is_open_values):
-        if not is_locked:
-            return False, "Submit Task", None
-
-        alert_is_open = any(alert_is_open_values or [])
-
-        if alert_is_open:
-            return (
-                True,
-                "Submit Task",
-                html.Small(
-                    "Close the message above to enable another submission.",
-                    className="text-muted",
-                ),
-            )
-
-        return (
-            True,
-            "Submitting…",
-            dbc.Alert(
-                "Submission in progress. Please wait…",
-                color="info",
-                className="mb-0 py-2",
-            ),
-        )
-
-    @app.callback(
-        Output("submit-lock-store", "data", allow_duplicate=True),
-        Input({"type": "submit-alert", "scope": ALL}, "is_open"),
-        State("submit-lock-store", "data"),
-        prevent_initial_call=True,
-    )
-    def unlock_submit_button_when_alert_closed(alert_is_open_values, is_locked):
-        if not is_locked:
-            raise PreventUpdate
-        if not alert_is_open_values:
-            raise PreventUpdate
-        if any(alert_is_open_values):
-            raise PreventUpdate
-        return False
-
-    @app.callback(
         [Output("submit-errors", "children"), Output("submit-result", "children")],
         Input("submit-task-button", "n_clicks"),
         State("task-name", "value"),
@@ -593,11 +522,6 @@ def register_callbacks(app):
         State("parsed-sites-store", "data"),
         State("covariate-selection", "value"),
         State("exact-match-selection", "value"),
-        State("max-treatment-pixels", "value"),
-        State("control-multiplier", "value"),
-        State("min-site-area-ha", "value"),
-        State("min-glm-treatment-pixels", "value"),
-        State("matching-job-queue", "value"),
         prevent_initial_call=True,
     )
     def handle_submit(
@@ -607,23 +531,9 @@ def register_callbacks(app):
         sites_data,
         covariates,
         exact_match_vars,
-        max_treatment_pixels,
-        control_multiplier,
-        min_site_area_ha,
-        min_glm_treatment_pixels,
-        matching_job_queue,
     ):
         def _error_alert(msg):
-            return (
-                dbc.Alert(
-                    msg,
-                    id={"type": "submit-alert", "scope": "task-submit"},
-                    color="danger",
-                    dismissable=True,
-                    is_open=True,
-                ),
-                None,
-            )
+            return dbc.Alert(msg, color="danger", dismissable=True), None
 
         if not name:
             return _error_alert("Please enter a task name.")
@@ -636,28 +546,6 @@ def register_callbacks(app):
                 "Please select at least one exact match variable "
                 "(admin boundary, ecoregion, or protected area)."
             )
-
-        try:
-            max_treatment_pixels = int(max_treatment_pixels or 1000)
-            control_multiplier = int(control_multiplier or 50)
-            min_site_area_ha = float(min_site_area_ha or 100)
-            min_glm_treatment_pixels = int(min_glm_treatment_pixels or 15)
-        except (TypeError, ValueError):
-            return _error_alert("Other Matching Settings must be numeric values.")
-
-        if max_treatment_pixels < 1:
-            return _error_alert("Max treatment pixels must be at least 1.")
-        if control_multiplier < 1:
-            return _error_alert("Control multiplier must be at least 1.")
-        if min_site_area_ha < 0:
-            return _error_alert("Minimum site area must be zero or greater.")
-        if min_glm_treatment_pixels < 1:
-            return _error_alert("Min GLM treatment pixels must be at least 1.")
-
-        allowed_job_queues = {opt["value"] for opt in MATCHING_JOB_QUEUE_OPTIONS}
-        matching_job_queue = matching_job_queue or DEFAULT_MATCHING_JOB_QUEUE
-        if matching_job_queue not in allowed_job_queues:
-            return _error_alert("Please select a valid Batch job queue.")
 
         user = get_current_user()
         if not user:
@@ -694,11 +582,6 @@ def register_callbacks(app):
                 exact_match_vars=exact_match_vars,
                 fc_years=fc_years,
                 site_set_id=sites_data.get("site_set_id"),
-                max_treatment_pixels=max_treatment_pixels,
-                control_multiplier=control_multiplier,
-                min_site_area_ha=min_site_area_ha,
-                min_glm_treatment_pixels=min_glm_treatment_pixels,
-                matching_job_queue=matching_job_queue,
             )
 
             return None, dbc.Alert(
@@ -706,10 +589,8 @@ def register_callbacks(app):
                     html.P("Task submitted successfully."),
                     dcc.Link(f"View task: {task_id}", href=f"/task/{task_id}"),
                 ],
-                id={"type": "submit-alert", "scope": "task-submit"},
                 color="success",
                 dismissable=True,
-                is_open=True,
             )
 
         except ValueError as exc:
@@ -816,7 +697,7 @@ def register_callbacks(app):
 
         # Plots tab
         plots = (
-            _build_plots(results, totals)
+            _build_plots(results, totals, sites, task=task)
             if results
             else html.P("Results not yet available.", className="text-muted")
         )
@@ -1398,6 +1279,210 @@ def register_callbacks(app):
             return f"/task/{task_id}"
         raise PreventUpdate
 
+    # -- Site-level deforestation drill-down ----------------------------------
+
+    @app.callback(
+        Output("site-defor-plot-container", "children"),
+        Input("site-defor-selector", "value"),
+        State("site-defor-store", "data"),
+        prevent_initial_call=True,
+    )
+    def update_site_deforestation_plot(selected_site, store_data):
+        """Build per-site deforestation and emissions plots with intervention
+        date markers when a site is selected from the dropdown."""
+        if not selected_site or not store_data:
+            raise PreventUpdate
+
+        results_data = store_data.get("results", [])
+        sites_data = store_data.get("sites", {})
+        subsampled_data = store_data.get("subsampled", {})
+
+        # Filter results for selected site
+        site_rows = [r for r in results_data if r["site_id"] == selected_site]
+        if not site_rows:
+            return html.P("No data for selected site.", className="text-muted")
+
+        site_df = pd.DataFrame(site_rows).sort_values("year")
+        site_info = sites_data.get(selected_site, {})
+        site_name = site_info.get("site_name", selected_site)
+        start_date = site_info.get("start_date")
+        end_date = site_info.get("end_date")
+
+        # Check if this site was subsampled
+        sub_info = subsampled_data.get(selected_site)
+        sub_note = ""
+        if sub_info:
+            pct = sub_info.get("sampled_percent", 100)
+            sub_note = f" [subsampled {pct:.0f}%]"
+
+        children = []
+
+        # Show subsampling alert if applicable
+        if sub_info:
+            children.append(
+                dbc.Alert(
+                    f"This site was subsampled to {pct:.1f}% of pixels for "
+                    f"matching. Results are scaled up from the sampled fraction "
+                    f"({sub_info.get('sampled_fraction', 1.0):.4f}).",
+                    color="info",
+                    className="mb-2",
+                )
+            )
+
+        # --- Deforestation comparison plot ---
+        fig_defor = go.Figure()
+        fig_defor.add_trace(
+            go.Scatter(
+                x=site_df["year"],
+                y=site_df["treatment_defor_ha"],
+                mode="lines+markers",
+                name="Project Site",
+                line=dict(color="#2ca02c", width=2),
+                marker=dict(size=6),
+            )
+        )
+        fig_defor.add_trace(
+            go.Scatter(
+                x=site_df["year"],
+                y=site_df["control_defor_ha"],
+                mode="lines+markers",
+                name="Matched Controls",
+                line=dict(color="#d62728", width=2),
+                marker=dict(size=6),
+            )
+        )
+        # Intervention date markers
+        if start_date:
+            start_year = int(start_date[:4])
+            fig_defor.add_vline(
+                x=start_year,
+                line_dash="dash",
+                line_color="blue",
+                line_width=1.5,
+                annotation_text="Intervention Start",
+                annotation_position="top left",
+                annotation_font_color="blue",
+            )
+        if end_date:
+            end_year = int(end_date[:4])
+            fig_defor.add_vline(
+                x=end_year,
+                line_dash="dash",
+                line_color="orange",
+                line_width=1.5,
+                annotation_text="Intervention End",
+                annotation_position="top right",
+                annotation_font_color="orange",
+            )
+        fig_defor.update_layout(
+            title=f"Annual Deforestation: {site_name}{sub_note}",
+            xaxis_title="Year",
+            yaxis_title="Deforestation (ha)",
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+            hovermode="x unified",
+        )
+        children.append(dcc.Graph(figure=fig_defor))
+
+        # --- Emissions comparison plot ---
+        has_emissions = (
+            site_df["treatment_emissions_mgco2e"].sum() > 0
+            or site_df["control_emissions_mgco2e"].sum() > 0
+        )
+        if has_emissions:
+            fig_em = go.Figure()
+            fig_em.add_trace(
+                go.Scatter(
+                    x=site_df["year"],
+                    y=site_df["treatment_emissions_mgco2e"],
+                    mode="lines+markers",
+                    name="Project Site",
+                    line=dict(color="#2ca02c", width=2),
+                    marker=dict(size=6),
+                )
+            )
+            fig_em.add_trace(
+                go.Scatter(
+                    x=site_df["year"],
+                    y=site_df["control_emissions_mgco2e"],
+                    mode="lines+markers",
+                    name="Matched Controls",
+                    line=dict(color="#d62728", width=2),
+                    marker=dict(size=6),
+                )
+            )
+            if start_date:
+                start_year = int(start_date[:4])
+                fig_em.add_vline(
+                    x=start_year,
+                    line_dash="dash",
+                    line_color="blue",
+                    line_width=1.5,
+                    annotation_text="Intervention Start",
+                    annotation_position="top left",
+                    annotation_font_color="blue",
+                )
+            if end_date:
+                end_year = int(end_date[:4])
+                fig_em.add_vline(
+                    x=end_year,
+                    line_dash="dash",
+                    line_color="orange",
+                    line_width=1.5,
+                    annotation_text="Intervention End",
+                    annotation_position="top right",
+                    annotation_font_color="orange",
+                )
+            fig_em.update_layout(
+                title=f"Annual Emissions: {site_name}{sub_note}",
+                xaxis_title="Year",
+                yaxis_title="Emissions (MgCO₂e)",
+                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+                hovermode="x unified",
+            )
+            children.append(dcc.Graph(figure=fig_em))
+
+        # --- Avoided values bar chart ---
+        fig_avoided = go.Figure()
+        fig_avoided.add_trace(
+            go.Bar(
+                x=site_df["year"],
+                y=site_df["forest_loss_avoided_ha"],
+                name="Forest Loss Avoided (ha)",
+                marker_color="#17a2b8",
+            )
+        )
+        fig_avoided.update_layout(
+            title=f"Forest Loss Avoided by Year: {site_name}{sub_note}",
+            xaxis_title="Year",
+            yaxis_title="Forest Loss Avoided (ha)",
+            hovermode="x unified",
+        )
+        if start_date:
+            start_year = int(start_date[:4])
+            fig_avoided.add_vline(
+                x=start_year,
+                line_dash="dash",
+                line_color="blue",
+                line_width=1.5,
+                annotation_text="Intervention Start",
+                annotation_position="top left",
+                annotation_font_color="blue",
+            )
+        if end_date:
+            end_year = int(end_date[:4])
+            fig_avoided.add_vline(
+                x=end_year,
+                line_dash="dash",
+                line_color="orange",
+                line_width=1.5,
+                annotation_text="Intervention End",
+                annotation_position="top right",
+                annotation_font_color="orange",
+            )
+        children.append(dcc.Graph(figure=fig_avoided))
+
+        return html.Div(children)
+
     # -- Covariate presets ---------------------------------------------------
 
     @app.callback(
@@ -1596,15 +1681,6 @@ def register_callbacks(app):
 def _build_overview(task, sites, totals):
     """Build the overview cards for a task detail page."""
     cards = []
-    task_config = task.config or {}
-    matching_job_queue = task_config.get("matching_job_queue")
-    if not matching_job_queue:
-        matching_job_queue = (
-            (task_config.get("batch") or {}).get("job_queue")
-            if isinstance(task_config.get("batch"), dict)
-            else None
-        )
-    matching_job_queue = matching_job_queue or "Not recorded"
 
     # Task info card
     cards.append(
@@ -1613,11 +1689,9 @@ def _build_overview(task, sites, totals):
                 dbc.CardHeader("Task Information"),
                 dbc.CardBody(
                     [
-                        html.P(f"Task ID: {task.id}"),
                         html.P(f"Description: {task.description or 'None'}"),
                         html.P(f"Sites: {task.n_sites or 0}"),
                         html.P(f"Covariates: {', '.join(task.covariates or [])}"),
-                        html.P(f"Matching job queue: {matching_job_queue}"),
                         html.P(f"Created: {task.created_at}"),
                         html.P(f"Status: {task.status}"),
                     ]
@@ -1701,6 +1775,64 @@ def _build_overview(task, sites, totals):
             )
         )
 
+    # --- Failed sites alert --------------------------------------------------
+    meta = task.extra_metadata or {}
+    failed_sites = meta.get("failed_sites", [])
+    if failed_sites:
+        failed_items = []
+        for fs in failed_sites:
+            label = fs.get("site_id") or fs.get("id_numeric", "?")
+            error = fs.get("error", "Unknown error")
+            failed_items.append(html.Li(f"{label}: {error}"))
+        cards.append(
+            dbc.Alert(
+                [
+                    html.H5(
+                        f"{len(failed_sites)} site(s) failed matching",
+                        className="alert-heading",
+                    ),
+                    html.P(
+                        "The following sites could not be matched and are "
+                        "excluded from the results:",
+                        className="mb-2",
+                    ),
+                    html.Ul(failed_items, className="mb-0"),
+                ],
+                color="warning",
+                className="mb-3",
+            )
+        )
+
+    # --- Subsampled sites info -----------------------------------------------
+    subsampled_sites = meta.get("subsampled_sites", [])
+    if subsampled_sites:
+        sub_items = []
+        for ss in subsampled_sites:
+            label = ss.get("site_id") or ss.get("id_numeric", "?")
+            pct = ss.get("sampled_percent", 100)
+            frac = ss.get("sampled_fraction", 1.0)
+            sub_items.append(
+                html.Li(f"{label}: {pct:.1f}% sampled (fraction {frac:.4f})")
+            )
+        cards.append(
+            dbc.Alert(
+                [
+                    html.H5(
+                        f"{len(subsampled_sites)} site(s) were subsampled",
+                        className="alert-heading",
+                    ),
+                    html.P(
+                        "Large sites were subsampled for matching. Their "
+                        "results are scaled up from the sampled fraction:",
+                        className="mb-2",
+                    ),
+                    html.Ul(sub_items, className="mb-0"),
+                ],
+                color="info",
+                className="mb-3",
+            )
+        )
+
     return html.Div(cards)
 
 
@@ -1766,6 +1898,7 @@ def _build_results_content(results, totals, sites=None):
             "forest_loss_avoided_ha": t.forest_loss_avoided_ha or 0,
             "area_ha": t.area_ha or 0,
             "period": (f"{t.first_year}-{t.last_year}" if t.first_year else "-"),
+            "sampled_percent": ((t.sampled_fraction or 1.0) * 100),
         }
         for t in totals
     ]
@@ -1777,6 +1910,8 @@ def _build_results_content(results, totals, sites=None):
             {
                 "site_id": r.site_id,
                 "year": r.year,
+                "treatment_defor_ha": r.treatment_defor_ha or 0,
+                "control_defor_ha": r.control_defor_ha or 0,
                 "emissions_avoided_mgco2e": r.emissions_avoided_mgco2e or 0,
                 "forest_loss_avoided_ha": r.forest_loss_avoided_ha or 0,
                 "n_matched_pixels": r.n_matched_pixels or 0,
@@ -1840,10 +1975,31 @@ def _build_results_content(results, totals, sites=None):
     return html.Div(content)
 
 
-def _build_plots(results, totals):
-    """Build interactive plots for task results."""
+def _build_plots(results, totals, sites=None, task=None):
+    """Build interactive plots for task results.
+
+    Includes aggregate deforestation comparison (project sites vs matched
+    controls), existing avoided-emissions/forest-loss bar charts, and a
+    site-level drill-down section with intervention date markers.
+
+    Parameters
+    ----------
+    task : AnalysisTask, optional
+        The parent task object, used to read ``extra_metadata`` for
+        failed-site and subsampled-site annotations.
+    """
     if not results:
         return html.P("No results to plot.", className="text-muted")
+
+    # Extract diagnostic metadata from the task
+    meta = (task.extra_metadata or {}) if task else {}
+    failed_site_ids = {
+        fs.get("site_id") or fs.get("id_numeric") for fs in meta.get("failed_sites", [])
+    }
+    subsampled_map = {
+        ss.get("site_id") or ss.get("id_numeric"): ss
+        for ss in meta.get("subsampled_sites", [])
+    }
 
     # Convert to DataFrame
     df = pd.DataFrame(
@@ -1853,12 +2009,83 @@ def _build_plots(results, totals):
                 "year": r.year,
                 "emissions_avoided_mgco2e": r.emissions_avoided_mgco2e or 0,
                 "forest_loss_avoided_ha": r.forest_loss_avoided_ha or 0,
+                "treatment_defor_ha": r.treatment_defor_ha or 0,
+                "control_defor_ha": r.control_defor_ha or 0,
+                "treatment_emissions_mgco2e": r.treatment_emissions_mgco2e or 0,
+                "control_emissions_mgco2e": r.control_emissions_mgco2e or 0,
+                "is_pre_intervention": bool(r.is_pre_intervention),
             }
             for r in results
         ]
     )
 
     plots = []
+
+    # --- Aggregate deforestation comparison (treatment vs control) ----------
+    has_defor_data = (
+        df["treatment_defor_ha"].sum() > 0 or df["control_defor_ha"].sum() > 0
+    )
+    if has_defor_data:
+        agg_df = (
+            df.groupby("year")
+            .agg(
+                treatment_defor_ha=("treatment_defor_ha", "sum"),
+                control_defor_ha=("control_defor_ha", "sum"),
+            )
+            .reset_index()
+            .sort_values("year")
+        )
+        fig_defor = go.Figure()
+        fig_defor.add_trace(
+            go.Scatter(
+                x=agg_df["year"],
+                y=agg_df["treatment_defor_ha"],
+                mode="lines+markers",
+                name="Project Sites",
+                line=dict(color="#2ca02c", width=2),
+                marker=dict(size=6),
+            )
+        )
+        fig_defor.add_trace(
+            go.Scatter(
+                x=agg_df["year"],
+                y=agg_df["control_defor_ha"],
+                mode="lines+markers",
+                name="Matched Controls",
+                line=dict(color="#d62728", width=2),
+                marker=dict(size=6),
+            )
+        )
+        n_successful = len(df["site_id"].unique())
+        title_suffix = f" ({n_successful} sites"
+        if failed_site_ids:
+            title_suffix += f", {len(failed_site_ids)} failed"
+        title_suffix += ")"
+        fig_defor.update_layout(
+            title=(
+                "Annual Deforestation: Project Sites vs Matched Controls" + title_suffix
+            ),
+            xaxis_title="Year",
+            yaxis_title="Deforestation (ha)",
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+            hovermode="x unified",
+        )
+        # Shade the pre-intervention period
+        pre_years = df.loc[df["is_pre_intervention"], "year"]
+        if not pre_years.empty:
+            fig_defor.add_vrect(
+                x0=pre_years.min() - 0.5,
+                x1=pre_years.max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Pre-intervention",
+                annotation_position="top left",
+                annotation_font_color="gray",
+            )
+        plots.append(dcc.Graph(figure=fig_defor))
+
+    # --- Existing avoided-emissions bar charts -----------------------------
 
     # Emissions avoided over time (stacked by site)
     fig_emissions = px.bar(
@@ -1917,6 +2144,57 @@ def _build_plots(results, totals):
             },
         )
         plots.append(dcc.Graph(figure=fig_site_totals))
+
+    # --- Site-level drill-down section -------------------------------------
+    if has_defor_data:
+        # Build site options for the dropdown
+        site_ids = sorted(df["site_id"].unique())
+        site_info_map = {}
+        if sites:
+            for s in sites:
+                site_info_map[s.site_id] = {
+                    "site_name": s.site_name or s.site_id,
+                    "start_date": (str(s.start_date)[:10] if s.start_date else None),
+                    "end_date": str(s.end_date)[:10] if s.end_date else None,
+                }
+
+        # Annotate dropdown labels for subsampled sites
+        site_options = []
+        for sid in site_ids:
+            label = site_info_map.get(sid, {}).get("site_name", sid)
+            if sid in subsampled_map:
+                pct = subsampled_map[sid].get("sampled_percent", 100)
+                label += f" (subsampled {pct:.0f}%)"
+            site_options.append({"label": label, "value": sid})
+
+        # Include subsampled-site info in the store so the drill-down
+        # callback can annotate individual site plots.
+        store_data = {
+            "results": df.to_dict("records"),
+            "sites": site_info_map,
+            "subsampled": {sid: sub for sid, sub in subsampled_map.items()},
+        }
+
+        plots.append(html.Hr(className="my-4"))
+        plots.append(html.H5("Site-Level Deforestation Detail", className="mt-3"))
+        plots.append(
+            html.P(
+                "Select a site to view its deforestation trajectory "
+                "compared to matched controls, with intervention dates marked.",
+                className="text-muted",
+            )
+        )
+        plots.append(
+            dbc.Select(
+                id="site-defor-selector",
+                options=site_options,
+                placeholder="Select a site...",
+                className="mb-3",
+                style={"maxWidth": "400px"},
+            )
+        )
+        plots.append(dcc.Store(id="site-defor-store", data=store_data))
+        plots.append(html.Div(id="site-defor-plot-container"))
 
     return html.Div(plots)
 

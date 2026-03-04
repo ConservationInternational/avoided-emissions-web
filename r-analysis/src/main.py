@@ -554,6 +554,7 @@ def _collect_results(output_dir, task_id, log):
         "year_range_min": year_range.get("min"),
         "year_range_max": year_range.get("max"),
         "failed_sites": summary.get("failed_sites", []),
+        "subsampled_sites": summary.get("subsampled_sites", []),
     }
 
     # --- per-site-year time series ---
@@ -572,11 +573,25 @@ def _collect_results(output_dir, task_id, log):
                             "emissions_avoided_mgco2e": float(
                                 row.get("emissions_avoided_mgco2e", 0)
                             ),
+                            "treatment_defor_ha": float(
+                                row.get("treatment_defor_ha", 0)
+                            ),
+                            "control_defor_ha": float(row.get("control_defor_ha", 0)),
+                            "treatment_emissions_mgco2e": float(
+                                row.get("treatment_emissions_mgco2e", 0)
+                            ),
+                            "control_emissions_mgco2e": float(
+                                row.get("control_emissions_mgco2e", 0)
+                            ),
                         },
                         entity_name=row.get("site_name") or None,
                         metadata={
                             "n_matched_pixels": int(row.get("n_matched_pixels", 0)),
                             "sampled_fraction": float(row.get("sampled_fraction", 1)),
+                            "is_pre_intervention": row.get(
+                                "is_pre_intervention", ""
+                            ).upper()
+                            == "TRUE",
                         },
                     )
                 )
