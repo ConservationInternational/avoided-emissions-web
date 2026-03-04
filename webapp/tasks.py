@@ -932,6 +932,28 @@ def poll_batch_tasks() -> dict:
                         if api_status == "FINISHED":
                             task.status = "succeeded"
                             task.completed_at = now
+                            # Fetch and import results into the local DB
+                            try:
+                                results_payload = client.get_execution_results(exec_id)
+                                if results_payload:
+                                    from services import import_execution_results
+
+                                    import_execution_results(
+                                        str(task.id), results_payload, db=db
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Task %s finished but no results "
+                                        "returned by API",
+                                        task.id,
+                                    )
+                            except Exception as results_exc:
+                                logger.warning(
+                                    "Task %s finished but failed to import results: %s",
+                                    task.id,
+                                    results_exc,
+                                )
+                                report_exception(task_id=str(task.id))
                         elif api_status == "FAILED":
                             task.status = "failed"
                             task.error_message = exec_data.get("results", {}).get(

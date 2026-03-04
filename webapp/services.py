@@ -931,6 +931,99 @@ def get_task_detail(task_id):
         db.close()
 
 
+def import_execution_results(task_id, results_payload, db=None):
+    """Parse an AnalysisResults payload and save rows to TaskResult / TaskResultTotal.
+
+    Called by the polling task when an API execution finishes.  The
+    *results_payload* is the dict returned by
+    ``TrendsEarthClient.get_execution_results()`` — a serialised
+    ``AnalysisResults`` object with ``records`` (per-site totals) and
+    ``time_series`` (per-site-year observations).
+
+    This function is idempotent: existing result rows for the task are
+    deleted before new ones are inserted.
+
+    Parameters
+    ----------
+    task_id : str
+        UUID of the local ``AnalysisTask``.
+    results_payload : dict
+        Serialised ``AnalysisResults`` from the API.
+    db : Session, optional
+        Existing DB session.  If *None*, a new session is created and
+        committed/closed within this function.
+    """
+    own_session = db is None
+    if own_session:
+        db = get_db()
+
+    try:
+        if not results_payload:
+            logger.warning(
+                "import_execution_results(%s): empty results payload", task_id
+            )
+            return
+
+        # Delete any existing results (idempotent re-import)
+        db.query(TaskResult).filter(TaskResult.task_id == task_id).delete()
+        db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).delete()
+
+        # --- per-site-year time series → TaskResult ---
+        time_series = results_payload.get("time_series") or []
+        for ts in time_series:
+            values = ts.get("values", {})
+            metadata = ts.get("metadata", {})
+            db.add(
+                TaskResult(
+                    task_id=task_id,
+                    site_id=ts["entity_id"],
+                    year=ts["year"],
+                    forest_loss_avoided_ha=values.get("forest_loss_avoided_ha"),
+                    emissions_avoided_mgco2e=values.get("emissions_avoided_mgco2e"),
+                    n_matched_pixels=metadata.get("n_matched_pixels"),
+                    sampled_fraction=metadata.get("sampled_fraction"),
+                )
+            )
+
+        # --- per-site totals → TaskResultTotal ---
+        records = results_payload.get("records") or []
+        for rec in records:
+            values = rec.get("values", {})
+            metadata = rec.get("metadata", {})
+            db.add(
+                TaskResultTotal(
+                    task_id=task_id,
+                    site_id=rec["entity_id"],
+                    site_name=rec.get("entity_name"),
+                    forest_loss_avoided_ha=values.get("forest_loss_avoided_ha"),
+                    emissions_avoided_mgco2e=values.get("emissions_avoided_mgco2e"),
+                    area_ha=values.get("area_ha"),
+                    n_matched_pixels=metadata.get("n_matched_pixels"),
+                    sampled_fraction=metadata.get("sampled_fraction"),
+                    first_year=rec.get("period_start"),
+                    last_year=rec.get("period_end"),
+                    n_years=metadata.get("n_years"),
+                )
+            )
+
+        if own_session:
+            db.commit()
+
+        logger.info(
+            "import_execution_results(%s): imported %d time-series rows, %d total rows",
+            task_id,
+            len(time_series),
+            len(records),
+        )
+    except Exception:
+        if own_session:
+            db.rollback()
+        raise
+    finally:
+        if own_session:
+            db.close()
+
+
 def _cleanup_covariate_downstream(covariate_name, db):
     """Delete downstream artefacts for a covariate before re-export.
 
