@@ -29,7 +29,9 @@ import json
 import logging
 import math
 import os
+import random
 import sys
+import time
 import warnings
 
 import geopandas as gpd
@@ -195,6 +197,73 @@ def _open_single_cog(uri: str, name: str) -> tuple[str, xr.DataArray]:
     if "band" in da.dims and da.sizes["band"] == 1:
         da = da.squeeze("band", drop=True)
     return name, da
+
+
+def _is_transient_raster_error(exc: Exception) -> bool:
+    """Return True when *exc* looks like a transient network/COG read error."""
+    msg = f"{type(exc).__name__}: {exc}".lower()
+    transient_markers = (
+        "503",
+        "502",
+        "504",
+        "response_code",
+        "zipdecode",
+        "decoding error",
+        "i/o error",
+        "connection",
+        "timeout",
+    )
+    return any(marker in msg for marker in transient_markers)
+
+
+def _read_layer_values_with_retry(
+    ds: xr.Dataset,
+    layer_name: str,
+    uri: str,
+    clip_bounds: tuple[float, float, float, float],
+    rows: np.ndarray,
+    cols: np.ndarray,
+    max_attempts: int = 5,
+    base_delay_seconds: float = 1.5,
+) -> np.ndarray:
+    """Read candidate pixel values for a layer with retry on transient failures."""
+    delay = base_delay_seconds
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if attempt == 1:
+                arr = ds[layer_name].values
+            else:
+                _, da_retry = _open_single_cog(uri, layer_name)
+                da_retry = da_retry.rio.clip_box(*clip_bounds)
+                arr = da_retry.values
+
+            if arr.ndim == 3:
+                arr = arr[0]
+
+            vals = arr[rows, cols]
+            if vals.dtype == np.float64:
+                vals = vals.astype(np.float32)
+            return vals
+        except Exception as exc:
+            should_retry = attempt < max_attempts and _is_transient_raster_error(exc)
+            if not should_retry:
+                raise
+
+            sleep_for = delay + random.uniform(0, 0.5)
+            log.warning(
+                "Transient read error for '%s' (attempt %d/%d): %s. Retrying in %.1fs",
+                layer_name,
+                attempt,
+                max_attempts,
+                exc,
+                sleep_for,
+            )
+            gdal.ErrorReset()
+            time.sleep(sleep_for)
+            delay = min(delay * 2, 20.0)
+
+    raise RuntimeError(f"Exhausted retries while reading layer '{layer_name}'.")
 
 
 def load_covariates_lazy(
@@ -385,6 +454,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         + config["exact_match_vars"]
         + [f"fc_{y}" for y in config["fc_years"]]
     )
+    layer_uris = {name: _s3_path(cog_bucket, cog_prefix, name) for name in all_layers}
     log.info("Loading %d covariate layers from S3", len(all_layers))
 
     # --- 1. open lazily ---
@@ -408,9 +478,10 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         ext_bounds[2] + buffer_deg,
         ext_bounds[3] + buffer_deg,
     )
+    clip_bounds = clip_box.bounds
     log.info("Clipping covariates to matching extent bbox: %s", clip_box.bounds)
 
-    ds = ds.rio.clip_box(*clip_box.bounds)
+    ds = ds.rio.clip_box(*clip_bounds)
 
     # --- 3. grid metadata from the *unloaded* dataset ---
     # rioxarray reads CRS, transform, and shape from COG headers;
@@ -498,13 +569,14 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     }
     for i, layer_name in enumerate(all_layers, 1):
         log.info("  [%d/%d] Fetching %s", i, len(all_layers), layer_name)
-        arr = ds[layer_name].values  # triggers HTTP range-request read
-        if arr.ndim == 3:
-            arr = arr[0]
-        vals = arr[rows, cols]
-        if vals.dtype == np.float64:
-            vals = vals.astype(np.float32)
-        data[layer_name] = vals
+        data[layer_name] = _read_layer_values_with_retry(
+            ds=ds,
+            layer_name=layer_name,
+            uri=layer_uris[layer_name],
+            clip_bounds=clip_bounds,
+            rows=rows,
+            cols=cols,
+        )
         # Release the full grid to free memory before the next layer.
         # The xr.Dataset keeps a reference to the loaded numpy array,
         # so we must drop the variable to allow GC to reclaim it.
