@@ -754,7 +754,11 @@ def login_layout():
 
 
 def register_layout():
-    """Registration page layout."""
+    """Registration page layout.
+
+    Collects only name and email.  Once an admin approves the account
+    the user receives an email with a link to set their password.
+    """
     return dbc.Container(
         [
             navbar(),
@@ -793,19 +797,14 @@ def register_layout():
                                             id="register-email",
                                             type="email",
                                             placeholder="user@example.com",
-                                            className="mb-2",
-                                        ),
-                                        dbc.Label("Password"),
-                                        dbc.Input(
-                                            id="register-password",
-                                            type="password",
-                                            className="mb-2",
-                                        ),
-                                        dbc.Label("Confirm Password"),
-                                        dbc.Input(
-                                            id="register-password-confirm",
-                                            type="password",
                                             className="mb-3",
+                                        ),
+                                        html.Small(
+                                            "After registration, an administrator "
+                                            "will review your request. Once "
+                                            "approved, you'll receive an email "
+                                            "with a link to set your password.",
+                                            className="text-muted d-block mb-3",
                                         ),
                                         html.Div(
                                             id="register-message", className="mb-2"
@@ -916,7 +915,13 @@ def forgot_password_layout():
 
 
 def reset_password_layout(token=""):
-    """Reset-password page — sets a new password using the emailed token."""
+    """Reset-password page — sets a new password using the emailed token.
+
+    Includes real-time password requirements hints that update as the
+    user types (driven by a Dash callback).
+    """
+    req_item_style = {"fontSize": "0.85rem", "lineHeight": "1.6"}
+
     return dbc.Container(
         [
             navbar(),
@@ -950,17 +955,74 @@ def reset_password_layout(token=""):
                                         dbc.Input(
                                             id="reset-password",
                                             type="password",
-                                            className="mb-2",
+                                            className="mb-1",
+                                            debounce=False,
                                         ),
                                         dbc.Label("Confirm New Password"),
                                         dbc.Input(
                                             id="reset-password-confirm",
                                             type="password",
-                                            className="mb-3",
+                                            className="mb-2",
+                                            debounce=False,
+                                        ),
+                                        # Password requirements checklist
+                                        html.Div(
+                                            [
+                                                html.Small(
+                                                    "Password requirements:",
+                                                    className="fw-bold",
+                                                ),
+                                                html.Ul(
+                                                    [
+                                                        html.Li(
+                                                            "At least 12 characters",
+                                                            id="req-length",
+                                                            className="text-muted",
+                                                            style=req_item_style,
+                                                        ),
+                                                        html.Li(
+                                                            "One uppercase letter",
+                                                            id="req-uppercase",
+                                                            className="text-muted",
+                                                            style=req_item_style,
+                                                        ),
+                                                        html.Li(
+                                                            "One lowercase letter",
+                                                            id="req-lowercase",
+                                                            className="text-muted",
+                                                            style=req_item_style,
+                                                        ),
+                                                        html.Li(
+                                                            "One number",
+                                                            id="req-number",
+                                                            className="text-muted",
+                                                            style=req_item_style,
+                                                        ),
+                                                        html.Li(
+                                                            "One special character",
+                                                            id="req-special",
+                                                            className="text-muted",
+                                                            style=req_item_style,
+                                                        ),
+                                                        html.Li(
+                                                            "Passwords match",
+                                                            id="req-match",
+                                                            className="text-muted",
+                                                            style=req_item_style,
+                                                        ),
+                                                    ],
+                                                    className="mb-2",
+                                                    style={
+                                                        "listStyleType": "none",
+                                                        "paddingLeft": "0.5rem",
+                                                    },
+                                                ),
+                                            ],
+                                            className="mb-2",
                                         ),
                                         html.Div(id="reset-message", className="mb-2"),
                                         dbc.Button(
-                                            "Reset Password",
+                                            "Set Password",
                                             id="reset-button",
                                             color="primary",
                                             className="w-100",
@@ -2587,6 +2649,104 @@ def settings_layout(user):
         children.append(dbc.Row(dbc.Col(credential_card, width=8)))
 
     children.append(dbc.Row(dbc.Col(link_card, width=8)))
+
+    # -- Change Password card -----------------------------------------------
+    req_item_style = {"fontSize": "0.85rem", "lineHeight": "1.6"}
+    change_pw_card = dbc.Card(
+        [
+            dbc.CardHeader(
+                html.H5("Change Password", className="mb-0"),
+            ),
+            dbc.CardBody(
+                [
+                    dbc.Label("Current Password"),
+                    dbc.Input(
+                        id="change-pw-current",
+                        type="password",
+                        className="mb-2",
+                    ),
+                    dbc.Label("New Password"),
+                    dbc.Input(
+                        id="change-pw-new",
+                        type="password",
+                        className="mb-1",
+                        debounce=False,
+                    ),
+                    dbc.Label("Confirm New Password"),
+                    dbc.Input(
+                        id="change-pw-confirm",
+                        type="password",
+                        className="mb-2",
+                        debounce=False,
+                    ),
+                    # Real-time password requirements checklist
+                    html.Div(
+                        [
+                            html.Small(
+                                "Password requirements:",
+                                className="fw-bold",
+                            ),
+                            html.Ul(
+                                [
+                                    html.Li(
+                                        "At least 12 characters",
+                                        id="cp-req-length",
+                                        className="text-muted",
+                                        style=req_item_style,
+                                    ),
+                                    html.Li(
+                                        "One uppercase letter",
+                                        id="cp-req-uppercase",
+                                        className="text-muted",
+                                        style=req_item_style,
+                                    ),
+                                    html.Li(
+                                        "One lowercase letter",
+                                        id="cp-req-lowercase",
+                                        className="text-muted",
+                                        style=req_item_style,
+                                    ),
+                                    html.Li(
+                                        "One number",
+                                        id="cp-req-number",
+                                        className="text-muted",
+                                        style=req_item_style,
+                                    ),
+                                    html.Li(
+                                        "One special character",
+                                        id="cp-req-special",
+                                        className="text-muted",
+                                        style=req_item_style,
+                                    ),
+                                    html.Li(
+                                        "Passwords match",
+                                        id="cp-req-match",
+                                        className="text-muted",
+                                        style=req_item_style,
+                                    ),
+                                ],
+                                className="mb-2",
+                                style={
+                                    "listStyleType": "none",
+                                    "paddingLeft": "0.5rem",
+                                },
+                            ),
+                        ],
+                        className="mb-2",
+                    ),
+                    html.Div(id="change-pw-message", className="mb-2"),
+                    dbc.Button(
+                        "Change Password",
+                        id="change-pw-btn",
+                        color="primary",
+                        className="w-100",
+                    ),
+                ]
+            ),
+        ],
+        className="mb-4 shadow-sm",
+    )
+    children.append(dbc.Row(dbc.Col(change_pw_card, width=8)))
 
     children.append(
         dbc.Row(

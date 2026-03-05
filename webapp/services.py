@@ -20,7 +20,7 @@ import geopandas as gpd
 import pandas as pd
 from sqlalchemy import text
 
-from config import Config
+from config import Config, report_exception
 from models import (
     AnalysisTask,
     Covariate,
@@ -550,11 +550,17 @@ def compute_matching_extent(
     # Build a single GeoJSON geometry representing all sites
     sites_geojson = json.dumps(mapping(gdf.unary_union))
 
+    _SAFE_ID = __import__("re").compile(r"^[a-z_][a-z0-9_]*$")
+
     db = get_db()
     try:
         layer_extents = []
         for var_name in polygon_vars:
             table = _EXTENT_TABLE_MAP[var_name]
+            # Safety: table comes from the hardcoded _EXTENT_TABLE_MAP —
+            # assert it matches a safe identifier pattern to prevent SQL
+            # injection if the dict is ever populated from external input.
+            assert _SAFE_ID.match(table), f"Unsafe table name: {table}"
             result = db.execute(
                 text(
                     f"SELECT ST_AsGeoJSON(ST_Union(ST_MakeValid(geom))) "
@@ -972,16 +978,23 @@ def _fetch_sites_geojson_from_s3(sites_s3_uri):
         return None
 
 
-def update_task_info(task_id, name=None, description=None):
+def update_task_info(task_id, name=None, description=None, user_id=None):
     """Update the name and/or description of an AnalysisTask.
 
+    When *user_id* is provided the function verifies that the task
+    belongs to that user (defense-in-depth).  Callers should always
+    pass the authenticated user's ID.
+
     Returns the updated task dict ``{"name": ..., "description": ...}``
-    on success, or *None* if the task does not exist.
+    on success, or *None* if the task does not exist or access is denied.
     """
     db = get_db()
     try:
         task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
         if not task:
+            return None
+        if user_id is not None and str(task.submitted_by) != str(user_id):
+            # Admins should pass user_id=None to bypass the ownership check.
             return None
         if name is not None:
             task.name = name.strip()[:255]
@@ -1462,10 +1475,13 @@ def get_user_list():
 
 
 def approve_user(user_id):
-    """Approve a pending user account. Returns (success, message)."""
+    """Approve a pending user account and email them a set-password link.
+
+    Returns (success, message).
+    """
     db = get_db()
     try:
-        from models import User
+        from models import PasswordResetToken, User
 
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
@@ -1475,6 +1491,44 @@ def approve_user(user_id):
         user.is_approved = True
         user.updated_at = datetime.now(timezone.utc)
         db.commit()
+
+        # Send the newly-approved user a link to set their password.
+        try:
+            PasswordResetToken.invalidate_user_tokens(user.id, db)
+            reset_token = PasswordResetToken(user_id=user.id)
+            db.add(reset_token)
+            db.commit()
+
+            from config import Config
+
+            set_pw_url = f"{Config.APP_URL}/reset-password?token={reset_token.token}"
+            html_body = f"""
+            <p>Hello {user.name},</p>
+
+            <p>Your Avoided Emissions account has been approved! To get
+            started, please set your password by clicking the link below.
+            This link will expire in 1 hour.</p>
+
+            <p><a href=\"{set_pw_url}\">Set Your Password</a></p>
+
+            <p>If you cannot click the link, copy and paste this URL into
+            your browser:</p>
+            <p>{set_pw_url}</p>
+            """
+            from email_service import send_html_email
+
+            send_html_email(
+                recipients=[user.email],
+                html=html_body,
+                subject="[Avoided Emissions] Account Approved — Set Your Password",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send set-password email to newly approved user %s",
+                user.email,
+            )
+            report_exception(approved_user_email=user.email)
+
         return True, f"User {user.email} approved."
     except Exception:
         db.rollback()
@@ -1998,7 +2052,7 @@ def create_share_link(task_id, user_id, expiry_days=7):
     user_id : str
         UUID of the user creating the link.
     expiry_days : int
-        Number of days until the link expires (default 7).
+        Number of days until the link expires (default 7, max 90).
 
     Returns
     -------
@@ -2006,6 +2060,9 @@ def create_share_link(task_id, user_id, expiry_days=7):
         ``{"token": ..., "expires_at": ..., "id": ...}`` on success.
     """
     from models import TaskShareLink
+
+    # Clamp expiry to a reasonable range (1–90 days)
+    expiry_days = max(1, min(int(expiry_days), 90))
 
     db = get_db()
     try:
@@ -2063,11 +2120,12 @@ def list_share_links(task_id):
         db.close()
 
 
-def revoke_share_link(link_id, user_id):
+def revoke_share_link(link_id, user_id, task_id=None):
     """Revoke a share link by setting ``is_active`` to False.
 
-    Only the task owner (or an admin) should call this — the caller is
-    responsible for the authorisation check.
+    Validates that the link belongs to the expected *task_id* (if
+    provided) to prevent cross-object attacks where a forged request
+    pairs a valid task_id with a foreign link_id.
 
     Returns ``True`` if the link was found and revoked.
     """
@@ -2077,6 +2135,11 @@ def revoke_share_link(link_id, user_id):
     try:
         link = db.query(TaskShareLink).filter(TaskShareLink.id == link_id).first()
         if not link:
+            return False
+        # Cross-validate: link must belong to the task the caller has
+        # access to.  Without this check a user who can view task A
+        # could revoke a link belonging to task B.
+        if task_id is not None and str(link.task_id) != str(task_id):
             return False
         link.is_active = False
         db.commit()

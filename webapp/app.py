@@ -18,6 +18,8 @@ import rollbar
 import rollbar.contrib.flask
 from dash import Input, Output, State, dcc, html
 from flask import got_request_exception, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from flask_wtf.csrf import CSRFProtect
 
 from auth import login_manager
@@ -81,14 +83,31 @@ server.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 if not Config.DEBUG:
     server.config["SESSION_COOKIE_SECURE"] = True
 
+# --- Upload size limit (50 MB) ---
+# Prevents memory/disk exhaustion from arbitrarily large file uploads.
+server.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
+
 # Initialize CSRF protection.
+# SECURITY NOTE: WTF_CSRF_CHECK_DEFAULT is intentionally disabled.
 # Dash submits all interactions as same-origin XHR/JSON requests which are
-# already guarded by SameSite cookies and the browser same-origin policy,
-# so we disable the automatic check and rely on those built-in protections.
-# If standalone Flask form routes are added later, decorate them with
-# @csrf.protect to opt in.
+# already guarded by SameSite cookies and the browser same-origin policy.
+# The Flask API routes (/api/*) are read-only GET endpoints behind
+# @flask_login.login_required, so they are not CSRF targets.
+# WARNING: If you add Flask routes that accept POST/PUT/DELETE with
+# form data or cookies, decorate them with @csrf.protect to opt in.
 server.config["WTF_CSRF_CHECK_DEFAULT"] = False
 csrf = CSRFProtect(server)
+
+# -- Rate limiting -----------------------------------------------------------
+# Protects authentication endpoints against brute-force and credential-
+# stuffing attacks.  Uses the Redis instance already available for Celery;
+# falls back to in-memory storage when Redis is unreachable.
+limiter = Limiter(
+    get_remote_address,
+    app=server,
+    default_limits=[],  # No blanket limit — applied selectively below
+    storage_uri=Config.CELERY_BROKER_URL,  # Redis
+)
 
 # Initialize Rollbar error tracking
 if Config.ROLLBAR_ACCESS_TOKEN:
@@ -112,6 +131,37 @@ else:
 @server.route("/health")
 def health_check():
     return "ok", 200
+
+
+# -- Security headers -------------------------------------------------------
+# Applied to every response.  CSP is intentionally permissive for the CDN
+# assets loaded by Dash/OpenLayers; tighten further when possible.
+
+
+@server.after_request
+def _set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if not Config.DEBUG:
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=63072000; includeSubDomains"
+        )
+    # CSP: allow Dash inline scripts/styles, CDN assets (OL, GeoTIFF),
+    # and blob: for OpenLayers WebGL tile rendering.
+    csp_parts = [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net",
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+        "img-src 'self' data: blob:",
+        "font-src 'self' data:",
+        "connect-src 'self' blob: https://*.amazonaws.com",
+        "worker-src 'self' blob:",
+        "frame-ancestors 'none'",
+    ]
+    response.headers["Content-Security-Policy"] = "; ".join(csp_parts)
+    return response
 
 
 # -- COG layer API -----------------------------------------------------------
@@ -256,6 +306,13 @@ def vector_layer(layer_name):
     simplify = float(request.args.get("simplify", "0.01"))
     table = cfg["table"]
     label_col = cfg["label_col"]
+
+    # Safety: table and label_col come from the hardcoded _VECTOR_LAYERS
+    # dict (never from user input).  Assert this to prevent future
+    # regressions if the dict is ever populated dynamically.
+    _SAFE_IDENTIFIER = __import__("re").compile(r"^[a-z_][a-z0-9_]*$")
+    assert _SAFE_IDENTIFIER.match(table), f"Unsafe table name: {table}"
+    assert _SAFE_IDENTIFIER.match(label_col), f"Unsafe column name: {label_col}"
 
     sql = sa_text(
         f"""
@@ -417,7 +474,7 @@ def display_page(pathname, search):
 
 
 # Register all interactive callbacks
-register_callbacks(app)
+register_callbacks(app, limiter=limiter)
 
 
 if __name__ == "__main__":

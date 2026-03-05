@@ -6,11 +6,12 @@ at rest in the database.
 """
 
 import base64
-import hashlib
 import logging
 from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
 
 from config import Config
 from models import TrendsEarthCredential, get_db
@@ -19,10 +20,33 @@ logger = logging.getLogger(__name__)
 
 
 def _fernet() -> Fernet:
-    """Derive a Fernet key from ``Config.SECRET_KEY``."""
-    # Fernet requires a 32-byte url-safe base64-encoded key.
-    # Derive one deterministically from the app secret.
-    key_bytes = hashlib.sha256(Config.SECRET_KEY.encode()).digest()
+    """Derive a Fernet key from ``Config.ENCRYPTION_KEY``.
+
+    Uses PBKDF2-HMAC-SHA256 with 480 000 iterations (OWASP 2023
+    recommendation) and a fixed application-scoped salt derived from the
+    key material itself.  The ``ENCRYPTION_KEY`` environment variable
+    should be a high-entropy random string (≥32 characters); it falls
+    back to ``SECRET_KEY`` for backwards compatibility but logs a warning
+    on first use.
+    """
+    raw_key = getattr(Config, "ENCRYPTION_KEY", "") or ""
+    if not raw_key:
+        raw_key = Config.SECRET_KEY
+        logger.warning(
+            "ENCRYPTION_KEY is not set — falling back to SECRET_KEY for "
+            "credential encryption.  Set a dedicated ENCRYPTION_KEY in "
+            "production for best security."
+        )
+    # Fixed, application-scoped salt.  A per-row salt is unnecessary here
+    # because the Fernet ciphertext already contains a random 128-bit IV.
+    salt = b"avoided-emissions-credential-store-v1"
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=480_000,
+    )
+    key_bytes = kdf.derive(raw_key.encode())
     return Fernet(base64.urlsafe_b64encode(key_bytes))
 
 

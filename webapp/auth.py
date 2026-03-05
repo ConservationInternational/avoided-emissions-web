@@ -63,6 +63,37 @@ def verify_password(password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
 
 
+def validate_password(password: str) -> list[str]:
+    """Validate password complexity requirements.
+
+    Returns a list of human-readable error messages.  An empty list
+    means the password is acceptable.
+
+    Requirements (aligned with trends.earth API):
+      - 12–128 characters
+      - At least one uppercase letter
+      - At least one lowercase letter
+      - At least one digit
+      - At least one special character
+    """
+    import re
+
+    errors: list[str] = []
+    if len(password) < 12:
+        errors.append("Password must be at least 12 characters.")
+    if len(password) > 128:
+        errors.append("Password must be at most 128 characters.")
+    if not re.search(r"[A-Z]", password):
+        errors.append("Password must contain at least one uppercase letter.")
+    if not re.search(r"[a-z]", password):
+        errors.append("Password must contain at least one lowercase letter.")
+    if not re.search(r"\d", password):
+        errors.append("Password must contain at least one digit.")
+    if not re.search(r"[^A-Za-z0-9]", password):
+        errors.append("Password must contain at least one special character.")
+    return errors
+
+
 def authenticate(email: str, password: str):
     """Authenticate a user by email and password.
 
@@ -84,19 +115,28 @@ def authenticate(email: str, password: str):
     return None
 
 
-def register_user(email: str, password: str, name: str):
+def register_user(email: str, name: str):
     """Create a new user account pending admin approval.
+
+    No password is collected at registration.  Once an admin approves the
+    account, the user receives an email with a link to set their password
+    (reuses the password-reset flow).
 
     Returns ``(True, message)`` on success or ``(False, error)`` on failure.
     """
+    import secrets
+
     db = get_db()
     try:
         existing = db.query(User).filter(User.email == email).first()
         if existing:
             return False, "An account with this email already exists."
+        # Store a random unusable hash — the user will set a real password
+        # via the emailed set-password link after admin approval.
+        placeholder_hash = hash_password(secrets.token_urlsafe(48))
         user = User(
             email=email,
-            password_hash=hash_password(password),
+            password_hash=placeholder_hash,
             name=name,
             role="user",
             is_approved=False,
@@ -116,7 +156,9 @@ def register_user(email: str, password: str, name: str):
 
         return (
             True,
-            "Account created. An administrator must approve your account before you can log in.",
+            "Account created. An administrator will review your request. "
+            "Once approved, you will receive an email with a link to set "
+            "your password.",
         )
     except Exception:
         db.rollback()
@@ -255,8 +297,9 @@ def reset_password_with_token(token_string: str, new_password: str):
     if not token_string or not new_password:
         return False, "Token and new password are required."
 
-    if len(new_password) < 8:
-        return False, "Password must be at least 8 characters."
+    errors = validate_password(new_password)
+    if errors:
+        return False, " ".join(errors)
 
     db = get_db()
     try:
@@ -279,6 +322,40 @@ def reset_password_with_token(token_string: str, new_password: str):
     except Exception:
         db.rollback()
         logger.exception("Error during password reset with token")
+        return False, "An error occurred. Please try again."
+    finally:
+        db.close()
+
+
+def change_password(user_id: str, current_password: str, new_password: str):
+    """Change the password of an authenticated user.
+
+    Verifies *current_password* before accepting the new one.
+    Returns ``(True, message)`` on success or ``(False, error)`` on failure.
+    """
+    if not current_password or not new_password:
+        return False, "Current and new passwords are required."
+
+    errors = validate_password(new_password)
+    if errors:
+        return False, " ".join(errors)
+
+    db = get_db()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return False, "User not found."
+
+        if not verify_password(current_password, user.password_hash):
+            return False, "Current password is incorrect."
+
+        user.password_hash = hash_password(new_password)
+        db.commit()
+        logger.info("Password changed for %s", user.email)
+        return True, "Your password has been changed."
+    except Exception:
+        db.rollback()
+        logger.exception("Error changing password for user %s", user_id)
         return False, "An error occurred. Please try again."
     finally:
         db.close()

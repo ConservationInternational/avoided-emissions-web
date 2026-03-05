@@ -37,7 +37,9 @@ def get_merged_covariates():
             existing = latest.get(rec.covariate_name)
             if existing is None or (
                 rec.started_at
-                and (existing.started_at is None or rec.started_at > existing.started_at)
+                and (
+                    existing.started_at is None or rec.started_at > existing.started_at
+                )
             ):
                 latest[rec.covariate_name] = rec
         return latest
@@ -107,9 +109,13 @@ def sample_overview(url, max_pixels=200000):
     # Use gdal_translate to fetch the smallest overview
     cmd = [
         "gdal_translate",
-        "-of", "GTiff",
-        "-outsize", str(target_x), str(target_y),
-        "-r", "nearest",
+        "-of",
+        "GTiff",
+        "-outsize",
+        str(target_x),
+        str(target_y),
+        "-r",
+        "nearest",
         "/vsicurl/" + url,
         tmp_path,
     ]
@@ -123,9 +129,13 @@ def sample_overview(url, max_pixels=200000):
         # Use gdal_translate to output raw binary, then read with numpy
         raw_cmd = [
             "gdal_translate",
-            "-of", "EHdr",  # flat binary
-            "-outsize", str(target_x), str(target_y),
-            "-r", "nearest",
+            "-of",
+            "EHdr",  # flat binary
+            "-outsize",
+            str(target_x),
+            str(target_y),
+            "-r",
+            "nearest",
             tmp_path,
             tmp_path + ".bil",
         ]
@@ -178,7 +188,11 @@ def analyze_layer(name, url):
         if nodata is not None:
             valid = data[data != nodata]
         else:
-            valid = data[np.isfinite(data)] if np.issubdtype(data.dtype, np.floating) else data
+            valid = (
+                data[np.isfinite(data)]
+                if np.issubdtype(data.dtype, np.floating)
+                else data
+            )
 
         if len(valid) == 0:
             info["error"] = "all pixels are nodata"
@@ -199,9 +213,7 @@ def analyze_layer(name, url):
 
         # Percentiles
         pcts = [1, 2, 5, 10, 25, 50, 75, 90, 95, 98, 99]
-        info["percentiles"] = {
-            str(p): float(np.percentile(valid, p)) for p in pcts
-        }
+        info["percentiles"] = {str(p): float(np.percentile(valid, p)) for p in pcts}
 
         # Zero fraction (important for nodata-as-zero layers)
         info["zero_fraction"] = round(float(np.sum(valid == 0)) / len(valid), 4)
@@ -291,7 +303,7 @@ def main():
                         f"p1={p['1']:.2f}, p50={p['50']:.2f}, p99={p['99']:.2f}, "
                         f"zeros={info['zero_fraction']:.1%}, "
                         f"nodata_frac={info.get('nodata_fraction', 0):.1%}"
-                        f"{', CATEGORICAL ('+str(len(info.get('unique_values',[])))+'v)' if info.get('is_categorical') else ''}"
+                        f"{', CATEGORICAL (' + str(len(info.get('unique_values', []))) + 'v)' if info.get('is_categorical') else ''}"
                     )
                 else:
                     print(f"    {name}: stats only - {info.get('gdal_stats', {})}")
@@ -323,7 +335,9 @@ def main():
         p = info["percentiles"]
         cat = info.get("is_categorical", False)
         if cat:
-            print(f"\n{name}: CATEGORICAL ??? {len(info.get('unique_values', []))} unique values")
+            print(
+                f"\n{name}: CATEGORICAL ??? {len(info.get('unique_values', []))} unique values"
+            )
         else:
             # Recommend using p2-p98 as min/max for continuous
             print(
@@ -333,10 +347,16 @@ def main():
             )
             # Check skewness
             if info["mean"] < info["median"] * 0.5:
-                print(f"  ??? Highly right-skewed (mean={info['mean']:.2f} << median={info['median']:.2f})")
-                print("  ??? Consider LOG or SQRT transform, or quantile-based color stops")
+                print(
+                    f"  ??? Highly right-skewed (mean={info['mean']:.2f} << median={info['median']:.2f})"
+                )
+                print(
+                    "  ??? Consider LOG or SQRT transform, or quantile-based color stops"
+                )
             elif info["mean"] > info["median"] * 2:
-                print(f"  ??? Highly left-skewed (mean={info['mean']:.2f} >> median={info['median']:.2f})")
+                print(
+                    f"  ??? Highly left-skewed (mean={info['mean']:.2f} >> median={info['median']:.2f})"
+                )
 
 
 if __name__ == "__main__":

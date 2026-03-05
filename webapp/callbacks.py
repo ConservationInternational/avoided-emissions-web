@@ -305,8 +305,44 @@ def _attach_totals_to_geojson(sites_geojson, totals):
     return json.dumps(fc)
 
 
-def register_callbacks(app):
-    """Register all Dash callbacks on the app instance."""
+def register_callbacks(app, limiter=None):
+    """Register all Dash callbacks on the app instance.
+
+    Parameters
+    ----------
+    app : dash.Dash
+        The Dash application.
+    limiter : flask_limiter.Limiter, optional
+        Flask-Limiter instance.  Currently unused directly (Dash funnels
+        all callbacks through a single POST endpoint) but reserved for
+        future use.  Auth-related callbacks are rate-limited via a
+        lightweight Redis counter (see ``_is_rate_limited``).
+    """
+
+    # -- Per-IP rate limiting for auth callbacks -----------------------------
+    # Flask-Limiter cannot distinguish individual Dash callbacks because
+    # they all share the /_dash-update-component route.  We use a simple
+    # Redis INCR + EXPIRE pattern instead.
+
+    def _is_rate_limited(action: str, max_attempts: int = 10, window: int = 300):
+        """Return True if the current IP has exceeded *max_attempts* for
+        *action* within *window* seconds.  Silently returns False when
+        Redis is unavailable."""
+        try:
+            from flask import request as _req
+            import redis as _redis
+
+            from config import Config as _Cfg
+
+            ip = _req.remote_addr or "unknown"
+            key = f"rl:{action}:{ip}"
+            r = _redis.from_url(_Cfg.CELERY_BROKER_URL, decode_responses=True)
+            count = r.incr(key)
+            if count == 1:
+                r.expire(key, window)
+            return count > max_attempts
+        except Exception:
+            return False
 
     # -- Login ---------------------------------------------------------------
 
@@ -318,6 +354,9 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def handle_login(n_clicks, email, password):
+        if _is_rate_limited("login", max_attempts=10, window=300):
+            return "Too many login attempts. Please try again in a few minutes."
+
         if not email or not password:
             return "Please enter email and password."
 
@@ -336,33 +375,23 @@ def register_callbacks(app):
         Input("register-button", "n_clicks"),
         State("register-name", "value"),
         State("register-email", "value"),
-        State("register-password", "value"),
-        State("register-password-confirm", "value"),
         prevent_initial_call=True,
     )
-    def handle_register(n_clicks, name, email, password, password_confirm):
-        if not name or not email or not password:
+    def handle_register(n_clicks, name, email):
+        if _is_rate_limited("register", max_attempts=5, window=600):
+            return dbc.Alert(
+                "Too many registration attempts. Please try again later.",
+                color="danger",
+            )
+
+        if not name or not email:
             return dbc.Alert(
                 "Please fill in all fields.",
                 color="warning",
                 duration=5000,
             )
 
-        if len(password) < 8:
-            return dbc.Alert(
-                "Password must be at least 8 characters.",
-                color="warning",
-                duration=5000,
-            )
-
-        if password != password_confirm:
-            return dbc.Alert(
-                "Passwords do not match.",
-                color="danger",
-                duration=5000,
-            )
-
-        success, message = register_user(email, password, name)
+        success, message = register_user(email, name)
         color = "success" if success else "danger"
         return dbc.Alert(message, color=color)
 
@@ -375,6 +404,12 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def handle_forgot_password(n_clicks, email):
+        if _is_rate_limited("forgot", max_attempts=5, window=600):
+            return dbc.Alert(
+                "Too many reset requests. Please try again later.",
+                color="danger",
+            )
+
         if not email:
             return dbc.Alert(
                 "Please enter your email address.",
@@ -411,12 +446,16 @@ def register_callbacks(app):
                 color="warning",
                 duration=5000,
             )
-        if len(password) < 8:
+
+        from auth import validate_password
+
+        pw_errors = validate_password(password)
+        if pw_errors:
             return dbc.Alert(
-                "Password must be at least 8 characters.",
+                html.Ul([html.Li(e) for e in pw_errors]),
                 color="warning",
-                duration=5000,
             )
+
         if password != password_confirm:
             return dbc.Alert(
                 "Passwords do not match.",
@@ -438,6 +477,42 @@ def register_callbacks(app):
                 )
             )
         return html.Div(result)
+
+    # -- Real-time password requirements hints -------------------------------
+
+    @app.callback(
+        [
+            Output("req-length", "className"),
+            Output("req-uppercase", "className"),
+            Output("req-lowercase", "className"),
+            Output("req-number", "className"),
+            Output("req-special", "className"),
+            Output("req-match", "className"),
+        ],
+        [
+            Input("reset-password", "value"),
+            Input("reset-password-confirm", "value"),
+        ],
+    )
+    def validate_password_requirements(password, confirm):
+        import re
+
+        pw = password or ""
+        conf = confirm or ""
+
+        def _cls(ok: bool) -> str:
+            if not pw:
+                return "text-muted"
+            return "text-success" if ok else "text-danger"
+
+        return (
+            _cls(len(pw) >= 12),
+            _cls(bool(re.search(r"[A-Z]", pw))),
+            _cls(bool(re.search(r"[a-z]", pw))),
+            _cls(bool(re.search(r"\d", pw))),
+            _cls(bool(re.search(r"[^A-Za-z0-9]", pw))),
+            _cls(bool(pw and pw == conf)),
+        )
 
     # -- Reusable site sets --------------------------------------------------
 
@@ -838,19 +913,25 @@ def register_callbacks(app):
                 exact_match_vars=exact_match_vars,
                 fc_years=fc_years,
                 site_set_id=sites_data.get("site_set_id"),
-                max_treatment_pixels=int(max_treatment_pixels or 1000),
-                control_multiplier=int(control_multiplier or 50),
-                min_site_area_ha=int(min_site_area_ha or 100),
-                min_glm_treatment_pixels=int(min_glm_treatment_pixels or 15),
-                caliper_width=float(
-                    caliper_width if caliper_width is not None else 0.2
+                max_treatment_pixels=min(int(max_treatment_pixels or 1000), 100_000),
+                control_multiplier=min(int(control_multiplier or 50), 500),
+                min_site_area_ha=min(int(min_site_area_ha or 100), 100_000),
+                min_glm_treatment_pixels=min(
+                    int(min_glm_treatment_pixels or 15), 10_000
                 ),
-                max_controls_per_treatment=int(
-                    max_controls_per_treatment
-                    if max_controls_per_treatment is not None
-                    else 1
+                caliper_width=min(
+                    float(caliper_width if caliper_width is not None else 0.2),
+                    5.0,
                 ),
-                match_memory_mib=int(match_memory_gb or 30) * 1024,
+                max_controls_per_treatment=min(
+                    int(
+                        max_controls_per_treatment
+                        if max_controls_per_treatment is not None
+                        else 1
+                    ),
+                    100,
+                ),
+                match_memory_mib=min(int(match_memory_gb or 30) * 1024, 122_880),
                 matching_job_queue=matching_job_queue,
             )
 
@@ -1186,7 +1267,7 @@ def register_callbacks(app):
         import json as _json
 
         link_id = _json.loads(trigger["prop_id"].rsplit(".", 1)[0])["index"]
-        revoke_share_link(link_id, str(user.id))
+        revoke_share_link(link_id, str(user.id), task_id=task_id)
 
         links = list_share_links(task_id)
         return _render_share_links_list(links, task_id)
@@ -1260,7 +1341,9 @@ def register_callbacks(app):
             )
 
         try:
-            result = update_task_info(task_id, name=name, description=description)
+            result = update_task_info(
+                task_id, name=name, description=description, user_id=user.id
+            )
             if not result:
                 return (
                     dbc.Alert("Task not found.", color="danger", className="mt-2"),
@@ -1338,6 +1421,10 @@ def register_callbacks(app):
         ],
     )
     def refresh_covariate_inventory(n, _export_result, _action_result):
+        user = get_current_user()
+        if not user or not user.is_admin:
+            raise PreventUpdate
+
         # GEE export status is polled by the Celery Beat worker;
         # this callback just reads the current DB/S3/GCS state.
         try:
@@ -1428,6 +1515,10 @@ def register_callbacks(app):
         Input("admin-refresh-interval", "n_intervals"),
     )
     def refresh_user_management(n):
+        user = get_current_user()
+        if not user or not user.is_admin:
+            raise PreventUpdate
+
         users = get_user_list()
         if not users:
             return [], "Total: 0"
@@ -1669,6 +1760,90 @@ def register_callbacks(app):
         return dbc.Alert(
             "Account unlinked. Refresh the page to update the display.",
             color="success",
+        )
+
+    # -- Settings: change password -------------------------------------------
+
+    @app.callback(
+        Output("change-pw-message", "children"),
+        Input("change-pw-btn", "n_clicks"),
+        [
+            State("change-pw-current", "value"),
+            State("change-pw-new", "value"),
+            State("change-pw-confirm", "value"),
+        ],
+        prevent_initial_call=True,
+    )
+    def handle_change_password(n_clicks, current_pw, new_pw, confirm_pw):
+        if _is_rate_limited("change_pw", max_attempts=5, window=300):
+            return dbc.Alert(
+                "Too many attempts. Please try again later.",
+                color="danger",
+            )
+
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        if not current_pw:
+            return dbc.Alert(
+                "Please enter your current password.",
+                color="warning",
+                duration=5000,
+            )
+        if not new_pw:
+            return dbc.Alert(
+                "Please enter a new password.",
+                color="warning",
+                duration=5000,
+            )
+        if new_pw != confirm_pw:
+            return dbc.Alert(
+                "New passwords do not match.",
+                color="danger",
+                duration=5000,
+            )
+
+        from auth import change_password
+
+        success, message = change_password(user.id, current_pw, new_pw)
+        color = "success" if success else "danger"
+        return dbc.Alert(message, color=color, duration=8000 if success else None)
+
+    # -- Settings: change password real-time hints ---------------------------
+
+    @app.callback(
+        [
+            Output("cp-req-length", "className"),
+            Output("cp-req-uppercase", "className"),
+            Output("cp-req-lowercase", "className"),
+            Output("cp-req-number", "className"),
+            Output("cp-req-special", "className"),
+            Output("cp-req-match", "className"),
+        ],
+        [
+            Input("change-pw-new", "value"),
+            Input("change-pw-confirm", "value"),
+        ],
+    )
+    def validate_change_pw_requirements(password, confirm):
+        import re
+
+        pw = password or ""
+        conf = confirm or ""
+
+        def _cls(ok: bool) -> str:
+            if not pw:
+                return "text-muted"
+            return "text-success" if ok else "text-danger"
+
+        return (
+            _cls(len(pw) >= 12),
+            _cls(bool(re.search(r"[A-Z]", pw))),
+            _cls(bool(re.search(r"[a-z]", pw))),
+            _cls(bool(re.search(r"\d", pw))),
+            _cls(bool(re.search(r"[^A-Za-z0-9]", pw))),
+            _cls(bool(pw and pw == conf)),
         )
 
     # -- Admin: approve user -------------------------------------------------

@@ -22,6 +22,7 @@ def _build_database_url() -> str:
 
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-production")
+    ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
     DATABASE_URL = _build_database_url()
     AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
     S3_BUCKET = os.environ.get("S3_BUCKET", "")
