@@ -359,3 +359,27 @@ h1, h2, h3, h4, h5 {
     color: #666;
 }
 
+/* —— Footer ———————————————————————————————————————————————————————————— */
+.ae-footer {
+    margin-top: 2rem;
+    padding: 1rem 0;
+    border-top: 1px solid #dbe1e7;
+    background-color: #f3f5f7;
+}
+
+.ae-footer-link {
+    color: #6c757d;
+    text-decoration: none;
+    font-size: 0.85rem;
+}
+
+.ae-footer-link:hover {
+    color: #2c3e50;
+    text-decoration: underline;
+}
+
+.ae-footer-separator {
+    margin: 0 0.5rem;
+    color: #adb5bd;
+}
+

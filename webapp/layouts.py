@@ -595,6 +595,38 @@ def navbar(user=None):
     )
 
 
+def footer():
+    """Footer bar with legal links — shown on authenticated pages."""
+    return html.Footer(
+        dbc.Container(
+            dbc.Row(
+                dbc.Col(
+                    [
+                        html.A(
+                            "Privacy Policy",
+                            href="https://www.conservation.org/privacy-policy",
+                            target="_blank",
+                            rel="noopener noreferrer",
+                            className="ae-footer-link",
+                        ),
+                        html.Span("·", className="ae-footer-separator"),
+                        html.A(
+                            "Terms of Use",
+                            href="https://www.conservation.org/terms-of-use",
+                            target="_blank",
+                            rel="noopener noreferrer",
+                            className="ae-footer-link",
+                        ),
+                    ],
+                    className="text-center",
+                ),
+            ),
+            fluid="lg",
+        ),
+        className="ae-footer",
+    )
+
+
 # -- Page layouts ------------------------------------------------------------
 
 

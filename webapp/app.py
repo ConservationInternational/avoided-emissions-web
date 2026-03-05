@@ -26,6 +26,7 @@ from config import Config
 from layouts import (
     admin_layout,
     dashboard_layout,
+    footer,
     forgot_password_layout,
     login_layout,
     not_found_layout,
@@ -359,52 +360,60 @@ def display_page(pathname, search):
 
         share_token = pathname.split("/shared/", 1)[1]
         if not share_token:
-            return not_found_layout(user)
+            return html.Div([not_found_layout(user), footer()])
         task_id = validate_share_token(share_token)
         if not task_id:
-            return dbc.Container(
-                html.Div(
-                    [
-                        html.H3("Link Expired or Invalid"),
-                        html.P(
-                            "This share link is no longer valid. "
-                            "It may have expired or been revoked."
-                        ),
-                        dbc.Button("Go to Login", href="/login", color="primary"),
-                    ],
-                    className="text-center mt-5",
-                )
+            return html.Div(
+                [
+                    dbc.Container(
+                        html.Div(
+                            [
+                                html.H3("Link Expired or Invalid"),
+                                html.P(
+                                    "This share link is no longer valid. "
+                                    "It may have expired or been revoked."
+                                ),
+                                dbc.Button(
+                                    "Go to Login", href="/login", color="primary"
+                                ),
+                            ],
+                            className="text-center mt-5",
+                        )
+                    ),
+                    footer(),
+                ]
             )
-        return task_detail_layout(user, task_id, shared_token=share_token)
+        return html.Div(
+            [task_detail_layout(user, task_id, shared_token=share_token), footer()]
+        )
 
     # All other pages require login
     if not user:
         return dcc.Location(pathname="/login", id="redirect-to-login")
 
     if pathname == "/" or pathname == "/dashboard":
-        return dashboard_layout(user)
-
-    if pathname == "/submit":
-        return submit_layout(user)
-
-    if pathname == "/settings":
-        return settings_layout(user)
-
-    if pathname == "/admin":
+        page = dashboard_layout(user)
+    elif pathname == "/submit":
+        page = submit_layout(user)
+    elif pathname == "/settings":
+        page = settings_layout(user)
+    elif pathname == "/admin":
         if not user.is_admin:
-            return not_found_layout(user)
-        return admin_layout(user)
-
-    if pathname and pathname.startswith("/task/"):
+            page = not_found_layout(user)
+        else:
+            page = admin_layout(user)
+    elif pathname and pathname.startswith("/task/"):
         task_id = pathname.split("/task/")[1]
         # Validate task_id is a proper UUID to prevent injection
         try:
             _uuid.UUID(task_id)
         except (ValueError, AttributeError):
-            return not_found_layout(user)
-        return task_detail_layout(user, task_id)
+            return html.Div([not_found_layout(user), footer()])
+        page = task_detail_layout(user, task_id)
+    else:
+        page = not_found_layout(user)
 
-    return not_found_layout(user)
+    return html.Div([page, footer()])
 
 
 # Register all interactive callbacks
