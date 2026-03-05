@@ -561,8 +561,8 @@ def _make_ag_grid(
 def navbar(user=None):
     """Top navigation bar."""
     nav_items = [
-        dbc.NavItem(dbc.NavLink("Dashboard", href="/")),
         dbc.NavItem(dbc.NavLink("Submit Task", href="/submit")),
+        dbc.NavItem(dbc.NavLink("View Tasks", href="/")),
     ]
     if user and user.is_admin:
         nav_items.append(dbc.NavItem(dbc.NavLink("Admin", href="/admin")))

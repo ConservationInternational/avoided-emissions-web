@@ -126,14 +126,19 @@ def _record_covariate_action_failure(covariate_name, action, user_id):
         db.close()
 
 
-def _openlayers_map_component(map_id, geojson_text, height="260px"):
+def _openlayers_map_component(
+    map_id, geojson_text, height="260px", enable_cog_layers=False
+):
+    attrs = {
+        "data-geojson": geojson_text or "",
+        "data-height": height,
+    }
+    if enable_cog_layers:
+        attrs["data-enable-cog-layers"] = "true"
     return html.Div(
         id=map_id,
         className="ol-sites-map",
-        **{
-            "data-geojson": geojson_text or "",
-            "data-height": height,
-        },
+        **attrs,
     )
 
 
@@ -548,7 +553,10 @@ def register_callbacks(app):
             store_data,
             preview_table,
             _openlayers_map_component(
-                "submit-sites-map", detail["geojson"], height="260px"
+                "submit-sites-map",
+                detail["geojson"],
+                height="260px",
+                enable_cog_layers=True,
             ),
             metadata,
         )
@@ -2327,7 +2335,7 @@ def _build_plots(results, totals, sites=None, task=None):
                     end_yr = s.end_date.year
                     if post_start is None or end_yr < post_start:
                         post_start = end_yr
-            if post_start is not None and post_start < agg_df["year"].max():
+            if post_start is not None:
                 fig_defor.add_vrect(
                     x0=post_start + 0.5,
                     x1=agg_df["year"].max() + 0.5,
@@ -2457,9 +2465,17 @@ def _build_plots(results, totals, sites=None, task=None):
 def _build_match_quality(task_id, task):
     """Build the match quality assessment section.
 
-    Fetches matched-pixel covariate data from S3 and produces overlaid
-    histograms comparing treatment vs control distributions for each
-    covariate. Also provides a download button for the full CSV.
+    Fetches matched-pixel covariate data, balance statistics, and
+    propensity scores from S3.  Produces:
+
+    * **Love plot** — horizontal dot plot of standardized mean differences
+      for each covariate with ±0.1 reference lines.
+    * **Propensity score QQ plot** — empirical quantile-quantile comparison
+      of treatment vs control propensity score distributions.
+    * **Covariate histograms** — overlaid treatment/control distributions
+      for each covariate (existing functionality).
+
+    Also provides download buttons for the underlying CSVs.
     """
     # Always render the callback target IDs so Dash doesn't error when
     # the callbacks reference them, even if the tab has no data yet.
@@ -2528,13 +2544,32 @@ def _build_match_quality(task_id, task):
             ]
         )
 
+    # Fetch balance statistics (Love plot data)
+    balance_df = None
+    balance_csv = download_results_csv(task_id, "balance")
+    if balance_csv:
+        balance_df = pd.read_csv(io.StringIO(balance_csv))
+        if balance_df.empty:
+            balance_df = None
+
+    # Fetch propensity scores (QQ plot data)
+    pscore_df = None
+    pscore_csv = download_results_csv(task_id, "propensity_scores")
+    if pscore_csv:
+        pscore_df = pd.read_csv(io.StringIO(pscore_csv))
+        if pscore_df.empty or "pscore" not in pscore_df.columns:
+            pscore_df = None
+        elif pscore_df["pscore"].dropna().empty:
+            pscore_df = None
+
     content = []
 
     content.append(
         html.P(
-            "Distribution of covariate values for matched treatment and "
-            "control pixels across all sites. Well-balanced matches should "
-            "show similar distributions between treatment and control groups.",
+            "Assessment of match quality between treatment and control "
+            "pixels. The Love plot shows covariate balance (standardized "
+            "mean differences), the QQ plot compares propensity score "
+            "distributions, and the histograms show per-covariate overlap.",
             className="text-muted mb-3",
         )
     )
@@ -2589,6 +2624,35 @@ def _build_match_quality(task_id, task):
         )
     )
 
+    # --- Love plot (balance plot) ------------------------------------------
+    if balance_df is not None:
+        content.append(html.H5("Covariate Balance (Love Plot)", className="mt-4 mb-2"))
+        content.append(
+            html.P(
+                "Standardized mean differences (SMD) for each covariate "
+                "after matching.  Values within the dashed lines (|SMD| < 0.1) "
+                "indicate good balance between treatment and control groups.",
+                className="text-muted mb-2",
+            )
+        )
+        content.append(_build_love_plot(balance_df, df))
+
+    # --- Propensity score QQ plot ------------------------------------------
+    if pscore_df is not None:
+        content.append(html.H5("Propensity Score QQ Plot", className="mt-4 mb-2"))
+        content.append(
+            html.P(
+                "Empirical quantile-quantile plot comparing the propensity "
+                "score distributions of matched treatment and control pixels. "
+                "Points close to the 45° line indicate similar distributions.",
+                className="text-muted mb-2",
+            )
+        )
+        content.append(_build_pscore_qq_plot(pscore_df, df))
+
+    # --- Covariate histograms (per-site filterable) ------------------------
+    content.append(html.H5("Covariate Distributions", className="mt-4 mb-2"))
+
     # Per-site selector for filtering distribution plots
     site_ids = sorted(df["site_id"].unique())
     site_options = [{"label": "All sites (aggregate)", "value": "__all__"}]
@@ -2640,6 +2704,148 @@ def _build_match_quality(task_id, task):
     content.append(dcc.Download(id="download-match-quality"))
 
     return html.Div(content)
+
+
+def _build_love_plot(balance_df, cov_df):
+    """Build a Love plot (balance dot plot) from the balance statistics CSV.
+
+    Shows a horizontal dot plot with one row per covariate.  The x-axis is
+    the Standardized Mean Difference (SMD) and dashed vertical lines mark
+    the ±0.1 threshold that is conventionally considered acceptable.
+
+    Parameters
+    ----------
+    balance_df : pd.DataFrame
+        Balance statistics with columns ``site_id``, ``covariate``, ``smd``.
+    cov_df : pd.DataFrame
+        Full covariate data (used only as a fallback if balance_df is
+        missing aggregate rows).
+    """
+    # Use aggregate balance (site_id == "__all__")
+    agg = balance_df[balance_df["site_id"] == "__all__"].copy()
+    if agg.empty:
+        return html.P(
+            "No aggregate balance statistics available.",
+            className="text-muted",
+        )
+
+    # Drop rows with missing SMD
+    agg = agg.dropna(subset=["smd"])
+    if agg.empty:
+        return html.P(
+            "All covariates have insufficient data for SMD calculation.",
+            className="text-muted",
+        )
+
+    # Sort by absolute SMD for visual clarity
+    agg = agg.sort_values("smd", key=lambda s: s.abs(), ascending=True)
+
+    # Colour-code by whether SMD is within the ±0.1 threshold
+    colors = ["#2ca02c" if abs(v) <= 0.1 else "#d62728" for v in agg["smd"]]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=agg["smd"],
+            y=agg["covariate"],
+            mode="markers",
+            marker=dict(size=10, color=colors),
+            hovertemplate="%{y}: SMD = %{x:.3f}<extra></extra>",
+        )
+    )
+    # Reference lines at ±0.1
+    fig.add_vline(x=0.1, line_dash="dash", line_color="gray", opacity=0.6)
+    fig.add_vline(x=-0.1, line_dash="dash", line_color="gray", opacity=0.6)
+    fig.add_vline(x=0, line_color="black", opacity=0.3)
+
+    fig.update_layout(
+        title="Love Plot: Standardized Mean Differences After Matching",
+        xaxis_title="Standardized Mean Difference (SMD)",
+        yaxis_title="",
+        showlegend=False,
+        height=max(300, 40 * len(agg) + 100),
+        margin=dict(l=200, r=40, t=50, b=50),
+        xaxis=dict(zeroline=True),
+    )
+
+    return dcc.Graph(figure=fig)
+
+
+def _build_pscore_qq_plot(pscore_df, cov_df):
+    """Build an empirical QQ plot comparing treatment vs control propensity
+    score distributions.
+
+    For each group, scores are sorted and quantile-aligned.  If the two
+    groups have different sizes, the smaller set is linearly interpolated
+    to match the larger set's quantile positions.
+
+    Parameters
+    ----------
+    pscore_df : pd.DataFrame
+        Propensity scores with columns ``treatment``, ``pscore``,
+        ``site_id``.
+    cov_df : pd.DataFrame
+        Unused; kept for API consistency with other helpers.
+    """
+    import numpy as np
+
+    treatment_scores = np.sort(
+        pscore_df.loc[pscore_df["treatment"], "pscore"].dropna().values
+    )
+    control_scores = np.sort(
+        pscore_df.loc[~pscore_df["treatment"], "pscore"].dropna().values
+    )
+
+    if len(treatment_scores) < 2 or len(control_scores) < 2:
+        return html.P(
+            "Insufficient propensity scores for a QQ plot.",
+            className="text-muted",
+        )
+
+    # Align quantiles via linear interpolation to the larger sample
+    n_points = max(len(treatment_scores), len(control_scores))
+    quantiles = np.linspace(0, 1, n_points)
+    t_quantiles = np.quantile(treatment_scores, quantiles)
+    c_quantiles = np.quantile(control_scores, quantiles)
+
+    fig = go.Figure()
+    # 45° reference line
+    q_min = min(t_quantiles.min(), c_quantiles.min())
+    q_max = max(t_quantiles.max(), c_quantiles.max())
+    fig.add_trace(
+        go.Scatter(
+            x=[q_min, q_max],
+            y=[q_min, q_max],
+            mode="lines",
+            line=dict(color="gray", dash="dash"),
+            name="45° line",
+            hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scattergl(
+            x=c_quantiles,
+            y=t_quantiles,
+            mode="markers",
+            marker=dict(size=4, color="#1f77b4", opacity=0.6),
+            name="Matched Pixels",
+            hovertemplate=(
+                "Control quantile: %{x:.3f}<br>"
+                "Treatment quantile: %{y:.3f}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title="Propensity Score QQ Plot (Treatment vs Control)",
+        xaxis_title="Control Quantiles",
+        yaxis_title="Treatment Quantiles",
+        height=450,
+        margin=dict(t=50, b=50, l=60, r=30),
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        xaxis=dict(scaleanchor="y", scaleratio=1),
+    )
+
+    return dcc.Graph(figure=fig)
 
 
 def _build_match_quality_plots(df, covariate_cols):
@@ -2700,4 +2906,9 @@ def _build_map(sites_geojson, totals):
     enriched_geojson = _attach_totals_to_geojson(sites_geojson, totals)
     if not enriched_geojson:
         return html.P("No site geometries available.", className="text-muted")
-    return _openlayers_map_component("task-sites-map", enriched_geojson, height="500px")
+    return _openlayers_map_component(
+        "task-sites-map",
+        enriched_geojson,
+        height="500px",
+        enable_cog_layers=True,
+    )

@@ -221,7 +221,7 @@
         button.className = "ol-zoom-extent-btn";
         button.title = "Zoom to all sites";
         button.setAttribute("aria-label", "Zoom to all sites");
-        button.textContent = "▭";
+        button.textContent = "???";
 
         button.addEventListener("click", function (event) {
             event.preventDefault();
@@ -271,6 +271,12 @@
         el._olSource = source;
         ensureZoomExtentControl(el, map);
         ensureScaleBarControl(el, map);
+
+        // Notify other scripts (e.g. COG layer control) that a map is ready.
+        el.dispatchEvent(
+            new CustomEvent("ol-map-ready", { bubbles: true, detail: { map: map } })
+        );
+
         return map;
     }
 

@@ -5,6 +5,7 @@ callbacks, and sets up URL routing between pages.
 """
 
 import logging
+import os
 import sys
 import uuid as _uuid
 from urllib.parse import parse_qs
@@ -15,7 +16,7 @@ import flask_login
 import rollbar
 import rollbar.contrib.flask
 from dash import Input, Output, State, dcc, html
-from flask import got_request_exception
+from flask import got_request_exception, jsonify
 from flask_wtf.csrf import CSRFProtect
 
 from auth import login_manager
@@ -57,7 +58,10 @@ app = dash.Dash(
         dbc.themes.FLATLY,
         "https://cdn.jsdelivr.net/npm/ol@10.6.1/ol.css",
     ],
-    external_scripts=["https://cdn.jsdelivr.net/npm/ol@10.6.1/dist/ol.js"],
+    external_scripts=[
+        "https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js",
+        "https://cdn.jsdelivr.net/npm/ol@10.6.1/dist/ol.js",
+    ],
     suppress_callback_exceptions=True,
     title="Avoided Emissions",
 )
@@ -106,6 +110,83 @@ else:
 @server.route("/health")
 def health_check():
     return "ok", 200
+
+
+# -- COG layer API -----------------------------------------------------------
+# Returns available covariate COG layers with pre-signed S3 URLs and style
+# config so the OpenLayers map can render them as toggleable overlays.
+
+
+@server.route("/api/cog-layers")
+@flask_login.login_required
+def cog_layers():
+    """Return merged covariate layers with pre-signed URLs and styles."""
+    import importlib.util
+
+    import boto3
+
+    from layer_config import get_style
+    from models import Covariate, get_db
+
+    # Load gee-export config for descriptions and categories
+    gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
+    spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
+    gee_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gee_config)
+
+    cog_prefix = f"{Config.S3_PREFIX}/cog"
+
+    # Get latest merged covariates from DB
+    db = get_db()
+    try:
+        latest: dict[str, Covariate] = {}
+        for rec in db.query(Covariate).filter(Covariate.status == "merged").all():
+            existing = latest.get(rec.covariate_name)
+            if existing is None or (
+                rec.started_at
+                and (
+                    existing.started_at is None or rec.started_at > existing.started_at
+                )
+            ):
+                latest[rec.covariate_name] = rec
+    finally:
+        db.close()
+
+    if not Config.S3_BUCKET:
+        return jsonify({"layers": []})
+
+    s3 = boto3.client("s3", region_name=Config.AWS_REGION)
+    layers = []
+
+    for name, rec in sorted(latest.items()):
+        if not rec.merged_url:
+            continue
+        cfg = gee_config.COVARIATES.get(name, {})
+        category = cfg.get("category", "")
+
+        # Generate a 1-hour pre-signed URL for the COG
+        s3_key = f"{cog_prefix}/{name}.tif"
+        try:
+            url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": Config.S3_BUCKET, "Key": s3_key},
+                ExpiresIn=3600,
+            )
+        except Exception:
+            continue
+
+        style = get_style(name, category)
+        layers.append(
+            {
+                "name": name,
+                "description": cfg.get("description", name),
+                "category": category,
+                "url": url,
+                "style": style,
+            }
+        )
+
+    return jsonify({"layers": layers})
 
 
 # Initialize Flask-Login

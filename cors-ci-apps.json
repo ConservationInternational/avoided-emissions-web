@@ -1,0 +1,11 @@
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": ["http://localhost:8050", "https://ae.trends.earth"],
+      "AllowedMethods": ["GET", "HEAD"],
+      "AllowedHeaders": ["Range", "Content-Type"],
+      "ExposeHeaders": ["Content-Range", "Content-Length", "Accept-Ranges"],
+      "MaxAgeSeconds": 3600
+    }
+  ]
+}

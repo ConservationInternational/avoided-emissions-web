@@ -1480,6 +1480,8 @@ def download_results_csv(task_id, result_type="by_site_year"):
         "by_site_total": "results_by_site_total.csv",
         "pixel_level": "results_pixel_level.csv",
         "match_covariates": "results_match_covariates.csv",
+        "balance": "results_balance.csv",
+        "propensity_scores": "results_propensity_scores.csv",
     }
     filename = filename_map.get(result_type)
     if not filename:

@@ -17,6 +17,8 @@
 #   - {output_dir}/results_pixel_level.csv     : Pixel-level detail
 #   - {output_dir}/results_summary.json        : Global summary
 #   - {output_dir}/results_match_covariates.csv: Matched pixel covariate values
+#   - {output_dir}/results_balance.csv         : SMD balance statistics (Love plot)
+#   - {output_dir}/results_propensity_scores.csv: Propensity scores (QQ plot)
 
 library(tidyverse)
 library(foreach)
@@ -166,6 +168,110 @@ if (length(match_files) > 0) {
         write_csv(
             empty_cov,
             file.path(config$output_dir, "results_match_covariates.csv")
+        )
+    }
+
+    # --- Balance statistics (SMD) for Love plot ----------------------------
+    # Compute the Standardized Mean Difference (SMD) for each covariate,
+    # both per-site and aggregated across all sites.  The SMD is defined
+    # as (mean_treatment - mean_control) / pooled_sd.
+    all_covs_for_balance <- if (nrow(match_cov_data) > 0) {
+        setdiff(names(match_cov_data),
+                c("cell", "site_id", "treatment", "match_group"))
+    } else {
+        character(0)
+    }
+
+    if (length(all_covs_for_balance) > 0 && nrow(match_cov_data) > 0) {
+        compute_smd <- function(df, cov) {
+            t_vals <- df[[cov]][df$treatment]
+            c_vals <- df[[cov]][!df$treatment]
+            t_vals <- t_vals[!is.na(t_vals)]
+            c_vals <- c_vals[!is.na(c_vals)]
+            if (length(t_vals) < 2 || length(c_vals) < 2) {
+                return(tibble(
+                    covariate = cov, mean_treatment = NA_real_,
+                    mean_control = NA_real_, pooled_sd = NA_real_,
+                    smd = NA_real_
+                ))
+            }
+            m_t <- mean(t_vals)
+            m_c <- mean(c_vals)
+            sd_t <- sd(t_vals)
+            sd_c <- sd(c_vals)
+            pooled <- sqrt((sd_t^2 + sd_c^2) / 2)
+            smd_val <- if (pooled > 0) (m_t - m_c) / pooled else 0
+            tibble(
+                covariate = cov, mean_treatment = m_t,
+                mean_control = m_c, pooled_sd = pooled,
+                smd = smd_val
+            )
+        }
+
+        # Per-site balance
+        balance_by_site <- match_cov_data %>%
+            group_by(site_id) %>%
+            group_modify(~ {
+                bind_rows(lapply(all_covs_for_balance,
+                                 function(cv) compute_smd(.x, cv)))
+            }) %>%
+            ungroup()
+
+        # Aggregate balance across all sites
+        balance_agg <- bind_rows(
+            lapply(all_covs_for_balance,
+                   function(cv) compute_smd(match_cov_data, cv))
+        ) %>% mutate(site_id = "__all__")
+
+        balance_table <- bind_rows(balance_agg, balance_by_site)
+        write_csv(
+            balance_table,
+            file.path(config$output_dir, "results_balance.csv")
+        )
+        message("  Balance statistics: ", nrow(balance_table),
+                " rows (", length(all_covs_for_balance), " covariates)")
+    } else {
+        write_csv(
+            tibble(
+                site_id = character(), covariate = character(),
+                mean_treatment = numeric(), mean_control = numeric(),
+                pooled_sd = numeric(), smd = numeric()
+            ),
+            file.path(config$output_dir, "results_balance.csv")
+        )
+    }
+
+    # --- Propensity scores for QQ plot -------------------------------------
+    # Collect propensity scores from all match files (saved in step 2).
+    pscore_data <- foreach(f = match_files, .combine = bind_rows) %do% {
+        m <- readRDS(f)
+        if ("pscore" %in% names(m)) {
+            m %>%
+                select(cell, site_id, treatment, match_group, pscore) %>%
+                as_tibble()
+        } else {
+            tibble(
+                cell = integer(), site_id = character(),
+                treatment = logical(), match_group = character(),
+                pscore = numeric()
+            )
+        }
+    }
+
+    if (nrow(pscore_data) > 0) {
+        write_csv(
+            pscore_data,
+            file.path(config$output_dir, "results_propensity_scores.csv")
+        )
+        message("  Propensity scores: ", nrow(pscore_data), " rows")
+    } else {
+        write_csv(
+            tibble(
+                cell = integer(), site_id = character(),
+                treatment = logical(), match_group = character(),
+                pscore = numeric()
+            ),
+            file.path(config$output_dir, "results_propensity_scores.csv")
         )
     }
 
@@ -407,6 +513,26 @@ if (length(match_files) > 0) {
             match_group = character()
         ),
         file.path(config$output_dir, "results_match_covariates.csv")
+    )
+
+    # Empty balance file
+    write_csv(
+        tibble(
+            site_id = character(), covariate = character(),
+            mean_treatment = numeric(), mean_control = numeric(),
+            pooled_sd = numeric(), smd = numeric()
+        ),
+        file.path(config$output_dir, "results_balance.csv")
+    )
+
+    # Empty propensity scores file
+    write_csv(
+        tibble(
+            cell = integer(), site_id = character(),
+            treatment = logical(), match_group = character(),
+            pscore = numeric()
+        ),
+        file.path(config$output_dir, "results_propensity_scores.csv")
     )
 }
 

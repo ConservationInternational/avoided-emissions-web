@@ -109,6 +109,8 @@ get_matches <- function(d, dists) {
 
 match_site <- function(d, f) {
     # Run propensity score matching within each exact-match group.
+    # Propensity scores (from GLM) are stored in a ``pscore`` column on
+    # the returned data.frame.  Groups too small for GLM get NA scores.
     m <- foreach(this_group = unique(d$group), .combine = foreach_rbind) %do% {
         this_d <- filter(d, group == this_group)
         n_treatment <- sum(this_d$treatment)
@@ -118,9 +120,11 @@ match_site <- function(d, f) {
         } else if (n_treatment < MIN_GLM) {
             # Too few treatment pixels for GLM; use Mahalanobis distance
             dists <- match_on(f, data = this_d)
+            this_d$pscore <- NA_real_
         } else {
             # Estimate propensity scores with logistic regression
             model <- glm(f, data = this_d, family = binomial())
+            this_d$pscore <- predict(model, type = "response")
             dists <- match_on(model, data = this_d)
         }
         return(get_matches(this_d, dists))
