@@ -644,6 +644,14 @@ def submit_analysis_task(
             "(admin0, admin1, admin2, ecoregion, or pa)."
         )
 
+    overlap = set(covariates or []) & set(exact_match_vars)
+    if overlap:
+        raise ValueError(
+            "The following variables are selected as both covariates and "
+            "exact matches. Each variable must be used as one or the "
+            "other, not both: " + ", ".join(sorted(overlap))
+        )
+
     ready_covariates = set(get_ready_covariate_names())
     requested_covariates = set(covariates or [])
     unavailable_covariates = sorted(requested_covariates - ready_covariates)
@@ -1855,6 +1863,15 @@ def get_ready_covariate_names():
         record = latest_records.get(covariate_name)
         if record and record.status == "merged" and record.merged_url:
             ready_names.append(covariate_name)
+
+    # Dual-purpose variables (ecoregion, pa) are rasterized from vector
+    # data and uploaded to S3 on startup.  They are always available as
+    # covariates once the rasterize-vectors task has completed.
+    from layouts import DUAL_PURPOSE_VARS
+
+    for var_name in DUAL_PURPOSE_VARS:
+        if var_name not in ready_names:
+            ready_names.append(var_name)
 
     return ready_names
 

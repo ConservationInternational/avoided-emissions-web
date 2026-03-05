@@ -44,6 +44,8 @@ ALL_COVARIATES = DEFAULT_COVARIATES + [
     "cropland_2011",
     "cropland_2015",
     "cropland_2019",
+    "ecoregion",
+    "pa",
 ]
 
 # Exact match variables — at least one must be selected for each task.
@@ -57,6 +59,12 @@ EXACT_MATCH_OPTIONS = [
 ]
 
 DEFAULT_EXACT_MATCH = ["admin1", "ecoregion", "pa"]
+
+# Variables that can be used as *either* exact match *or* covariates
+# (but never both simultaneously).  When used as a covariate they are
+# included in the propensity score formula; when used as an exact match
+# they define stratification groups.
+DUAL_PURPOSE_VARS = ["ecoregion", "pa"]
 
 MATCHING_JOB_QUEUE_OPTIONS = [
     {

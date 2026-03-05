@@ -624,12 +624,24 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Covariates that are categorical integer IDs and must be wrapped with
+# factor() in the R formula so that GLM treats them as discrete levels
+# rather than continuous numeric values.
+_CATEGORICAL_COVARIATES = {"ecoregion", "admin0", "admin1", "admin2"}
+
+
 def build_matching_formula(covariates: list[str]) -> dict:
     """Build a formula dict: {"lhs": "treatment", "rhs": ["cov1", ...]}."""
+    terms = []
+    for cov in covariates:
+        if cov in _CATEGORICAL_COVARIATES:
+            terms.append(f"factor({cov})")
+        else:
+            terms.append(cov)
     return {
         "lhs": "treatment",
         "rhs": list(covariates),
-        "formula_str": "treatment ~ " + " + ".join(covariates),
+        "formula_str": "treatment ~ " + " + ".join(terms),
     }
 
 

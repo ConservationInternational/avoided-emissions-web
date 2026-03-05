@@ -795,6 +795,14 @@ def register_callbacks(app):
                 "(admin boundary, ecoregion, or protected area)."
             )
 
+        overlap = set(covariates) & set(exact_match_vars)
+        if overlap:
+            return _error_alert(
+                "The following variables are selected as both covariates "
+                "and exact matches — each must be one or the other: "
+                + ", ".join(sorted(overlap))
+            )
+
         user = get_current_user()
         if not user:
             return _error_alert("Please log in first.")
