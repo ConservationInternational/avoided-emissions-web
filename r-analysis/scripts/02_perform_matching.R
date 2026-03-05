@@ -185,9 +185,6 @@ match_site <- function(d, f) {
     return(m)
 }
 
-
-set.seed(31)
-
 n_failed <- 0L
 required_match_cols <- c(
     "cell", "site_id", "id_numeric", "area_ha", "treatment",
