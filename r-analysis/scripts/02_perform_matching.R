@@ -86,41 +86,31 @@ if (!is.null(config$site_id)) {
 
 
 get_matches <- function(d, dists) {
-    # Attempt full matching and return matched pairs with weights.
+    # Attempt matching and return matched pairs with weights.
     # Returns empty data.frame if matching fails.
     #
-    # MAX_CONTROLS controls the ratio:
-    #   0 -> no upper bound (full matching)
-    #   k -> k controls per treatment pixel (target)
-    #
-    # NOTE: fullmatch minimises total within-set distance, so with
-    # min.controls = 1 it *always* produces 1:1 matching regardless
-    # of max.controls (adding extra controls only increases cost).
-    # To obtain k:1 matching we must set min.controls = k so the
-    # optimiser is forced to assign that many controls.  fullmatch
-    # automatically relaxes the constraint for treatments that do
-    # not have enough controls within the caliper.
+    # MAX_CONTROLS controls the matching strategy:
+    #   0 -> full matching with variable ratios
+    #   k -> fixed k:1 matching via pairmatch
     #
     # Controls within each matched set are weighted equally:
-    # each gets match_weight = 1 / n_controls so
-    # that the weighted control mean represents a single synthetic
-    # control per treatment pixel.  The optimality of the assignment
-    # (which controls end up in which set) is handled by fullmatch's
-    # minimum-cost network flow — additional distance-based weighting
-    # within sets is not standard.  Treatment pixels get weight = 1.
+    # each gets match_weight = 1 / n_controls so that the weighted
+    # control mean represents a single synthetic control per
+    # treatment pixel.  Treatment pixels get weight = 1.
     subdim_works <- tryCatch(
         is.data.frame(subdim(dists)),
         error = function(e) FALSE
     )
     if (subdim_works) {
         if (MAX_CONTROLS > 0) {
-            mc <- MAX_CONTROLS
-            mn <- MAX_CONTROLS
+            # Assigns exactly controls per treatment when feasible;
+            # treatments without enough eligible controls are left unmatched.
+            m <- pairmatch(dists, controls = MAX_CONTROLS, data = d)
         } else {
-            mc <- Inf
-            mn <- 1
+            # Full matching — variable ratios, all units matched
+            m <- fullmatch(dists, min.controls = 1,
+                           max.controls = Inf, data = d)
         }
-        m <- fullmatch(dists, min.controls = mn, max.controls = mc, data = d)
         d$match_group <- as.character(m)
         d <- d[matched(m), ]
         # Label match groups by treatment cell ID
