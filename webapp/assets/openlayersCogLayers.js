@@ -135,6 +135,7 @@
         try {
             var source = new ol.source.GeoTIFF({
                 sources: [{ url: layerDef.url }],
+                normalize: false,
                 convertToRGB: false,
                 opaque: false,
                 transition: 0,

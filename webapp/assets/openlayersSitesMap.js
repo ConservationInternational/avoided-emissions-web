@@ -286,10 +286,21 @@
         }
 
         const height = el.getAttribute("data-height") || "260px";
-        el.style.height = height;
+        if (!el.style.height) {
+            el.style.height = height;
+        }
         el.style.width = "100%";
 
         const map = ensureMap(el);
+
+        // Watch for user resize (CSS resize: vertical) and update the map.
+        if (!el._resizeObserverAttached) {
+            el._resizeObserverAttached = true;
+            var ro = new ResizeObserver(function () {
+                map.updateSize();
+            });
+            ro.observe(el);
+        }
         const source = el._olSource;
         const rawGeojson = getRawGeoJson(el);
         const dataChanged = el._lastGeojsonRaw !== rawGeojson;
