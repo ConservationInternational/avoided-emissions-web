@@ -904,6 +904,38 @@ def register_callbacks(app, limiter=None):
                 fc_max = 2024
             fc_years = list(range(fc_min, fc_max + 1))
 
+            # Server-side bounds validation (mirrors the HTML input
+            # min/max attributes so tampered requests are rejected).
+            _mtp = int(max_treatment_pixels or 1000)
+            _cm = int(control_multiplier or 50)
+            _msa = int(min_site_area_ha or 100)
+            _mglm = int(min_glm_treatment_pixels or 15)
+            _cw = float(caliper_width if caliper_width is not None else 0.2)
+            _mcpt = int(
+                max_controls_per_treatment
+                if max_controls_per_treatment is not None
+                else 1
+            )
+            _mmgb = int(match_memory_gb or 30)
+
+            bounds = [
+                (_mtp, 1, 100_000, "Max treatment pixels"),
+                (_cm, 1, 500, "Control multiplier"),
+                (_msa, 0, 100_000, "Minimum site area"),
+                (_mglm, 1, 10_000, "Min GLM treatment pixels"),
+                (_mcpt, 0, 100, "Max controls per treatment"),
+                (_mmgb, 1, 240, "Matching memory (GB)"),
+            ]
+            for val, lo, hi, label in bounds:
+                if val < lo or val > hi:
+                    return _error_alert(
+                        f"{label} must be between {lo} and {hi}."
+                    )
+            if _cw < 0 or _cw > 5.0:
+                return _error_alert(
+                    "Caliper width must be between 0 and 5.0."
+                )
+
             task_id = submit_analysis_task(
                 task_name=name,
                 description=description or "",
@@ -913,25 +945,13 @@ def register_callbacks(app, limiter=None):
                 exact_match_vars=exact_match_vars,
                 fc_years=fc_years,
                 site_set_id=sites_data.get("site_set_id"),
-                max_treatment_pixels=min(int(max_treatment_pixels or 1000), 100_000),
-                control_multiplier=min(int(control_multiplier or 50), 500),
-                min_site_area_ha=min(int(min_site_area_ha or 100), 100_000),
-                min_glm_treatment_pixels=min(
-                    int(min_glm_treatment_pixels or 15), 10_000
-                ),
-                caliper_width=min(
-                    float(caliper_width if caliper_width is not None else 0.2),
-                    5.0,
-                ),
-                max_controls_per_treatment=min(
-                    int(
-                        max_controls_per_treatment
-                        if max_controls_per_treatment is not None
-                        else 1
-                    ),
-                    100,
-                ),
-                match_memory_mib=min(int(match_memory_gb or 30) * 1024, 122_880),
+                max_treatment_pixels=_mtp,
+                control_multiplier=_cm,
+                min_site_area_ha=_msa,
+                min_glm_treatment_pixels=_mglm,
+                caliper_width=_cw,
+                max_controls_per_treatment=_mcpt,
+                match_memory_mib=_mmgb * 1024,
                 matching_job_queue=matching_job_queue,
             )
 
