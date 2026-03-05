@@ -200,8 +200,12 @@ def _open_single_cog(uri: str, name: str) -> tuple[str, xr.DataArray]:
 
 
 def _is_transient_raster_error(exc: Exception) -> bool:
-    """Return True when *exc* looks like a transient network/COG read error."""
-    msg = f"{type(exc).__name__}: {exc}".lower()
+    """Return True when *exc* looks like a transient network/COG read error.
+
+    Walks the full exception chain (``__cause__`` / ``__context__``) so that
+    wrapped errors like ``RasterioIOError: Read failed`` whose *cause* is a
+    transient ``CPLE_AppDefinedError: ZIPDecode:...`` are still recognised.
+    """
     transient_markers = (
         "503",
         "502",
@@ -212,8 +216,17 @@ def _is_transient_raster_error(exc: Exception) -> bool:
         "i/o error",
         "connection",
         "timeout",
+        "read failed",
     )
-    return any(marker in msg for marker in transient_markers)
+    current: BaseException | None = exc
+    seen: set[int] = set()  # guard against hypothetical cycles
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        msg = f"{type(current).__name__}: {current}".lower()
+        if any(marker in msg for marker in transient_markers):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _read_layer_values_with_retry(
