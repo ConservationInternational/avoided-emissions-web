@@ -1909,6 +1909,7 @@ def _build_overview(task, sites, totals):
     cards = []
 
     # Task info card
+    config = task.config or {}
     cards.append(
         dbc.Card(
             [
@@ -1929,6 +1930,37 @@ def _build_overview(task, sites, totals):
                             ]
                         ),
                         html.P(f"Status: {task.status}"),
+                        html.Hr(),
+                        html.H6("Matching Settings"),
+                        html.P(
+                            f"Max treatment pixels: "
+                            f"{config.get('max_treatment_pixels', '—')}"
+                        ),
+                        html.P(
+                            f"Control multiplier: "
+                            f"{config.get('control_multiplier', '—')}"
+                        ),
+                        html.P(
+                            f"Min site area (ha): {config.get('min_site_area_ha', '—')}"
+                        ),
+                        html.P(
+                            f"Min GLM treatment pixels: "
+                            f"{config.get('min_glm_treatment_pixels', '—')}"
+                        ),
+                        html.P(
+                            f"Caliper width (SD): {config.get('caliper_width', '—')}"
+                        ),
+                        html.P(
+                            f"Max controls per treatment: "
+                            f"{config.get('max_controls_per_treatment', '—')}"
+                        ),
+                        html.P(
+                            f"Matching memory (MiB): "
+                            f"{config.get('match_memory_mib', '—')}"
+                        ),
+                        html.P(
+                            f"Batch job queue: {config.get('matching_job_queue', '—')}"
+                        ),
                     ]
                 ),
             ],

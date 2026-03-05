@@ -700,7 +700,16 @@ def submit_analysis_task(
             submitted_by=user_id,
             site_set_id=site_set_id,
             status="pending",
-            config={"matching_job_queue": matching_job_queue},
+            config={
+                "max_treatment_pixels": max_treatment_pixels,
+                "control_multiplier": control_multiplier,
+                "min_site_area_ha": min_site_area_ha,
+                "min_glm_treatment_pixels": min_glm_treatment_pixels,
+                "caliper_width": caliper_width,
+                "max_controls_per_treatment": max_controls_per_treatment,
+                "match_memory_mib": match_memory_mib,
+                "matching_job_queue": matching_job_queue,
+            },
             covariates=covariates,
             n_sites=len(gdf),
         )
