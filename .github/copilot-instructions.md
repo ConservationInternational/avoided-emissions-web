@@ -25,6 +25,7 @@ webapp/                       # Dash web application (main component)
   tasks.py                    # Celery background tasks (GEE polling, Batch polling, merges)
   celery_app.py               # Celery factory with beat schedule and task routing
   cog_merge.py                # Merge GEE tiles into single COGs via GDAL
+  layer_config.py             # Visualization styles for covariate COG map overlays
   import_vector_data.py       # Import geoBoundaries/ecoregions/WDPA into PostGIS
   rasterize_vectors.py        # Rasterize PostGIS vectors to COGs aligned with GEE grid
   trendsearth_client.py       # OAuth2 client for trends.earth API
@@ -38,6 +39,7 @@ webapp/                       # Dash web application (main component)
     versions/                 # Migration files (revision IDs are hex-like strings)
   scripts/
     create_service_client.py  # CLI to register OAuth2 client on trends.earth API
+    analyze_cog_distributions.py  # Pixel distribution analysis for styling COG layers
   assets/                     # CSS, JS (AG Grid renderers), images
 gee-export/                   # GEE covariate export scripts
   config.py                   # Covariate definitions, grid params, GEE asset IDs
@@ -164,3 +166,37 @@ There is **no CI linting or test workflow** — linting and formatting must be d
 ## Trust These Instructions
 
 These instructions reflect the current state of the repository. Only search for additional information if commands fail unexpectedly or if you need implementation details not covered here.
+
+## Covariate Map Layer Styling
+
+The web app renders merged COG covariates as toggleable overlays on OpenLayers maps. Styles are defined in `webapp/layer_config.py` and resolved in three tiers: `DEFAULT_STYLE` → `CATEGORY_STYLES` → per-covariate `COVARIATE_STYLES`. The `/api/cog-layers` endpoint in `webapp/app.py` serves the merged style config + pre-signed S3 URLs. The client-side rendering is in `webapp/assets/openlayersCogLayers.js` using `ol.source.GeoTIFF` (with `normalize: false` so raw pixel values are used) and `ol.layer.WebGLTile` with WebGL color expressions.
+
+### How to determine styling for new covariate layers
+
+When a new covariate COG is added, its `min_value`/`max_value` and color ramp need to be based on the actual pixel data distribution — not guessed. Use this workflow:
+
+1. **Run the distribution analysis script** inside the webapp container:
+   ```bash
+   docker compose -f deploy/docker-compose.develop.yml exec webapp \
+       python scripts/analyze_cog_distributions.py
+   ```
+   This downloads the smallest overview level of each COG (not the full raster) and computes percentiles, zero fractions, unique value counts, and histograms. Results are saved to `/tmp/cog_distributions.json` inside the container. Time-series layers (fc_YYYY, pop_YYYY) are deduplicated — only one representative is sampled per group.
+
+2. **Read the output** to determine the layer type and data range:
+   - **Categorical** (≤50 unique integer values): Use `"type": "categorical"` with explicit `color_stops` mapping each value to a colour.
+   - **Continuous symmetric** (e.g. temperature, pop_growth): Use `"type": "continuous"` or `"type": "diverging"`. Set `min_value`/`max_value` to approximately the p2/p98 percentiles to capture 96% of data while clipping outliers.
+   - **Continuous right-skewed** (e.g. population, forest cover, biomass): Most pixels cluster near zero with a long tail. Use **quantile-based color stops** — place stop positions at percentile boundaries rather than evenly spaced. For example, if p50=0 and p99=5.6, put the first few colour stops close to 0 and spread the upper stops to cover the tail. This prevents the map from appearing as a single flat colour.
+
+3. **Add the style** to `webapp/layer_config.py`:
+   - For a single layer: add an entry in `COVARIATE_STYLES`.
+   - For a category of layers: add/update `CATEGORY_STYLES`.
+   - Key properties: `type`, `min_value`, `max_value`, `color_stops` (list of `[normalized_position, R, G, B, alpha]`), `opacity`, `nodata_value`.
+   - `nodata_value` should match the GeoTIFF's actual NoData value (check the `nodata_value` field in the script output). Many layers have NoData=0 in the GeoTIFF header; some have no explicit NoData. Set to `null` if there is no nodata.
+
+4. **Verify visually**: Restart/rebuild the webapp container, load the map, toggle the new layer and confirm the colour ramp shows good differentiation at the zoom levels users will typically view.
+
+### Key style pitfalls
+- **`normalize: false`** is set on `ol.source.GeoTIFF` — style expressions receive raw pixel values, not 0–1 normalised values. The `buildColorExpression()` function in the JS does its own normalisation using `min_value`/`max_value`.
+- **Right-skewed data** (population, forest cover, biomass, distance): If `min_value=0` and `max_value=p98`, most of the map will map to the first colour stop because the median is near zero. Use non-linear stop positions (e.g. `[0, ...], [0.01, ...], [0.05, ...], [0.2, ...], [0.5, ...], [1.0, ...]`) to spread the colour range across the data's actual distribution.
+- **Large nodata fractions**: Layers like `pa` (96.9% nodata), `total_biomass` (82.1% nodata) have most pixels transparent. This is correct — they only cover land areas or specific regions.
+- **Series layers share styles**: All `fc_YYYY` layers share one style entry (set via a loop in `layer_config.py`). Same for `pop_YYYY` and `lc_2015_*` layers.
