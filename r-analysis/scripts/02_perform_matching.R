@@ -91,7 +91,15 @@ get_matches <- function(d, dists) {
     #
     # MAX_CONTROLS controls the ratio:
     #   0 -> no upper bound (full matching)
-    #   k -> at most k controls per treatment pixel
+    #   k -> k controls per treatment pixel (target)
+    #
+    # NOTE: fullmatch minimises total within-set distance, so with
+    # min.controls = 1 it *always* produces 1:1 matching regardless
+    # of max.controls (adding extra controls only increases cost).
+    # To obtain k:1 matching we must set min.controls = k so the
+    # optimiser is forced to assign that many controls.  fullmatch
+    # automatically relaxes the constraint for treatments that do
+    # not have enough controls within the caliper.
     #
     # Controls within each matched set are weighted equally:
     # each gets match_weight = 1 / n_controls so
@@ -105,8 +113,14 @@ get_matches <- function(d, dists) {
         error = function(e) FALSE
     )
     if (subdim_works) {
-        mc <- if (MAX_CONTROLS > 0) MAX_CONTROLS else Inf
-        m <- fullmatch(dists, min.controls = 1, max.controls = mc, data = d)
+        if (MAX_CONTROLS > 0) {
+            mc <- MAX_CONTROLS
+            mn <- MAX_CONTROLS
+        } else {
+            mc <- Inf
+            mn <- 1
+        }
+        m <- fullmatch(dists, min.controls = mn, max.controls = mc, data = d)
         d$match_group <- as.character(m)
         d <- d[matched(m), ]
         # Label match groups by treatment cell ID

@@ -122,26 +122,55 @@ def _render_share_links_list(links, task_id):
     if not links:
         return html.P("No share links yet.", className="text-muted")
 
+    from flask import request as flask_request
+
+    base_url = flask_request.host_url.rstrip("/")
+
     items = []
     for lnk in links:
         expires = (lnk["expires_at"] or "")[:10]
         badge_color = "success" if lnk["is_valid"] else "secondary"
         badge_text = "Active" if lnk["is_valid"] else "Expired / Revoked"
+        share_url = f"{base_url}/shared/{lnk['token']}"
+        input_id = f"share-link-{lnk['id']}"
+
+        url_display = (
+            dbc.InputGroup(
+                [
+                    dbc.Input(
+                        value=share_url,
+                        id=input_id,
+                        readonly=True,
+                        size="sm",
+                    ),
+                    dcc.Clipboard(
+                        target_id=input_id,
+                        className="btn btn-outline-secondary btn-sm",
+                        style={"display": "inline-block"},
+                    ),
+                ],
+                size="sm",
+                className="flex-grow-1 me-2",
+            )
+            if lnk["is_valid"]
+            else html.Code(
+                f"...{lnk['token'][-12:]}",
+                className="me-2 text-muted",
+            )
+        )
+
         row = html.Div(
             [
                 html.Div(
                     [
                         dbc.Badge(badge_text, color=badge_color, className="me-2"),
-                        html.Code(
-                            f"...{lnk['token'][-12:]}",
-                            className="me-2",
-                        ),
+                        url_display,
                         html.Small(
                             f"Expires {expires} · {lnk['access_count']} view(s)",
-                            className="text-muted",
+                            className="text-muted text-nowrap",
                         ),
                     ],
-                    className="d-flex align-items-center",
+                    className="d-flex align-items-center flex-grow-1",
                 ),
                 *(
                     [
@@ -153,6 +182,7 @@ def _render_share_links_list(links, task_id):
                             },
                             color="outline-danger",
                             size="sm",
+                            className="ms-2 text-nowrap",
                         )
                     ]
                     if lnk["is_valid"]
@@ -2961,8 +2991,8 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
             ]
         )
 
-    # Identify covariate columns (everything except identifiers)
-    id_cols = {"cell", "site_id", "treatment", "match_group"}
+    # Identify covariate columns (everything except identifiers/weights)
+    id_cols = {"cell", "site_id", "treatment", "match_group", "match_weight"}
     covariate_cols = [c for c in df.columns if c not in id_cols]
 
     if not covariate_cols:
