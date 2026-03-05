@@ -1500,7 +1500,7 @@ def register_callbacks(app):
             return html.P("No data available.", className="text-muted")
 
         if selected_site and selected_site != "__all__":
-            df = df[df["site_id"] == selected_site]
+            df = df[df["site_id"].astype(str) == str(selected_site)]
 
         if df.empty:
             return html.P("No data for selected site.", className="text-muted")
