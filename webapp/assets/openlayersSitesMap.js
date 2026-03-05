@@ -221,7 +221,7 @@
         button.className = "ol-zoom-extent-btn";
         button.title = "Zoom to all sites";
         button.setAttribute("aria-label", "Zoom to all sites");
-        button.textContent = "???";
+        button.textContent = "\u25A1";
 
         button.addEventListener("click", function (event) {
             event.preventDefault();
@@ -251,6 +251,50 @@
         mapEl._scaleBarControlAdded = true;
     }
 
+    function ensureDragZoomControl(mapEl, map) {
+        if (mapEl._dragZoomControlAdded) {
+            return;
+        }
+
+        // Add a DragZoom interaction (active only when the button is toggled on).
+        const dragZoom = new ol.interaction.DragZoom({
+            condition: ol.events.condition.always,
+        });
+        dragZoom.setActive(false);
+        map.addInteraction(dragZoom);
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ol-drag-zoom-btn";
+        button.title = "Drag to zoom to region";
+        button.setAttribute("aria-label", "Drag to zoom to region");
+        button.textContent = "\uD83D\uDD0D"; // 🔍
+
+        var active = false;
+        button.addEventListener("click", function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            active = !active;
+            dragZoom.setActive(active);
+            button.classList.toggle("active", active);
+        });
+
+        // Deactivate after each zoom.
+        dragZoom.on("boxend", function () {
+            active = false;
+            dragZoom.setActive(false);
+            button.classList.remove("active");
+        });
+
+        const element = document.createElement("div");
+        element.className = "ol-unselectable ol-control ol-drag-zoom";
+        element.appendChild(button);
+
+        const control = new ol.control.Control({ element: element });
+        map.addControl(control);
+        mapEl._dragZoomControlAdded = true;
+    }
+
     function ensureMap(el) {
         if (el._olMap) {
             return el._olMap;
@@ -271,6 +315,7 @@
         el._olSource = source;
         ensureZoomExtentControl(el, map);
         ensureScaleBarControl(el, map);
+        ensureDragZoomControl(el, map);
 
         // Notify other scripts (e.g. COG layer control) that a map is ready.
         el.dispatchEvent(

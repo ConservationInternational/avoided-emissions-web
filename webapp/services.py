@@ -701,6 +701,7 @@ def submit_analysis_task(
             site_set_id=site_set_id,
             status="pending",
             config={
+                "exact_match_vars": list(exact_match_vars),
                 "max_treatment_pixels": max_treatment_pixels,
                 "control_multiplier": control_multiplier,
                 "min_site_area_ha": min_site_area_ha,

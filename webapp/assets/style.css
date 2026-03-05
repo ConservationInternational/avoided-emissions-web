@@ -102,6 +102,21 @@ h1, h2, h3, h4, h5 {
     line-height: 1;
 }
 
+.ol-sites-map .ol-drag-zoom {
+    top: 8em;
+    left: 0.5em;
+}
+
+.ol-sites-map .ol-drag-zoom-btn {
+    font-size: 16px;
+    line-height: 1;
+}
+
+.ol-sites-map .ol-drag-zoom-btn.active {
+    background-color: rgba(0, 60, 136, 0.7);
+    color: #fff;
+}
+
 .ol-sites-map .ae-scale-line {
     left: 0.5em;
     bottom: 0.75em;
@@ -253,6 +268,10 @@ h1, h2, h3, h4, h5 {
     color: #212529;
 }
 
+.ae-layer-control-heading + .ae-layer-cat ~ .ae-layer-control-heading {
+    margin-top: 10px;
+}
+
 .ae-layer-cat {
     margin-bottom: 6px;
 }
@@ -295,5 +314,48 @@ h1, h2, h3, h4, h5 {
     margin: 0;
     cursor: pointer;
     accent-color: #2e7d32;
+}
+
+/* Layer legends */
+.ae-layer-legend {
+    margin: 0 0 4px 22px;
+    padding: 2px 0;
+}
+
+.ae-legend-gradient {
+    height: 10px;
+    width: 100%;
+    border-radius: 2px;
+    border: 1px solid #ccc;
+}
+
+.ae-legend-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #666;
+    margin-top: 1px;
+}
+
+.ae-legend-cat-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-right: 6px;
+    margin-bottom: 2px;
+}
+
+.ae-legend-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    border: 1px solid #ccc;
+    flex-shrink: 0;
+}
+
+.ae-legend-cat-label {
+    font-size: 9px;
+    color: #666;
 }
 

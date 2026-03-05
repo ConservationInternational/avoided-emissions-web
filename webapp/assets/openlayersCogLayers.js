@@ -86,6 +86,177 @@
         ];
     }
 
+    /**
+     * Build a small legend element for a layer based on its style config.
+     * Returns a DOM element (hidden by default).
+     */
+    function buildLegendElement(style) {
+        var container = document.createElement("div");
+        container.className = "ae-layer-legend";
+        container.style.display = "none";
+
+        var stops = style.color_stops || [];
+        if (stops.length < 2) {
+            return container;
+        }
+
+        if (style.type === "categorical") {
+            // Categorical: small colored squares with labels
+            for (var i = 0; i < stops.length; i++) {
+                var item = document.createElement("div");
+                item.className = "ae-legend-cat-item";
+
+                var swatch = document.createElement("span");
+                swatch.className = "ae-legend-swatch";
+                swatch.style.backgroundColor =
+                    "rgb(" + stops[i][1] + "," + stops[i][2] + "," + stops[i][3] + ")";
+                item.appendChild(swatch);
+
+                var lbl = document.createElement("span");
+                lbl.className = "ae-legend-cat-label";
+                lbl.textContent = String(stops[i][0]);
+                item.appendChild(lbl);
+
+                container.appendChild(item);
+            }
+        } else {
+            // Continuous: gradient bar with min/max labels
+            var gradientParts = [];
+            for (var j = 0; j < stops.length; j++) {
+                var pct = Math.round(stops[j][0] * 100);
+                var rgb = "rgb(" + stops[j][1] + "," + stops[j][2] + "," + stops[j][3] + ")";
+                gradientParts.push(rgb + " " + pct + "%");
+            }
+
+            var bar = document.createElement("div");
+            bar.className = "ae-legend-gradient";
+            bar.style.background = "linear-gradient(to right, " + gradientParts.join(", ") + ")";
+            container.appendChild(bar);
+
+            var labels = document.createElement("div");
+            labels.className = "ae-legend-labels";
+            var minVal = style.min_value != null ? style.min_value : 0;
+            var maxVal = style.max_value != null ? style.max_value : 1;
+
+            var minLbl = document.createElement("span");
+            minLbl.textContent = formatLegendNum(minVal);
+            labels.appendChild(minLbl);
+
+            var maxLbl = document.createElement("span");
+            maxLbl.textContent = formatLegendNum(maxVal);
+            labels.appendChild(maxLbl);
+
+            container.appendChild(labels);
+        }
+
+        return container;
+    }
+
+    function formatLegendNum(v) {
+        if (Math.abs(v) >= 1000) {
+            return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+        }
+        if (Math.abs(v) < 0.01 && v !== 0) {
+            return v.toExponential(1);
+        }
+        return String(Math.round(v * 100) / 100);
+    }
+
+    // ?????? Vector layer helpers ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+
+    // Colour palette for vector overlays (assigned per-layer).
+    var VECTOR_COLORS = [
+        [31, 119, 180],   // blue
+        [255, 127, 14],   // orange
+        [44, 160, 44],    // green
+        [214, 39, 40],    // red
+        [148, 103, 189],  // purple
+    ];
+
+    /**
+     * Compute simplification tolerance from the current map view.
+     * At low zoom we simplify aggressively; at high zoom we keep detail.
+     */
+    function simplifyTolerance(map) {
+        var view = map.getView();
+        var zoom = view.getZoom() || 3;
+        if (zoom >= 12) return 0.0001;
+        if (zoom >= 8) return 0.001;
+        if (zoom >= 5) return 0.01;
+        return 0.05;
+    }
+
+    /**
+     * Return the current map extent as "west,south,east,north" in EPSG:4326.
+     */
+    function bboxString(map) {
+        var extent = map.getView().calculateExtent(map.getSize());
+        var transformed = ol.proj.transformExtent(extent, "EPSG:3857", "EPSG:4326");
+        return transformed.map(function (v) { return v.toFixed(6); }).join(",");
+    }
+
+    /**
+     * Build an OpenLayers style for a vector polygon layer.
+     * Stroke colour comes from colorIdx; text labels use the "name" property.
+     */
+    function buildVectorStyle(colorIdx) {
+        var c = VECTOR_COLORS[colorIdx % VECTOR_COLORS.length];
+        var strokeColor = "rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0.85)";
+        var fillColor = "rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0.08)";
+
+        return function (feature, resolution) {
+            var name = feature.get("name") || "";
+            var fontSize = resolution < 500 ? "11px" : "10px";
+            var showLabel = resolution < 5000;
+
+            return new ol.style.Style({
+                stroke: new ol.style.Stroke({ color: strokeColor, width: 1.5 }),
+                fill: new ol.style.Fill({ color: fillColor }),
+                text: showLabel
+                    ? new ol.style.Text({
+                        text: name,
+                        font: fontSize + " sans-serif",
+                        fill: new ol.style.Fill({ color: "#222" }),
+                        stroke: new ol.style.Stroke({ color: "#fff", width: 3 }),
+                        overflow: true,
+                        placement: "point",
+                    })
+                    : undefined,
+            });
+        };
+    }
+
+    /**
+     * Fetch GeoJSON from /api/vector-layer/<name> and replace the source
+     * features on the given vector layer.
+     */
+    function loadVectorFeatures(map, layer, layerName) {
+        var bbox = bboxString(map);
+        var tol = simplifyTolerance(map);
+        var url = "/api/vector-layer/" + layerName + "?bbox=" + bbox + "&simplify=" + tol;
+
+        fetch(url, { credentials: "same-origin" })
+            .then(function (resp) {
+                if (!resp.ok) throw new Error("HTTP " + resp.status);
+                return resp.json();
+            })
+            .then(function (geojson) {
+                var fmt = new ol.format.GeoJSON();
+                var features = fmt.readFeatures(geojson, {
+                    featureProjection: "EPSG:3857",
+                });
+                layer.getSource().clear();
+                layer.getSource().addFeatures(features);
+                console.log(
+                    LOG_PREFIX + "loaded " + features.length +
+                    " vector features for " + layerName
+                );
+            })
+            .catch(function (err) {
+                console.warn(LOG_PREFIX + "vector fetch failed for " + layerName, err);
+            });
+    }
+
     // ?????? Layer cache ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
     // Per-map caches: mapEl ??? { name ??? { layer, def } }
@@ -116,6 +287,31 @@
                 return [];
             });
         return _layerDataPromise;
+    }
+
+    var _vectorLayerDataPromise = null;
+
+    function fetchVectorLayerData() {
+        if (_vectorLayerDataPromise) {
+            return _vectorLayerDataPromise;
+        }
+        console.log(LOG_PREFIX + "fetching /api/vector-layers ???");
+        _vectorLayerDataPromise = fetch("/api/vector-layers", { credentials: "same-origin" })
+            .then(function (resp) {
+                if (!resp.ok) throw new Error("HTTP " + resp.status);
+                return resp.json();
+            })
+            .then(function (data) {
+                var layers = data.layers || [];
+                console.log(LOG_PREFIX + layers.length + " vector layers available");
+                return layers;
+            })
+            .catch(function (err) {
+                console.warn(LOG_PREFIX + "vector layers fetch failed:", err);
+                _vectorLayerDataPromise = null;
+                return [];
+            });
+        return _vectorLayerDataPromise;
     }
 
     /**
@@ -163,7 +359,7 @@
             var layer = new ol.layer.WebGLTile({
                 source: source,
                 visible: false,
-                opacity: style.opacity != null ? style.opacity : 0.7,
+                opacity: style.opacity != null ? style.opacity : 1.0,
                 style: { color: colorExpr },
                 properties: { title: layerDef.description || layerDef.name },
             });
@@ -185,12 +381,18 @@
 
     // ?????? Layer control panel ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
-    function buildLayerControl(map, mapEl, layers) {
+    function buildLayerControl(map, mapEl, layers, vectorLayers) {
         // Per-map layer cache stored on the element.
         if (!mapEl._cogLayerCache) {
             mapEl._cogLayerCache = {};
         }
         var cache = mapEl._cogLayerCache;
+
+        // Per-map vector layer cache.
+        if (!mapEl._vectorLayerCache) {
+            mapEl._vectorLayerCache = {};
+        }
+        var vecCache = mapEl._vectorLayerCache;
 
         // Look up a layer def by name.
         var defByName = {};
@@ -198,7 +400,7 @@
             defByName[layers[i].name] = layers[i];
         }
 
-        // Group layers by category.
+        // Group COG layers by category.
         var categories = {};
         for (var k = 0; k < layers.length; k++) {
             var cat = layers[k].category || "other";
@@ -206,6 +408,16 @@
                 categories[cat] = [];
             }
             categories[cat].push(layers[k]);
+        }
+
+        // Group vector layers by category.
+        var vecCategories = {};
+        for (var vi = 0; vi < vectorLayers.length; vi++) {
+            var vcat = vectorLayers[vi].category || "other";
+            if (!vecCategories[vcat]) {
+                vecCategories[vcat] = [];
+            }
+            vecCategories[vcat].push(vectorLayers[vi]);
         }
 
         // Outer wrapper.
@@ -216,8 +428,8 @@
         var toggleBtn = document.createElement("button");
         toggleBtn.type = "button";
         toggleBtn.className = "ae-layer-control-toggle";
-        toggleBtn.title = "Toggle covariate layers";
-        toggleBtn.textContent = "\uD83D\uDDFA"; // ????
+        toggleBtn.title = "Toggle layers";
+        toggleBtn.textContent = "\uD83D\uDDFA"; // 🗺
         panel.appendChild(toggleBtn);
 
         // Content area (hidden by default).
@@ -225,6 +437,60 @@
         content.className = "ae-layer-control-content";
         content.style.display = "none";
 
+        // --- Vector overlay section ---
+        if (vectorLayers.length > 0) {
+            var vecHeading = document.createElement("div");
+            vecHeading.className = "ae-layer-control-heading";
+            vecHeading.textContent = "Overlays";
+            content.appendChild(vecHeading);
+
+            var vecCatOrder = Object.keys(vecCategories).sort();
+            for (var vci = 0; vci < vecCatOrder.length; vci++) {
+                var vcatName = vecCatOrder[vci];
+                var vcatLayers = vecCategories[vcatName];
+
+                var vcatDiv = document.createElement("div");
+                vcatDiv.className = "ae-layer-cat";
+
+                var vcatLabel = document.createElement("div");
+                vcatLabel.className = "ae-layer-cat-label";
+                vcatLabel.textContent =
+                    vcatName.charAt(0).toUpperCase() + vcatName.slice(1).replace(/_/g, " ");
+                vcatDiv.appendChild(vcatLabel);
+
+                for (var vli = 0; vli < vcatLayers.length; vli++) {
+                    var vdef = vcatLayers[vli];
+                    var vrow = document.createElement("label");
+                    vrow.className = "ae-layer-row";
+
+                    var vcb = document.createElement("input");
+                    vcb.type = "checkbox";
+                    vcb.dataset.vectorLayerName = vdef.name;
+                    vrow.appendChild(vcb);
+
+                    var vspan = document.createElement("span");
+                    vspan.textContent = " " + (vdef.description || vdef.name);
+                    vspan.title = vdef.name;
+                    vrow.appendChild(vspan);
+
+                    var vslider = document.createElement("input");
+                    vslider.type = "range";
+                    vslider.min = "0";
+                    vslider.max = "100";
+                    vslider.value = "100";
+                    vslider.className = "ae-layer-opacity";
+                    vslider.dataset.vectorLayerName = vdef.name;
+                    vslider.title = "Opacity";
+                    vrow.appendChild(vslider);
+
+                    vcatDiv.appendChild(vrow);
+                }
+
+                content.appendChild(vcatDiv);
+            }
+        }
+
+        // --- COG covariate layer section ---
         var heading = document.createElement("div");
         heading.className = "ae-layer-control-heading";
         heading.textContent = "Covariate Layers";
@@ -275,14 +541,18 @@
                 slider.min = "0";
                 slider.max = "100";
                 slider.value = String(
-                    Math.round((ldef.style.opacity != null ? ldef.style.opacity : 0.7) * 100)
+                    Math.round((ldef.style.opacity != null ? ldef.style.opacity : 1.0) * 100)
                 );
                 slider.className = "ae-layer-opacity";
                 slider.dataset.layerName = ldef.name;
                 slider.title = "Opacity";
                 row.appendChild(slider);
 
+                var legend = buildLegendElement(ldef.style || {});
+                legend.dataset.layerName = ldef.name;
+
                 catDiv.appendChild(row);
+                catDiv.appendChild(legend);
             }
 
             content.appendChild(catDiv);
@@ -298,9 +568,39 @@
             content.style.display = isVisible ? "none" : "block";
         });
 
-        // Lazy-create layers on first toggle.
+        // --- COG checkbox handler (lazy-create raster layers) ---
         content.addEventListener("change", function (e) {
             var target = e.target;
+
+            // Vector layer checkbox
+            if (target.type === "checkbox" && target.dataset.vectorLayerName) {
+                var vName = target.dataset.vectorLayerName;
+                if (target.checked) {
+                    if (!vecCache[vName]) {
+                        var colorIdx = Object.keys(vecCache).length;
+                        var source = new ol.source.Vector();
+                        var vlayer = new ol.layer.Vector({
+                            source: source,
+                            style: buildVectorStyle(colorIdx),
+                            visible: true,
+                            properties: { title: vName },
+                        });
+                        vecCache[vName] = { layer: vlayer, name: vName };
+                        // Insert below site polygons (top layer) but above tiles
+                        var mapLayers = map.getLayers();
+                        mapLayers.insertAt(mapLayers.getLength() - 1, vlayer);
+                    }
+                    vecCache[vName].layer.setVisible(true);
+                    loadVectorFeatures(map, vecCache[vName].layer, vName);
+                } else {
+                    if (vecCache[vName]) {
+                        vecCache[vName].layer.setVisible(false);
+                    }
+                }
+                return;
+            }
+
+            // COG layer checkbox
             if (target.type !== "checkbox" || !target.dataset.layerName) {
                 return;
             }
@@ -323,21 +623,29 @@
 
                 var cached = cache[layerName];
                 // Add layer to map if not already present.
-                var mapLayers = map.getLayers();
+                var cogMapLayers = map.getLayers();
                 var found = false;
-                mapLayers.forEach(function (l) {
+                cogMapLayers.forEach(function (l) {
                     if (l === cached.layer) {
                         found = true;
                     }
                 });
                 if (!found) {
-                    mapLayers.insertAt(mapLayers.getLength() - 1, cached.layer);
+                    cogMapLayers.insertAt(cogMapLayers.getLength() - 1, cached.layer);
                 }
                 cached.layer.setVisible(true);
             } else {
                 if (cache[layerName]) {
                     cache[layerName].layer.setVisible(false);
                 }
+            }
+
+            // Toggle legend visibility
+            var legendEl = content.querySelector(
+                ".ae-layer-legend[data-layer-name=\"" + layerName + "\"]"
+            );
+            if (legendEl) {
+                legendEl.style.display = target.checked ? "block" : "none";
             }
         });
 
@@ -349,6 +657,21 @@
                     c.layer.setOpacity(parseInt(target.value, 10) / 100);
                 }
             }
+            if (target.type === "range" && target.dataset.vectorLayerName) {
+                var vc = vecCache[target.dataset.vectorLayerName];
+                if (vc) {
+                    vc.layer.setOpacity(parseInt(target.value, 10) / 100);
+                }
+            }
+        });
+
+        // Reload visible vector layers when map view changes.
+        map.on("moveend", function () {
+            Object.keys(vecCache).forEach(function (vn) {
+                if (vecCache[vn].layer.getVisible()) {
+                    loadVectorFeatures(map, vecCache[vn].layer, vn);
+                }
+            });
         });
 
         var control = new ol.control.Control({ element: panel });
@@ -372,12 +695,34 @@
         }
         el._cogLayersAttached = true;
 
-        fetchLayerData().then(function (layers) {
-            if (!layers.length) {
+        // Fetch COG and vector layer lists in parallel.
+        Promise.all([fetchLayerData(), fetchVectorLayerData()]).then(function (results) {
+            var layers = results[0];
+            var vectorLayers = results[1];
+
+            if (!layers.length && !vectorLayers.length) {
                 console.log(LOG_PREFIX + "no layers to show");
                 return;
             }
-            buildLayerControl(map, el, layers);
+
+            // Optionally filter COG layers to only covariates used in this task
+            var cogFilter = el.getAttribute("data-cog-filter");
+            if (cogFilter) {
+                var allowed = cogFilter.split(",").map(function (s) {
+                    return s.trim();
+                });
+                var allowedSet = {};
+                allowed.forEach(function (n) { allowedSet[n] = true; });
+                layers = layers.filter(function (l) {
+                    return allowedSet[l.name];
+                });
+                console.log(
+                    LOG_PREFIX + "filtered to " + layers.length +
+                    " layers for covariates: " + cogFilter
+                );
+            }
+
+            buildLayerControl(map, el, layers, vectorLayers);
         });
     }
 

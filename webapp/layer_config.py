@@ -62,7 +62,7 @@ CATEGORY_STYLES = {
             [0.75, 240, 59, 32, 1],
             [1.0, 128, 0, 38, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     "terrain": {
@@ -75,7 +75,7 @@ CATEGORY_STYLES = {
             [0.80, 160, 80, 50, 1],
             [1.0, 255, 255, 255, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     "accessibility": {
@@ -87,7 +87,7 @@ CATEGORY_STYLES = {
             [0.75, 244, 109, 67, 1],
             [1.0, 165, 0, 38, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     "demographics": {
@@ -99,7 +99,7 @@ CATEGORY_STYLES = {
             [0.75, 217, 72, 1, 1],
             [1.0, 127, 39, 4, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     "biomass": {
@@ -111,7 +111,7 @@ CATEGORY_STYLES = {
             [0.75, 0, 109, 44, 1],
             [1.0, 0, 68, 27, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     "land_cover": {
@@ -123,7 +123,7 @@ CATEGORY_STYLES = {
             [0.75, 44, 127, 184, 1],
             [1.0, 37, 52, 148, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     "ecological": {
@@ -141,7 +141,7 @@ CATEGORY_STYLES = {
             [0.75, 0, 109, 44, 1],
             [1.0, 0, 68, 27, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     "cropland": {
@@ -153,7 +153,7 @@ CATEGORY_STYLES = {
             [0.75, 163, 117, 25, 1],
             [1.0, 102, 69, 0, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
 }
@@ -184,7 +184,7 @@ COVARIATE_STYLES = {
             [0.85, 160, 80, 50, 1],
             [1.0, 255, 255, 255, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     # slope: range [0, 55], p2=0, p50=2.66, p98=28, 19.3% zeros
@@ -202,7 +202,7 @@ COVARIATE_STYLES = {
             [0.75, 0, 109, 44, 1],
             [1.0, 0, 68, 27, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     # aspect: range [0, 326], p2=0, p50=142, p98=252, 30% zeros
@@ -235,7 +235,7 @@ COVARIATE_STYLES = {
             [0.60, 34, 94, 168, 1],
             [1.0, 8, 29, 88, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     # temp: range [-275, 314], p2=-201, p50=87, p98=281
@@ -253,7 +253,7 @@ COVARIATE_STYLES = {
             [0.80, 244, 109, 67, 1],
             [1.0, 165, 0, 38, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     # ── Accessibility ────────────────────────────────────────────────────
@@ -272,7 +272,7 @@ COVARIATE_STYLES = {
             [0.60, 244, 109, 67, 1],
             [1.0, 165, 0, 38, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     # dist_roads: range [0, 1.21], p2=0, p50=0, p98=0.04
@@ -289,7 +289,7 @@ COVARIATE_STYLES = {
             [0.65, 244, 109, 67, 1],
             [1.0, 165, 0, 38, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     # ── Biomass ──────────────────────────────────────────────────────────
@@ -309,7 +309,7 @@ COVARIATE_STYLES = {
             [0.85, 0, 109, 44, 1],
             [1.0, 0, 68, 27, 1],
         ],
-        "opacity": 0.65,
+        "opacity": 1.0,
         "nodata_value": None,
     },
     # ── Ecological ───────────────────────────────────────────────────────
@@ -350,7 +350,7 @@ _fc_style = {
         [0.75, 0, 109, 44, 1],
         [1.0, 0, 68, 27, 1],
     ],
-    "opacity": 0.65,
+    "opacity": 1.0,
     "nodata_value": None,
 }
 for _yr in range(2000, 2025):
@@ -375,7 +375,7 @@ _pop_style = {
         [0.80, 189, 0, 38, 1],
         [1.0, 128, 0, 38, 1],
     ],
-    "opacity": 0.65,
+    "opacity": 1.0,
     "nodata_value": None,
 }
 for _yr in (2000, 2005, 2010, 2015, 2020):
@@ -396,7 +396,7 @@ COVARIATE_STYLES["pop_growth"] = {
         [0.80, 214, 96, 77, 1],
         [1.0, 165, 0, 38, 1],
     ],
-    "opacity": 0.65,
+    "opacity": 1.0,
     "nodata_value": None,
 }
 

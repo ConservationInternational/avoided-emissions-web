@@ -127,7 +127,11 @@ def _record_covariate_action_failure(covariate_name, action, user_id):
 
 
 def _openlayers_map_component(
-    map_id, geojson_text, height="260px", enable_cog_layers=False
+    map_id,
+    geojson_text,
+    height="260px",
+    enable_cog_layers=False,
+    cog_filter_covariates=None,
 ):
     attrs = {
         "data-geojson": geojson_text or "",
@@ -135,6 +139,8 @@ def _openlayers_map_component(
     }
     if enable_cog_layers:
         attrs["data-enable-cog-layers"] = "true"
+    if cog_filter_covariates:
+        attrs["data-cog-filter"] = ",".join(cog_filter_covariates)
     return html.Div(
         id=map_id,
         className="ol-sites-map",
@@ -857,7 +863,9 @@ def register_callbacks(app):
         match_quality = _build_match_quality(task_id, task)
 
         # Map tab
-        map_content = _build_map(detail.get("sites_geojson"), totals)
+        map_content = _build_map(
+            detail.get("sites_geojson"), totals, covariates=task.covariates
+        )
 
         return (
             title,
@@ -1910,56 +1918,90 @@ def _build_overview(task, sites, totals):
 
     # Task info card
     config = task.config or {}
+
+    def _detail_row(label, value):
+        return html.Div(
+            [
+                html.Span(label, className="text-muted", style={"minWidth": "200px"}),
+                html.Span(str(value), style={"fontWeight": "500"}),
+            ],
+            style={"display": "flex", "gap": "0.5rem", "marginBottom": "0.25rem"},
+        )
+
+    caliper_val = config.get("caliper_width")
+    caliper_display = (
+        "Disabled" if caliper_val == 0 else (caliper_val if caliper_val else "—")
+    )
+    max_ctrl = config.get("max_controls_per_treatment")
+    max_ctrl_display = "No limit" if max_ctrl == 0 else (max_ctrl if max_ctrl else "—")
+    mem_mib = config.get("match_memory_mib")
+    mem_display = f"{mem_mib / 1024:.1f} GB" if mem_mib else "—"
+
     cards.append(
         dbc.Card(
             [
                 dbc.CardHeader("Task Information"),
                 dbc.CardBody(
                     [
-                        html.P(f"Description: {task.description or 'None'}"),
-                        html.P(f"Sites: {task.n_sites or 0}"),
-                        html.P(f"Covariates: {', '.join(task.covariates or [])}"),
-                        html.P(
+                        _detail_row("Description", task.description or "None"),
+                        _detail_row("Sites", task.n_sites or 0),
+                        html.Div(
                             [
-                                "Created: ",
+                                html.Span(
+                                    "Created",
+                                    className="text-muted",
+                                    style={"minWidth": "200px"},
+                                ),
                                 html.Span(
                                     _fmt_dt(task.created_at),
                                     className="utc-datetime",
+                                    style={"fontWeight": "500"},
                                     **{"data-utc": _fmt_dt(task.created_at)},
                                 ),
-                            ]
+                            ],
+                            style={
+                                "display": "flex",
+                                "gap": "0.5rem",
+                                "marginBottom": "0.25rem",
+                            },
                         ),
-                        html.P(f"Status: {task.status}"),
-                        html.Hr(),
-                        html.H6("Matching Settings"),
-                        html.P(
-                            f"Max treatment pixels: "
-                            f"{config.get('max_treatment_pixels', '—')}"
+                        _detail_row("Status", task.status),
+                        html.Hr(className="my-2"),
+                        html.H6(
+                            "Matching Settings",
+                            className="mb-2",
+                            style={"fontWeight": "600"},
                         ),
-                        html.P(
-                            f"Control multiplier: "
-                            f"{config.get('control_multiplier', '—')}"
+                        _detail_row(
+                            "Covariates",
+                            ", ".join(task.covariates or []) or "—",
                         ),
-                        html.P(
-                            f"Min site area (ha): {config.get('min_site_area_ha', '—')}"
+                        _detail_row(
+                            "Exact match variables",
+                            ", ".join(config.get("exact_match_vars", [])) or "—",
                         ),
-                        html.P(
-                            f"Min GLM treatment pixels: "
-                            f"{config.get('min_glm_treatment_pixels', '—')}"
+                        _detail_row(
+                            "Max treatment pixels",
+                            config.get("max_treatment_pixels", "—"),
                         ),
-                        html.P(
-                            f"Caliper width (SD): {config.get('caliper_width', '—')}"
+                        _detail_row(
+                            "Control multiplier",
+                            config.get("control_multiplier", "—"),
                         ),
-                        html.P(
-                            f"Max controls per treatment: "
-                            f"{config.get('max_controls_per_treatment', '—')}"
+                        _detail_row(
+                            "Min site area (ha)",
+                            config.get("min_site_area_ha", "—"),
                         ),
-                        html.P(
-                            f"Matching memory (MiB): "
-                            f"{config.get('match_memory_mib', '—')}"
+                        _detail_row(
+                            "Min GLM treatment pixels",
+                            config.get("min_glm_treatment_pixels", "—"),
                         ),
-                        html.P(
-                            f"Batch job queue: {config.get('matching_job_queue', '—')}"
+                        _detail_row("Caliper width (SD)", caliper_display),
+                        _detail_row("Max controls per treatment", max_ctrl_display),
+                        _detail_row("Matching memory", mem_display),
+                        _detail_row(
+                            "Batch job queue",
+                            config.get("matching_job_queue", "—"),
                         ),
                     ]
                 ),
@@ -2946,7 +2988,7 @@ def _build_match_quality_plots(df, covariate_cols):
     return plots
 
 
-def _build_map(sites_geojson, totals):
+def _build_map(sites_geojson, totals, covariates=None):
     """Build an OpenLayers map for task sites and summary values."""
     enriched_geojson = _attach_totals_to_geojson(sites_geojson, totals)
     if not enriched_geojson:
@@ -2956,4 +2998,5 @@ def _build_map(sites_geojson, totals):
         enriched_geojson,
         height="500px",
         enable_cog_layers=True,
+        cog_filter_covariates=covariates,
     )

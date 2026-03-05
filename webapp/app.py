@@ -4,6 +4,7 @@ Creates the Dash app, configures Flask-Login authentication, registers
 callbacks, and sets up URL routing between pages.
 """
 
+import json
 import logging
 import os
 import sys
@@ -16,7 +17,7 @@ import flask_login
 import rollbar
 import rollbar.contrib.flask
 from dash import Input, Output, State, dcc, html
-from flask import got_request_exception, jsonify
+from flask import got_request_exception, jsonify, request
 from flask_wtf.csrf import CSRFProtect
 
 from auth import login_manager
@@ -186,6 +187,126 @@ def cog_layers():
             }
         )
 
+    return jsonify({"layers": layers})
+
+
+# Vector overlay layer configuration: maps layer name to DB table and
+# the column that contains the human-readable label for each polygon.
+_VECTOR_LAYERS = {
+    "admin0": {
+        "table": "geoboundaries_adm0",
+        "label_col": "shape_name",
+        "description": "Country boundaries (ADM0)",
+        "category": "boundaries",
+    },
+    "admin1": {
+        "table": "geoboundaries_adm1",
+        "label_col": "shape_name",
+        "description": "Admin level 1 boundaries",
+        "category": "boundaries",
+    },
+    "admin2": {
+        "table": "geoboundaries_adm2",
+        "label_col": "shape_name",
+        "description": "Admin level 2 boundaries",
+        "category": "boundaries",
+    },
+    "ecoregion": {
+        "table": "ecoregions",
+        "label_col": "eco_name",
+        "description": "RESOLVE Ecoregions",
+        "category": "ecological",
+    },
+    "pa": {
+        "table": "wdpa",
+        "label_col": "name_eng",
+        "description": "Protected Areas (WDPA)",
+        "category": "ecological",
+    },
+}
+
+
+@server.route("/api/vector-layer/<layer_name>")
+@flask_login.login_required
+def vector_layer(layer_name):
+    """Return simplified GeoJSON for a vector overlay within a bounding box.
+
+    Query parameters:
+        bbox  – comma-separated west,south,east,north in EPSG:4326
+        simplify – optional tolerance in degrees (default 0.01)
+    """
+    from sqlalchemy import text as sa_text
+
+    from models import get_db
+
+    cfg = _VECTOR_LAYERS.get(layer_name)
+    if not cfg:
+        return jsonify({"error": "Unknown layer"}), 404
+
+    bbox_str = request.args.get("bbox")
+    if not bbox_str:
+        return jsonify({"error": "bbox parameter required"}), 400
+
+    try:
+        west, south, east, north = (float(v) for v in bbox_str.split(","))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid bbox format"}), 400
+
+    simplify = float(request.args.get("simplify", "0.01"))
+    table = cfg["table"]
+    label_col = cfg["label_col"]
+
+    sql = sa_text(
+        f"""
+        SELECT
+            {label_col} AS name,
+            ST_AsGeoJSON(
+                ST_SimplifyPreserveTopology(geom, :tol),
+                6
+            ) AS geojson
+        FROM {table}
+        WHERE geom && ST_MakeEnvelope(:w, :s, :e, :n, 4326)
+        LIMIT 2000
+        """
+    )
+
+    db = get_db()
+    try:
+        rows = db.execute(
+            sql, {"tol": simplify, "w": west, "s": south, "e": east, "n": north}
+        ).fetchall()
+    finally:
+        db.close()
+
+    features = []
+    for row in rows:
+        geom = json.loads(row.geojson) if row.geojson else None
+        if not geom:
+            continue
+        features.append(
+            {
+                "type": "Feature",
+                "properties": {"name": row.name or ""},
+                "geometry": geom,
+            }
+        )
+
+    return jsonify({"type": "FeatureCollection", "features": features})
+
+
+@server.route("/api/vector-layers")
+@flask_login.login_required
+def vector_layers_list():
+    """Return the list of available vector overlay layers."""
+    layers = []
+    for name, cfg in _VECTOR_LAYERS.items():
+        layers.append(
+            {
+                "name": name,
+                "description": cfg["description"],
+                "category": cfg["category"],
+            }
+        )
     return jsonify({"layers": layers})
 
 
