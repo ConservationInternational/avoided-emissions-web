@@ -717,6 +717,17 @@ def submit_analysis_task(
         db.add(task)
 
         for _, row in gdf.iterrows():
+            # Compute area in hectares from the polygon geometry using
+            # an equal-area projection (Mollweide).
+            geom = row.geometry
+            if geom is not None and not geom.is_empty:
+                area_gdf = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326").to_crs(
+                    "ESRI:54009"
+                )
+                area_ha = area_gdf.geometry.iloc[0].area / 10_000.0
+            else:
+                area_ha = None
+
             site = TaskSite(
                 task_id=task_id,
                 site_id=str(row["site_id"]),
@@ -725,6 +736,7 @@ def submit_analysis_task(
                 end_date=pd.to_datetime(row["end_date"])
                 if pd.notna(row.get("end_date"))
                 else None,
+                area_ha=area_ha,
             )
             db.add(site)
         db.commit()

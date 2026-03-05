@@ -1753,7 +1753,7 @@ def task_detail_layout(user, task_id):
                         ],
                     ),
                     dbc.Tab(
-                        label="Results",
+                        label="Results Tables",
                         tab_id="tab-results",
                         children=[
                             html.Div(
@@ -1768,7 +1768,7 @@ def task_detail_layout(user, task_id):
                         ],
                     ),
                     dbc.Tab(
-                        label="Plots",
+                        label="Results Plots",
                         tab_id="tab-plots",
                         children=[
                             html.Div(

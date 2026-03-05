@@ -860,7 +860,7 @@ def register_callbacks(app):
         )
 
         # Match Quality tab
-        match_quality = _build_match_quality(task_id, task)
+        match_quality = _build_match_quality(task_id, task, sites, totals)
 
         # Map tab
         map_content = _build_map(
@@ -1489,23 +1489,46 @@ def register_callbacks(app):
         prevent_initial_call=True,
     )
     def update_match_quality_plots(selected_site, store_data):
-        """Rebuild covariate distribution plots when site filter changes."""
+        """Rebuild all match-quality plots when site filter changes.
+
+        Renders summary stat boxes, Love plot (SMD), propensity score
+        QQ plot, and covariate distribution histograms for the selected
+        site (or aggregate across all sites).
+        """
         if not store_data:
             raise PreventUpdate
 
         df = pd.DataFrame(store_data["rows"])
         covariate_cols = store_data["covariate_cols"]
+        site_areas = store_data.get("site_areas", {})
+
+        balance_rows = store_data.get("balance_rows")
+        balance_df = pd.DataFrame(balance_rows) if balance_rows else None
+
+        pscore_rows = store_data.get("pscore_rows")
+        pscore_df = pd.DataFrame(pscore_rows) if pscore_rows else None
 
         if df.empty:
             return html.P("No data available.", className="text-muted")
 
+        site_filter = None
         if selected_site and selected_site != "__all__":
+            site_filter = selected_site
             df = df[df["site_id"].astype(str) == str(selected_site)]
 
         if df.empty:
             return html.P("No data for selected site.", className="text-muted")
 
-        return html.Div(_build_match_quality_plots(df, covariate_cols))
+        return html.Div(
+            _build_all_match_quality_plots(
+                df,
+                covariate_cols,
+                balance_df,
+                pscore_df,
+                site_filter,
+                site_areas=site_areas,
+            )
+        )
 
     # -- Site-level deforestation drill-down ----------------------------------
 
@@ -2494,10 +2517,17 @@ def _build_plots(results, totals, sites=None, task=None):
         # Build site options for the dropdown
         site_ids = sorted(df["site_id"].unique())
         site_info_map = {}
+        # Build name lookup from totals (always has names from R analysis)
+        totals_name_map = {}
+        if totals:
+            for t in totals:
+                if t.site_name:
+                    totals_name_map[str(t.site_id)] = t.site_name
         if sites:
             for s in sites:
-                site_info_map[s.site_id] = {
-                    "site_name": s.site_name or s.site_id,
+                sid = s.site_id
+                site_info_map[sid] = {
+                    "site_name": s.site_name or totals_name_map.get(str(sid)) or sid,
                     "start_date": (str(s.start_date)[:10] if s.start_date else None),
                     "end_date": str(s.end_date)[:10] if s.end_date else None,
                 }
@@ -2505,7 +2535,11 @@ def _build_plots(results, totals, sites=None, task=None):
         # Annotate dropdown labels for subsampled sites
         site_options = []
         for sid in site_ids:
-            label = site_info_map.get(sid, {}).get("site_name", sid)
+            sname = site_info_map.get(sid, {}).get("site_name", sid)
+            if sname and str(sname) != str(sid):
+                label = f"{sname} ({sid})"
+            else:
+                label = str(sid)
             if sid in subsampled_map:
                 pct = subsampled_map[sid].get("sampled_percent", 100)
                 label += f" (subsampled {pct:.0f}%)"
@@ -2543,7 +2577,7 @@ def _build_plots(results, totals, sites=None, task=None):
     return html.Div(plots)
 
 
-def _build_match_quality(task_id, task):
+def _build_match_quality(task_id, task, sites=None, totals=None):
     """Build the match quality assessment section.
 
     Fetches matched-pixel covariate data, balance statistics, and
@@ -2649,6 +2683,15 @@ def _build_match_quality(task_id, task):
         elif pscore_df["pscore"].dropna().empty:
             pscore_df = None
 
+    # Build a lookup of site_id -> area_ha from totals (TaskResultTotal),
+    # which always has area from the R analysis results.
+    site_areas = {}
+    for t in totals or []:
+        sid = t.site_id if hasattr(t, "site_id") else t.get("site_id")
+        area = t.area_ha if hasattr(t, "area_ha") else t.get("area_ha")
+        if sid is not None:
+            site_areas[str(sid)] = area or 0
+
     content = []
 
     content.append(
@@ -2656,94 +2699,29 @@ def _build_match_quality(task_id, task):
             "Assessment of match quality between treatment and control "
             "pixels. The Love plot shows covariate balance (standardized "
             "mean differences), the QQ plot compares propensity score "
-            "distributions, and the histograms show per-covariate overlap.",
+            "distributions, and the histograms show per-covariate overlap. "
+            "Use the site filter to view diagnostics for individual sites.",
             className="text-muted mb-3",
         )
     )
 
-    # Summary stats
-    n_treatment = int(df["treatment"].sum())
-    n_control = int((~df["treatment"]).sum())
-    n_sites = df["site_id"].nunique()
-    content.append(
-        dbc.Row(
-            [
-                dbc.Col(
-                    dbc.Card(
-                        dbc.CardBody(
-                            [
-                                html.H6(
-                                    "Treatment Pixels", className="text-muted mb-1"
-                                ),
-                                html.H4(f"{n_treatment:,}"),
-                            ]
-                        ),
-                        className="text-center",
-                    ),
-                    md=4,
-                ),
-                dbc.Col(
-                    dbc.Card(
-                        dbc.CardBody(
-                            [
-                                html.H6("Control Pixels", className="text-muted mb-1"),
-                                html.H4(f"{n_control:,}"),
-                            ]
-                        ),
-                        className="text-center",
-                    ),
-                    md=4,
-                ),
-                dbc.Col(
-                    dbc.Card(
-                        dbc.CardBody(
-                            [
-                                html.H6("Sites", className="text-muted mb-1"),
-                                html.H4(f"{n_sites:,}"),
-                            ]
-                        ),
-                        className="text-center",
-                    ),
-                    md=4,
-                ),
-            ],
-            className="mb-4",
-        )
-    )
+    # --- Match quality diagnostics (all filterable by site) ----------------
+    content.append(html.H5("Match Quality Diagnostics", className="mt-4 mb-2"))
 
-    # --- Love plot (balance plot) ------------------------------------------
-    if balance_df is not None:
-        content.append(html.H5("Covariate Balance (Love Plot)", className="mt-4 mb-2"))
-        content.append(
-            html.P(
-                "Standardized mean differences (SMD) for each covariate "
-                "after matching.  Values within the dashed lines (|SMD| < 0.1) "
-                "indicate good balance between treatment and control groups.",
-                className="text-muted mb-2",
-            )
-        )
-        content.append(_build_love_plot(balance_df, df))
-
-    # --- Propensity score QQ plot ------------------------------------------
-    if pscore_df is not None:
-        content.append(html.H5("Propensity Score QQ Plot", className="mt-4 mb-2"))
-        content.append(
-            html.P(
-                "Empirical quantile-quantile plot comparing the propensity "
-                "score distributions of matched treatment and control pixels. "
-                "Points close to the 45° line indicate similar distributions.",
-                className="text-muted mb-2",
-            )
-        )
-        content.append(_build_pscore_qq_plot(pscore_df, df))
-
-    # --- Covariate histograms (per-site filterable) ------------------------
-    content.append(html.H5("Covariate Distributions", className="mt-4 mb-2"))
-
-    # Per-site selector for filtering distribution plots
+    # Per-site selector for filtering all diagnostic plots
     site_ids = sorted(df["site_id"].unique())
+    # Build name map from totals (always has names from R analysis)
+    site_name_map = {}
+    for t in totals or []:
+        sid = t.site_id if hasattr(t, "site_id") else t.get("site_id")
+        sname = t.site_name if hasattr(t, "site_name") else t.get("site_name")
+        if sid is not None and sname and str(sname) != str(sid):
+            site_name_map[str(sid)] = sname
     site_options = [{"label": "All sites (aggregate)", "value": "__all__"}]
-    site_options.extend({"label": sid, "value": sid} for sid in site_ids)
+    for sid in site_ids:
+        sname = site_name_map.get(str(sid))
+        label = f"{sname} ({sid})" if sname else str(sid)
+        site_options.append({"label": label, "value": sid})
 
     content.append(
         html.Div(
@@ -2761,19 +2739,28 @@ def _build_match_quality(task_id, task):
     )
 
     # Store the data for client-side filtering via a callback
-    content.append(
-        dcc.Store(
-            id="match-quality-data-store",
-            data={
-                "rows": df.to_dict("records"),
-                "covariate_cols": covariate_cols,
-            },
-        )
-    )
-    # Render initial plots for all sites
+    store_data = {
+        "rows": df.to_dict("records"),
+        "covariate_cols": covariate_cols,
+        "site_areas": site_areas,
+    }
+    if balance_df is not None:
+        store_data["balance_rows"] = balance_df.to_dict("records")
+    if pscore_df is not None:
+        store_data["pscore_rows"] = pscore_df.to_dict("records")
+    content.append(dcc.Store(id="match-quality-data-store", data=store_data))
+
+    # Render initial plots for all sites (aggregate)
     content.append(
         html.Div(
-            _build_match_quality_plots(df, covariate_cols),
+            _build_all_match_quality_plots(
+                df,
+                covariate_cols,
+                balance_df,
+                pscore_df,
+                site_filter=None,
+                site_areas=site_areas,
+            ),
             id="match-quality-plots-container",
         )
     )
@@ -2793,7 +2780,147 @@ def _build_match_quality(task_id, task):
     return html.Div(content)
 
 
-def _build_love_plot(balance_df, cov_df):
+def _build_all_match_quality_plots(
+    df,
+    covariate_cols,
+    balance_df,
+    pscore_df,
+    site_filter=None,
+    site_areas=None,
+):
+    """Build summary stats, Love plot, QQ plot, and covariate histograms.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Matched-pixel covariate data (already filtered to the target site
+        when *site_filter* is not ``None``).
+    covariate_cols : list[str]
+        Covariate column names.
+    balance_df : pd.DataFrame | None
+        Balance statistics with ``site_id``, ``covariate``, ``smd``.
+    pscore_df : pd.DataFrame | None
+        Propensity scores with ``treatment``, ``pscore``, ``site_id``.
+    site_filter : str | None
+        ``None`` (or ``"__all__"``) for aggregate; otherwise the site id
+        string to show per-site diagnostics.
+    site_areas : dict | None
+        Mapping of ``str(site_id)`` to area in hectares.
+    """
+    if site_areas is None:
+        site_areas = {}
+
+    components = []
+
+    # --- Summary stat boxes ------------------------------------------------
+    n_treatment = int(df["treatment"].sum())
+    n_control = int((~df["treatment"]).sum())
+    n_sites = df["site_id"].nunique()
+
+    # Compute total area for the selected site(s)
+    if site_filter:
+        total_area = site_areas.get(str(site_filter), 0)
+    else:
+        total_area = sum(site_areas.values())
+
+    stat_cols = [
+        dbc.Col(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6("Treatment Pixels", className="text-muted mb-1"),
+                        html.H4(f"{n_treatment:,}"),
+                    ]
+                ),
+                className="text-center",
+            ),
+            md=3,
+        ),
+        dbc.Col(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6("Control Pixels", className="text-muted mb-1"),
+                        html.H4(f"{n_control:,}"),
+                    ]
+                ),
+                className="text-center",
+            ),
+            md=3,
+        ),
+        dbc.Col(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6(
+                            "Site Area (ha)" if site_filter else "Total Area (ha)",
+                            className="text-muted mb-1",
+                        ),
+                        html.H4(f"{total_area:,.1f}"),
+                    ]
+                ),
+                className="text-center",
+            ),
+            md=3,
+        ),
+    ]
+
+    if not site_filter:
+        stat_cols.append(
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.H6("Sites", className="text-muted mb-1"),
+                            html.H4(f"{n_sites:,}"),
+                        ]
+                    ),
+                    className="text-center",
+                ),
+                md=3,
+            ),
+        )
+
+    components.append(dbc.Row(stat_cols, className="mb-4"))
+
+    # --- Love plot ---------------------------------------------------------
+    if balance_df is not None:
+        components.append(
+            html.H6("Covariate Balance (Love Plot)", className="mt-3 mb-2")
+        )
+        components.append(
+            html.P(
+                "Standardized mean differences (SMD) for each covariate "
+                "after matching.  Values within the dashed lines "
+                "(|SMD| < 0.1) indicate good balance between treatment "
+                "and control groups.",
+                className="text-muted mb-2",
+            )
+        )
+        components.append(_build_love_plot(balance_df, df, site_filter))
+
+    # --- Propensity score QQ plot ------------------------------------------
+    if pscore_df is not None:
+        components.append(html.H6("Propensity Score QQ Plot", className="mt-3 mb-2"))
+        components.append(
+            html.P(
+                "Empirical quantile-quantile plot comparing the propensity "
+                "score distributions of matched treatment and control "
+                "pixels. Points close to the 45° line indicate similar "
+                "distributions.",
+                className="text-muted mb-2",
+            )
+        )
+        components.append(_build_pscore_qq_plot(pscore_df, df, site_filter))
+
+    # --- Covariate histograms ----------------------------------------------
+    components.append(html.H6("Covariate Distributions", className="mt-3 mb-2"))
+    components.extend(_build_match_quality_plots(df, covariate_cols))
+
+    return components
+
+
+def _build_love_plot(balance_df, cov_df, site_filter=None):
     """Build a Love plot (balance dot plot) from the balance statistics CSV.
 
     Shows a horizontal dot plot with one row per covariate.  The x-axis is
@@ -2807,14 +2934,24 @@ def _build_love_plot(balance_df, cov_df):
     cov_df : pd.DataFrame
         Full covariate data (used only as a fallback if balance_df is
         missing aggregate rows).
+    site_filter : str | None
+        ``None`` for aggregate view; otherwise the site id to display.
     """
-    # Use aggregate balance (site_id == "__all__")
-    agg = balance_df[balance_df["site_id"] == "__all__"].copy()
-    if agg.empty:
-        return html.P(
-            "No aggregate balance statistics available.",
-            className="text-muted",
-        )
+    if site_filter:
+        agg = balance_df[balance_df["site_id"].astype(str) == str(site_filter)].copy()
+        if agg.empty:
+            return html.P(
+                "No balance statistics available for this site.",
+                className="text-muted",
+            )
+    else:
+        # Use aggregate balance (site_id == "__all__")
+        agg = balance_df[balance_df["site_id"] == "__all__"].copy()
+        if agg.empty:
+            return html.P(
+                "No aggregate balance statistics available.",
+                className="text-muted",
+            )
 
     # Drop rows with missing SMD
     agg = agg.dropna(subset=["smd"])
@@ -2858,7 +2995,7 @@ def _build_love_plot(balance_df, cov_df):
     return dcc.Graph(figure=fig)
 
 
-def _build_pscore_qq_plot(pscore_df, cov_df):
+def _build_pscore_qq_plot(pscore_df, cov_df, site_filter=None):
     """Build an empirical QQ plot comparing treatment vs control propensity
     score distributions.
 
@@ -2873,8 +3010,13 @@ def _build_pscore_qq_plot(pscore_df, cov_df):
         ``site_id``.
     cov_df : pd.DataFrame
         Unused; kept for API consistency with other helpers.
+    site_filter : str | None
+        ``None`` for aggregate view; otherwise the site id to display.
     """
     import numpy as np
+
+    if site_filter:
+        pscore_df = pscore_df[pscore_df["site_id"].astype(str) == str(site_filter)]
 
     treatment_scores = np.sort(
         pscore_df.loc[pscore_df["treatment"], "pscore"].dropna().values
@@ -2939,9 +3081,12 @@ def _build_match_quality_plots(df, covariate_cols):
     """Build overlaid histogram figures for each covariate.
 
     Returns a list of ``dcc.Graph`` components comparing treatment vs
-    control distributions.
+    control distributions.  Both traces share identical bin edges so
+    their bar widths are directly comparable.
     """
+
     plots = []
+    n_bins = 40
 
     treatment_df = df[df["treatment"]]
     control_df = df[~df["treatment"]]
@@ -2952,6 +3097,12 @@ def _build_match_quality_plots(df, covariate_cols):
         if col_vals.empty or col_vals.nunique() < 2:
             continue
 
+        # Compute shared bin edges from the combined data
+        col_min = float(col_vals.min())
+        col_max = float(col_vals.max())
+        bin_size = (col_max - col_min) / n_bins if col_max > col_min else 1
+        xbins = dict(start=col_min, end=col_max + bin_size, size=bin_size)
+
         fig = go.Figure()
         fig.add_trace(
             go.Histogram(
@@ -2959,7 +3110,7 @@ def _build_match_quality_plots(df, covariate_cols):
                 name="Treatment",
                 opacity=0.6,
                 marker_color="#2ca02c",
-                nbinsx=40,
+                xbins=xbins,
             )
         )
         fig.add_trace(
@@ -2968,7 +3119,7 @@ def _build_match_quality_plots(df, covariate_cols):
                 name="Control",
                 opacity=0.6,
                 marker_color="#d62728",
-                nbinsx=40,
+                xbins=xbins,
             )
         )
         fig.update_layout(
