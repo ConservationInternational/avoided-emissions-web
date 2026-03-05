@@ -113,6 +113,22 @@ match_site <- function(d, f) {
     # the returned data.frame.  Groups too small for GLM get NA scores.
     m <- foreach(this_group = unique(d$group), .combine = foreach_rbind) %do% {
         this_d <- filter(d, group == this_group)
+
+        # Drop rows with NA in any formula variable so that glm() and
+        # predict() operate on the same set of rows (glm uses na.omit
+        # by default, which silently drops incomplete cases and causes
+        # a length mismatch when assigning predictions back).
+        formula_vars <- all.vars(f)
+        complete <- complete.cases(this_d[, formula_vars, drop = FALSE])
+        n_dropped_na <- sum(!complete)
+        if (n_dropped_na > 0) {
+            this_d <- this_d[complete, ]
+            message(
+                "    Dropped ", n_dropped_na,
+                " rows with NA covariates in group ", this_group
+            )
+        }
+
         n_treatment <- sum(this_d$treatment)
 
         if (n_treatment < 1) {
