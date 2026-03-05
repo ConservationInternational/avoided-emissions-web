@@ -56,6 +56,7 @@ from services import (
     save_user_site_set,
     start_gee_export,
     submit_analysis_task,
+    update_task_info,
     validate_share_token,
     delete_user_site_set,
 )
@@ -1151,6 +1152,92 @@ def register_callbacks(app):
 
         links = list_share_links(task_id)
         return _render_share_links_list(links, task_id)
+
+    # -- Edit task name/description -------------------------------------------
+
+    @app.callback(
+        [
+            Output("edit-task-modal", "is_open"),
+            Output("edit-task-name", "value"),
+            Output("edit-task-description", "value"),
+            Output("edit-task-result", "children"),
+        ],
+        [
+            Input("open-edit-modal", "n_clicks"),
+            Input("cancel-edit-task", "n_clicks"),
+        ],
+        [
+            State("edit-task-modal", "is_open"),
+            State("task-id-store", "data"),
+        ],
+        prevent_initial_call=True,
+    )
+    def toggle_edit_modal(open_clicks, cancel_clicks, is_open, task_id):
+        if not callback_context.triggered:
+            raise PreventUpdate
+
+        # Closing
+        if is_open:
+            return False, no_update, no_update, html.Div()
+
+        # Opening — populate inputs with current values
+        user = get_current_user()
+        if not user or not _check_task_access(task_id, user):
+            raise PreventUpdate
+
+        detail = get_task_detail(task_id)
+        if not detail:
+            raise PreventUpdate
+
+        task = detail["task"]
+        return True, task.name, task.description or "", html.Div()
+
+    @app.callback(
+        [
+            Output("edit-task-result", "children", allow_duplicate=True),
+            Output("edit-task-modal", "is_open", allow_duplicate=True),
+            Output("task-title", "children", allow_duplicate=True),
+        ],
+        Input("save-edit-task", "n_clicks"),
+        [
+            State("edit-task-name", "value"),
+            State("edit-task-description", "value"),
+            State("task-id-store", "data"),
+        ],
+        prevent_initial_call=True,
+    )
+    def save_task_edits(n_clicks, name, description, task_id):
+        if not n_clicks:
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user or not _check_task_access(task_id, user):
+            raise PreventUpdate
+
+        if not name or not name.strip():
+            return (
+                dbc.Alert("Name cannot be empty.", color="danger", className="mt-2"),
+                no_update,
+                no_update,
+            )
+
+        try:
+            result = update_task_info(task_id, name=name, description=description)
+            if not result:
+                return (
+                    dbc.Alert("Task not found.", color="danger", className="mt-2"),
+                    no_update,
+                    no_update,
+                )
+            return html.Div(), False, result["name"]
+        except Exception:
+            logger.exception("Failed to update task info")
+            report_exception()
+            return (
+                dbc.Alert("Failed to save changes.", color="danger", className="mt-2"),
+                no_update,
+                no_update,
+            )
 
     # -- Admin: Covariates (unified export + merge) ---------------------------
 

@@ -1804,16 +1804,31 @@ def task_detail_layout(user, task_id, shared_token=None):
     header_row = dbc.Row(
         [
             dbc.Col(header_children, width=True),
-            # Share button — only shown for authenticated users
+            # Edit / Share buttons — only shown for authenticated users
             *(
                 [
                     dbc.Col(
-                        dbc.Button(
-                            [html.I(className="bi bi-share me-1"), "Share"],
-                            id="open-share-modal",
-                            color="outline-primary",
-                            size="sm",
-                            className="mt-1",
+                        html.Div(
+                            [
+                                dbc.Button(
+                                    [html.I(className="bi bi-pencil me-1"), "Edit"],
+                                    id="open-edit-modal",
+                                    color="outline-secondary",
+                                    size="sm",
+                                    className="mt-1 me-2",
+                                ),
+                                dbc.Button(
+                                    [
+                                        html.I(className="bi bi-share me-1"),
+                                        "Share",
+                                    ],
+                                    id="open-share-modal",
+                                    color="outline-primary",
+                                    size="sm",
+                                    className="mt-1",
+                                ),
+                            ],
+                            className="d-flex",
                         ),
                         width="auto",
                         className="d-flex align-items-start",
@@ -1838,6 +1853,52 @@ def task_detail_layout(user, task_id, shared_token=None):
             dismissable=False,
         )
         if is_shared
+        else html.Div()
+    )
+
+    # -- Edit modal (only in authenticated mode) ------------------------------
+    edit_modal = (
+        dbc.Modal(
+            [
+                dbc.ModalHeader(dbc.ModalTitle("Edit Task")),
+                dbc.ModalBody(
+                    [
+                        dbc.Label("Name"),
+                        dbc.Input(
+                            id="edit-task-name",
+                            type="text",
+                            maxLength=255,
+                            className="mb-3",
+                        ),
+                        dbc.Label("Description"),
+                        dbc.Textarea(
+                            id="edit-task-description",
+                            className="mb-3",
+                            style={"height": "100px"},
+                        ),
+                        html.Div(id="edit-task-result"),
+                    ]
+                ),
+                dbc.ModalFooter(
+                    [
+                        dbc.Button(
+                            "Cancel",
+                            id="cancel-edit-task",
+                            color="secondary",
+                            className="me-2",
+                        ),
+                        dbc.Button(
+                            "Save",
+                            id="save-edit-task",
+                            color="primary",
+                        ),
+                    ]
+                ),
+            ],
+            id="edit-task-modal",
+            is_open=False,
+        )
+        if not is_shared
         else html.Div()
     )
 
@@ -1970,6 +2031,7 @@ def task_detail_layout(user, task_id, shared_token=None):
             shared_banner,
             header_row,
             tabs,
+            edit_modal,
             share_modal,
             dcc.Store(id="task-id-store", data=task_id),
             dcc.Store(id="share-token-store", data=shared_token),

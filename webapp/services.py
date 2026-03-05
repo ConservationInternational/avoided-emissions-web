@@ -958,6 +958,30 @@ def _fetch_sites_geojson_from_s3(sites_s3_uri):
         return None
 
 
+def update_task_info(task_id, name=None, description=None):
+    """Update the name and/or description of an AnalysisTask.
+
+    Returns the updated task dict ``{"name": ..., "description": ...}``
+    on success, or *None* if the task does not exist.
+    """
+    db = get_db()
+    try:
+        task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+        if not task:
+            return None
+        if name is not None:
+            task.name = name.strip()[:255]
+        if description is not None:
+            task.description = description.strip() or None
+        db.commit()
+        return {"name": task.name, "description": task.description}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def get_task_detail(task_id):
     """Get full task details including sites and results."""
     db = get_db()
