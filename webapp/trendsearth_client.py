@@ -28,6 +28,8 @@ Usage
     status = client.get_execution(execution["id"])
 """
 
+import gzip
+import json
 import logging
 import os
 
@@ -38,9 +40,17 @@ logger = logging.getLogger(__name__)
 # Default timeout for API calls (seconds)
 _TIMEOUT = 30
 
+# Minimum payload size (bytes) before attempting gzip compression
+_COMPRESS_MIN_SIZE = 1024
+
 
 class TrendsEarthClient:
-    """Lightweight client for the trends.earth API."""
+    """Lightweight client for the trends.earth API.
+
+    Uses a persistent ``requests.Session`` for HTTP keep-alive /
+    connection pooling, and transparently gzip-compresses JSON request
+    bodies that exceed ``_COMPRESS_MIN_SIZE`` bytes.
+    """
 
     def __init__(
         self,
@@ -58,6 +68,51 @@ class TrendsEarthClient:
         self._email = email or ""
         self._password = password or ""
         self._token = None
+
+        # Persistent session — keeps TCP connections alive across
+        # requests to the same host and negotiates compressed responses
+        # automatically via urllib3.
+        self._session = requests.Session()
+        self._session.headers.update({"Accept-Encoding": "gzip, deflate"})
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _compressed_post(self, url, *, json_body=None, **kwargs):
+        """POST with optional gzip compression of JSON payloads.
+
+        If the serialised JSON exceeds ``_COMPRESS_MIN_SIZE`` and
+        compression yields at least a 20 % size reduction the request
+        body is gzip-compressed and ``Content-Encoding: gzip`` is set.
+        The trends.earth API already supports the ``Content-Encoding:
+        gzip`` header (see ``handle_compressed_request`` middleware in
+        ``gefapi/__init__.py``).
+
+        For small payloads or when compression is not beneficial the
+        body is sent uncompressed as regular ``application/json``.
+        """
+        headers = kwargs.pop("headers", {})
+        if json_body is not None:
+            raw = json.dumps(json_body, separators=(",", ":"))
+            if len(raw) > _COMPRESS_MIN_SIZE:
+                compressed = gzip.compress(raw.encode())
+                ratio = len(raw) / len(compressed)
+                if ratio > 1.2:
+                    logger.debug(
+                        "Compressing request: %d → %d bytes (%.1fx)",
+                        len(raw),
+                        len(compressed),
+                        ratio,
+                    )
+                    headers["Content-Type"] = "application/json"
+                    headers["Content-Encoding"] = "gzip"
+                    return self._session.post(
+                        url, data=compressed, headers=headers, **kwargs
+                    )
+            # Payload too small or compression not effective
+            return self._session.post(url, json=json_body, headers=headers, **kwargs)
+        return self._session.post(url, headers=headers, **kwargs)
 
     # ------------------------------------------------------------------
     # Auth
@@ -94,7 +149,7 @@ class TrendsEarthClient:
         else:
             auth_url = base_url + "/auth"
 
-        resp = requests.post(
+        resp = self._session.post(
             auth_url,
             json={"email": self._email, "password": self._password},
             timeout=_TIMEOUT,
@@ -120,7 +175,7 @@ class TrendsEarthClient:
         dict
             ``{"data": {"id": "...", "email": "...", ...}}``
         """
-        resp = requests.get(
+        resp = self._session.get(
             f"{self.api_url}/user/me",
             headers=self._headers(),
             timeout=_TIMEOUT,
@@ -161,9 +216,9 @@ class TrendsEarthClient:
         if expires_in_days is not None:
             body["expires_in_days"] = expires_in_days
 
-        resp = requests.post(
+        resp = self._compressed_post(
             f"{self.api_url}/oauth/clients",
-            json=body,
+            json_body=body,
             headers=self._headers(),
             timeout=_TIMEOUT,
         )
@@ -172,7 +227,7 @@ class TrendsEarthClient:
 
     def list_oauth2_clients(self):
         """List the caller's active OAuth2 service clients."""
-        resp = requests.get(
+        resp = self._session.get(
             f"{self.api_url}/oauth/clients",
             headers=self._headers(),
             timeout=_TIMEOUT,
@@ -182,7 +237,7 @@ class TrendsEarthClient:
 
     def revoke_oauth2_client(self, client_db_id):
         """Revoke an OAuth2 service client by its database UUID."""
-        resp = requests.delete(
+        resp = self._session.delete(
             f"{self.api_url}/oauth/clients/{client_db_id}",
             headers=self._headers(),
             timeout=_TIMEOUT,
@@ -205,7 +260,7 @@ class TrendsEarthClient:
         dict
             ``{"access_token": "...", "token_type": "bearer", "expires_in": ...}``
         """
-        resp = requests.post(
+        resp = self._session.post(
             f"{self.api_url}/oauth/token",
             json={
                 "grant_type": "client_credentials",
@@ -267,9 +322,9 @@ class TrendsEarthClient:
             url,
             params.get("task_id", "?"),
         )
-        resp = requests.post(
+        resp = self._compressed_post(
             url,
-            json=params,
+            json_body=params,
             headers=self._headers(),
             timeout=_TIMEOUT,
         )
@@ -293,7 +348,7 @@ class TrendsEarthClient:
     def get_execution(self, execution_id):
         """Fetch an execution's current state."""
         url = f"{self.api_url}/execution/{execution_id}"
-        resp = requests.get(
+        resp = self._session.get(
             url,
             headers=self._headers(),
             timeout=_TIMEOUT,
@@ -338,7 +393,7 @@ class TrendsEarthClient:
         if last_id is not None:
             params["last-id"] = last_id
         try:
-            resp = requests.get(
+            resp = self._session.get(
                 url,
                 params=params,
                 headers=self._headers(),
@@ -378,7 +433,7 @@ class TrendsEarthClient:
             params["status"] = status
         if updated_at:
             params["updated_at"] = updated_at
-        resp = requests.get(
+        resp = self._session.get(
             f"{self.api_url}/execution",
             params=params,
             headers=self._headers(),
@@ -392,7 +447,7 @@ class TrendsEarthClient:
     # ------------------------------------------------------------------
 
     def get_script(self, script_id):
-        resp = requests.get(
+        resp = self._session.get(
             f"{self.api_url}/script/{script_id}",
             headers=self._headers(),
             timeout=_TIMEOUT,
@@ -402,7 +457,7 @@ class TrendsEarthClient:
 
     def find_script_by_slug(self, slug):
         """Find a script by its slug name."""
-        resp = requests.get(
+        resp = self._session.get(
             f"{self.api_url}/script",
             params={"slug": slug},
             headers=self._headers(),
