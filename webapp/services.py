@@ -679,10 +679,29 @@ def submit_analysis_task(
             + ", ".join(sorted(ALLOWED_MATCHING_JOB_QUEUES))
         )
 
-    # Compute the matching extent polygon from PostGIS
-    matching_extent = compute_matching_extent(gdf, exact_match_vars)
+    # Verify trends.earth integration *before* any DB or S3 work so the
+    # user gets an immediate error on the submission form instead of a
+    # half-created failed task.
     from credential_store import get_decrypted_secret
     from trendsearth_client import TrendsEarthClient
+
+    user_creds = get_decrypted_secret(user_id)
+    if not user_creds:
+        raise ValueError(
+            "You must link your trends.earth account before "
+            "submitting analysis tasks.  Go to Settings \u2192 "
+            "trends.earth Integration to connect your account."
+        )
+    script_id = Config.TRENDSEARTH_SCRIPT_ID
+    if not script_id:
+        raise ValueError(
+            "TRENDSEARTH_SCRIPT_ID is not configured. Set this "
+            "environment variable to the UUID of the avoided-emissions "
+            "script registered on the trends.earth API."
+        )
+
+    # Compute the matching extent polygon from PostGIS
+    matching_extent = compute_matching_extent(gdf, exact_match_vars)
 
     if fc_years is None:
         fc_years = list(range(2000, 2024))
@@ -847,26 +866,13 @@ def submit_analysis_task(
         params["batch"] = batch_overrides
 
         # Submit via trends.earth API using the user's own OAuth2 creds
-        user_creds = get_decrypted_secret(user_id)
-        if not user_creds:
-            raise ValueError(
-                "You must link your trends.earth account before "
-                "submitting analysis tasks.  Go to Settings → "
-                "trends.earth Integration to connect your account."
-            )
+        # (credentials and script_id already validated above)
         client_id, client_secret = user_creds
         client = TrendsEarthClient.from_oauth2_credentials(
             api_url=Config.TRENDSEARTH_API_URL,
             client_id=client_id,
             client_secret=client_secret,
         )
-        script_id = Config.TRENDSEARTH_SCRIPT_ID
-        if not script_id:
-            raise ValueError(
-                "TRENDSEARTH_SCRIPT_ID is not configured. Set this "
-                "environment variable to the UUID of the avoided-emissions "
-                "script registered on the trends.earth API."
-            )
         logger.info(
             "[SUBMIT] Task %s: calling trends.earth API (script=%s, "
             "api_url=%s, batch_overrides=%s)",
