@@ -670,6 +670,36 @@ def login_layout():
                                             ),
                                             className="text-center mb-0",
                                         ),
+                                        html.Div(
+                                            [
+                                                html.A(
+                                                    "Privacy Policy",
+                                                    href="https://www.conservation.org/policies/privacy",
+                                                    target="_blank",
+                                                    className="text-muted",
+                                                    style={
+                                                        "textDecoration": "none",
+                                                        "fontSize": "12px",
+                                                    },
+                                                ),
+                                                html.Span(
+                                                    " | ",
+                                                    className="text-muted",
+                                                    style={"fontSize": "12px"},
+                                                ),
+                                                html.A(
+                                                    "Terms of Use",
+                                                    href="https://www.conservation.org/policies/terms-of-use",
+                                                    target="_blank",
+                                                    className="text-muted",
+                                                    style={
+                                                        "textDecoration": "none",
+                                                        "fontSize": "12px",
+                                                    },
+                                                ),
+                                            ],
+                                            className="text-center mt-3",
+                                        ),
                                     ]
                                 ),
                             ],
