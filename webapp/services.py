@@ -604,6 +604,7 @@ def submit_analysis_task(
     control_multiplier=50,
     min_site_area_ha=100,
     min_glm_treatment_pixels=15,
+    caliper_width=0.2,
     match_memory_mib=30720,
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
 ):
@@ -659,6 +660,8 @@ def submit_analysis_task(
         raise ValueError("min_site_area_ha must be zero or greater")
     if min_glm_treatment_pixels < 1:
         raise ValueError("min_glm_treatment_pixels must be at least 1")
+    if caliper_width < 0:
+        raise ValueError("caliper_width must be zero (disabled) or positive")
     if matching_job_queue not in ALLOWED_MATCHING_JOB_QUEUES:
         raise ValueError(
             "matching_job_queue must be one of: "
@@ -738,6 +741,7 @@ def submit_analysis_task(
             "control_multiplier": control_multiplier,
             "min_site_area_ha": min_site_area_ha,
             "min_glm_treatment_pixels": min_glm_treatment_pixels,
+            "caliper_width": caliper_width,
             "results_s3_uri": (
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
             ),
@@ -1465,12 +1469,21 @@ def delete_user(user_id):
         db.close()
 
 
-def download_results_csv(task_id, result_type="by_site_year"):
+def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=None):
     """Download result CSV from S3 for a completed task.
 
     Args:
         task_id: The task UUID.
-        result_type: One of 'by_site_year', 'by_site_total', 'pixel_level'.
+        result_type: One of 'by_site_year', 'by_site_total', 'pixel_level',
+            'match_covariates', 'balance', 'propensity_scores'.
+        results_s3_uri: Optional ``s3://bucket/prefix`` URI pointing to the
+            output directory.  When provided the bucket and prefix are
+            extracted from this URI instead of being derived from
+            ``Config.S3_PREFIX`` and *task_id*.  This is important for
+            tasks adopted from the trends.earth API whose local UUID
+            differs from the original task_id embedded in the S3 path.
+            If *None*, falls back to looking up the task's stored URI
+            in the database before constructing a default path.
 
     Returns:
         CSV content as string, or None if not found.
@@ -1487,10 +1500,42 @@ def download_results_csv(task_id, result_type="by_site_year"):
     if not filename:
         return None
 
+    # Resolve the S3 location of the output directory.  Priority:
+    #   1. Explicit results_s3_uri argument
+    #   2. AnalysisTask.results_s3_uri from the database
+    #   3. Constructed default from Config.S3_PREFIX + task_id
+    if not results_s3_uri:
+        from models import AnalysisTask, get_db
+
+        db = get_db()
+        try:
+            task = (
+                db.query(AnalysisTask.results_s3_uri)
+                .filter(AnalysisTask.id == task_id)
+                .first()
+            )
+            if task and task.results_s3_uri:
+                results_s3_uri = task.results_s3_uri
+        finally:
+            db.close()
+
     s3 = get_s3_client()
-    key = f"{Config.S3_PREFIX}/tasks/{task_id}/output/{filename}"
+
+    if results_s3_uri:
+        # Parse s3://bucket/prefix
+        uri = results_s3_uri
+        if uri.startswith("s3://"):
+            uri = uri[5:]
+        parts = uri.split("/", 1)
+        bucket = parts[0]
+        prefix = parts[1].rstrip("/") if len(parts) > 1 else ""
+        key = f"{prefix}/{filename}"
+    else:
+        bucket = Config.S3_BUCKET
+        key = f"{Config.S3_PREFIX}/tasks/{task_id}/output/{filename}"
+
     try:
-        response = s3.get_object(Bucket=Config.S3_BUCKET, Key=key)
+        response = s3.get_object(Bucket=bucket, Key=key)
         return response["Body"].read().decode("utf-8")
     except s3.exceptions.NoSuchKey:
         return None

@@ -38,6 +38,7 @@ message("Step 2: Propensity score matching")
 MAX_TREATMENT <- config$max_treatment_pixels
 CONTROL_MULTIPLIER <- config$control_multiplier
 MIN_GLM <- config$min_glm_treatment_pixels
+CALIPER_WIDTH <- config$caliper_width
 
 # Exact-match variables read from config (e.g. admin1, ecoregion, pa)
 EXACT_MATCH_VARS <- config$exact_match_vars
@@ -136,12 +137,18 @@ match_site <- function(d, f) {
         } else if (n_treatment < MIN_GLM) {
             # Too few treatment pixels for GLM; use Mahalanobis distance
             dists <- match_on(f, data = this_d)
+            if (CALIPER_WIDTH > 0) {
+                dists <- dists + caliper(dists, width = CALIPER_WIDTH)
+            }
             this_d$pscore <- NA_real_
         } else {
             # Estimate propensity scores with logistic regression
             model <- glm(f, data = this_d, family = binomial())
             this_d$pscore <- predict(model, type = "response")
             dists <- match_on(model, data = this_d)
+            if (CALIPER_WIDTH > 0) {
+                dists <- dists + caliper(dists, width = CALIPER_WIDTH)
+            }
         }
         return(get_matches(this_d, dists))
     }

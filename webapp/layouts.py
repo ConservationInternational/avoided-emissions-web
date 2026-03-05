@@ -1512,6 +1512,32 @@ def submit_layout(user):
                                                                                     dbc.Col(
                                                                                         [
                                                                                             dbc.Label(
+                                                                                                "Caliper width"
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="caliper-width",
+                                                                                                type="number",
+                                                                                                min=0,
+                                                                                                step=0.05,
+                                                                                                value=0.2,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Maximum distance (in SD) for a valid match. "
+                                                                                                "Tighter values improve balance but reduce matched pairs. "
+                                                                                                "Set to 0 to disable the caliper.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
                                                                                                 "Matching memory (GB)"
                                                                                             ),
                                                                                             dcc.Dropdown(

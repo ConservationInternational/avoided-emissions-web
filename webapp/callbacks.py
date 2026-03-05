@@ -633,6 +633,7 @@ def register_callbacks(app):
         State("control-multiplier", "value"),
         State("min-site-area-ha", "value"),
         State("min-glm-treatment-pixels", "value"),
+        State("caliper-width", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
         prevent_initial_call=True,
@@ -648,6 +649,7 @@ def register_callbacks(app):
         control_multiplier,
         min_site_area_ha,
         min_glm_treatment_pixels,
+        caliper_width,
         match_memory_gb,
         matching_job_queue,
     ):
@@ -714,6 +716,9 @@ def register_callbacks(app):
                 control_multiplier=int(control_multiplier or 50),
                 min_site_area_ha=int(min_site_area_ha or 100),
                 min_glm_treatment_pixels=int(min_glm_treatment_pixels or 15),
+                caliper_width=float(
+                    caliper_width if caliper_width is not None else 0.2
+                ),
                 match_memory_mib=int(match_memory_gb or 30) * 1024,
                 matching_job_queue=matching_job_queue,
             )
@@ -2505,7 +2510,9 @@ def _build_match_quality(task_id, task):
             ]
         )
 
-    csv_content = download_results_csv(task_id, "match_covariates")
+    csv_content = download_results_csv(
+        task_id, "match_covariates", results_s3_uri=task.results_s3_uri
+    )
     if not csv_content:
         return html.Div(
             [
@@ -2546,7 +2553,9 @@ def _build_match_quality(task_id, task):
 
     # Fetch balance statistics (Love plot data)
     balance_df = None
-    balance_csv = download_results_csv(task_id, "balance")
+    balance_csv = download_results_csv(
+        task_id, "balance", results_s3_uri=task.results_s3_uri
+    )
     if balance_csv:
         balance_df = pd.read_csv(io.StringIO(balance_csv))
         if balance_df.empty:
@@ -2554,7 +2563,9 @@ def _build_match_quality(task_id, task):
 
     # Fetch propensity scores (QQ plot data)
     pscore_df = None
-    pscore_csv = download_results_csv(task_id, "propensity_scores")
+    pscore_csv = download_results_csv(
+        task_id, "propensity_scores", results_s3_uri=task.results_s3_uri
+    )
     if pscore_csv:
         pscore_df = pd.read_csv(io.StringIO(pscore_csv))
         if pscore_df.empty or "pscore" not in pscore_df.columns:
@@ -2759,7 +2770,7 @@ def _build_love_plot(balance_df, cov_df):
     fig.add_vline(x=0, line_color="black", opacity=0.3)
 
     fig.update_layout(
-        title="Love Plot: Standardized Mean Differences After Matching",
+        title="Standardized Mean Differences After Matching",
         xaxis_title="Standardized Mean Difference (SMD)",
         yaxis_title="",
         showlegend=False,
