@@ -114,7 +114,7 @@ PRE_INTERVENTION_YEARS <- 5
 if (length(match_files) > 0) {
     required_match_cols <- c(
         "cell", "site_id", "id_numeric", "area_ha", "treatment",
-        "sampled_fraction", "total_biomass", "match_group"
+        "sampled_fraction", "total_biomass", "match_group", "match_weight"
     )
 
     # --- Extract matched-pixel covariate data for match-quality assessment ---
@@ -145,7 +145,8 @@ if (length(match_files) > 0) {
             !"defor_pre_intervention" %in% available_covs) {
             available_covs <- c(available_covs, "defor_pre_intervention")
         }
-        id_cols <- c("cell", "site_id", "treatment", "match_group")
+        id_cols <- c("cell", "site_id", "treatment", "match_group",
+                    "match_weight")
         keep_cols <- intersect(c(id_cols, available_covs), names(m))
         m %>% select(all_of(keep_cols)) %>% as_tibble()
     }
@@ -163,7 +164,8 @@ if (length(match_files) > 0) {
             cell = integer(),
             site_id = character(),
             treatment = logical(),
-            match_group = character()
+            match_group = character(),
+            match_weight = numeric()
         )
         write_csv(
             empty_cov,
@@ -177,17 +179,27 @@ if (length(match_files) > 0) {
     # as (mean_treatment - mean_control) / pooled_sd.
     all_covs_for_balance <- if (nrow(match_cov_data) > 0) {
         setdiff(names(match_cov_data),
-                c("cell", "site_id", "treatment", "match_group"))
+                c("cell", "site_id", "treatment", "match_group",
+                  "match_weight"))
     } else {
         character(0)
     }
 
     if (length(all_covs_for_balance) > 0 && nrow(match_cov_data) > 0) {
         compute_smd <- function(df, cov) {
-            t_vals <- df[[cov]][df$treatment]
-            c_vals <- df[[cov]][!df$treatment]
-            t_vals <- t_vals[!is.na(t_vals)]
-            c_vals <- c_vals[!is.na(c_vals)]
+            # Use match_weight for weighted statistics so that 1:k
+            # matching is correctly reflected in the balance check.
+            t_mask <- df$treatment
+            t_vals <- df[[cov]][t_mask]
+            c_vals <- df[[cov]][!t_mask]
+            t_wts <- df$match_weight[t_mask]
+            c_wts <- df$match_weight[!t_mask]
+            ok_t <- !is.na(t_vals)
+            ok_c <- !is.na(c_vals)
+            t_vals <- t_vals[ok_t]
+            t_wts <- t_wts[ok_t]
+            c_vals <- c_vals[ok_c]
+            c_wts <- c_wts[ok_c]
             if (length(t_vals) < 2 || length(c_vals) < 2) {
                 return(tibble(
                     covariate = cov, mean_treatment = NA_real_,
@@ -195,10 +207,14 @@ if (length(match_files) > 0) {
                     smd = NA_real_
                 ))
             }
-            m_t <- mean(t_vals)
-            m_c <- mean(c_vals)
-            sd_t <- sd(t_vals)
-            sd_c <- sd(c_vals)
+            m_t <- weighted.mean(t_vals, t_wts)
+            m_c <- weighted.mean(c_vals, c_wts)
+            # Weighted variance (reliability weights)
+            wvar <- function(x, w) {
+                sum(w * (x - weighted.mean(x, w))^2) / sum(w)
+            }
+            sd_t <- sqrt(wvar(t_vals, t_wts))
+            sd_c <- sqrt(wvar(c_vals, c_wts))
             pooled <- sqrt((sd_t^2 + sd_c^2) / 2)
             smd_val <- if (pooled > 0) (m_t - m_c) / pooled else 0
             tibble(
@@ -247,13 +263,14 @@ if (length(match_files) > 0) {
         m <- readRDS(f)
         if ("pscore" %in% names(m)) {
             m %>%
-                select(cell, site_id, treatment, match_group, pscore) %>%
+                select(cell, site_id, treatment, match_group,
+                       match_weight, pscore) %>%
                 as_tibble()
         } else {
             tibble(
                 cell = integer(), site_id = character(),
                 treatment = logical(), match_group = character(),
-                pscore = numeric()
+                match_weight = numeric(), pscore = numeric()
             )
         }
     }
@@ -269,7 +286,7 @@ if (length(match_files) > 0) {
             tibble(
                 cell = integer(), site_id = character(),
                 treatment = logical(), match_group = character(),
-                pscore = numeric()
+                match_weight = numeric(), pscore = numeric()
             ),
             file.path(config$output_dir, "results_propensity_scores.csv")
         )
@@ -293,6 +310,7 @@ if (length(match_files) > 0) {
         m %>%
             select(cell, site_id, id_numeric, area_ha, treatment,
                    sampled_fraction, total_biomass, match_group,
+                   match_weight,
                    all_of(fc_cols[fc_cols %in% names(m)])) %>%
             left_join(
                 sites %>% select(site_id, start_year, end_year),
@@ -357,26 +375,39 @@ if (length(match_files) > 0) {
     # Save pixel-level results
     m_processed %>%
         select(cell, site_id, year, treatment, sampled_fraction,
-               match_group, forest_at_year_end, forest_change_ha,
-               Emissions_MgCO2e) %>%
+               match_group, match_weight, forest_at_year_end,
+               forest_change_ha, Emissions_MgCO2e) %>%
         write_csv(file.path(config$output_dir, "results_pixel_level.csv"))
 
-    # Summarize by site and year
+    # Summarize by site and year.
+    # With 1:k matching each match_group has one treatment pixel and
+    # one or more control pixels, each carrying a match_weight.  The
+    # control-side aggregates use the weighted mean of the controls in
+    # each group, so that a group with 3 controls contributes the same
+    # overall weight as one with 1 control.  Treatment pixels always
+    # have match_weight = 1.
     results_by_year <- m_processed %>%
         group_by(match_group, site_id, year) %>%
         summarise(
-            cell = cell[treatment],
-            treatment_defor_ha = abs(forest_change_ha[treatment]),
-            control_defor_ha = abs(forest_change_ha[!treatment]),
-            forest_loss_avoided_ha =
-                abs(forest_change_ha[!treatment]) -
-                abs(forest_change_ha[treatment]),
-            treatment_emissions_mgco2e = abs(Emissions_MgCO2e[treatment]),
-            control_emissions_mgco2e = abs(Emissions_MgCO2e[!treatment]),
-            emissions_avoided_mgco2e =
-                abs(Emissions_MgCO2e[!treatment]) -
-                abs(Emissions_MgCO2e[treatment]),
+            cell = cell[treatment][1],
+            treatment_defor_ha = abs(forest_change_ha[treatment][1]),
+            control_defor_ha = weighted.mean(
+                abs(forest_change_ha[!treatment]),
+                match_weight[!treatment]
+            ),
+            treatment_emissions_mgco2e =
+                abs(Emissions_MgCO2e[treatment][1]),
+            control_emissions_mgco2e = weighted.mean(
+                abs(Emissions_MgCO2e[!treatment]),
+                match_weight[!treatment]
+            ),
             .groups = "drop"
+        ) %>%
+        mutate(
+            forest_loss_avoided_ha =
+                control_defor_ha - treatment_defor_ha,
+            emissions_avoided_mgco2e =
+                control_emissions_mgco2e - treatment_emissions_mgco2e
         ) %>%
         group_by(site_id, year) %>%
         summarise(
@@ -510,7 +541,8 @@ if (length(match_files) > 0) {
             cell = integer(),
             site_id = character(),
             treatment = logical(),
-            match_group = character()
+            match_group = character(),
+            match_weight = numeric()
         ),
         file.path(config$output_dir, "results_match_covariates.csv")
     )
@@ -530,7 +562,7 @@ if (length(match_files) > 0) {
         tibble(
             cell = integer(), site_id = character(),
             treatment = logical(), match_group = character(),
-            pscore = numeric()
+            match_weight = numeric(), pscore = numeric()
         ),
         file.path(config$output_dir, "results_propensity_scores.csv")
     )

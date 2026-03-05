@@ -1530,6 +1530,43 @@ def submit_layout(user):
                                                                                         ],
                                                                                         width=6,
                                                                                     ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "Max controls per treatment pixel"
+                                                                                            ),
+                                                                                            dcc.Dropdown(
+                                                                                                id="max-controls-per-treatment",
+                                                                                                options=[
+                                                                                                    {
+                                                                                                        "label": "1 (pair matching)",
+                                                                                                        "value": 1,
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "label": "3",
+                                                                                                        "value": 3,
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "label": "5",
+                                                                                                        "value": 5,
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "label": "No limit (full matching)",
+                                                                                                        "value": 0,
+                                                                                                    },
+                                                                                                ],
+                                                                                                value=1,
+                                                                                                clearable=False,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "More controls per treatment reduces variance "
+                                                                                                "but may increase bias. Controls are weighted "
+                                                                                                "inversely by group size.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
                                                                                 ],
                                                                                 className="g-3 mt-1",
                                                                             ),

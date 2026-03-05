@@ -605,6 +605,7 @@ def submit_analysis_task(
     min_site_area_ha=100,
     min_glm_treatment_pixels=15,
     caliper_width=0.2,
+    max_controls_per_treatment=1,
     match_memory_mib=30720,
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
 ):
@@ -662,6 +663,8 @@ def submit_analysis_task(
         raise ValueError("min_glm_treatment_pixels must be at least 1")
     if caliper_width < 0:
         raise ValueError("caliper_width must be zero (disabled) or positive")
+    if max_controls_per_treatment < 0:
+        raise ValueError("max_controls_per_treatment must be 0 (no limit) or positive")
     if matching_job_queue not in ALLOWED_MATCHING_JOB_QUEUES:
         raise ValueError(
             "matching_job_queue must be one of: "
@@ -742,6 +745,7 @@ def submit_analysis_task(
             "min_site_area_ha": min_site_area_ha,
             "min_glm_treatment_pixels": min_glm_treatment_pixels,
             "caliper_width": caliper_width,
+            "max_controls_per_treatment": max_controls_per_treatment,
             "results_s3_uri": (
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
             ),

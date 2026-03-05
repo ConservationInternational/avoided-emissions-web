@@ -634,6 +634,7 @@ def register_callbacks(app):
         State("min-site-area-ha", "value"),
         State("min-glm-treatment-pixels", "value"),
         State("caliper-width", "value"),
+        State("max-controls-per-treatment", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
         prevent_initial_call=True,
@@ -650,6 +651,7 @@ def register_callbacks(app):
         min_site_area_ha,
         min_glm_treatment_pixels,
         caliper_width,
+        max_controls_per_treatment,
         match_memory_gb,
         matching_job_queue,
     ):

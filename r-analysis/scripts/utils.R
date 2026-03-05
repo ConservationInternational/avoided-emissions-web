@@ -194,6 +194,7 @@ parse_config <- function(args = commandArgs(trailingOnly = TRUE)) {
     if (is.null(config$min_site_area_ha)) config$min_site_area_ha <- 100
     if (is.null(config$min_glm_treatment_pixels)) config$min_glm_treatment_pixels <- 15
     if (is.null(config$caliper_width)) config$caliper_width <- 0.2
+    if (is.null(config$max_controls_per_treatment)) config$max_controls_per_treatment <- 1
 
     # Set up directory paths
     config$input_dir <- file.path(config$data_dir, "input")

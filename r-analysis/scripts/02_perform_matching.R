@@ -39,6 +39,8 @@ MAX_TREATMENT <- config$max_treatment_pixels
 CONTROL_MULTIPLIER <- config$control_multiplier
 MIN_GLM <- config$min_glm_treatment_pixels
 CALIPER_WIDTH <- config$caliper_width
+# 0 means no upper limit (full matching); positive integer caps controls
+MAX_CONTROLS <- config$max_controls_per_treatment
 
 # Exact-match variables read from config (e.g. admin1, ecoregion, pa)
 EXACT_MATCH_VARS <- config$exact_match_vars
@@ -84,14 +86,27 @@ if (!is.null(config$site_id)) {
 
 
 get_matches <- function(d, dists) {
-    # Attempt full matching (1:1) and return matched pairs.
+    # Attempt full matching and return matched pairs with weights.
     # Returns empty data.frame if matching fails.
+    #
+    # MAX_CONTROLS controls the ratio:
+    #   0 -> no upper bound (full matching)
+    #   k -> at most k controls per treatment pixel
+    #
+    # Controls within each matched set are weighted equally:
+    # each gets match_weight = 1 / n_controls so
+    # that the weighted control mean represents a single synthetic
+    # control per treatment pixel.  The optimality of the assignment
+    # (which controls end up in which set) is handled by fullmatch's
+    # minimum-cost network flow — additional distance-based weighting
+    # within sets is not standard.  Treatment pixels get weight = 1.
     subdim_works <- tryCatch(
         is.data.frame(subdim(dists)),
         error = function(e) FALSE
     )
     if (subdim_works) {
-        m <- fullmatch(dists, min.controls = 1, max.controls = 1, data = d)
+        mc <- if (MAX_CONTROLS > 0) MAX_CONTROLS else Inf
+        m <- fullmatch(dists, min.controls = 1, max.controls = mc, data = d)
         d$match_group <- as.character(m)
         d <- d[matched(m), ]
         # Label match groups by treatment cell ID
@@ -101,6 +116,17 @@ get_matches <- function(d, dists) {
         )
         d$match_group[!d$treatment] <- d$cell[d$treatment][match_pos]
         d$match_group[d$treatment] <- d$cell[d$treatment]
+
+        # Equal weights within matched sets (Hansen 2004)
+        d$match_weight <- 1
+        ctrl_counts <- d %>%
+            filter(!treatment) %>%
+            count(match_group, name = "n_controls")
+        ctrl_idx <- which(!d$treatment)
+        ctrl_groups <- d$match_group[ctrl_idx]
+        d$match_weight[ctrl_idx] <-
+            1 / ctrl_counts$n_controls[match(ctrl_groups,
+                                             ctrl_counts$match_group)]
     } else {
         d <- data.frame()
     }
@@ -165,7 +191,7 @@ set.seed(31)
 n_failed <- 0L
 required_match_cols <- c(
     "cell", "site_id", "id_numeric", "area_ha", "treatment",
-    "sampled_fraction", "total_biomass", "match_group"
+    "sampled_fraction", "total_biomass", "match_group", "match_weight"
 )
 
 for (this_id in site_ids) {
