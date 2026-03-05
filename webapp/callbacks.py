@@ -806,6 +806,11 @@ def register_callbacks(app):
                 caliper_width=float(
                     caliper_width if caliper_width is not None else 0.2
                 ),
+                max_controls_per_treatment=int(
+                    max_controls_per_treatment
+                    if max_controls_per_treatment is not None
+                    else 1
+                ),
                 match_memory_mib=int(match_memory_gb or 30) * 1024,
                 matching_job_queue=matching_job_queue,
             )
