@@ -353,6 +353,30 @@ def display_page(pathname, search):
         flask_login.logout_user()
         return dcc.Location(pathname="/login", id="redirect-logout")
 
+    # Shared task view — no login required
+    if pathname and pathname.startswith("/shared/"):
+        from services import validate_share_token
+
+        share_token = pathname.split("/shared/", 1)[1]
+        if not share_token:
+            return not_found_layout(user)
+        task_id = validate_share_token(share_token)
+        if not task_id:
+            return dbc.Container(
+                html.Div(
+                    [
+                        html.H3("Link Expired or Invalid"),
+                        html.P(
+                            "This share link is no longer valid. "
+                            "It may have expired or been revoked."
+                        ),
+                        dbc.Button("Go to Login", href="/login", color="primary"),
+                    ],
+                    className="text-center mt-5",
+                )
+            )
+        return task_detail_layout(user, task_id, shared_token=share_token)
+
     # All other pages require login
     if not user:
         return dcc.Location(pathname="/login", id="redirect-to-login")

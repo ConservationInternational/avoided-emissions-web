@@ -1709,119 +1709,208 @@ def submit_layout(user):
     )
 
 
-def task_detail_layout(user, task_id):
-    """Task detail page with status, results, plots, and map."""
+def task_detail_layout(user, task_id, shared_token=None):
+    """Task detail page with status, results, plots, and map.
+
+    Parameters
+    ----------
+    user : User or None
+        The logged-in user, or *None* when rendering a shared view.
+    task_id : str
+        UUID of the task to display.
+    shared_token : str or None
+        When set, the page is rendered in read-only shared mode: the
+        share button is hidden and a banner is shown instead.
+    """
+    is_shared = shared_token is not None
+
+    # -- Header row: title, badge, and (for authenticated users) share button -
+    header_children = [
+        html.Div(
+            [
+                html.H2(id="task-title", className="mb-1"),
+                html.Span(id="task-status-badge", className="ms-2"),
+            ],
+            className="d-flex align-items-center",
+        ),
+        html.P(
+            "Review progress, outputs, plots, and map layers for this analysis task.",
+            className="text-muted mb-0",
+        ),
+    ]
+
+    header_row = dbc.Row(
+        [
+            dbc.Col(header_children, width=True),
+            # Share button — only shown for authenticated users
+            *(
+                [
+                    dbc.Col(
+                        dbc.Button(
+                            [html.I(className="bi bi-share me-1"), "Share"],
+                            id="open-share-modal",
+                            color="outline-primary",
+                            size="sm",
+                            className="mt-1",
+                        ),
+                        width="auto",
+                        className="d-flex align-items-start",
+                    )
+                ]
+                if not is_shared
+                else []
+            ),
+        ],
+        className="mb-3",
+    )
+
+    # -- Shared-view banner ---------------------------------------------------
+    shared_banner = (
+        dbc.Alert(
+            [
+                html.I(className="bi bi-link-45deg me-2"),
+                "You are viewing a shared link. Results are read-only.",
+            ],
+            color="info",
+            className="mb-3 py-2",
+            dismissable=False,
+        )
+        if is_shared
+        else html.Div()
+    )
+
+    # -- Share modal (only in authenticated mode) -----------------------------
+    share_modal = (
+        dbc.Modal(
+            [
+                dbc.ModalHeader(dbc.ModalTitle("Share Task Results")),
+                dbc.ModalBody(
+                    [
+                        html.P(
+                            "Generate a link that allows anyone to view this "
+                            "task's results, plots, and downloads without "
+                            "logging in.",
+                            className="text-muted",
+                        ),
+                        dbc.Label("Link expires after"),
+                        dbc.Select(
+                            id="share-expiry-days",
+                            options=[
+                                {"label": "1 day", "value": "1"},
+                                {"label": "7 days", "value": "7"},
+                                {"label": "30 days", "value": "30"},
+                                {"label": "90 days", "value": "90"},
+                            ],
+                            value="7",
+                            className="mb-3",
+                        ),
+                        dbc.Button(
+                            "Generate Link",
+                            id="generate-share-link",
+                            color="primary",
+                            className="mb-3",
+                        ),
+                        html.Div(id="share-link-result"),
+                        html.Hr(),
+                        html.H6("Active Share Links"),
+                        html.Div(id="share-links-list"),
+                    ]
+                ),
+            ],
+            id="share-modal",
+            is_open=False,
+            size="lg",
+        )
+        if not is_shared
+        else html.Div()
+    )
+
+    # -- Tab pane (shared by both modes) --------------------------------------
+    tabs = dbc.Tabs(
+        [
+            dbc.Tab(
+                label="Overview",
+                tab_id="tab-overview",
+                children=[
+                    html.Div(
+                        dbc.Card(
+                            dbc.CardBody(html.Div(id="task-overview")),
+                            className="ae-section-card",
+                        ),
+                        className="p-3",
+                    ),
+                ],
+            ),
+            dbc.Tab(
+                label="Results Tables",
+                tab_id="tab-results",
+                children=[
+                    html.Div(
+                        dbc.Card(
+                            dbc.CardBody(html.Div(id="task-results-content")),
+                            className="ae-section-card",
+                        ),
+                        className="p-3",
+                    ),
+                ],
+            ),
+            dbc.Tab(
+                label="Results Plots",
+                tab_id="tab-plots",
+                children=[
+                    html.Div(
+                        dbc.Card(
+                            dbc.CardBody(html.Div(id="task-plots")),
+                            className="ae-section-card",
+                        ),
+                        className="p-3",
+                    ),
+                ],
+            ),
+            dbc.Tab(
+                label="Match Quality",
+                tab_id="tab-match-quality",
+                children=[
+                    html.Div(
+                        dbc.Card(
+                            dbc.CardBody(html.Div(id="task-match-quality")),
+                            className="ae-section-card",
+                        ),
+                        className="p-3",
+                    ),
+                ],
+            ),
+            dbc.Tab(
+                label="Map",
+                tab_id="tab-map",
+                children=[
+                    html.Div(
+                        dbc.Card(
+                            dbc.CardBody(
+                                html.Div(id="task-map", style={"height": "500px"}),
+                                className="p-0",
+                            ),
+                            className="ae-section-card ae-map-card",
+                        ),
+                        className="p-3",
+                    ),
+                ],
+            ),
+        ],
+        id="detail-tabs",
+        active_tab="tab-overview",
+        className="ae-content-tabs",
+    )
+
     return dbc.Container(
         [
             navbar(user),
-            dbc.Row(
-                [
-                    dbc.Col(
-                        [
-                            html.Div(
-                                [
-                                    html.H2(id="task-title", className="mb-1"),
-                                    html.Span(id="task-status-badge", className="ms-2"),
-                                ],
-                                className="d-flex align-items-center",
-                            ),
-                            html.P(
-                                "Review progress, outputs, plots, and map layers for this analysis task.",
-                                className="text-muted mb-0",
-                            ),
-                        ],
-                        width=True,
-                    )
-                ],
-                className="mb-3",
-            ),
-            dbc.Tabs(
-                [
-                    dbc.Tab(
-                        label="Overview",
-                        tab_id="tab-overview",
-                        children=[
-                            html.Div(
-                                dbc.Card(
-                                    dbc.CardBody(
-                                        html.Div(id="task-overview"),
-                                    ),
-                                    className="ae-section-card",
-                                ),
-                                className="p-3",
-                            ),
-                        ],
-                    ),
-                    dbc.Tab(
-                        label="Results Tables",
-                        tab_id="tab-results",
-                        children=[
-                            html.Div(
-                                dbc.Card(
-                                    dbc.CardBody(
-                                        html.Div(id="task-results-content"),
-                                    ),
-                                    className="ae-section-card",
-                                ),
-                                className="p-3",
-                            ),
-                        ],
-                    ),
-                    dbc.Tab(
-                        label="Results Plots",
-                        tab_id="tab-plots",
-                        children=[
-                            html.Div(
-                                dbc.Card(
-                                    dbc.CardBody(
-                                        html.Div(id="task-plots"),
-                                    ),
-                                    className="ae-section-card",
-                                ),
-                                className="p-3",
-                            ),
-                        ],
-                    ),
-                    dbc.Tab(
-                        label="Match Quality",
-                        tab_id="tab-match-quality",
-                        children=[
-                            html.Div(
-                                dbc.Card(
-                                    dbc.CardBody(
-                                        html.Div(id="task-match-quality"),
-                                    ),
-                                    className="ae-section-card",
-                                ),
-                                className="p-3",
-                            ),
-                        ],
-                    ),
-                    dbc.Tab(
-                        label="Map",
-                        tab_id="tab-map",
-                        children=[
-                            html.Div(
-                                dbc.Card(
-                                    dbc.CardBody(
-                                        html.Div(
-                                            id="task-map",
-                                            style={"height": "500px"},
-                                        ),
-                                        className="p-0",
-                                    ),
-                                    className="ae-section-card ae-map-card",
-                                ),
-                                className="p-3",
-                            ),
-                        ],
-                    ),
-                ],
-                id="detail-tabs",
-                active_tab="tab-overview",
-                className="ae-content-tabs",
-            ),
+            shared_banner,
+            header_row,
+            tabs,
+            share_modal,
             dcc.Store(id="task-id-store", data=task_id),
+            dcc.Store(id="share-token-store", data=shared_token),
             dcc.Interval(id="detail-refresh-interval", interval=15000, n_intervals=0),
         ]
     )

@@ -13,7 +13,7 @@ import tarfile
 import tempfile
 import uuid
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import boto3
 import geopandas as gpd
@@ -1932,5 +1932,145 @@ def delete_covariate_preset(preset_id, user_id):
     except Exception:
         db.rollback()
         raise
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Task share links
+# ---------------------------------------------------------------------------
+
+
+def create_share_link(task_id, user_id, expiry_days=7):
+    """Create a shareable link for a task.
+
+    Parameters
+    ----------
+    task_id : str
+        UUID of the ``AnalysisTask``.
+    user_id : str
+        UUID of the user creating the link.
+    expiry_days : int
+        Number of days until the link expires (default 7).
+
+    Returns
+    -------
+    dict
+        ``{"token": ..., "expires_at": ..., "id": ...}`` on success.
+    """
+    from models import TaskShareLink
+
+    db = get_db()
+    try:
+        link = TaskShareLink(
+            task_id=task_id,
+            created_by=user_id,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=expiry_days),
+        )
+        db.add(link)
+        db.commit()
+        return {
+            "token": link.token,
+            "expires_at": link.expires_at.isoformat(),
+            "id": str(link.id),
+        }
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def list_share_links(task_id):
+    """Return active share links for a task.
+
+    Returns
+    -------
+    list[dict]
+        Each dict has ``id``, ``token``, ``created_at``, ``expires_at``,
+        ``is_active``, ``access_count``.
+    """
+    from models import TaskShareLink
+
+    db = get_db()
+    try:
+        links = (
+            db.query(TaskShareLink)
+            .filter(TaskShareLink.task_id == task_id)
+            .order_by(TaskShareLink.created_at.desc())
+            .all()
+        )
+        return [
+            {
+                "id": str(lnk.id),
+                "token": lnk.token,
+                "created_at": lnk.created_at.isoformat() if lnk.created_at else None,
+                "expires_at": lnk.expires_at.isoformat() if lnk.expires_at else None,
+                "is_active": lnk.is_active,
+                "is_valid": lnk.is_valid,
+                "access_count": lnk.access_count or 0,
+            }
+            for lnk in links
+        ]
+    finally:
+        db.close()
+
+
+def revoke_share_link(link_id, user_id):
+    """Revoke a share link by setting ``is_active`` to False.
+
+    Only the task owner (or an admin) should call this — the caller is
+    responsible for the authorisation check.
+
+    Returns ``True`` if the link was found and revoked.
+    """
+    from models import TaskShareLink
+
+    db = get_db()
+    try:
+        link = db.query(TaskShareLink).filter(TaskShareLink.id == link_id).first()
+        if not link:
+            return False
+        link.is_active = False
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def validate_share_token(token, record_access=True):
+    """Validate a share token and return the associated task_id.
+
+    Parameters
+    ----------
+    token : str
+        The URL-safe share token.
+    record_access : bool
+        When *True* (the default), increments the access counter on the
+        link.  Pass *False* for lightweight authorisation checks that
+        should not inflate the counter (e.g. periodic callback ticks).
+
+    Returns
+    -------
+    str or None
+        The task UUID as a string, or ``None``.
+    """
+    from models import TaskShareLink
+
+    db = get_db()
+    try:
+        link = TaskShareLink.get_valid_link(token, db)
+        if not link:
+            return None
+        if record_access:
+            link.record_access()
+            db.commit()
+        return str(link.task_id)
+    except Exception:
+        db.rollback()
+        return None
     finally:
         db.close()

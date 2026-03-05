@@ -36,6 +36,7 @@ from layouts import (
 from services import (
     approve_user,
     change_user_role,
+    create_share_link,
     delete_covariate_preset,
     delete_user,
     download_results_csv,
@@ -47,12 +48,15 @@ from services import (
     get_task_detail,
     get_task_list,
     get_user_site_set_detail,
+    list_share_links,
     list_user_site_sets,
     get_user_list,
+    revoke_share_link,
     save_covariate_preset,
     save_user_site_set,
     start_gee_export,
     submit_analysis_task,
+    validate_share_token,
     delete_user_site_set,
 )
 
@@ -83,6 +87,81 @@ def _check_task_access(task_id, user):
     if user.is_admin:
         return True
     return str(detail["task"].submitted_by) == str(user.id)
+
+
+def _authorize_task_access(task_id, share_token=None):
+    """Check whether the current request may access *task_id*.
+
+    Supports two authentication modes:
+    1. **Authenticated user**: checks user login and ownership/admin.
+    2. **Share token**: validates the token and confirms it belongs to
+       the requested *task_id*.
+
+    Returns the task_id (str) if access is granted, or ``None``.
+    """
+    # Mode 1: share token (lightweight check — access was already
+    # recorded when the page was loaded via display_page)
+    if share_token:
+        token_task_id = validate_share_token(share_token, record_access=False)
+        if token_task_id and str(token_task_id) == str(task_id):
+            return str(task_id)
+        return None
+
+    # Mode 2: authenticated user
+    user = get_current_user()
+    if not user:
+        return None
+    if not _check_task_access(task_id, user):
+        return None
+    return str(task_id)
+
+
+def _render_share_links_list(links, task_id):
+    """Build the UI list of existing share links for the share modal."""
+    if not links:
+        return html.P("No share links yet.", className="text-muted")
+
+    items = []
+    for lnk in links:
+        expires = (lnk["expires_at"] or "")[:10]
+        badge_color = "success" if lnk["is_valid"] else "secondary"
+        badge_text = "Active" if lnk["is_valid"] else "Expired / Revoked"
+        row = html.Div(
+            [
+                html.Div(
+                    [
+                        dbc.Badge(badge_text, color=badge_color, className="me-2"),
+                        html.Code(
+                            f"...{lnk['token'][-12:]}",
+                            className="me-2",
+                        ),
+                        html.Small(
+                            f"Expires {expires} · {lnk['access_count']} view(s)",
+                            className="text-muted",
+                        ),
+                    ],
+                    className="d-flex align-items-center",
+                ),
+                *(
+                    [
+                        dbc.Button(
+                            "Revoke",
+                            id={
+                                "type": "revoke-share-link",
+                                "index": lnk["id"],
+                            },
+                            color="outline-danger",
+                            size="sm",
+                        )
+                    ]
+                    if lnk["is_valid"]
+                    else []
+                ),
+            ],
+            className="d-flex justify-content-between align-items-center mb-2",
+        )
+        items.append(row)
+    return html.Div(items)
 
 
 def _fmt_dt(dt):
@@ -807,14 +886,16 @@ def register_callbacks(app):
             Input("detail-refresh-interval", "n_intervals"),
             Input("detail-tabs", "active_tab"),
         ],
-        State("task-id-store", "data"),
+        [
+            State("task-id-store", "data"),
+            State("share-token-store", "data"),
+        ],
     )
-    def refresh_task_detail(n, active_tab, task_id):
+    def refresh_task_detail(n, active_tab, task_id, share_token):
         if not task_id:
             raise PreventUpdate
 
-        user = get_current_user()
-        if not user or not _check_task_access(task_id, user):
+        if not _authorize_task_access(task_id, share_token):
             return ("Task Not Found", None, None, None, None, None, None, True)
 
         # Batch task status is polled by the Celery Beat worker;
@@ -883,16 +964,18 @@ def register_callbacks(app):
     @app.callback(
         Output("download-results", "data"),
         [Input("download-by-year", "n_clicks"), Input("download-totals", "n_clicks")],
-        State("task-id-store", "data"),
+        [
+            State("task-id-store", "data"),
+            State("share-token-store", "data"),
+        ],
         prevent_initial_call=True,
     )
-    def handle_download(by_year_clicks, total_clicks, task_id):
+    def handle_download(by_year_clicks, total_clicks, task_id, share_token):
         ctx = callback_context
         if not ctx.triggered:
             raise PreventUpdate
 
-        user = get_current_user()
-        if not user or not _check_task_access(task_id, user):
+        if not _authorize_task_access(task_id, share_token):
             raise PreventUpdate
 
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
@@ -912,10 +995,41 @@ def register_callbacks(app):
     @app.callback(
         Output("download-match-quality", "data"),
         Input("download-match-covariates", "n_clicks"),
-        State("task-id-store", "data"),
+        [
+            State("task-id-store", "data"),
+            State("share-token-store", "data"),
+        ],
         prevent_initial_call=True,
     )
-    def handle_match_quality_download(n_clicks, task_id):
+    def handle_match_quality_download(n_clicks, task_id, share_token):
+        if not n_clicks:
+            raise PreventUpdate
+
+        if not _authorize_task_access(task_id, share_token):
+            raise PreventUpdate
+
+        csv = download_results_csv(task_id, "match_covariates")
+        if csv:
+            return dict(content=csv, filename="results_match_covariates.csv")
+        return no_update
+
+    # -- Share modal ----------------------------------------------------------
+
+    @app.callback(
+        [
+            Output("share-modal", "is_open"),
+            Output("share-links-list", "children"),
+        ],
+        [
+            Input("open-share-modal", "n_clicks"),
+        ],
+        [
+            State("share-modal", "is_open"),
+            State("task-id-store", "data"),
+        ],
+        prevent_initial_call=True,
+    )
+    def toggle_share_modal(n_clicks, is_open, task_id):
         if not n_clicks:
             raise PreventUpdate
 
@@ -923,10 +1037,115 @@ def register_callbacks(app):
         if not user or not _check_task_access(task_id, user):
             raise PreventUpdate
 
-        csv = download_results_csv(task_id, "match_covariates")
-        if csv:
-            return dict(content=csv, filename="results_match_covariates.csv")
-        return no_update
+        if is_open:
+            # Closing — return empty list to avoid stale data
+            return False, html.Div()
+
+        # Opening — fetch existing links
+        links = list_share_links(task_id)
+        return True, _render_share_links_list(links, task_id)
+
+    @app.callback(
+        [
+            Output("share-link-result", "children"),
+            Output("share-links-list", "children", allow_duplicate=True),
+        ],
+        Input("generate-share-link", "n_clicks"),
+        [
+            State("share-expiry-days", "value"),
+            State("task-id-store", "data"),
+        ],
+        prevent_initial_call=True,
+    )
+    def generate_share(n_clicks, expiry_days, task_id):
+        if not n_clicks:
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user or not _check_task_access(task_id, user):
+            raise PreventUpdate
+
+        try:
+            result = create_share_link(
+                task_id, str(user.id), expiry_days=int(expiry_days)
+            )
+            from flask import request as flask_request
+
+            base_url = flask_request.host_url.rstrip("/")
+            share_url = f"{base_url}/shared/{result['token']}"
+
+            link_display = html.Div(
+                [
+                    dbc.Alert(
+                        [
+                            html.Strong("Share link created!"),
+                            html.Br(),
+                            html.Span(
+                                "Copy and share this URL:",
+                                className="text-muted",
+                            ),
+                            dbc.InputGroup(
+                                [
+                                    dbc.Input(
+                                        value=share_url,
+                                        id="share-url-input",
+                                        readonly=True,
+                                        size="sm",
+                                    ),
+                                    dcc.Clipboard(
+                                        target_id="share-url-input",
+                                        className="btn btn-outline-secondary btn-sm",
+                                        style={"display": "inline-block"},
+                                    ),
+                                ],
+                                className="mt-2",
+                                size="sm",
+                            ),
+                            html.Small(
+                                f"Expires: {result['expires_at'][:10]}",
+                                className="text-muted mt-1 d-block",
+                            ),
+                        ],
+                        color="success",
+                        className="mt-2",
+                    ),
+                ]
+            )
+
+            # Refresh the list
+            links = list_share_links(task_id)
+            return link_display, _render_share_links_list(links, task_id)
+        except Exception:
+            logger.exception("Failed to create share link")
+            report_exception()
+            return (
+                dbc.Alert("Failed to create share link.", color="danger"),
+                no_update,
+            )
+
+    @app.callback(
+        Output("share-links-list", "children", allow_duplicate=True),
+        Input({"type": "revoke-share-link", "index": ALL}, "n_clicks"),
+        State("task-id-store", "data"),
+        prevent_initial_call=True,
+    )
+    def revoke_share(n_clicks_list, task_id):
+        ctx = callback_context
+        if not ctx.triggered or not any(n_clicks_list):
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user or not _check_task_access(task_id, user):
+            raise PreventUpdate
+
+        trigger = ctx.triggered[0]
+        import json as _json
+
+        link_id = _json.loads(trigger["prop_id"].rsplit(".", 1)[0])["index"]
+        revoke_share_link(link_id, str(user.id))
+
+        links = list_share_links(task_id)
+        return _render_share_links_list(links, task_id)
 
     # -- Admin: Covariates (unified export + merge) ---------------------------
 
