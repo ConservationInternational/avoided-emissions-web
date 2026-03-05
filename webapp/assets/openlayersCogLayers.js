@@ -268,7 +268,7 @@
         if (_layerDataPromise) {
             return _layerDataPromise;
         }
-        console.log(LOG_PREFIX + "fetching /api/cog-layers ???");
+        console.debug(LOG_PREFIX + "fetching /api/cog-layers ???");
         _layerDataPromise = fetch("/api/cog-layers", { credentials: "same-origin" })
             .then(function (resp) {
                 if (!resp.ok) {
@@ -278,7 +278,7 @@
             })
             .then(function (data) {
                 var layers = data.layers || [];
-                console.log(LOG_PREFIX + layers.length + " layers available");
+                console.debug(LOG_PREFIX + layers.length + " layers available");
                 return layers;
             })
             .catch(function (err) {
@@ -295,7 +295,7 @@
         if (_vectorLayerDataPromise) {
             return _vectorLayerDataPromise;
         }
-        console.log(LOG_PREFIX + "fetching /api/vector-layers ???");
+        console.debug(LOG_PREFIX + "fetching /api/vector-layers ???");
         _vectorLayerDataPromise = fetch("/api/vector-layers", { credentials: "same-origin" })
             .then(function (resp) {
                 if (!resp.ok) throw new Error("HTTP " + resp.status);
@@ -303,7 +303,7 @@
             })
             .then(function (data) {
                 var layers = data.layers || [];
-                console.log(LOG_PREFIX + layers.length + " vector layers available");
+                console.debug(LOG_PREFIX + layers.length + " vector layers available");
                 return layers;
             })
             .catch(function (err) {
@@ -371,7 +371,7 @@
                 );
             });
 
-            console.log(LOG_PREFIX + "created layer: " + layerDef.name);
+            console.debug(LOG_PREFIX + "created layer: " + layerDef.name);
             return layer;
         } catch (err) {
             console.error(LOG_PREFIX + "error creating layer " + layerDef.name, err);
@@ -676,7 +676,7 @@
 
         var control = new ol.control.Control({ element: panel });
         map.addControl(control);
-        console.log(LOG_PREFIX + "layer control added to map " + mapEl.id);
+        console.debug(LOG_PREFIX + "layer control added to map " + mapEl.id);
     }
 
     // ?????? Attach to maps ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
@@ -701,7 +701,7 @@
             var vectorLayers = results[1];
 
             if (!layers.length && !vectorLayers.length) {
-                console.log(LOG_PREFIX + "no layers to show");
+                console.debug(LOG_PREFIX + "no layers to show");
                 return;
             }
 
@@ -743,7 +743,7 @@
 
         // Listen for the custom event dispatched by openlayersSitesMap.js.
         document.body.addEventListener("ol-map-ready", function (e) {
-            console.log(LOG_PREFIX + "ol-map-ready event on", e.target.id);
+            console.debug(LOG_PREFIX + "ol-map-ready event on", e.target.id);
             var el = e.target;
             var map = e.detail && e.detail.map;
             if (el && map) {

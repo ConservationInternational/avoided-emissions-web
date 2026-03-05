@@ -2525,9 +2525,13 @@ def _build_plots(results, totals, sites=None, task=None):
                     totals_name_map[str(t.site_id)] = t.site_name
         if sites:
             for s in sites:
-                sid = s.site_id
+                sid = str(s.site_id)
+                # Use site_name only if it's a real name (not equal to
+                # site_id); fall back to the totals lookup from the R
+                # analysis results which always has proper names.
+                name = s.site_name if s.site_name and s.site_name != sid else None
                 site_info_map[sid] = {
-                    "site_name": s.site_name or totals_name_map.get(str(sid)) or sid,
+                    "site_name": name or totals_name_map.get(sid) or sid,
                     "start_date": (str(s.start_date)[:10] if s.start_date else None),
                     "end_date": str(s.end_date)[:10] if s.end_date else None,
                 }
@@ -2535,7 +2539,7 @@ def _build_plots(results, totals, sites=None, task=None):
         # Annotate dropdown labels for subsampled sites
         site_options = []
         for sid in site_ids:
-            sname = site_info_map.get(sid, {}).get("site_name", sid)
+            sname = site_info_map.get(str(sid), {}).get("site_name", str(sid))
             if sname and str(sname) != str(sid):
                 label = f"{sname} ({sid})"
             else:
