@@ -174,7 +174,7 @@ the standard formula:
 
 ```
 treatment ~ lc_2015_agriculture + precip + temp + elev + slope +
-    dist_cities + dist_roads + crop_suitability + pop_2015 +
+    dist_cities + friction_surface + crop_suitability + pop_2015 +
     pop_growth + total_biomass
 ```
 

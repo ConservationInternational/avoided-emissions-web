@@ -168,20 +168,15 @@ def build_glad_cropland(year):
         raise ValueError(f"GLAD cropland year must be one of {valid_years}, got {year}")
     asset_id = f"users/potapovpeter/Global_cropland_{year}"
     # The asset is an ImageCollection (tiled), so mosaic into a single Image.
-    # mosaic() drops the default projection; restore a stable default
-    # projection for downstream reduceResolution/reproject.
+    # We intentionally avoid inheriting per-tile projection metadata from the
+    # source collection, because GLAD tiles can expose EPSG:4326 PLANAR
+    # transforms that fail during downstream reprojection to the export grid.
     #
-    # Important: do not copy the first tile's full affine transform onto the
-    # entire mosaic. GLAD tiles can have tile-local transforms and forcing one
-    # tile transform globally can yield invalid coordinates during reprojection
-    # (e.g., out-of-range EPSG:4326 edge transforms). Keep only CRS and
-    # nominal scale instead.
+    # Instead, set a clean WGS84 default projection at native-ish 30 m scale
+    # after mosaicking, so reduceResolution/reproject always starts from a
+    # stable CRS definition.
     col = ee.ImageCollection(asset_id)
-    first = col.first()
-    proj = first.projection()
-    crs = proj.crs()
-    scale = proj.nominalScale()
-    cropland = col.mosaic().setDefaultProjection(crs=crs, scale=scale)
+    cropland = col.mosaic().setDefaultProjection(crs="EPSG:4326", scale=30)
     return cropland.rename(f"cropland_{year}").toFloat()
 
 
@@ -215,7 +210,7 @@ def build_friction_surface():
     friction = ee.Image(
         "projects/malariaatlasproject/assets/accessibility/friction_surface/2019_v5_1"
     )
-    return friction.rename("dist_roads").toFloat()
+    return friction.rename("friction_surface").toFloat()
 
 
 def build_cropland_fraction():
@@ -226,10 +221,15 @@ def build_cropland_fraction():
     (0-100). This serves as a proxy for crop suitability.
     """
     src = ee.Image("COPERNICUS/Landcover/100m/Proba-V-C3/Global/2015")
-    # Capture the native projection *before* any operations that could
-    # drop it, so that reduceResolution has a valid source CRS.
-    proj = src.select("crops-coverfraction").projection()
-    cropland = src.select("crops-coverfraction").setDefaultProjection(proj)
+    # Keep only CRS + nominal scale from the source projection.
+    # Avoid carrying over any dataset-specific affine transform metadata,
+    # which can lead to invalid edge transforms during downstream
+    # reduceResolution/reproject exports (same failure mode as GLAD cropland).
+    band = src.select("crops-coverfraction")
+    proj = band.projection()
+    crs = proj.crs()
+    scale = proj.nominalScale()
+    cropland = band.setDefaultProjection(crs=crs, scale=scale)
     return cropland.rename("crop_suitability").toFloat()
 
 
