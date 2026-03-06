@@ -2785,7 +2785,7 @@ def settings_layout(user):
                     dbc.Card(
                         [
                             dbc.CardHeader(
-                                html.H5("Account", className="mb-0"),
+                                html.H5("Delete account", className="mb-0"),
                             ),
                             dbc.CardBody(
                                 [
