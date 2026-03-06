@@ -55,6 +55,14 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+def _extra_csp_sources(env_var_name: str) -> list[str]:
+    raw = (os.environ.get(env_var_name, "") or "").strip()
+    if not raw:
+        return []
+    return [item for item in raw.split() if item]
+
+
 _CSP_SCRIPT_SRC = [
     "'self'",
     "'unsafe-inline'",
@@ -77,11 +85,19 @@ _CSP_IMG_SRC = [
     "data:",
     "blob:",
     "https://*.amazonaws.com",
+    "https://storage.googleapis.com",
+    "https://*.storage.googleapis.com",
+    "https://s3.amazonaws.com",
+    "https://*.s3.amazonaws.com",
 ]
 _CSP_CONNECT_SRC = [
     "'self'",
     "blob:",
     "https://*.amazonaws.com",
+    "https://storage.googleapis.com",
+    "https://*.storage.googleapis.com",
+    "https://s3.amazonaws.com",
+    "https://*.s3.amazonaws.com",
     "https://cdn.jsdelivr.net",
 ]
 
@@ -188,6 +204,9 @@ def _set_security_headers(response):
     # CSP: allow Dash inline scripts/styles, CDN assets (OL, GeoTIFF),
     # Google Fonts, and S3-hosted resources used by presigned URLs.
     # Keep sources centralised in module-level lists for easier updates.
+    img_src = _CSP_IMG_SRC + _extra_csp_sources("CSP_EXTRA_IMG_SRC")
+    connect_src = _CSP_CONNECT_SRC + _extra_csp_sources("CSP_EXTRA_CONNECT_SRC")
+
     csp_parts = [
         "default-src 'self'",
         f"script-src {' '.join(_CSP_SCRIPT_SRC)}",
@@ -195,9 +214,9 @@ def _set_security_headers(response):
         f"style-src {' '.join(_CSP_STYLE_SRC)}",
         f"style-src-elem {' '.join(_CSP_STYLE_SRC)}",
         "style-src-attr 'unsafe-inline'",
-        f"img-src {' '.join(_CSP_IMG_SRC)}",
+        f"img-src {' '.join(img_src)}",
         f"font-src {' '.join(_CSP_FONT_SRC)}",
-        f"connect-src {' '.join(_CSP_CONNECT_SRC)}",
+        f"connect-src {' '.join(connect_src)}",
         "worker-src 'self' blob:",
         "frame-ancestors 'none'",
     ]
