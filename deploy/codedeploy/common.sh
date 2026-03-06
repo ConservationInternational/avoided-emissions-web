@@ -205,31 +205,31 @@ recover_stack() {
 
     log_warning "Attempting stack recovery for $stack_name..."
 
-    if docker stack ls --format "{{.Name}}" 2>/dev/null | grep -q "^${stack_name}$"; then
-        log_info "Removing existing stack..."
-        docker stack rm "$stack_name" 2>/dev/null || true
+    # IMPORTANT: Never remove the entire stack — that tears down the postgres
+    # service and risks data loss if the bind-mount directory is empty or the
+    # volume migration hasn't completed.  Instead, force-update each stuck
+    # service individually so the scheduler reschedules their tasks.
 
-        local wait_count=0
-        local max_wait=60
-        while [ $wait_count -lt $max_wait ]; do
-            local remaining
-            remaining=$(docker service ls --filter "name=${stack_name}_" --format "{{.Name}}" 2>/dev/null | wc -l)
-            if [ "$remaining" -eq 0 ]; then
-                if ! docker network inspect "${stack_name}_backend" >/dev/null 2>&1; then
-                    log_success "Stack resources cleaned up"
-                    break
-                fi
-            fi
-            sleep 2
-            wait_count=$((wait_count + 2))
-        done
+    local stuck_services
+    stuck_services=$(docker service ls --filter "name=${stack_name}_" --format "{{.Name}} {{.Replicas}}" 2>/dev/null \
+        | grep -v "_migrate " \
+        | grep -E "0/[0-9]+" \
+        | awk '{print $1}' || echo "")
 
-        if [ $wait_count -ge $max_wait ]; then
-            log_warning "Timeout waiting for cleanup, proceeding anyway..."
-        fi
-
-        sleep 5
+    if [ -z "$stuck_services" ]; then
+        log_info "No stuck services found, nothing to recover"
+        return 0
     fi
+
+    for svc in $stuck_services; do
+        log_info "Force-updating stuck service: $svc"
+        docker service update --force "$svc" 2>/dev/null || {
+            log_warning "Failed to force-update $svc"
+        }
+    done
+
+    log_success "Recovery force-updates issued"
+    sleep 5
     return 0
 }
 
