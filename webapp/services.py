@@ -594,6 +594,9 @@ _EXTENT_TABLE_MAP: dict[str, str] = {
 }
 
 
+_SAFE_TABLE_RE = __import__("re").compile(r"^[a-z_][a-z0-9_]*$")
+
+
 def compute_matching_extent(
     gdf: gpd.GeoDataFrame,
     exact_match_vars: list[str],
@@ -602,7 +605,7 @@ def compute_matching_extent(
 
     For each polygon-type exact-match variable the function queries
     PostGIS to find every polygon that intersects any of the treatment
-    *sites*.  The per-layer polygons are unioned, then all layers are
+    *sites*.  The per-layer polygons are collected, then all layers are
     intersected together.  The resulting geometry is the tightest
     bounding area in which a pixel could share the same exact-match
     attribute values as at least one treatment site.
@@ -611,20 +614,39 @@ def compute_matching_extent(
     they partition all of space into only two classes and therefore
     provide no spatial restriction.
 
+    Performance notes
+    -----------------
+    * ``ST_MakeValid`` is **not** applied to stored geometries because
+      the vector import pipeline (``import_vector_data._make_valid``)
+      already validates every geometry before writing to PostGIS.
+    * ``ST_Collect`` + ``ST_Buffer(geom, 0)`` is used instead of the
+      much slower ``ST_Union`` aggregate.  ``ST_Collect`` simply groups
+      geometries into a GeometryCollection (O(n)), and ``ST_Buffer(…,
+      0)`` dissolves overlaps in a single GEOS pass — typically 5–10×
+      faster than the iterative pair-wise merge that ``ST_Union``
+      performs on large sets of complex polygons.
+
     Returns a GeoJSON-compatible dict (``{"type": "...", ...}``) or
     ``None`` when no polygon-type variables are selected.
     """
+    import time as _time
+
     from shapely.geometry import mapping, shape
+    from shapely.validation import make_valid
     from sqlalchemy import text
 
     polygon_vars = [v for v in exact_match_vars if v in _EXTENT_TABLE_MAP]
     if not polygon_vars:
         return None
 
-    # Build a single GeoJSON geometry representing all sites
-    sites_geojson = json.dumps(mapping(gdf.unary_union))
+    # Validate the sites geometry once in Python so we can skip
+    # ST_MakeValid on the GeoJSON parameter in every query.
+    sites_union = gdf.unary_union
+    if not sites_union.is_valid:
+        sites_union = make_valid(sites_union)
+    sites_geojson = json.dumps(mapping(sites_union))
 
-    _SAFE_ID = __import__("re").compile(r"^[a-z_][a-z0-9_]*$")
+    t0 = _time.perf_counter()
 
     db = get_db()
     try:
@@ -634,19 +656,28 @@ def compute_matching_extent(
             # Safety: table comes from the hardcoded _EXTENT_TABLE_MAP —
             # assert it matches a safe identifier pattern to prevent SQL
             # injection if the dict is ever populated from external input.
-            assert _SAFE_ID.match(table), f"Unsafe table name: {table}"
+            assert _SAFE_TABLE_RE.match(table), f"Unsafe table name: {table}"
+            t1 = _time.perf_counter()
             result = db.execute(
                 text(
-                    f"SELECT ST_AsGeoJSON(ST_Union(ST_MakeValid(geom))) "
+                    f"SELECT ST_AsGeoJSON("
+                    f"  ST_Buffer(ST_Collect(geom), 0)"
+                    f") "
                     f"FROM {table} "
                     f"WHERE ST_Intersects("
-                    f"  ST_MakeValid(geom), "
-                    f"  ST_MakeValid(ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326))"
+                    f"  geom, "
+                    f"  ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326)"
                     f")"
                 ),
                 {"sites": sites_geojson},
             )
             row = result.fetchone()
+            elapsed = _time.perf_counter() - t1
+            logger.info(
+                "[EXTENT] %s query took %.2fs",
+                table,
+                elapsed,
+            )
             if row and row[0]:
                 layer_extents.append(shape(json.loads(row[0])))
 
@@ -665,6 +696,10 @@ def compute_matching_extent(
             )
             return None
 
+        logger.info(
+            "[EXTENT] Total matching-extent computation: %.2fs",
+            _time.perf_counter() - t0,
+        )
         return mapping(extent)
 
     finally:
@@ -783,8 +818,16 @@ def submit_analysis_task(
             "script registered on the trends.earth API."
         )
 
+    import time as _time
+
+    _submit_t0 = _time.perf_counter()
+
     # Compute the matching extent polygon from PostGIS
     matching_extent = compute_matching_extent(gdf, exact_match_vars)
+    logger.info(
+        "[SUBMIT] matching extent computed in %.2fs",
+        _time.perf_counter() - _submit_t0,
+    )
 
     if fc_years is None:
         fc_years = list(range(2000, 2024))
@@ -857,11 +900,17 @@ def submit_analysis_task(
         )
 
         # Upload sites to S3 (prefer PostGIS-exported GeoJSON from a persisted set)
+        _s3_t0 = _time.perf_counter()
         if site_set_id:
             sites_uri = upload_user_site_set_geojson_to_s3(site_set_id, task_id)
         else:
             sites_uri = upload_sites_to_s3(gdf, task_id)
-        logger.info("[SUBMIT] Task %s: sites uploaded to %s", task_id, sites_uri)
+        logger.info(
+            "[SUBMIT] Task %s: sites uploaded to %s (%.2fs)",
+            task_id,
+            sites_uri,
+            _time.perf_counter() - _s3_t0,
+        )
 
         # Build params matching AvoidedEmissionsParams schema
         params = {
@@ -952,6 +1001,7 @@ def submit_analysis_task(
 
         # Submit via trends.earth API using the user's own OAuth2 creds
         # (credentials and script_id already validated above)
+        _auth_t0 = _time.perf_counter()
         client_id, client_secret = user_creds
         client = TrendsEarthClient.from_oauth2_credentials(
             api_url=Config.TRENDSEARTH_API_URL,
@@ -959,14 +1009,21 @@ def submit_analysis_task(
             client_secret=client_secret,
         )
         logger.info(
-            "[SUBMIT] Task %s: calling trends.earth API (script=%s, "
-            "api_url=%s, batch_overrides=%s)",
+            "[SUBMIT] Task %s: OAuth2 auth in %.2fs, calling trends.earth "
+            "API (script=%s, api_url=%s, batch_overrides=%s)",
             task_id,
+            _time.perf_counter() - _auth_t0,
             script_id,
             Config.TRENDSEARTH_API_URL,
             batch_overrides if batch_overrides else "none",
         )
+        _api_t0 = _time.perf_counter()
         execution = client.create_execution(script_id, params)
+        logger.info(
+            "[SUBMIT] Task %s: API create_execution took %.2fs",
+            task_id,
+            _time.perf_counter() - _api_t0,
+        )
 
         # Store the API execution ID for polling
         exec_data = execution.get("data", {})
@@ -989,9 +1046,11 @@ def submit_analysis_task(
         task.extract_job_id = f"api:{exec_id}"
         db.commit()
         logger.info(
-            "[SUBMIT] Task %s: status → submitted (tracking as api:%s)",
+            "[SUBMIT] Task %s: status → submitted (tracking as api:%s) "
+            "— total submit time %.2fs",
             task_id,
             exec_id,
+            _time.perf_counter() - _submit_t0,
         )
 
         return task_id

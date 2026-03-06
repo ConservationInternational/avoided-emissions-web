@@ -32,6 +32,8 @@ import gzip
 import json
 import logging
 import os
+import threading
+import time
 
 import requests
 
@@ -42,6 +44,15 @@ _TIMEOUT = 30
 
 # Minimum payload size (bytes) before attempting gzip compression
 _COMPRESS_MIN_SIZE = 1024
+
+# ---------------------------------------------------------------------------
+# Module-level OAuth2 token cache — avoids a round-trip on every submission.
+# Keyed by (api_url, client_id).  Each entry stores the access token and the
+# wallclock time at which it should be considered expired (``expires_in``
+# from the token response minus a 60-second safety margin).
+# ---------------------------------------------------------------------------
+_token_cache: dict[tuple[str, str], tuple[str, float]] = {}
+_token_cache_lock = threading.Lock()
 
 
 class TrendsEarthClient:
@@ -276,8 +287,10 @@ class TrendsEarthClient:
     def from_oauth2_credentials(cls, api_url, client_id, client_secret):
         """Create a client authenticated via OAuth2 client credentials.
 
-        Immediately obtains an access token and uses it for subsequent
-        requests.
+        Uses a module-level token cache so that repeated calls with the
+        same ``(api_url, client_id)`` pair reuse an existing JWT until
+        it is close to expiry, avoiding a network round-trip per
+        submission.
 
         Parameters
         ----------
@@ -289,9 +302,32 @@ class TrendsEarthClient:
         -------
         TrendsEarthClient
         """
+        cache_key = (api_url, client_id)
+        now = time.monotonic()
+        with _token_cache_lock:
+            cached = _token_cache.get(cache_key)
+            if cached is not None:
+                token, expires_at = cached
+                if now < expires_at:
+                    logger.debug(
+                        "Reusing cached OAuth2 token for %s (expires in %.0fs)",
+                        api_url,
+                        expires_at - now,
+                    )
+                    instance = cls(api_url=api_url)
+                    instance._token = token
+                    return instance
+
+        # Cache miss or expired — fetch a fresh token
         instance = cls(api_url=api_url)
         token_data = instance.oauth2_token(client_id, client_secret)
-        instance._token = token_data["access_token"]
+        token = token_data["access_token"]
+        # Cache for (expires_in - 60) seconds; default to 30 min if
+        # the server omits expires_in.
+        ttl = max(0, token_data.get("expires_in", 1800) - 60)
+        with _token_cache_lock:
+            _token_cache[cache_key] = (token, now + ttl)
+        instance._token = token
         return instance
 
     # ------------------------------------------------------------------

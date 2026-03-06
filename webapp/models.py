@@ -137,7 +137,7 @@ class GeeExportMetadata(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     covariate_id = Column(
-        UUID(as_uuid=True), ForeignKey("covariates.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("covariates.id"), nullable=True, index=True
     )
     covariate_name = Column(String(100), nullable=False, index=True)
 
@@ -214,7 +214,7 @@ class AnalysisTask(Base):
         nullable=False,
         default="pending",
     )
-    extract_job_id = Column(String(255))
+    extract_job_id = Column(String(255), index=True)
     match_job_id = Column(String(255))
     summarize_job_id = Column(String(255))
     config = Column(JSON, nullable=False, default=dict)
@@ -382,7 +382,7 @@ class TrendsEarthCredential(Base):
     # The trends.earth user email used to create the client
     te_email = Column(String(255), nullable=False)
     # The UUID of the user on the trends.earth API side
-    te_user_id = Column(String(128), nullable=True)
+    te_user_id = Column(String(128), nullable=True, index=True)
     # OAuth2 client_id (public, non-secret)
     client_id = Column(String(128), nullable=False)
     # OAuth2 client_secret (encrypted with Fernet using SECRET_KEY)
