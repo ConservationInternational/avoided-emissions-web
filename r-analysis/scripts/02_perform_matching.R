@@ -259,6 +259,20 @@ for (this_id in site_ids) {
 
         if (n_treatment_total == 0) {
             message("  Skipping: no treatment cells")
+            failure_info <- list(
+                id_numeric = this_id,
+                site_id = this_site_id,
+                site_name = this_site_name,
+                error = "No treatment cells found for site",
+                timestamp = format(
+                    Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                array_index = this_batch_index
+            )
+            write_json(
+                failure_info, failure_path,
+                auto_unbox = TRUE, pretty = TRUE
+            )
             TRUE
         } else {
             # All candidate pixels (treatment + controls) are already spatially
@@ -329,6 +343,20 @@ for (this_id in site_ids) {
 
             if (n_treatment_final == 0) {
                 message("  No treatment pixels remaining after filtering")
+                failure_info <- list(
+                    id_numeric = this_id,
+                    site_id = this_site_id,
+                    site_name = this_site_name,
+                    error = "No treatment pixels remaining after filtering",
+                    timestamp = format(
+                        Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    array_index = this_batch_index
+                )
+                write_json(
+                    failure_info, failure_path,
+                    auto_unbox = TRUE, pretty = TRUE
+                )
                 TRUE
             } else {
                 # Run matching
@@ -336,6 +364,32 @@ for (this_id in site_ids) {
 
                 if (is.null(m)) {
                     message("  No matches found")
+                    # Write a failure marker so the summarize step
+                    # knows this site was processed but produced no
+                    # matches (e.g. caliper too tight, perfect
+                    # separation in propensity scores).
+                    failure_info <- list(
+                        id_numeric = this_id,
+                        site_id = this_site_id,
+                        site_name = this_site_name,
+                        error = paste0(
+                            "No matches found (treatment=",
+                            n_treatment_final,
+                            ", control=", n_control_final, ")"
+                        ),
+                        timestamp = format(
+                            Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                        array_index = this_batch_index
+                    )
+                    write_json(
+                        failure_info, failure_path,
+                        auto_unbox = TRUE, pretty = TRUE
+                    )
+                    message(
+                        "  No-match marker written to ",
+                        failure_path
+                    )
                 } else {
                     m$id_numeric <- this_id
                     m$site_id <- site$site_id
