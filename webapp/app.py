@@ -89,6 +89,8 @@ _CSP_IMG_SRC = [
     "https://*.storage.googleapis.com",
     "https://s3.amazonaws.com",
     "https://*.s3.amazonaws.com",
+    "https://tile.openstreetmap.org",
+    "https://*.tile.openstreetmap.org",
 ]
 _CSP_CONNECT_SRC = [
     "'self'",
