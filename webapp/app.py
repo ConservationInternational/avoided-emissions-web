@@ -77,6 +77,13 @@ if not Config.DEBUG and Config.SECRET_KEY in ("change-me-in-production", ""):
         "SECRET_KEY is not set. Refusing to start in production with the "
         "default key. Set SECRET_KEY in your environment."
     )
+if not Config.DEBUG and not (Config.APP_URL or "").strip().lower().startswith(
+    "https://"
+):
+    raise RuntimeError(
+        "APP_URL must use HTTPS when DEBUG is false. "
+        "Set APP_URL to an https:// URL in your environment."
+    )
 server.config["SECRET_KEY"] = Config.SECRET_KEY
 server.config["SESSION_COOKIE_HTTPONLY"] = True
 server.config["SESSION_COOKIE_SAMESITE"] = "Lax"

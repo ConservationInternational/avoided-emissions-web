@@ -41,6 +41,11 @@ ALLOWED_MATCHING_JOB_QUEUES = {
 
 DEFAULT_MATCHING_JOB_QUEUE = "spot_fleet_1TB-io2-disk"
 
+MAX_ARCHIVE_FILE_COUNT = 2_000
+MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+MAX_ARCHIVE_MEMBER_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+MAX_ARCHIVE_COMPRESSION_RATIO = 200.0
+
 
 def get_s3_client():
     return boto3.client("s3", region_name=Config.AWS_REGION)
@@ -65,21 +70,69 @@ def _is_within_directory(directory, target):
 
 def _safe_extract_zip(archive_path, target_dir):
     with zipfile.ZipFile(archive_path, "r") as archive:
-        for member in archive.namelist():
+        file_count = 0
+        total_uncompressed_bytes = 0
+
+        for info in archive.infolist():
+            member = info.filename
             if not member:
                 continue
             destination = os.path.join(target_dir, member)
             if not _is_within_directory(target_dir, destination):
                 raise ValueError("Archive contains invalid paths.")
+
+            if info.is_dir():
+                continue
+
+            file_count += 1
+            member_size = int(info.file_size or 0)
+            compressed_size = int(info.compress_size or 0)
+
+            if member_size > MAX_ARCHIVE_MEMBER_UNCOMPRESSED_BYTES:
+                raise ValueError("Archive member is too large.")
+
+            if compressed_size <= 0 and member_size > 0:
+                raise ValueError("Archive contains an invalid compressed member.")
+
+            if compressed_size > 0:
+                ratio = member_size / compressed_size
+                if ratio > MAX_ARCHIVE_COMPRESSION_RATIO:
+                    raise ValueError("Archive contains suspiciously compressed data.")
+
+            total_uncompressed_bytes += member_size
+            if total_uncompressed_bytes > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES:
+                raise ValueError("Archive expands to too much data.")
+            if file_count > MAX_ARCHIVE_FILE_COUNT:
+                raise ValueError("Archive contains too many files.")
+
         archive.extractall(target_dir)
 
 
 def _safe_extract_tar(archive_path, target_dir):
     with tarfile.open(archive_path, "r:gz") as archive:
+        file_count = 0
+        total_uncompressed_bytes = 0
+
         for member in archive.getmembers():
             destination = os.path.join(target_dir, member.name)
             if not _is_within_directory(target_dir, destination):
                 raise ValueError("Archive contains invalid paths.")
+
+            if not member.isfile():
+                continue
+
+            file_count += 1
+            member_size = int(member.size or 0)
+
+            if member_size > MAX_ARCHIVE_MEMBER_UNCOMPRESSED_BYTES:
+                raise ValueError("Archive member is too large.")
+
+            total_uncompressed_bytes += member_size
+            if total_uncompressed_bytes > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES:
+                raise ValueError("Archive expands to too much data.")
+            if file_count > MAX_ARCHIVE_FILE_COUNT:
+                raise ValueError("Archive contains too many files.")
+
         archive.extractall(target_dir, filter="data")
 
 
@@ -2066,6 +2119,21 @@ def create_share_link(task_id, user_id, expiry_days=7):
 
     db = get_db()
     try:
+        from models import User
+
+        task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+        if not task:
+            raise ValueError("Task not found.")
+
+        user = (
+            db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
+        )
+        if not user:
+            raise PermissionError("User is not authorized to manage share links.")
+
+        if user.role != "admin" and str(task.submitted_by) != str(user_id):
+            raise PermissionError("User is not authorized to manage share links.")
+
         link = TaskShareLink(
             task_id=task_id,
             created_by=user_id,
@@ -2085,7 +2153,7 @@ def create_share_link(task_id, user_id, expiry_days=7):
         db.close()
 
 
-def list_share_links(task_id):
+def list_share_links(task_id, user_id=None):
     """Return active share links for a task.
 
     Returns
@@ -2098,6 +2166,23 @@ def list_share_links(task_id):
 
     db = get_db()
     try:
+        if user_id is not None:
+            from models import User
+
+            task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+            if not task:
+                return []
+
+            user = (
+                db.query(User)
+                .filter(User.id == user_id, User.is_active.is_(True))
+                .first()
+            )
+            if not user:
+                return []
+            if user.role != "admin" and str(task.submitted_by) != str(user_id):
+                return []
+
         links = (
             db.query(TaskShareLink)
             .filter(TaskShareLink.task_id == task_id)
@@ -2133,9 +2218,25 @@ def revoke_share_link(link_id, user_id, task_id=None):
 
     db = get_db()
     try:
+        from models import User
+
         link = db.query(TaskShareLink).filter(TaskShareLink.id == link_id).first()
         if not link:
             return False
+
+        user = (
+            db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
+        )
+        if not user:
+            return False
+
+        task = db.query(AnalysisTask).filter(AnalysisTask.id == link.task_id).first()
+        if not task:
+            return False
+
+        if user.role != "admin" and str(task.submitted_by) != str(user_id):
+            return False
+
         # Cross-validate: link must belong to the task the caller has
         # access to.  Without this check a user who can view task A
         # could revoke a link belonging to task B.

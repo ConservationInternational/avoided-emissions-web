@@ -928,13 +928,9 @@ def register_callbacks(app, limiter=None):
             ]
             for val, lo, hi, label in bounds:
                 if val < lo or val > hi:
-                    return _error_alert(
-                        f"{label} must be between {lo} and {hi}."
-                    )
+                    return _error_alert(f"{label} must be between {lo} and {hi}.")
             if _cw < 0 or _cw > 5.0:
-                return _error_alert(
-                    "Caliper width must be between 0 and 5.0."
-                )
+                return _error_alert("Caliper width must be between 0 and 5.0.")
 
             task_id = submit_analysis_task(
                 task_name=name,
@@ -1187,7 +1183,7 @@ def register_callbacks(app, limiter=None):
             return False, html.Div()
 
         # Opening — fetch existing links
-        links = list_share_links(task_id)
+        links = list_share_links(task_id, str(user.id))
         return True, _render_share_links_list(links, task_id)
 
     @app.callback(
@@ -1258,7 +1254,7 @@ def register_callbacks(app, limiter=None):
             )
 
             # Refresh the list
-            links = list_share_links(task_id)
+            links = list_share_links(task_id, str(user.id))
             return link_display, _render_share_links_list(links, task_id)
         except Exception:
             logger.exception("Failed to create share link")
@@ -1289,7 +1285,7 @@ def register_callbacks(app, limiter=None):
         link_id = _json.loads(trigger["prop_id"].rsplit(".", 1)[0])["index"]
         revoke_share_link(link_id, str(user.id), task_id=task_id)
 
-        links = list_share_links(task_id)
+        links = list_share_links(task_id, str(user.id))
         return _render_share_links_list(links, task_id)
 
     # -- Edit task name/description -------------------------------------------
@@ -1668,6 +1664,7 @@ def register_callbacks(app, limiter=None):
 
         except Exception as e:
             logger.exception("Failed to link trends.earth account")
+            report_exception(action="te_link", user_id=str(user.id))
             msg = str(e)
             if "401" in msg or "Unauthorized" in msg:
                 msg = "Invalid email or password."
@@ -1678,7 +1675,10 @@ def register_callbacks(app, limiter=None):
                     "at trends.earth first."
                 )
             else:
-                msg = f"Failed to link account: {msg}"
+                msg = (
+                    "Failed to link account. Please try again later "
+                    "or contact support if the problem persists."
+                )
             return (
                 dbc.Alert(msg, color="danger"),
                 no_update,
@@ -1726,8 +1726,19 @@ def register_callbacks(app, limiter=None):
             )
         except Exception as e:
             logger.exception("trends.earth connection test failed")
+            report_exception(action="te_test_connection", user_id=str(user.id))
+            msg = str(e)
+            if "401" in msg or "Unauthorized" in msg:
+                user_message = (
+                    "Connection failed: stored credentials are invalid or expired."
+                )
+            else:
+                user_message = (
+                    "Connection test failed. Please try again later "
+                    "or relink your account."
+                )
             return dbc.Alert(
-                f"Connection failed: {e}",
+                user_message,
                 color="danger",
                 duration=8000,
             )
