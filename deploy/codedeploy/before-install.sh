@@ -118,27 +118,13 @@ else
     log_info "Postgres data directory $PG_DATA_DIR already exists — data will be retained"
 fi
 
-# Always ensure correct ownership — the official postgres image runs as uid 999.
-chown 999:999 "$PG_DATA_DIR"
+# Always ensure correct ownership.  Alpine-based postgres images (which
+# postgis/postgis:*-alpine inherits) run as uid/gid 70, NOT 999.
+# Debian-based images use 999, but we use Alpine.
+PG_UID=70
+PG_GID=70
 
-# Migrate from old Docker named volume if it exists and the host dir is empty.
-OLD_VOLUME="postgres_${ENVIRONMENT}_data"
-if [ "$ENVIRONMENT" = "staging" ]; then
-    OLD_VOLUME="postgres_staging_data"
-fi
-if docker volume inspect "$OLD_VOLUME" > /dev/null 2>&1; then
-    if [ -z "$(ls -A "$PG_DATA_DIR" 2>/dev/null)" ]; then
-        log_info "Migrating data from Docker volume $OLD_VOLUME to $PG_DATA_DIR"
-        docker run --rm \
-            -v "${OLD_VOLUME}:/source:ro" \
-            -v "${PG_DATA_DIR}:/dest" \
-            alpine sh -c 'cp -a /source/. /dest/' && \
-        log_success "Data migrated from $OLD_VOLUME" || \
-        log_warning "Volume migration failed — postgres will initialize fresh"
-    else
-        log_info "Host dir already has data — skipping volume migration"
-    fi
-fi
+chown "$PG_UID:$PG_GID" "$PG_DATA_DIR"
 
 log_success "BeforeInstall hook completed"
 exit 0
