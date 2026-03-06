@@ -568,13 +568,15 @@ def _make_ag_grid(
 
 def navbar(user=None):
     """Top navigation bar."""
-    nav_items = [
-        dbc.NavItem(dbc.NavLink("Submit Task", href="/submit")),
-        dbc.NavItem(dbc.NavLink("View Tasks", href="/")),
-    ]
-    if user and user.is_admin:
-        nav_items.append(dbc.NavItem(dbc.NavLink("Admin", href="/admin")))
-    nav_items.append(dbc.NavItem(dbc.NavLink("Profile", href="/settings")))
+    nav_items = []
+    if user:
+        nav_items = [
+            dbc.NavItem(dbc.NavLink("Submit Task", href="/submit")),
+            dbc.NavItem(dbc.NavLink("View Tasks", href="/")),
+        ]
+        if user.is_admin:
+            nav_items.append(dbc.NavItem(dbc.NavLink("Admin", href="/admin")))
+        nav_items.append(dbc.NavItem(dbc.NavLink("Profile", href="/settings")))
 
     right_items = []
     if user:
@@ -591,9 +593,35 @@ def navbar(user=None):
     return dbc.Navbar(
         dbc.Container(
             [
-                dbc.NavbarBrand("Avoided Emissions", href="/", className="fw-bold"),
-                dbc.Nav(nav_items, className="me-auto", navbar=True),
-                dbc.Nav(right_items, navbar=True),
+                dbc.NavbarBrand(
+                    [
+                        html.Img(
+                            src="/assets/CI_Logo.png",
+                            height="36",
+                            className="me-3",
+                            alt="Conservation International",
+                        ),
+                        html.Span(
+                            "Avoided Emissions",
+                            style={
+                                "borderLeft": "1px solid rgba(255,255,255,0.3)",
+                                "paddingLeft": "0.75rem",
+                            },
+                        ),
+                    ],
+                    href="/",
+                    className="fw-bold d-flex align-items-center",
+                ),
+                dbc.NavbarToggler(id="navbar-toggler", n_clicks=0),
+                dbc.Collapse(
+                    [
+                        dbc.Nav(nav_items, className="me-auto", navbar=True),
+                        dbc.Nav(right_items, navbar=True),
+                    ],
+                    id="navbar-collapse",
+                    is_open=False,
+                    navbar=True,
+                ),
             ],
             fluid="lg",
         ),
@@ -781,7 +809,10 @@ def login_layout():
                             className="text-center mt-1",
                         ),
                     ],
-                    width={"size": 4, "offset": 4},
+                    xs=12,
+                    sm={"size": 10, "offset": 1},
+                    md={"size": 6, "offset": 3},
+                    lg={"size": 4, "offset": 4},
                 )
             ),
         ]
@@ -868,7 +899,10 @@ def register_layout():
                             className="mt-5 shadow-sm ae-auth-card",
                         ),
                     ],
-                    width={"size": 4, "offset": 4},
+                    xs=12,
+                    sm={"size": 10, "offset": 1},
+                    md={"size": 6, "offset": 3},
+                    lg={"size": 4, "offset": 4},
                 )
             ),
         ]
@@ -942,7 +976,10 @@ def forgot_password_layout():
                             className="mt-5 shadow-sm ae-auth-card",
                         ),
                     ],
-                    width={"size": 4, "offset": 4},
+                    xs=12,
+                    sm={"size": 10, "offset": 1},
+                    md={"size": 6, "offset": 3},
+                    lg={"size": 4, "offset": 4},
                 )
             ),
         ]
@@ -1079,7 +1116,10 @@ def reset_password_layout(token=""):
                             className="mt-5 shadow-sm ae-auth-card",
                         ),
                     ],
-                    width={"size": 4, "offset": 4},
+                    xs=12,
+                    sm={"size": 10, "offset": 1},
+                    md={"size": 6, "offset": 3},
+                    lg={"size": 4, "offset": 4},
                 )
             ),
         ]
@@ -1213,7 +1253,8 @@ def submit_layout(user):
                                                                 placeholder="My analysis",
                                                             ),
                                                         ],
-                                                        width=6,
+                                                        xs=12,
+                                                        md=6,
                                                     ),
                                                     dbc.Col(
                                                         [
@@ -1226,7 +1267,8 @@ def submit_layout(user):
                                                                 placeholder="Brief description",
                                                             ),
                                                         ],
-                                                        width=6,
+                                                        xs=12,
+                                                        md=6,
                                                     ),
                                                 ],
                                                 className="g-3 mb-3",
@@ -1246,7 +1288,8 @@ def submit_layout(user):
                                                                             options=[],
                                                                             placeholder="Select a saved site set...",
                                                                         ),
-                                                                        width=9,
+                                                                        xs=12,
+                                                                        md=9,
                                                                     ),
                                                                     dbc.Col(
                                                                         dbc.Button(
@@ -1256,7 +1299,8 @@ def submit_layout(user):
                                                                             outline=True,
                                                                             className="w-100",
                                                                         ),
-                                                                        width=3,
+                                                                        xs=12,
+                                                                        md=3,
                                                                     ),
                                                                 ],
                                                                 className="g-2 mb-2",
@@ -1486,7 +1530,8 @@ def submit_layout(user):
                                                                                                 placeholder="Load a saved preset…",
                                                                                             ),
                                                                                         ],
-                                                                                        width=5,
+                                                                                        xs=12,
+                                                                                        md=5,
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
@@ -1505,7 +1550,8 @@ def submit_layout(user):
                                                                                                 size="sm",
                                                                                             ),
                                                                                         ],
-                                                                                        width=3,
+                                                                                        xs="auto",
+                                                                                        md=3,
                                                                                         className="d-flex align-items-center",
                                                                                     ),
                                                                                     dbc.Col(
@@ -1528,7 +1574,8 @@ def submit_layout(user):
                                                                                                 size="sm",
                                                                                             ),
                                                                                         ],
-                                                                                        width=4,
+                                                                                        xs=12,
+                                                                                        md=4,
                                                                                     ),
                                                                                 ]
                                                                             ),
@@ -1556,7 +1603,8 @@ def submit_layout(user):
                                                                 className="ae-section-card",
                                                             ),
                                                         ],
-                                                        width=6,
+                                                        xs=12,
+                                                        lg=6,
                                                     ),
                                                     dbc.Col(
                                                         [
@@ -1610,7 +1658,8 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=6,
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
@@ -1630,7 +1679,8 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=6,
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                 ],
                                                                                 className="g-3 mb-3",
@@ -1655,7 +1705,8 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=6,
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
@@ -1675,7 +1726,8 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=6,
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                 ],
                                                                                 className="g-3",
@@ -1702,7 +1754,8 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=6,
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
@@ -1739,7 +1792,8 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=6,
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                 ],
                                                                                 className="g-3 mt-1",
@@ -1764,7 +1818,8 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=6,
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                 ],
                                                                                 className="g-3 mt-1",
@@ -1805,7 +1860,8 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=6,
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
@@ -1829,7 +1885,8 @@ def submit_layout(user):
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
-                                                                                        width=6,
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                 ],
                                                                                 className="g-3 mt-1",
@@ -1840,7 +1897,8 @@ def submit_layout(user):
                                                                 className="ae-section-card",
                                                             ),
                                                         ],
-                                                        width=6,
+                                                        xs=12,
+                                                        lg=6,
                                                     ),
                                                 ],
                                                 className="g-3",
@@ -2278,7 +2336,8 @@ def admin_layout(user):
                                                                         value="all",
                                                                     ),
                                                                 ],
-                                                                width=6,
+                                                                xs=12,
+                                                                sm=6,
                                                             ),
                                                             dbc.Col(
                                                                 [
@@ -2396,7 +2455,8 @@ def admin_layout(user):
                                                                         placeholder="Select a user...",
                                                                     ),
                                                                 ],
-                                                                width=4,
+                                                                xs=12,
+                                                                md=4,
                                                             ),
                                                             dbc.Col(
                                                                 [
@@ -2419,7 +2479,8 @@ def admin_layout(user):
                                                                         value="user",
                                                                     ),
                                                                 ],
-                                                                width=2,
+                                                                xs=6,
+                                                                md=2,
                                                             ),
                                                             dbc.Col(
                                                                 [
@@ -2719,7 +2780,7 @@ def settings_layout(user):
         ],
         className="mb-4 shadow-sm",
     )
-    children.append(dbc.Row(dbc.Col(te_integration_card, width=8)))
+    children.append(dbc.Row(dbc.Col(te_integration_card, xs=12, lg=8)))
 
     # -- Change Password card -----------------------------------------------
     req_item_style = {"fontSize": "0.85rem", "lineHeight": "1.6"}
@@ -2817,7 +2878,7 @@ def settings_layout(user):
         ],
         className="mb-4 shadow-sm",
     )
-    children.append(dbc.Row(dbc.Col(change_pw_card, width=8)))
+    children.append(dbc.Row(dbc.Col(change_pw_card, xs=12, lg=8)))
 
     children.append(
         dbc.Row(
@@ -2883,7 +2944,8 @@ def settings_layout(user):
                         className="mb-4 shadow-sm ae-section-card",
                     )
                 ],
-                width=8,
+                xs=12,
+                lg=8,
             )
         )
     )

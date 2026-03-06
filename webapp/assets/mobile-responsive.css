@@ -1,0 +1,147 @@
+/* Mobile-responsive overrides for Avoided Emissions webapp.
+ *
+ * Complements style.css — loaded automatically by Dash from the assets/
+ * directory.  All rules are scoped behind @media queries so they have
+ * zero effect on the existing desktop layout.
+ */
+
+/* ── Touch-friendly targets (all small screens) ─────────────────────── */
+@media (max-width: 768px) {
+    /* Minimum 44px tap targets (WCAG 2.5.5) */
+    .btn,
+    .nav-link,
+    .form-select,
+    .form-control {
+        min-height: 44px;
+    }
+
+    /* Tighter container padding on phones */
+    .container,
+    .container-fluid {
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+    }
+
+    /* Tabs: allow wrapping and reduce padding */
+    .nav-tabs {
+        flex-wrap: wrap !important;
+        gap: 2px;
+    }
+
+    .nav-tabs .nav-link {
+        padding: 0.5rem 0.75rem;
+        font-size: 0.85rem;
+    }
+
+    /* AG Grid: reduce font and row height for density */
+    .ag-theme-alpine .ag-header-cell-label {
+        font-size: 11px;
+    }
+
+    .ag-theme-alpine .ag-cell {
+        font-size: 12px;
+        line-height: 28px;
+    }
+
+    .ag-theme-alpine .ag-header-cell,
+    .ag-theme-alpine .ag-cell {
+        padding-left: 6px;
+        padding-right: 6px;
+    }
+
+    /* Action buttons: stack full-width */
+    .ae-action-buttons {
+        width: 100%;
+        justify-content: flex-start;
+        margin-top: 0.5rem;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    /* Auth cards: less top margin on small screens */
+    .ae-auth-card {
+        margin-top: 1.5rem !important;
+    }
+
+    /* Map: reduce default min-height on phones */
+    .ol-sites-map {
+        min-height: 200px;
+    }
+
+    /* Cards: no horizontal overflow */
+    .ae-section-card {
+        overflow-x: auto;
+    }
+
+    /* Tables inside cards: horizontal scroll */
+    .ae-section-card .table-responsive,
+    .ae-section-card table {
+        font-size: 0.85rem;
+    }
+
+    /* Footer: stack items vertically */
+    .ae-footer .text-center {
+        font-size: 0.8rem;
+    }
+
+    /* Layer control panel: pull back from edge */
+    .ae-layer-control-content {
+        max-width: 260px;
+        min-width: 180px;
+    }
+
+    /* Modals: near full-width on phones */
+    .modal-dialog {
+        margin: 0.5rem;
+        max-width: calc(100vw - 1rem);
+    }
+
+    /* Plotly charts: let them shrink */
+    .js-plotly-plot {
+        max-width: 100%;
+        overflow-x: auto;
+    }
+
+    /* Navbar margin reduction */
+    .ae-navbar {
+        margin-bottom: 1rem !important;
+    }
+
+    /* Page headings: slightly smaller */
+    h2 {
+        font-size: 1.4rem;
+    }
+
+    /* Scroll panel: shorter on mobile */
+    .ae-scroll-panel {
+        max-height: 240px;
+    }
+}
+
+/* ── Very small phones (≤ 480px) ────────────────────────────────────── */
+@media (max-width: 480px) {
+    .ae-navbar .navbar-brand {
+        font-size: 1rem;
+    }
+
+    .nav-tabs .nav-link {
+        font-size: 0.78rem;
+        padding: 0.4rem 0.5rem;
+    }
+
+    /* Full-width buttons */
+    .btn-group {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .btn-group .btn {
+        width: 100%;
+        border-radius: 0.375rem !important;
+        margin-bottom: 0.25rem;
+    }
+
+    h2 {
+        font-size: 1.25rem;
+    }
+}

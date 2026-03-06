@@ -737,7 +737,7 @@
     }
 
     function boot() {
-        console.log(
+        console.debug(
             LOG_PREFIX + "booting, GeoTIFF support: " + hasGeoTIFFSupport()
         );
 
