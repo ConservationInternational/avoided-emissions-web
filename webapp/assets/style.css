@@ -383,3 +383,22 @@ h1, h2, h3, h4, h5 {
     color: #adb5bd;
 }
 
+.ae-footer-powered {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 0.5rem;
+}
+
+.ae-footer-powered-text {
+    color: #6c757d;
+    font-size: 0.75rem;
+    margin-bottom: 0.15rem;
+}
+
+.ae-footer-powered-logo {
+    height: 1.1rem;
+    opacity: 0.7;
+}
+

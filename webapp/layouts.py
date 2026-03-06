@@ -607,28 +607,49 @@ def footer():
     """Footer bar with legal links — shown on authenticated pages."""
     return html.Footer(
         dbc.Container(
-            dbc.Row(
-                dbc.Col(
-                    [
-                        html.A(
-                            "Privacy Policy",
-                            href="https://www.conservation.org/privacy-policy",
-                            target="_blank",
-                            rel="noopener noreferrer",
-                            className="ae-footer-link",
+            [
+                dbc.Row(
+                    dbc.Col(
+                        html.Div(
+                            [
+                                html.Span(
+                                    "Powered by",
+                                    className="ae-footer-powered-text",
+                                ),
+                                html.Img(
+                                    src="/assets/trends_earth_bl_print.png",
+                                    alt="Trends.Earth",
+                                    className="ae-footer-powered-logo",
+                                ),
+                            ],
+                            className="ae-footer-powered",
                         ),
-                        html.Span("·", className="ae-footer-separator"),
-                        html.A(
-                            "Terms of Use",
-                            href="https://www.conservation.org/terms-of-use",
-                            target="_blank",
-                            rel="noopener noreferrer",
-                            className="ae-footer-link",
-                        ),
-                    ],
-                    className="text-center",
+                        className="text-center",
+                    ),
                 ),
-            ),
+                dbc.Row(
+                    dbc.Col(
+                        [
+                            html.A(
+                                "Privacy Policy",
+                                href="https://www.conservation.org/privacy-policy",
+                                target="_blank",
+                                rel="noopener noreferrer",
+                                className="ae-footer-link",
+                            ),
+                            html.Span("·", className="ae-footer-separator"),
+                            html.A(
+                                "Terms of Use",
+                                href="https://www.conservation.org/terms-of-use",
+                                target="_blank",
+                                rel="noopener noreferrer",
+                                className="ae-footer-link",
+                            ),
+                        ],
+                        className="text-center",
+                    ),
+                ),
+            ],
             fluid="lg",
         ),
         className="ae-footer",
@@ -710,40 +731,54 @@ def login_layout():
                                             ),
                                             className="text-center mb-0",
                                         ),
-                                        html.Div(
-                                            [
-                                                html.A(
-                                                    "Privacy Policy",
-                                                    href="https://www.conservation.org/policies/privacy",
-                                                    target="_blank",
-                                                    className="text-muted",
-                                                    style={
-                                                        "textDecoration": "none",
-                                                        "fontSize": "12px",
-                                                    },
-                                                ),
-                                                html.Span(
-                                                    " | ",
-                                                    className="text-muted",
-                                                    style={"fontSize": "12px"},
-                                                ),
-                                                html.A(
-                                                    "Terms of Use",
-                                                    href="https://www.conservation.org/policies/terms-of-use",
-                                                    target="_blank",
-                                                    className="text-muted",
-                                                    style={
-                                                        "textDecoration": "none",
-                                                        "fontSize": "12px",
-                                                    },
-                                                ),
-                                            ],
-                                            className="text-center mt-3",
-                                        ),
                                     ]
                                 ),
                             ],
                             className="mt-5 shadow-sm ae-auth-card",
+                        ),
+                        html.Div(
+                            [
+                                html.Span(
+                                    "Powered by",
+                                    className="ae-footer-powered-text",
+                                ),
+                                html.Img(
+                                    src="/assets/trends_earth_bl_print.png",
+                                    alt="Trends.Earth",
+                                    className="ae-footer-powered-logo",
+                                ),
+                            ],
+                            className="ae-footer-powered mt-3",
+                        ),
+                        html.Div(
+                            [
+                                html.A(
+                                    "Privacy Policy",
+                                    href="https://www.conservation.org/policies/privacy",
+                                    target="_blank",
+                                    className="text-muted",
+                                    style={
+                                        "textDecoration": "none",
+                                        "fontSize": "12px",
+                                    },
+                                ),
+                                html.Span(
+                                    " | ",
+                                    className="text-muted",
+                                    style={"fontSize": "12px"},
+                                ),
+                                html.A(
+                                    "Terms of Use",
+                                    href="https://www.conservation.org/policies/terms-of-use",
+                                    target="_blank",
+                                    className="text-muted",
+                                    style={
+                                        "textDecoration": "none",
+                                        "fontSize": "12px",
+                                    },
+                                ),
+                            ],
+                            className="text-center mt-1",
                         ),
                     ],
                     width={"size": 4, "offset": 4},
