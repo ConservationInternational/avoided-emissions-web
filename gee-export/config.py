@@ -105,15 +105,9 @@ COVARIATES = {
         "category": "accessibility",
         "resample": "mean",
     },
-    "dist_roads": {
+    "friction_surface": {
         "derived": "friction_surface",
         "description": "Travel friction surface (minutes/m), proxy for road proximity",
-        "category": "accessibility",
-        "resample": "mean",
-    },
-    "crop_suitability": {
-        "derived": "cropland_fraction",
-        "description": "Cropland fraction (0-100%), proxy for crop suitability",
         "category": "accessibility",
         "resample": "mean",
     },
@@ -266,8 +260,7 @@ DEFAULT_MATCHING_COVARIATES = [
     "elev",
     "slope",
     "dist_cities",
-    "dist_roads",
-    "crop_suitability",
+    "friction_surface",
     "pop_2015",
     "pop_growth",
     "total_biomass",

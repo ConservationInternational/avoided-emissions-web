@@ -275,9 +275,9 @@ COVARIATE_STYLES = {
         "opacity": 1.0,
         "nodata_value": None,
     },
-    # dist_roads: range [0, 1.21], p2=0, p50=0, p98=0.04
+    # friction_surface: range [0, 1.21], p2=0, p50=0, p98=0.04
     # Extremely right-skewed — nearly all pixels are 0 or near-0.
-    "dist_roads": {
+    "friction_surface": {
         "type": "continuous",
         "min_value": 0,
         "max_value": 0.06,

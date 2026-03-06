@@ -22,7 +22,6 @@ DEFAULT_COVARIATES = [
     "slope",
     "dist_cities",
     "friction_surface",
-    "crop_suitability",
     "pop_2015",
     "pop_growth",
     "total_biomass",

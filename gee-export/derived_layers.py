@@ -213,26 +213,6 @@ def build_friction_surface():
     return friction.rename("friction_surface").toFloat()
 
 
-def build_cropland_fraction():
-    """Build a cropland fraction layer from Copernicus Global LC 2015.
-
-    Uses the 'crops-coverfraction' band from the Copernicus 100m land cover
-    dataset, which gives the percentage of each pixel covered by cropland
-    (0-100). This serves as a proxy for crop suitability.
-    """
-    src = ee.Image("COPERNICUS/Landcover/100m/Proba-V-C3/Global/2015")
-    # Keep only CRS + nominal scale from the source projection.
-    # Avoid carrying over any dataset-specific affine transform metadata,
-    # which can lead to invalid edge transforms during downstream
-    # reduceResolution/reproject exports (same failure mode as GLAD cropland).
-    band = src.select("crops-coverfraction")
-    proj = band.projection()
-    crs = proj.crs()
-    scale = proj.nominalScale()
-    cropland = band.setDefaultProjection(crs=crs, scale=scale)
-    return cropland.rename("crop_suitability").toFloat()
-
-
 def get_derived_image(covariate_name, covariate_config):
     """Dispatch to the appropriate builder for a derived covariate.
 
@@ -259,8 +239,6 @@ def get_derived_image(covariate_name, covariate_config):
         return build_lc_class(covariate_config["lc_class"])
     elif derived_type == "friction_surface":
         return build_friction_surface()
-    elif derived_type == "cropland_fraction":
-        return build_cropland_fraction()
     elif derived_type == "glad_cropland":
         return build_glad_cropland(covariate_config["year"])
     elif derived_type == "aez":

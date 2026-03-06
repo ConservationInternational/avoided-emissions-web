@@ -37,7 +37,7 @@ All scripts read a JSON configuration file specifying:
     "sites_file": "/data/input/sites.gpkg",
     "covariates": [
         "lc_2015_agriculture", "precip", "temp", "elev", "slope",
-        "dist_cities", "dist_roads", "crop_suitability",
+      "dist_cities", "friction_surface",
         "pop_2015", "pop_growth", "total_biomass"
     ],
    "exact_match_vars": ["admin0", "admin1", "admin2", "ecoregion", "pa"],
