@@ -2661,24 +2661,30 @@ def settings_layout(user):
             ],
             className="mb-3",
         ),
-        dbc.Row(
-            dbc.Col(
-                [
-                    html.H4("trends.earth API Integration"),
-                    html.P(
-                        "Link your trends.earth account to submit analysis tasks "
-                        "through the trends.earth API.",
-                        className="text-muted",
-                    ),
-                ]
-            )
-        ),
     ]
 
+    # -- trends.earth API Integration card (groups linked account + link form) --
+    te_integration_contents = [
+        html.P(
+            "Link your trends.earth account to submit analysis tasks "
+            "through the trends.earth API.",
+            className="text-muted",
+        ),
+    ]
     if credential_card:
-        children.append(dbc.Row(dbc.Col(credential_card, width=8)))
+        te_integration_contents.append(credential_card)
+    te_integration_contents.append(link_card)
 
-    children.append(dbc.Row(dbc.Col(link_card, width=8)))
+    te_integration_card = dbc.Card(
+        [
+            dbc.CardHeader(
+                html.H5("trends.earth API Integration", className="mb-0"),
+            ),
+            dbc.CardBody(te_integration_contents),
+        ],
+        className="mb-4 shadow-sm",
+    )
+    children.append(dbc.Row(dbc.Col(te_integration_card, width=8)))
 
     # -- Change Password card -----------------------------------------------
     req_item_style = {"fontSize": "0.85rem", "lineHeight": "1.6"}
@@ -2790,7 +2796,7 @@ def settings_layout(user):
                             dbc.CardBody(
                                 [
                                     html.P(
-                                        "Delete your account and all associated analysis tasks. This action cannot be undone.",
+                                        "Delete your account and all associated analysis tasks. This action cannot be undone. This does not affect your trends.earth account.",
                                         className="text-muted",
                                     ),
                                     dbc.Button(

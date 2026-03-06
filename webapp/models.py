@@ -106,7 +106,7 @@ class Covariate(Base):
         nullable=False,
         default="pending_export",
     )
-    started_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    started_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
     started_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -195,8 +195,12 @@ class AnalysisTask(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
     description = Column(Text)
-    submitted_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    site_set_id = Column(UUID(as_uuid=True), ForeignKey("user_site_sets.id"))
+    submitted_by = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    site_set_id = Column(
+        UUID(as_uuid=True), ForeignKey("user_site_sets.id"), index=True
+    )
     status = Column(
         Enum(
             "pending",
@@ -246,7 +250,10 @@ class TaskSite(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id = Column(
-        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("analysis_tasks.id"),
+        nullable=False,
+        index=True,
     )
     site_id = Column(String(100), nullable=False)
     site_name = Column(String(255))
@@ -263,7 +270,9 @@ class UserSiteSet(Base):
     __tablename__ = "user_site_sets"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
     name = Column(String(255), nullable=False)
     original_filename = Column(String(500), nullable=False)
     file_size_bytes = Column(BigInteger, nullable=False)
@@ -289,7 +298,10 @@ class UserSiteFeature(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     site_set_id = Column(
-        UUID(as_uuid=True), ForeignKey("user_site_sets.id"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("user_site_sets.id"),
+        nullable=False,
+        index=True,
     )
     site_id = Column(String(100), nullable=False)
     site_name = Column(String(255), nullable=False)
@@ -308,7 +320,10 @@ class TaskResult(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id = Column(
-        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("analysis_tasks.id"),
+        nullable=False,
+        index=True,
     )
     site_id = Column(String(100), nullable=False)
     year = Column(Integer, nullable=False)
@@ -330,7 +345,10 @@ class TaskResultTotal(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id = Column(
-        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("analysis_tasks.id"),
+        nullable=False,
+        index=True,
     )
     site_id = Column(String(100), nullable=False)
     site_name = Column(String(255))
@@ -392,7 +410,9 @@ class CovariatePreset(Base):
     __tablename__ = "covariate_presets"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
     name = Column(String(255), nullable=False)
     covariates = Column(ARRAY(Text), nullable=False)
     exact_match_vars = Column(ARRAY(Text), nullable=True)
@@ -575,7 +595,9 @@ class TaskShareLink(Base):
         nullable=False,
         default=lambda: secrets.token_urlsafe(48),
     )
-    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_by = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
