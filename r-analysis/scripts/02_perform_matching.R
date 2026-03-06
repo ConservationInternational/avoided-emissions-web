@@ -113,24 +113,25 @@ get_matches <- function(d, dists) {
         }
         d$match_group <- as.character(m)
         d <- d[matched(m), ]
-        # Label match groups by treatment cell ID
-        match_pos <- match(
-            d$match_group[!d$treatment],
-            d$match_group[d$treatment]
-        )
-        d$match_group[!d$treatment] <- d$cell[d$treatment][match_pos]
-        d$match_group[d$treatment] <- d$cell[d$treatment]
 
-        # Equal weights within matched sets (Hansen 2004)
+        # Weights within matched sets:
+        # treatment units carry weight 1 each; control weights are scaled so
+        # the total control weight in a set equals the number of treated units.
+        # This supports both pair matching (1:k) and full matching with
+        # potentially multiple treated units per matched set.
         d$match_weight <- 1
-        ctrl_counts <- d %>%
-            filter(!treatment) %>%
-            count(match_group, name = "n_controls")
+        group_counts <- d %>%
+            group_by(match_group) %>%
+            summarise(
+                n_treated = sum(treatment),
+                n_controls = sum(!treatment),
+                .groups = "drop"
+            )
         ctrl_idx <- which(!d$treatment)
         ctrl_groups <- d$match_group[ctrl_idx]
+        matched_counts <- group_counts[match(ctrl_groups, group_counts$match_group), ]
         d$match_weight[ctrl_idx] <-
-            1 / ctrl_counts$n_controls[match(ctrl_groups,
-                                             ctrl_counts$match_group)]
+            matched_counts$n_treated / matched_counts$n_controls
     } else {
         d <- data.frame()
     }

@@ -380,27 +380,33 @@ if (length(match_files) > 0) {
         write_csv(file.path(config$output_dir, "results_pixel_level.csv"))
 
     # Summarize by site and year.
-    # With 1:k matching each match_group has one treatment pixel and
-    # one or more control pixels, each carrying a match_weight.  The
-    # control-side aggregates use the weighted mean of the controls in
-    # each group, so that a group with 3 controls contributes the same
-    # overall weight as one with 1 control.  Treatment pixels always
-    # have match_weight = 1.
+    # Aggregation is done per matched set using match_weight so that it
+    # remains correct for both pair matching and full matching (where a
+    # set may contain multiple treated pixels).
     results_by_year <- m_processed %>%
         group_by(match_group, site_id, year) %>%
         summarise(
-            cell = cell[treatment][1],
-            treatment_defor_ha = abs(forest_change_ha[treatment][1]),
-            control_defor_ha = weighted.mean(
-                abs(forest_change_ha[!treatment]),
-                match_weight[!treatment]
+            treatment_defor_ha = sum(
+                abs(forest_change_ha[treatment]) *
+                    match_weight[treatment],
+                na.rm = TRUE
             ),
-            treatment_emissions_mgco2e =
-                abs(Emissions_MgCO2e[treatment][1]),
-            control_emissions_mgco2e = weighted.mean(
-                abs(Emissions_MgCO2e[!treatment]),
-                match_weight[!treatment]
+            control_defor_ha = sum(
+                abs(forest_change_ha[!treatment]) *
+                    match_weight[!treatment],
+                na.rm = TRUE
             ),
+            treatment_emissions_mgco2e = sum(
+                abs(Emissions_MgCO2e[treatment]) *
+                    match_weight[treatment],
+                na.rm = TRUE
+            ),
+            control_emissions_mgco2e = sum(
+                abs(Emissions_MgCO2e[!treatment]) *
+                    match_weight[!treatment],
+                na.rm = TRUE
+            ),
+            n_treated_pixels = sum(treatment),
             .groups = "drop"
         ) %>%
         mutate(
@@ -421,7 +427,7 @@ if (length(match_files) > 0) {
                 sum(control_emissions_mgco2e, na.rm = TRUE),
             emissions_avoided_mgco2e =
                 sum(emissions_avoided_mgco2e, na.rm = TRUE),
-            n_matched_pixels = n(),
+            n_matched_pixels = sum(n_treated_pixels, na.rm = TRUE),
             .groups = "drop"
         ) %>%
         left_join(
