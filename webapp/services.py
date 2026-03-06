@@ -141,8 +141,13 @@ def _find_supported_dataset_paths(directory):
     geopackages = []
     geojsons = []
 
-    for root, _dirs, files in os.walk(directory):
+    for root, dirs, files in os.walk(directory):
+        # Skip macOS resource fork directories
+        dirs[:] = [d for d in dirs if d != "__MACOSX"]
         for filename in files:
+            # Skip macOS resource fork files
+            if filename.startswith("._"):
+                continue
             lower_name = filename.lower()
             full_path = os.path.join(root, filename)
             if lower_name.endswith(".shp"):
@@ -153,6 +158,22 @@ def _find_supported_dataset_paths(directory):
                 geojsons.append(full_path)
 
     return sorted(shapefiles), sorted(geopackages), sorted(geojsons)
+
+
+def _read_shapefile(path):
+    """Read a shapefile, preferring UTF-8 when no .cpg sidecar is present.
+
+    Without a .cpg file, GDAL/Fiona defaults to ISO-8859-1 per the shapefile
+    spec, which mangles text that is actually encoded as UTF-8. This function
+    detects the missing .cpg case and tries UTF-8 first.
+    """
+    cpg_path = os.path.splitext(path)[0] + ".cpg"
+    if not os.path.exists(cpg_path):
+        try:
+            return gpd.read_file(path, encoding="utf-8")
+        except Exception:
+            pass
+    return gpd.read_file(path)
 
 
 def _read_sites_from_archive(file_content, filename):
@@ -184,7 +205,7 @@ def _read_sites_from_archive(file_content, filename):
             )
 
         if shapefiles:
-            return gpd.read_file(shapefiles[0])
+            return _read_shapefile(shapefiles[0])
         if geopackages:
             return gpd.read_file(geopackages[0])
         return gpd.read_file(geojsons[0], driver="GeoJSON")

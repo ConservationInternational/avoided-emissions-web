@@ -2205,7 +2205,7 @@ def task_detail_layout(user, task_id, shared_token=None):
                     html.Div(
                         dbc.Card(
                             dbc.CardBody(
-                                html.Div(id="task-map", style={"height": "500px"}),
+                                html.Div(id="task-map"),
                                 className="p-0",
                             ),
                             className="ae-section-card ae-map-card",

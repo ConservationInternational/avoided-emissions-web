@@ -759,7 +759,7 @@ def register_callbacks(app, limiter=None):
             _openlayers_map_component(
                 "submit-sites-map",
                 detail["geojson"],
-                height="260px",
+                height="500px",
                 enable_cog_layers=True,
             ),
             metadata,

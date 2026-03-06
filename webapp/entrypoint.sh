@@ -12,11 +12,12 @@ set -e
 mkdir -p /app/celerybeat
 
 # Wait for Postgres to be reachable.  In Docker Swarm the overlay network
-# may not resolve service DNS immediately, so we retry for up to 60 s.
+# may not resolve service DNS immediately, and first-time data-directory
+# initialisation on a bind mount can take several minutes.
 wait_for_postgres() {
     echo "Waiting for Postgres to become reachable..."
     attempts=0
-    max_attempts=30
+    max_attempts=90
     while [ $attempts -lt $max_attempts ]; do
         # Use Python+psycopg2 (already installed) for a lightweight probe.
         if python -c "
@@ -52,6 +53,8 @@ case "$1" in
         ;;
     celery)
         # Workers/beat skip migrations — the migrate service handles them.
+        # But they still need Postgres to be reachable before starting.
+        wait_for_postgres
         ;;
     *)
         # Webapp — just start serving.
