@@ -21,7 +21,7 @@ DEFAULT_COVARIATES = [
     "elev",
     "slope",
     "dist_cities",
-    "dist_roads",
+    "friction_surface",
     "crop_suitability",
     "pop_2015",
     "pop_growth",
@@ -2305,10 +2305,8 @@ def admin_layout(user):
                                                         height="500px",
                                                         style_conditions=COVARIATE_STATUS_ROW_STYLES,
                                                         grid_options_extra={
-                                                            "rowSelection": {
-                                                                "mode": "multiRow",
-                                                                "enableClickSelection": False,
-                                                            },
+                                                            "rowSelection": "multiple",
+                                                            "suppressRowClickSelection": True,
                                                             "isRowSelectable": {
                                                                 "function": (
                                                                     "!!params.data"
