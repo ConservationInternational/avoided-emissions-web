@@ -566,17 +566,56 @@ def _make_ag_grid(
 # -- Navigation bar ----------------------------------------------------------
 
 
-def navbar(user=None):
-    """Top navigation bar."""
+def navbar(user=None, active_page=None):
+    """Top navigation bar.
+
+    Parameters
+    ----------
+    active_page : str | None
+        One of ``"/submit"``, ``"/"``, ``"/admin"``, ``"/settings"``.
+        The matching nav link is rendered bold to indicate the current page.
+    """
     nav_items = []
     if user:
         nav_items = [
-            dbc.NavItem(dbc.NavLink("Submit Task", href="/submit")),
-            dbc.NavItem(dbc.NavLink("View Tasks", href="/")),
+            dbc.NavItem(
+                dbc.NavLink(
+                    "Submit Task",
+                    href="/submit",
+                    active=(active_page == "/submit"),
+                    className="fw-bold" if active_page == "/submit" else "",
+                )
+            ),
+            dbc.NavItem(
+                dbc.NavLink(
+                    "View Tasks",
+                    href="/",
+                    active=(active_page == "/"),
+                    className="fw-bold" if active_page == "/" else "",
+                )
+            ),
         ]
         if user.is_admin:
-            nav_items.append(dbc.NavItem(dbc.NavLink("Admin", href="/admin")))
-        nav_items.append(dbc.NavItem(dbc.NavLink("Profile", href="/settings")))
+            nav_items.append(
+                dbc.NavItem(
+                    dbc.NavLink(
+                        "Admin",
+                        href="/admin",
+                        active=(active_page == "/admin"),
+                        className="fw-bold" if active_page == "/admin" else "",
+                    )
+                )
+            )
+        nav_items.append(
+            dbc.NavItem(
+                dbc.NavLink(
+                    "Profile",
+                    href="/settings",
+                    active=(active_page == "/settings"),
+                    className="fw-bold" if active_page == "/settings" else "",
+                )
+            )
+        )
 
     right_items = []
     if user:
@@ -1130,7 +1169,7 @@ def dashboard_layout(user):
     """Main dashboard showing task list with AG Grid and status overview."""
     return dbc.Container(
         [
-            navbar(user),
+            navbar(user, active_page="/"),
             dbc.Row(
                 [
                     dbc.Col(
@@ -1209,7 +1248,7 @@ def submit_layout(user):
 
     return dbc.Container(
         [
-            navbar(user),
+            navbar(user, active_page="/submit"),
             dbc.Row(
                 [
                     dbc.Col(
@@ -2240,9 +2279,10 @@ def task_detail_layout(user, task_id, shared_token=None):
 
     return dbc.Container(
         [
-            navbar(user),
+            navbar(user, active_page="/"),
             shared_banner,
             header_row,
+            html.Div(id="quality-warning-banner"),
             tabs,
             edit_modal,
             share_modal,
@@ -2310,7 +2350,7 @@ def admin_layout(user):
 
     return dbc.Container(
         [
-            navbar(user),
+            navbar(user, active_page="/admin"),
             dbc.Row(
                 [
                     dbc.Col(
@@ -2759,7 +2799,7 @@ def settings_layout(user):
     )
 
     children = [
-        navbar(user),
+        navbar(user, active_page="/settings"),
         dbc.Row(
             [
                 dbc.Col(
@@ -2978,7 +3018,7 @@ def not_found_layout(user=None):
     """404 page."""
     return dbc.Container(
         [
-            navbar(user),
+            navbar(user, active_page=None),
             dbc.Row(
                 dbc.Col(
                     [

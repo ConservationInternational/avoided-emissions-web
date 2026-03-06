@@ -1041,6 +1041,7 @@ def register_callbacks(app, limiter=None):
             Output("task-plots", "children"),
             Output("task-match-quality", "children"),
             Output("task-map", "children"),
+            Output("quality-warning-banner", "children"),
             Output("detail-refresh-interval", "disabled"),
         ],
         [
@@ -1057,13 +1058,13 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
 
         if not _authorize_task_access(task_id, share_token):
-            return ("Task Not Found", None, None, None, None, None, None, True)
+            return ("Task Not Found", None, None, None, None, None, None, None, True)
 
         # Batch task status is polled by the Celery Beat worker;
         # this callback just reads the current DB state.
         detail = get_task_detail(task_id)
         if not detail:
-            return ("Task Not Found", None, None, None, None, None, None, True)
+            return ("Task Not Found", None, None, None, None, None, None, None, True)
 
         task = detail["task"]
         sites = detail["sites"]
@@ -1091,12 +1092,27 @@ def register_callbacks(app, limiter=None):
         # Overview tab
         overview = _build_overview(task, sites, totals)
 
+        # Quality warning banner (above tabs) — only for succeeded tasks
+        quality_banner = html.Div()
+        quality_warnings = []
+        if task.status == "succeeded":
+            quality_warnings = _compute_quality_warnings(task_id, task, totals)
+            quality_banner = _build_quality_warning_banner(quality_warnings)
+
         # Results tab (AG Grid tables)
-        results_content = _build_results_content(results, totals, sites)
+        results_content = _build_results_content(
+            results, totals, sites, quality_warnings=quality_warnings
+        )
 
         # Plots tab
         plots = (
-            _build_plots(results, totals, sites, task=task)
+            _build_plots(
+                results,
+                totals,
+                sites,
+                task=task,
+                quality_warnings=quality_warnings,
+            )
             if results
             else html.P("Results not yet available.", className="text-muted")
         )
@@ -1117,6 +1133,7 @@ def register_callbacks(app, limiter=None):
             plots,
             match_quality,
             map_content,
+            quality_banner,
             disable_interval,
         )
 
@@ -2094,8 +2111,16 @@ def register_callbacks(app, limiter=None):
         if df.empty:
             return html.P("No data for selected site.", className="text-muted")
 
+        # Show per-site or aggregate quality warnings
+        quality_warnings = store_data.get("quality_warnings", [])
+        scope = site_filter if site_filter else None
+        warning_banner = _build_quality_warning_banner(
+            quality_warnings, scope_filter=scope
+        )
+
         return html.Div(
-            _build_all_match_quality_plots(
+            [warning_banner]
+            + _build_all_match_quality_plots(
                 df,
                 covariate_cols,
                 balance_df,
@@ -2771,9 +2796,13 @@ def _build_overview(task, sites, totals):
     return html.Div(cards)
 
 
-def _build_results_content(results, totals, sites=None):
+def _build_results_content(results, totals, sites=None, quality_warnings=None):
     """Build the results section with sites table, AG Grid tables, and downloads."""
     content = []
+
+    # Show per-site quality issues table (detail, not a duplicate banner)
+    if quality_warnings:
+        content.append(_build_site_quality_table(quality_warnings, totals))
 
     # Sites table — always shown when sites are available
     if sites:
@@ -2912,7 +2941,7 @@ def _build_results_content(results, totals, sites=None):
     return html.Div(content)
 
 
-def _build_plots(results, totals, sites=None, task=None):
+def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
     """Build interactive plots for task results.
 
     Includes aggregate deforestation comparison (project sites vs matched
@@ -2924,6 +2953,8 @@ def _build_plots(results, totals, sites=None, task=None):
     task : AnalysisTask, optional
         The parent task object, used to read ``extra_metadata`` for
         failed-site and subsampled-site annotations.
+    quality_warnings : list[dict], optional
+        Output of :func:`_assess_match_quality`.
     """
     if not results:
         return html.P("No results to plot.", className="text-muted")
@@ -3171,6 +3202,311 @@ def _build_plots(results, totals, sites=None, task=None):
     return html.Div(plots)
 
 
+# ---------------------------------------------------------------------------
+# Match quality assessment helpers
+# ---------------------------------------------------------------------------
+
+# Thresholds for automated quality checks (from propensity score matching
+# best-practice literature).
+_SMD_CRITICAL = 0.25  # |SMD| above this → critical imbalance
+_SMD_WARN = 0.1  # |SMD| above this → imperfect balance
+_SMD_POOR_FRAC = 0.20  # fraction of covariates with |SMD| > 0.1 to trigger warning
+_MIN_PIXELS_CRITICAL = 50  # matched-pixel count below this → critical
+_MIN_PIXELS_WARN = 200  # matched-pixel count below this → warning
+
+
+def _assess_match_quality(balance_df=None, totals=None):
+    """Run automated quality checks and return a list of warning dicts.
+
+    Each warning has:
+
+    * ``level`` – ``"danger"`` (critical) or ``"warning"`` (caution).
+    * ``scope`` – ``"aggregate"`` or a *site_id* string.
+    * ``message`` – human-readable description.
+    """
+    warnings = []
+
+    # -- Matched-pixel count per site ---------------------------------------
+    if totals:
+        for t in totals:
+            site_label = t.site_name or t.site_id
+            n_px = t.n_matched_pixels or 0
+            if n_px < _MIN_PIXELS_CRITICAL:
+                warnings.append(
+                    {
+                        "level": "danger",
+                        "scope": str(t.site_id),
+                        "message": (
+                            f"Site \u2018{site_label}\u2019 has only {n_px} "
+                            f"matched pixels, which is very low for "
+                            f"reliable results."
+                        ),
+                    }
+                )
+            elif n_px < _MIN_PIXELS_WARN:
+                warnings.append(
+                    {
+                        "level": "warning",
+                        "scope": str(t.site_id),
+                        "message": (
+                            f"Site \u2018{site_label}\u2019 has only {n_px} "
+                            f"matched pixels, which may limit result "
+                            f"reliability."
+                        ),
+                    }
+                )
+
+    # -- Covariate balance (SMD) from balance statistics --------------------
+    if balance_df is not None and not balance_df.empty:
+        _check_balance_warnings(
+            balance_df, warnings, scope="aggregate", site_filter="__all__"
+        )
+        per_site = balance_df[balance_df["site_id"] != "__all__"]
+        for sid in per_site["site_id"].unique():
+            _check_balance_warnings(
+                balance_df, warnings, scope=str(sid), site_filter=str(sid)
+            )
+
+    return warnings
+
+
+def _check_balance_warnings(balance_df, warnings, scope, site_filter):
+    """Append SMD-based warnings for *site_filter* to *warnings*."""
+    rows = balance_df[balance_df["site_id"].astype(str) == str(site_filter)]
+    smds = rows["smd"].dropna()
+    if smds.empty:
+        return
+    max_smd = smds.abs().max()
+    n_poor = int((smds.abs() > _SMD_WARN).sum())
+    n_total = len(smds)
+    pct_poor = n_poor / n_total if n_total > 0 else 0
+
+    n_critical = int((smds.abs() >= _SMD_CRITICAL).sum())
+
+    if n_critical > 0:
+        worst_idx = smds.abs().idxmax()
+        worst_cov = rows.loc[worst_idx, "covariate"]
+        # List all covariates exceeding the critical threshold
+        critical_covs = sorted(
+            rows.loc[smds.abs() >= _SMD_CRITICAL, "covariate"].tolist(),
+            key=lambda c: abs(
+                smds[rows["covariate"] == c].values[0]
+                if len(rows[rows["covariate"] == c]) > 0
+                else 0
+            ),
+            reverse=True,
+        )
+        if len(critical_covs) == 1:
+            cov_detail = f"\u2018{worst_cov}\u2019 has |SMD|\u2009=\u2009{max_smd:.2f}"
+        else:
+            cov_detail = (
+                f"{len(critical_covs)} covariates have "
+                f"|SMD|\u2009\u2265\u2009{_SMD_CRITICAL} "
+                f"(worst: \u2018{worst_cov}\u2019 at {max_smd:.2f})"
+            )
+        warnings.append(
+            {
+                "level": "danger",
+                "scope": scope,
+                "message": f"Covariate balance is poor: {cov_detail}.",
+            }
+        )
+
+    # Also warn about the overall fraction of imbalanced covariates
+    # (this fires independently of the critical check above)
+    if n_poor > 0 and pct_poor > _SMD_POOR_FRAC:
+        warnings.append(
+            {
+                "level": "warning",
+                "scope": scope,
+                "message": (
+                    f"{n_poor} of {n_total} covariates "
+                    f"({pct_poor:.0%}) have |SMD|\u2009>\u2009{_SMD_WARN}, "
+                    f"suggesting imperfect matching."
+                ),
+            }
+        )
+
+
+def _build_quality_warning_banner(warnings, scope_filter=None):
+    """Build a dismissable warning alert from quality assessment warnings.
+
+    Parameters
+    ----------
+    warnings : list[dict]
+        Output of :func:`_assess_match_quality`.
+    scope_filter : str | None
+        ``None`` to show aggregate + per-site summary.  A site-id string
+        to show only that site's warnings.
+    """
+    if not warnings:
+        return html.Div()
+
+    if scope_filter:
+        # Show only warnings for the given site
+        filtered = [w for w in warnings if w["scope"] == scope_filter]
+        if not filtered:
+            return html.Div()
+        items = [html.Li(w["message"]) for w in filtered]
+        has_danger = any(w["level"] == "danger" for w in filtered)
+    else:
+        # Aggregate view: show aggregate warnings and summarise per-site
+        agg = [w for w in warnings if w["scope"] == "aggregate"]
+        site_warnings = [w for w in warnings if w["scope"] != "aggregate"]
+
+        items = [html.Li(w["message"]) for w in agg]
+
+        danger_sites = sorted(
+            {w["scope"] for w in site_warnings if w["level"] == "danger"}
+        )
+        caution_sites = sorted(
+            {w["scope"] for w in site_warnings if w["level"] == "warning"}
+            - set(danger_sites)
+        )
+
+        if danger_sites:
+            items.append(
+                html.Li(
+                    f"Critical quality issues detected for {len(danger_sites)} site(s)."
+                )
+            )
+        if caution_sites:
+            items.append(
+                html.Li(
+                    f"Quality concerns detected for "
+                    f"{len(caution_sites)} additional site(s)."
+                )
+            )
+
+        has_danger = any(w["level"] == "danger" for w in warnings)
+
+    if not items:
+        return html.Div()
+
+    color = "danger" if has_danger else "warning"
+
+    return dbc.Alert(
+        [
+            html.Div(
+                [
+                    html.I(
+                        className="bi bi-exclamation-triangle-fill me-2",
+                        style={"fontSize": "1.2em"},
+                    ),
+                    html.Strong("Match Quality Warning"),
+                ],
+                className="d-flex align-items-center mb-2",
+            ),
+            html.Ul(items, className="mb-2"),
+            html.P(
+                "These matching results may not be reliable. We suggest "
+                "you review the matching carefully, and seek expert "
+                "advice on interpretation.",
+                className="mb-0 fst-italic",
+            ),
+        ],
+        color=color,
+        className="mb-3",
+    )
+
+
+def _compute_quality_warnings(task_id, task, totals):
+    """Load balance data from S3 and run quality checks.
+
+    Returns
+    -------
+    list[dict]
+        Warning dicts from :func:`_assess_match_quality`.
+    """
+    import io
+
+    balance_df = None
+    if task.status == "succeeded":
+        balance_csv = download_results_csv(
+            task_id, "balance", results_s3_uri=task.results_s3_uri
+        )
+        if balance_csv:
+            balance_df = pd.read_csv(io.StringIO(balance_csv))
+            if balance_df.empty:
+                balance_df = None
+
+    return _assess_match_quality(balance_df=balance_df, totals=totals)
+
+
+def _build_site_quality_table(warnings, totals=None):
+    """Build a table listing sites with quality concerns.
+
+    Returns an empty ``html.Div`` when there are no per-site warnings.
+    """
+    site_warnings = [w for w in warnings if w["scope"] != "aggregate"]
+    if not site_warnings:
+        return html.Div()
+
+    # Group warnings by site
+    site_map = {}
+    for w in site_warnings:
+        site_map.setdefault(w["scope"], []).append(w)
+
+    # Build name lookup from totals
+    name_lookup = {}
+    if totals:
+        for t in totals:
+            name_lookup[str(t.site_id)] = t.site_name or str(t.site_id)
+
+    rows = []
+    for sid, ws in sorted(site_map.items()):
+        has_danger = any(w["level"] == "danger" for w in ws)
+        icon_cls = (
+            "bi bi-exclamation-triangle-fill text-danger"
+            if has_danger
+            else "bi bi-exclamation-triangle text-warning"
+        )
+        issues = "; ".join(w["message"] for w in ws)
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(
+                        html.I(className=icon_cls),
+                        style={"width": "30px", "textAlign": "center"},
+                    ),
+                    html.Td(name_lookup.get(sid, sid)),
+                    html.Td(issues, className="text-muted small"),
+                ]
+            )
+        )
+
+    return dbc.Card(
+        [
+            dbc.CardHeader(
+                [
+                    html.I(
+                        className="bi bi-exclamation-triangle-fill text-warning me-2"
+                    ),
+                    "Sites with Potential Quality Issues",
+                ]
+            ),
+            dbc.CardBody(
+                html.Table(
+                    [
+                        html.Thead(
+                            html.Tr(
+                                [
+                                    html.Th("", style={"width": "30px"}),
+                                    html.Th("Site"),
+                                    html.Th("Issue(s)"),
+                                ]
+                            )
+                        ),
+                        html.Tbody(rows),
+                    ],
+                    className="table table-sm table-hover mb-0",
+                ),
+            ),
+        ],
+        className="mb-3",
+    )
+
+
 def _build_match_quality(task_id, task, sites=None, totals=None):
     """Build the match quality assessment section.
 
@@ -3288,6 +3624,9 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
 
     content = []
 
+    # Run quality checks (used for per-site warnings in the site filter)
+    quality_warnings = _assess_match_quality(balance_df=balance_df, totals=totals)
+
     content.append(
         html.P(
             "Assessment of match quality between treatment and control "
@@ -3337,6 +3676,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
         "rows": df.to_dict("records"),
         "covariate_cols": covariate_cols,
         "site_areas": site_areas,
+        "quality_warnings": quality_warnings,
     }
     if balance_df is not None:
         store_data["balance_rows"] = balance_df.to_dict("records")
@@ -3702,6 +4042,7 @@ def _build_match_quality_plots(df, covariate_cols):
             go.Histogram(
                 x=treatment_df[col].dropna(),
                 name="Treatment",
+                histnorm="percent",
                 opacity=0.6,
                 marker_color="#2ca02c",
                 xbins=xbins,
@@ -3711,6 +4052,7 @@ def _build_match_quality_plots(df, covariate_cols):
             go.Histogram(
                 x=control_df[col].dropna(),
                 name="Control",
+                histnorm="percent",
                 opacity=0.6,
                 marker_color="#d62728",
                 xbins=xbins,
@@ -3719,7 +4061,7 @@ def _build_match_quality_plots(df, covariate_cols):
         fig.update_layout(
             title=f"Covariate: {col}",
             xaxis_title=col,
-            yaxis_title="Count",
+            yaxis_title="Frequency (%)",
             barmode="overlay",
             legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
             height=350,

@@ -24,7 +24,7 @@ exported as an individual GEE batch task. Covariates include:
 
 - **Climate**: precipitation, temperature
 - **Terrain**: elevation, slope
-- **Accessibility**: distance to cities, distance to roads, crop suitability
+- **Accessibility**: distance to cities, friction surface, crop suitability
 - **Demographics**: population (2000, 2005, 2010, 2015, 2020), population growth
 - **Biomass**: above + below ground biomass
 - **Land cover**: ESA CCI 7-class land cover (2015)
@@ -182,3 +182,53 @@ With exact matching on selected stratification variables (default:
 `admin0`, `admin1`, `admin2`, `ecoregion`, `pa`).
 For sites established after 2005, `defor_pre_intervention` (5-year
 pre-establishment deforestation rate) is added automatically.
+
+## Automated Match Quality Checks
+
+When a task completes, the webapp runs a series of automated quality checks
+on the matching results and displays warnings on the task detail page when
+potential issues are detected.
+
+### Checks performed
+
+The checks are implemented in `webapp/callbacks.py` (function
+`_assess_match_quality`) and use the following thresholds:
+
+#### 1. Matched pixel count per site
+
+Low matched-pixel counts reduce statistical power and make site-level
+estimates less reliable.
+
+| Condition | Level |
+|---|---|
+| `n_matched_pixels < 50` | Critical |
+| `n_matched_pixels < 200` | Caution |
+
+#### 2. Covariate balance (Standardized Mean Difference)
+
+After matching, the Standardized Mean Difference (SMD) for each covariate
+should ideally be below 0.1 in absolute value (the conventional threshold
+shown on the Love plot). The checks are run both at the aggregate level
+(across all sites) and per-site:
+
+| Condition | Level |
+|---|---|
+| Any covariate with \|SMD\| ≥ 0.25 | Critical — names the worst covariate |
+| > 20 % of covariates with \|SMD\| > 0.1 | Caution |
+
+### Adjusting thresholds
+
+The threshold constants are defined at the top of the quality-check section
+in `webapp/callbacks.py`:
+
+```python
+_SMD_CRITICAL = 0.25
+_SMD_WARN = 0.1
+_SMD_POOR_FRAC = 0.20
+_MIN_PIXELS_CRITICAL = 50
+_MIN_PIXELS_WARN = 200
+```
+
+Modify these values and restart the webapp to change the sensitivity of the
+checks. No database migration or R-side changes are needed — the checks are
+purely evaluated at display time from existing result outputs.
