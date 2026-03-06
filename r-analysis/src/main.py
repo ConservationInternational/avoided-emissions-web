@@ -198,6 +198,8 @@ def run(params, log=None):
         "control_multiplier": params.get("control_multiplier", 50),
         "min_site_area_ha": params.get("min_site_area_ha", 100),
         "min_glm_treatment_pixels": params.get("min_glm_treatment_pixels", 15),
+        "caliper_width": params.get("caliper_width", 0.2),
+        "max_controls_per_treatment": params.get("max_controls_per_treatment", 0),
     }
     if params.get("random_seed") is not None:
         config["random_seed"] = int(params["random_seed"])
