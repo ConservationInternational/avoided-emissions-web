@@ -55,6 +55,36 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+_CSP_SCRIPT_SRC = [
+    "'self'",
+    "'unsafe-inline'",
+    "'unsafe-eval'",
+    "https://cdn.jsdelivr.net",
+]
+_CSP_STYLE_SRC = [
+    "'self'",
+    "'unsafe-inline'",
+    "https://cdn.jsdelivr.net",
+    "https://fonts.googleapis.com",
+]
+_CSP_FONT_SRC = [
+    "'self'",
+    "data:",
+    "https://fonts.gstatic.com",
+]
+_CSP_IMG_SRC = [
+    "'self'",
+    "data:",
+    "blob:",
+    "https://*.amazonaws.com",
+]
+_CSP_CONNECT_SRC = [
+    "'self'",
+    "blob:",
+    "https://*.amazonaws.com",
+    "https://cdn.jsdelivr.net",
+]
+
 # Create Dash app with Bootstrap theme
 app = dash.Dash(
     __name__,
@@ -156,14 +186,18 @@ def _set_security_headers(response):
             "max-age=63072000; includeSubDomains"
         )
     # CSP: allow Dash inline scripts/styles, CDN assets (OL, GeoTIFF),
-    # and blob: for OpenLayers WebGL tile rendering.
+    # Google Fonts, and S3-hosted resources used by presigned URLs.
+    # Keep sources centralised in module-level lists for easier updates.
     csp_parts = [
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net",
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
-        "img-src 'self' data: blob:",
-        "font-src 'self' data:",
-        "connect-src 'self' blob: https://*.amazonaws.com",
+        f"script-src {' '.join(_CSP_SCRIPT_SRC)}",
+        f"script-src-elem {' '.join(_CSP_SCRIPT_SRC)}",
+        f"style-src {' '.join(_CSP_STYLE_SRC)}",
+        f"style-src-elem {' '.join(_CSP_STYLE_SRC)}",
+        "style-src-attr 'unsafe-inline'",
+        f"img-src {' '.join(_CSP_IMG_SRC)}",
+        f"font-src {' '.join(_CSP_FONT_SRC)}",
+        f"connect-src {' '.join(_CSP_CONNECT_SRC)}",
         "worker-src 'self' blob:",
         "frame-ancestors 'none'",
     ]
