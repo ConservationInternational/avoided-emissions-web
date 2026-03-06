@@ -7,6 +7,7 @@ tables following the same patterns as the trends.earth-api-ui.
 
 import importlib.util
 import os
+import random
 
 import dash_ag_grid as dag
 import dash_bootstrap_components as dbc
@@ -1130,6 +1131,8 @@ def dashboard_layout(user):
 
 def submit_layout(user):
     """Task submission form with file upload and covariate selection."""
+    default_random_seed = random.SystemRandom().randint(1, 2147483647)
+
     return dbc.Container(
         [
             navbar(user),
@@ -1699,6 +1702,31 @@ def submit_layout(user):
                                                                                                 "More controls per treatment reduces variance "
                                                                                                 "but may increase bias. Controls are weighted "
                                                                                                 "inversely by group size.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        width=6,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "Random seed (optional)"
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="random-seed",
+                                                                                                type="number",
+                                                                                                min=1,
+                                                                                                max=2147483647,
+                                                                                                step=1,
+                                                                                                value=default_random_seed,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Prefilled with a random value. ",
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],

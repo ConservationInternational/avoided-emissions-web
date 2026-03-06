@@ -826,6 +826,7 @@ def register_callbacks(app, limiter=None):
         State("min-glm-treatment-pixels", "value"),
         State("caliper-width", "value"),
         State("max-controls-per-treatment", "value"),
+        State("random-seed", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
         prevent_initial_call=True,
@@ -843,6 +844,7 @@ def register_callbacks(app, limiter=None):
         min_glm_treatment_pixels,
         caliper_width,
         max_controls_per_treatment,
+        random_seed,
         match_memory_gb,
         matching_job_queue,
     ):
@@ -916,6 +918,7 @@ def register_callbacks(app, limiter=None):
                 if max_controls_per_treatment is not None
                 else 1
             )
+            _seed = int(random_seed) if random_seed not in (None, "") else None
             _mmgb = int(match_memory_gb or 30)
 
             bounds = [
@@ -931,6 +934,8 @@ def register_callbacks(app, limiter=None):
                     return _error_alert(f"{label} must be between {lo} and {hi}.")
             if _cw < 0 or _cw > 5.0:
                 return _error_alert("Caliper width must be between 0 and 5.0.")
+            if _seed is not None and (_seed < 1 or _seed > 2_147_483_647):
+                return _error_alert("Random seed must be between 1 and 2147483647.")
 
             task_id = submit_analysis_task(
                 task_name=name,
@@ -947,6 +952,7 @@ def register_callbacks(app, limiter=None):
                 min_glm_treatment_pixels=_mglm,
                 caliper_width=_cw,
                 max_controls_per_treatment=_mcpt,
+                random_seed=_seed,
                 match_memory_mib=_mmgb * 1024,
                 matching_job_queue=matching_job_queue,
             )
@@ -2576,6 +2582,10 @@ def _build_overview(task, sites, totals):
                         ),
                         _detail_row("Caliper width (SD)", caliper_display),
                         _detail_row("Max controls per treatment", max_ctrl_display),
+                        _detail_row(
+                            "Random seed",
+                            config.get("random_seed", "Not set"),
+                        ),
                         _detail_row("Matching memory", mem_display),
                         _detail_row(
                             "Batch job queue",

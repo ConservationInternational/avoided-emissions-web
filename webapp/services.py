@@ -665,6 +665,7 @@ def submit_analysis_task(
     min_glm_treatment_pixels=15,
     caliper_width=0.2,
     max_controls_per_treatment=1,
+    random_seed=None,
     match_memory_mib=30720,
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
 ):
@@ -732,6 +733,8 @@ def submit_analysis_task(
         raise ValueError("caliper_width must be zero (disabled) or positive")
     if max_controls_per_treatment < 0:
         raise ValueError("max_controls_per_treatment must be 0 (no limit) or positive")
+    if random_seed is not None and (random_seed < 1 or random_seed > 2_147_483_647):
+        raise ValueError("random_seed must be between 1 and 2147483647")
     if matching_job_queue not in ALLOWED_MATCHING_JOB_QUEUES:
         raise ValueError(
             "matching_job_queue must be one of: "
@@ -794,6 +797,7 @@ def submit_analysis_task(
                 "min_glm_treatment_pixels": min_glm_treatment_pixels,
                 "caliper_width": caliper_width,
                 "max_controls_per_treatment": max_controls_per_treatment,
+                **({"random_seed": random_seed} if random_seed is not None else {}),
                 "match_memory_mib": match_memory_mib,
                 "matching_job_queue": matching_job_queue,
             },
@@ -854,6 +858,7 @@ def submit_analysis_task(
             "min_glm_treatment_pixels": min_glm_treatment_pixels,
             "caliper_width": caliper_width,
             "max_controls_per_treatment": max_controls_per_treatment,
+            **({"random_seed": random_seed} if random_seed is not None else {}),
             "results_s3_uri": (
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
             ),

@@ -32,6 +32,11 @@ with_rollbar({
 
 config <- parse_config()
 message("Step 3: Summarizing results")
+RANDOM_SEED <- if (is.null(config$random_seed)) {
+    NULL
+} else {
+    as.integer(config$random_seed)
+}
 
 # Load site metadata (Parquet from Python step 1)
 sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %>%
@@ -383,7 +388,7 @@ if (length(match_files) > 0) {
     # Aggregation is done per matched set using match_weight so that it
     # remains correct for both pair matching and full matching (where a
     # set may contain multiple treated pixels).
-    results_by_year <- m_processed %>%
+    results_by_match_year <- m_processed %>%
         group_by(match_group, site_id, year) %>%
         summarise(
             treatment_defor_ha = sum(
@@ -414,7 +419,9 @@ if (length(match_files) > 0) {
                 control_defor_ha - treatment_defor_ha,
             emissions_avoided_mgco2e =
                 control_emissions_mgco2e - treatment_emissions_mgco2e
-        ) %>%
+        )
+
+    results_by_year <- results_by_match_year %>%
         group_by(site_id, year) %>%
         summarise(
             treatment_defor_ha = sum(treatment_defor_ha, na.rm = TRUE),
@@ -619,6 +626,7 @@ summary_data <- list(
     task_id = config$task_id,
     n_sites = nrow(results_total),
     n_failed_sites = n_failed,
+    random_seed = RANDOM_SEED,
     total_emissions_avoided_mgco2e = sum(
         results_total$emissions_avoided_mgco2e, na.rm = TRUE
     ),

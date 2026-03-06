@@ -199,6 +199,8 @@ def run(params, log=None):
         "min_site_area_ha": params.get("min_site_area_ha", 100),
         "min_glm_treatment_pixels": params.get("min_glm_treatment_pixels", 15),
     }
+    if params.get("random_seed") is not None:
+        config["random_seed"] = int(params["random_seed"])
     if params.get("matching_extent"):
         config["matching_extent"] = params["matching_extent"]
     if params.get("site_id"):

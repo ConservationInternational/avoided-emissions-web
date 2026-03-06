@@ -41,6 +41,11 @@ MIN_GLM <- config$min_glm_treatment_pixels
 CALIPER_WIDTH <- config$caliper_width
 # 0 means no upper limit (full matching); positive integer caps controls
 MAX_CONTROLS <- config$max_controls_per_treatment
+RANDOM_SEED <- if (is.null(config$random_seed)) {
+    NULL
+} else {
+    as.integer(config$random_seed)
+}
 
 # Exact-match variables read from config (e.g. admin1, ecoregion, pa)
 EXACT_MATCH_VARS <- config$exact_match_vars
@@ -93,10 +98,9 @@ get_matches <- function(d, dists) {
     #   0 -> full matching with variable ratios
     #   k -> fixed k:1 matching via pairmatch
     #
-    # Controls within each matched set are weighted equally:
-    # each gets match_weight = 1 / n_controls so that the weighted
-    # control mean represents a single synthetic control per
-    # treatment pixel.  Treatment pixels get weight = 1.
+    # Controls within each matched set are weighted so that total control
+    # weight equals the number of treated units in that set. Treatment
+    # pixels get weight = 1.
     subdim_works <- tryCatch(
         is.data.frame(subdim(dists)),
         error = function(e) FALSE
@@ -239,6 +243,11 @@ for (this_id in site_ids) {
     }
     message("  Processing site_id ", this_site_id,
             " (batch_index=", this_batch_index, ")")
+
+    # Deterministic per-site sampling for reproducibility across reruns.
+    if (!is.null(RANDOM_SEED)) {
+        set.seed(RANDOM_SEED + as.integer(this_id))
+    }
 
     # Wrap per-site matching in tryCatch so that a failure in one site
     # (e.g. memory allocation error in optmatch) does not abort the
