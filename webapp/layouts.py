@@ -1802,8 +1802,26 @@ def submit_layout(user):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Random seed (optional)"
+                                                                                            html.Div(
+                                                                                                [
+                                                                                                    dbc.Label(
+                                                                                                        "Random seed (optional)",
+                                                                                                        className="me-2 mb-0",
+                                                                                                    ),
+                                                                                                    dbc.Button(
+                                                                                                        "\u21bb",
+                                                                                                        id="refresh-random-seed",
+                                                                                                        size="sm",
+                                                                                                        color="link",
+                                                                                                        title="Generate new random seed",
+                                                                                                        className="p-0 ms-1",
+                                                                                                        style={
+                                                                                                            "fontSize": "1.1rem",
+                                                                                                            "lineHeight": "1",
+                                                                                                        },
+                                                                                                    ),
+                                                                                                ],
+                                                                                                className="d-flex align-items-center",
                                                                                             ),
                                                                                             dbc.Input(
                                                                                                 id="random-seed",

@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import os
+import random
 import uuid as _uuid
 
 import dash_bootstrap_components as dbc
@@ -2504,6 +2505,17 @@ def register_callbacks(app, limiter=None):
                 ),
                 no_update,
             )
+
+    # -- Refresh random seed -------------------------------------------------
+
+    @app.callback(
+        Output("random-seed", "value"),
+        Input("refresh-random-seed", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def refresh_random_seed(_n):
+        """Generate a new random seed value."""
+        return random.SystemRandom().randint(1, 2147483647)
 
 
 # -- Helper functions for building detail page content -----------------------
