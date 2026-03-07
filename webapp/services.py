@@ -1729,8 +1729,138 @@ def change_user_role(user_id, new_role, acting_user_id=None):
         db.close()
 
 
+# ---------------------------------------------------------------------------
+# trends.earth script access management
+# ---------------------------------------------------------------------------
+
+
+def _get_te_admin_client():
+    """Return a ``TrendsEarthClient`` authenticated with the webapp's
+    service-account credentials (``TRENDSEARTH_CLIENT_ID`` /
+    ``TRENDSEARTH_CLIENT_SECRET``).
+
+    These credentials must belong to a trends.earth ADMIN or SUPERADMIN
+    user so that the script access endpoints are accessible.
+
+    Returns ``None`` if the service-account credentials or script ID are
+    not configured.
+    """
+    from trendsearth_client import TrendsEarthClient
+
+    client_id = Config.TRENDSEARTH_CLIENT_ID
+    client_secret = Config.TRENDSEARTH_CLIENT_SECRET
+    script_id = Config.TRENDSEARTH_SCRIPT_ID
+
+    if not client_id or not client_secret or not script_id:
+        logger.debug(
+            "TE admin client not available — TRENDSEARTH_CLIENT_ID, "
+            "TRENDSEARTH_CLIENT_SECRET, or TRENDSEARTH_SCRIPT_ID is not set."
+        )
+        return None
+
+    return TrendsEarthClient.from_oauth2_credentials(
+        api_url=Config.TRENDSEARTH_API_URL,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+
+
+def grant_te_script_access(user_id):
+    """Grant a webapp user access to the avoided-emissions TE API script.
+
+    Looks up the user's ``te_user_id`` from the stored credential and
+    adds that ID to the script's allowed-users list on the TE API using
+    the webapp's service-account credentials.
+
+    Does nothing (and logs a warning) if:
+    - The user has no linked TE credential or no ``te_user_id``.
+    - The webapp service-account credentials are not configured.
+
+    Raises on HTTP errors so callers can decide whether to treat the
+    failure as blocking or best-effort.
+    """
+    from credential_store import get_credential
+
+    cred = get_credential(user_id)
+    if not cred or not cred.te_user_id:
+        logger.warning(
+            "Cannot grant TE script access for user %s — no te_user_id", user_id
+        )
+        return
+
+    client = _get_te_admin_client()
+    if not client:
+        logger.warning(
+            "Cannot grant TE script access — webapp service-account "
+            "credentials are not configured."
+        )
+        return
+
+    script_id = Config.TRENDSEARTH_SCRIPT_ID
+    logger.info(
+        "Granting TE script %s access to TE user %s (webapp user %s)",
+        script_id,
+        cred.te_user_id,
+        user_id,
+    )
+    client.add_user_to_script(script_id, cred.te_user_id)
+
+
+def revoke_te_script_access(user_id):
+    """Revoke a webapp user's access to the avoided-emissions TE API script.
+
+    Looks up the user's ``te_user_id`` from the stored credential and
+    removes that ID from the script's allowed-users list on the TE API
+    using the webapp's service-account credentials.
+
+    Does nothing (and logs a warning) if:
+    - The user has no linked TE credential or no ``te_user_id``.
+    - The webapp service-account credentials are not configured.
+
+    Raises on HTTP errors so callers can decide whether to treat the
+    failure as blocking or best-effort.
+    """
+    from credential_store import get_credential
+
+    cred = get_credential(user_id)
+    if not cred or not cred.te_user_id:
+        logger.warning(
+            "Cannot revoke TE script access for user %s — no te_user_id", user_id
+        )
+        return
+
+    client = _get_te_admin_client()
+    if not client:
+        logger.warning(
+            "Cannot revoke TE script access — webapp service-account "
+            "credentials are not configured."
+        )
+        return
+
+    script_id = Config.TRENDSEARTH_SCRIPT_ID
+    logger.info(
+        "Revoking TE script %s access from TE user %s (webapp user %s)",
+        script_id,
+        cred.te_user_id,
+        user_id,
+    )
+    client.remove_user_from_script(script_id, cred.te_user_id)
+
+
 def delete_user(user_id):
     """Delete a user account and their analysis tasks. Returns (success, message)."""
+    # Revoke TE script access *before* deleting the DB row so that
+    # the credential lookup still works.
+    try:
+        revoke_te_script_access(user_id)
+    except Exception:
+        logger.warning(
+            "Failed to revoke TE script access for user %s during deletion "
+            "(continuing with deletion)",
+            user_id,
+            exc_info=True,
+        )
+
     db = get_db()
     try:
         from models import User

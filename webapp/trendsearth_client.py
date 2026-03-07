@@ -507,3 +507,57 @@ class TrendsEarthClient:
             if attrs.get("slug") == slug:
                 return s
         return None
+
+    # ------------------------------------------------------------------
+    # Script access control
+    # ------------------------------------------------------------------
+
+    def add_user_to_script(self, script_id, user_id):
+        """Grant *user_id* access to *script_id* on the TE API.
+
+        Requires ADMIN or SUPERADMIN privileges on the API side.
+
+        Parameters
+        ----------
+        script_id : str
+            UUID or slug of the script.
+        user_id : str
+            UUID of the trends.earth user to grant access.
+
+        Returns
+        -------
+        dict
+            Updated access summary from the API.
+        """
+        resp = self._session.post(
+            f"{self.api_url}/script/{script_id}/access/users/{user_id}",
+            headers=self._headers(),
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def remove_user_from_script(self, script_id, user_id):
+        """Revoke *user_id* access to *script_id* on the TE API.
+
+        Requires ADMIN or SUPERADMIN privileges on the API side.
+
+        Parameters
+        ----------
+        script_id : str
+            UUID or slug of the script.
+        user_id : str
+            UUID of the trends.earth user to revoke access.
+
+        Returns
+        -------
+        dict
+            Updated access summary from the API.
+        """
+        resp = self._session.delete(
+            f"{self.api_url}/script/{script_id}/access/users/{user_id}",
+            headers=self._headers(),
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()

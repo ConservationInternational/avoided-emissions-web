@@ -50,10 +50,12 @@ from services import (
     get_task_detail,
     get_task_list,
     get_user_site_set_detail,
+    grant_te_script_access,
     list_share_links,
     list_user_site_sets,
     get_user_list,
     revoke_share_link,
+    revoke_te_script_access,
     save_covariate_preset,
     save_user_site_set,
     start_gee_export,
@@ -1815,6 +1817,17 @@ def register_callbacks(app, limiter=None):
                 te_user_id=te_user_id,
             )
 
+            # 5. Grant the user access to the AE script on the TE API
+            try:
+                grant_te_script_access(user.id)
+            except Exception:
+                logger.warning(
+                    "Linked TE account but failed to grant script "
+                    "access for user %s (will retry on next login)",
+                    user.id,
+                    exc_info=True,
+                )
+
             return (
                 dbc.Alert(
                     "Successfully linked to trends.earth! "
@@ -1930,7 +1943,17 @@ def register_callbacks(app, limiter=None):
         if not cred:
             return dbc.Alert("No linked account.", color="info", duration=4000)
 
-        # Try to revoke on the API side (best-effort)
+        # Revoke script access (best-effort, before deleting credential)
+        try:
+            revoke_te_script_access(user.id)
+        except Exception:
+            logger.warning(
+                "Failed to revoke TE script access during unlink "
+                "(continuing with local cleanup)",
+                exc_info=True,
+            )
+
+        # Try to revoke the OAuth2 client on the API side (best-effort)
         if cred.api_client_db_id:
             try:
                 creds = get_decrypted_secret(user.id)
