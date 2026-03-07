@@ -297,6 +297,124 @@ if (length(match_files) > 0) {
         )
     }
 
+    # --- Pre-computed match quality summary (for web UI) -------------------
+    # The web UI previously loaded the full pixel-level CSVs to render
+    # histograms and QQ plots, which caused out-of-memory kills for large
+    # jobs.  Instead we pre-compute the aggregated data needed for the
+    # plots here (where all data is already in memory on the Batch
+    # worker) and save a small JSON summary.
+    N_HIST_BINS <- 40L
+    N_QQ_POINTS <- 500L
+
+    mq_summary <- list(
+        summary_stats = list(),
+        histograms = list(),
+        qq_quantiles = list(),
+        covariate_cols = all_covs_for_balance
+    )
+
+    if (nrow(match_cov_data) > 0 && length(all_covs_for_balance) > 0) {
+        # -- Summary stats per site and aggregate --------------------------
+        mq_summary$summary_stats[["__all__"]] <- list(
+            n_treatment = sum(match_cov_data$treatment),
+            n_control = sum(!match_cov_data$treatment),
+            n_sites = length(unique(match_cov_data$site_id))
+        )
+        for (sid in unique(match_cov_data$site_id)) {
+            site_mask <- match_cov_data$site_id == sid
+            mq_summary$summary_stats[[as.character(sid)]] <- list(
+                n_treatment = sum(match_cov_data$treatment[site_mask]),
+                n_control = sum(!match_cov_data$treatment[site_mask])
+            )
+        }
+
+        # -- Histogram bins per covariate ----------------------------------
+        compute_histogram <- function(df, cov, n_bins = N_HIST_BINS) {
+            vals <- df[[cov]]
+            t_mask <- df$treatment
+            t_vals <- vals[t_mask & !is.na(vals)]
+            c_vals <- vals[!t_mask & !is.na(vals)]
+            all_vals <- vals[!is.na(vals)]
+            if (length(all_vals) < 2 || diff(range(all_vals)) == 0) {
+                return(NULL)
+            }
+            brks <- seq(min(all_vals), max(all_vals),
+                        length.out = n_bins + 1)
+            t_h <- hist(t_vals, breaks = brks, plot = FALSE)
+            c_h <- hist(c_vals, breaks = brks, plot = FALSE)
+            t_tot <- sum(t_h$counts)
+            c_tot <- sum(c_h$counts)
+            list(
+                bin_edges = as.numeric(brks),
+                treatment_pct = if (t_tot > 0) {
+                    as.numeric(t_h$counts / t_tot * 100)
+                } else {
+                    rep(0, n_bins)
+                },
+                control_pct = if (c_tot > 0) {
+                    as.numeric(c_h$counts / c_tot * 100)
+                } else {
+                    rep(0, n_bins)
+                }
+            )
+        }
+
+        # Aggregate histograms
+        agg_hists <- list()
+        for (cov in all_covs_for_balance) {
+            h <- compute_histogram(match_cov_data, cov)
+            if (!is.null(h)) agg_hists[[cov]] <- h
+        }
+        mq_summary$histograms[["__all__"]] <- agg_hists
+
+        # Per-site histograms
+        for (sid in unique(match_cov_data$site_id)) {
+            site_data <- match_cov_data[match_cov_data$site_id == sid, ]
+            site_hists <- list()
+            for (cov in all_covs_for_balance) {
+                h <- compute_histogram(site_data, cov)
+                if (!is.null(h)) site_hists[[cov]] <- h
+            }
+            mq_summary$histograms[[as.character(sid)]] <- site_hists
+        }
+    }
+
+    # -- QQ quantiles from propensity scores -------------------------------
+    if (nrow(pscore_data) > 0 && "pscore" %in% names(pscore_data)) {
+        compute_qq <- function(df, n_points = N_QQ_POINTS) {
+            t_sc <- sort(df$pscore[df$treatment & !is.na(df$pscore)])
+            c_sc <- sort(df$pscore[!df$treatment & !is.na(df$pscore)])
+            if (length(t_sc) < 2 || length(c_sc) < 2) return(NULL)
+            probs <- seq(0, 1, length.out = n_points)
+            list(
+                quantiles = as.numeric(probs),
+                treatment_values = as.numeric(quantile(t_sc, probs)),
+                control_values = as.numeric(quantile(c_sc, probs))
+            )
+        }
+
+        qq_agg <- compute_qq(pscore_data)
+        if (!is.null(qq_agg)) {
+            mq_summary$qq_quantiles[["__all__"]] <- qq_agg
+        }
+        for (sid in unique(pscore_data$site_id)) {
+            qq_s <- compute_qq(
+                pscore_data[pscore_data$site_id == sid, ]
+            )
+            if (!is.null(qq_s)) {
+                mq_summary$qq_quantiles[[as.character(sid)]] <- qq_s
+            }
+        }
+    }
+
+    write_json(
+        mq_summary,
+        file.path(config$output_dir,
+                  "results_match_quality_summary.json"),
+        auto_unbox = TRUE
+    )
+    message("  Match quality summary: written")
+
     # Process in chunks
     m_processed <- foreach(f = match_files, .combine = bind_rows) %do% {
         m <- readRDS(f)
@@ -578,6 +696,19 @@ if (length(match_files) > 0) {
             match_weight = numeric(), pscore = numeric()
         ),
         file.path(config$output_dir, "results_propensity_scores.csv")
+    )
+
+    # Empty match quality summary
+    write_json(
+        list(
+            summary_stats = list(),
+            histograms = list(),
+            qq_quantiles = list(),
+            covariate_cols = character(0)
+        ),
+        file.path(config$output_dir,
+                  "results_match_quality_summary.json"),
+        auto_unbox = TRUE
     )
 }
 

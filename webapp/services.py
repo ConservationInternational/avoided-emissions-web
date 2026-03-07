@@ -1763,6 +1763,7 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         "match_covariates": "results_match_covariates.csv",
         "balance": "results_balance.csv",
         "propensity_scores": "results_propensity_scores.csv",
+        "match_quality_summary": "results_match_quality_summary.json",
     }
     filename = filename_map.get(result_type)
     if not filename:
@@ -1807,6 +1808,250 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         return response["Body"].read().decode("utf-8")
     except s3.exceptions.NoSuchKey:
         return None
+
+
+def _resolve_results_s3(task_id, results_s3_uri=None):
+    """Return ``(bucket, prefix)`` for a task's result directory on S3.
+
+    Resolution priority: explicit *results_s3_uri*, then the value stored
+    on the ``AnalysisTask`` row, then ``Config.S3_PREFIX`` + *task_id*.
+    """
+    if not results_s3_uri:
+        from models import AnalysisTask, get_db
+
+        db = get_db()
+        try:
+            row = (
+                db.query(AnalysisTask.results_s3_uri)
+                .filter(AnalysisTask.id == task_id)
+                .first()
+            )
+            if row and row.results_s3_uri:
+                results_s3_uri = row.results_s3_uri
+        finally:
+            db.close()
+
+    if results_s3_uri:
+        uri = results_s3_uri
+        if uri.startswith("s3://"):
+            uri = uri[5:]
+        parts = uri.split("/", 1)
+        bucket = parts[0]
+        prefix = parts[1].rstrip("/") if len(parts) > 1 else ""
+    else:
+        bucket = Config.S3_BUCKET
+        prefix = f"{Config.S3_PREFIX}/tasks/{task_id}/output"
+
+    return bucket, prefix
+
+
+def generate_match_quality_summary(task_id, results_s3_uri=None):
+    """Build ``results_match_quality_summary.json`` from existing raw CSVs.
+
+    This is the *backfill* path: for tasks that completed before the R
+    summarize script started producing this file.  It downloads the raw
+    CSVs to temporary files and processes them with chunked reads to keep
+    memory usage low.  The resulting JSON is uploaded back to S3 alongside
+    the other result artefacts.
+
+    Returns the parsed summary dict, or ``None`` on failure.
+    """
+    import json
+    import tempfile
+
+    import numpy as np
+
+    N_BINS = 40
+    N_QQ = 500
+    CHUNK = 50_000
+
+    bucket, prefix = _resolve_results_s3(task_id, results_s3_uri)
+    s3 = get_s3_client()
+
+    summary = {
+        "summary_stats": {},
+        "histograms": {},
+        "qq_quantiles": {},
+        "covariate_cols": [],
+    }
+
+    # ---- Histograms from results_match_covariates.csv --------------------
+    cov_key = f"{prefix}/results_match_covariates.csv"
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+            s3.download_fileobj(Bucket=bucket, Key=cov_key, Fileobj=tmp)
+            cov_path = tmp.name
+    except Exception:
+        logger.info(
+            "generate_match_quality_summary(%s): "
+            "match_covariates CSV not found, skipping histograms",
+            task_id,
+        )
+        cov_path = None
+
+    id_cols = {"cell", "site_id", "treatment", "match_group", "match_weight"}
+    covariate_cols = []
+    site_stats: dict = {}
+    cov_ranges: dict = {}
+
+    if cov_path:
+        import os
+
+        try:
+            # Pass 1 — compute ranges and counts
+            for chunk in pd.read_csv(cov_path, chunksize=CHUNK):
+                if not covariate_cols:
+                    covariate_cols = [c for c in chunk.columns if c not in id_cols]
+                for sid in chunk["site_id"].unique():
+                    s = str(sid)
+                    mask = chunk["site_id"] == sid
+                    sub = chunk[mask]
+                    if s not in site_stats:
+                        site_stats[s] = {"n_treatment": 0, "n_control": 0}
+                    site_stats[s]["n_treatment"] += int(sub["treatment"].sum())
+                    site_stats[s]["n_control"] += int((~sub["treatment"]).sum())
+                for cov in covariate_cols:
+                    vals = chunk[cov].dropna()
+                    if vals.empty:
+                        continue
+                    lo, hi = float(vals.min()), float(vals.max())
+                    if cov not in cov_ranges:
+                        cov_ranges[cov] = {"min": lo, "max": hi}
+                    else:
+                        cov_ranges[cov]["min"] = min(cov_ranges[cov]["min"], lo)
+                        cov_ranges[cov]["max"] = max(cov_ranges[cov]["max"], hi)
+
+            summary["covariate_cols"] = covariate_cols
+
+            # Summary stats
+            summary["summary_stats"]["__all__"] = {
+                "n_treatment": sum(s["n_treatment"] for s in site_stats.values()),
+                "n_control": sum(s["n_control"] for s in site_stats.values()),
+                "n_sites": len(site_stats),
+            }
+            for sid_str, stats in site_stats.items():
+                summary["summary_stats"][sid_str] = stats
+
+            # Compute bin edges per covariate
+            bin_edges: dict = {}
+            for cov in covariate_cols:
+                if cov in cov_ranges:
+                    r = cov_ranges[cov]
+                    if r["max"] > r["min"]:
+                        bin_edges[cov] = np.linspace(
+                            r["min"], r["max"], N_BINS + 1
+                        ).tolist()
+
+            # Pass 2 — accumulate bin counts
+            hist_counts: dict = {}
+            for chunk in pd.read_csv(cov_path, chunksize=CHUNK):
+                scope_masks = [("__all__", slice(None))]
+                for sid in chunk["site_id"].unique():
+                    scope_masks.append((str(sid), chunk["site_id"] == sid))
+                for scope, mask in scope_masks:
+                    sub = chunk if scope == "__all__" else chunk[mask]
+                    if scope not in hist_counts:
+                        hist_counts[scope] = {}
+                    for cov in covariate_cols:
+                        if cov not in bin_edges:
+                            continue
+                        if cov not in hist_counts[scope]:
+                            hist_counts[scope][cov] = {
+                                "treatment": np.zeros(N_BINS, dtype=np.int64),
+                                "control": np.zeros(N_BINS, dtype=np.int64),
+                            }
+                        edges = bin_edges[cov]
+                        t_v = sub.loc[sub["treatment"], cov].dropna()
+                        c_v = sub.loc[~sub["treatment"], cov].dropna()
+                        if len(t_v) > 0:
+                            h, _ = np.histogram(t_v, bins=edges)
+                            hist_counts[scope][cov]["treatment"] += h
+                        if len(c_v) > 0:
+                            h, _ = np.histogram(c_v, bins=edges)
+                            hist_counts[scope][cov]["control"] += h
+
+            # Convert counts → percentages
+            for scope, covs in hist_counts.items():
+                scope_hists = {}
+                for cov, counts in covs.items():
+                    tt = counts["treatment"].sum()
+                    ct = counts["control"].sum()
+                    scope_hists[cov] = {
+                        "bin_edges": bin_edges[cov],
+                        "treatment_pct": (
+                            (counts["treatment"] / tt * 100).tolist()
+                            if tt > 0
+                            else [0.0] * N_BINS
+                        ),
+                        "control_pct": (
+                            (counts["control"] / ct * 100).tolist()
+                            if ct > 0
+                            else [0.0] * N_BINS
+                        ),
+                    }
+                summary["histograms"][scope] = scope_hists
+        finally:
+            os.unlink(cov_path)
+
+    # ---- QQ quantiles from results_propensity_scores.csv -----------------
+    ps_key = f"{prefix}/results_propensity_scores.csv"
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+            s3.download_fileobj(Bucket=bucket, Key=ps_key, Fileobj=tmp)
+            ps_path = tmp.name
+    except Exception:
+        ps_path = None
+
+    if ps_path:
+        import os as _os
+
+        try:
+            # Collect scores per scope — pscores have only 6 columns so
+            # the per-row memory is small even for large pixel counts.
+            pscores: dict = {}
+            for chunk in pd.read_csv(
+                ps_path,
+                chunksize=CHUNK,
+                usecols=["site_id", "treatment", "pscore"],
+            ):
+                for scope, mask in [("__all__", slice(None))] + [
+                    (str(sid), chunk["site_id"] == sid)
+                    for sid in chunk["site_id"].unique()
+                ]:
+                    sub = chunk if scope == "__all__" else chunk[mask]
+                    if scope not in pscores:
+                        pscores[scope] = {"treatment": [], "control": []}
+                    t_ps = sub.loc[sub["treatment"], "pscore"].dropna()
+                    c_ps = sub.loc[~sub["treatment"], "pscore"].dropna()
+                    pscores[scope]["treatment"].extend(t_ps.tolist())
+                    pscores[scope]["control"].extend(c_ps.tolist())
+
+            for scope, data in pscores.items():
+                t_s = np.sort(data["treatment"])
+                c_s = np.sort(data["control"])
+                if len(t_s) >= 2 and len(c_s) >= 2:
+                    n_pts = min(N_QQ, max(len(t_s), len(c_s)))
+                    probs = np.linspace(0, 1, n_pts)
+                    summary["qq_quantiles"][scope] = {
+                        "quantiles": probs.tolist(),
+                        "treatment_values": np.quantile(t_s, probs).tolist(),
+                        "control_values": np.quantile(c_s, probs).tolist(),
+                    }
+        finally:
+            _os.unlink(ps_path)
+
+    # ---- Upload summary to S3 --------------------------------------------
+    summary_json = json.dumps(summary)
+    summary_key = f"{prefix}/results_match_quality_summary.json"
+    s3.put_object(Bucket=bucket, Key=summary_key, Body=summary_json.encode("utf-8"))
+
+    logger.info(
+        "generate_match_quality_summary(%s): uploaded to s3://%s/%s",
+        task_id,
+        bucket,
+        summary_key,
+    )
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -2380,5 +2625,121 @@ def validate_share_token(token, record_access=True):
     except Exception:
         db.rollback()
         return None
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Recompute (resubmit with new random seed)
+# ---------------------------------------------------------------------------
+
+
+def resubmit_analysis_task(task_id, user_id):
+    """Resubmit a previously submitted task with a new random seed.
+
+    Loads the original task's configuration and sites, generates a fresh
+    random seed, and creates a brand-new ``AnalysisTask`` via
+    :func:`submit_analysis_task`.
+
+    Parameters
+    ----------
+    task_id : str
+        UUID of the original ``AnalysisTask`` to recompute.
+    user_id : str
+        UUID of the user requesting the recompute.
+
+    Returns
+    -------
+    str
+        UUID of the newly created task.
+
+    Raises
+    ------
+    ValueError
+        If the task is not found, not owned by the user, or its sites
+        cannot be recovered.
+    """
+    import random as _random
+
+    db = get_db()
+    try:
+        task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+        if not task:
+            raise ValueError("Task not found.")
+
+        # Ownership check (admins bypass)
+        from models import User
+
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError("User not found.")
+        if not user.is_admin and str(task.submitted_by) != str(user_id):
+            raise ValueError("You can only recompute your own tasks.")
+
+        # Recover the sites GeoDataFrame
+        gdf = None
+        if task.site_set_id:
+            geojson_fc = get_user_site_set_geojson(task.site_set_id)
+            features = geojson_fc.get("features", [])
+            if features:
+                gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
+        if gdf is None or gdf.empty:
+            # Fall back to S3-stored sites
+            s3_uri = task.sites_s3_uri
+            if not s3_uri:
+                s3_uri = (task.config or {}).get("sites_s3_uri")
+            if s3_uri:
+                geojson_fc = _fetch_sites_geojson_from_s3(s3_uri)
+                if geojson_fc and geojson_fc.get("features"):
+                    gdf = gpd.GeoDataFrame.from_features(
+                        geojson_fc["features"], crs="EPSG:4326"
+                    )
+        if gdf is None or gdf.empty:
+            raise ValueError(
+                "Cannot recover sites for this task. The original site "
+                "data is no longer available."
+            )
+
+        config = task.config or {}
+        new_seed = _random.randint(1, 2_147_483_647)
+
+        # Derive fc_years the same way the original submission does
+        start_dates = pd.to_datetime(gdf["start_date"])
+        fc_min = max(2000, int(start_dates.dt.year.min()) - 5)
+        if "end_date" in gdf.columns and gdf["end_date"].notna().any():
+            end_years = pd.to_datetime(
+                gdf.loc[gdf["end_date"].notna(), "end_date"]
+            ).dt.year
+            fc_max = min(2024, int(end_years.max()))
+        else:
+            fc_max = 2024
+        fc_years = list(range(fc_min, fc_max + 1))
+
+        # Memory is stored in MiB in config
+        match_memory_mib = config.get("match_memory_mib", 30720)
+
+        new_task_name = f"{task.name} (recompute)"
+
+        return submit_analysis_task(
+            task_name=new_task_name,
+            description=task.description or "",
+            user_id=user_id,
+            gdf=gdf,
+            covariates=list(task.covariates or []),
+            exact_match_vars=config.get("exact_match_vars", []),
+            fc_years=fc_years,
+            site_set_id=task.site_set_id,
+            max_treatment_pixels=config.get("max_treatment_pixels", 1000),
+            control_multiplier=config.get("control_multiplier", 50),
+            min_site_area_ha=config.get("min_site_area_ha", 100),
+            min_glm_treatment_pixels=config.get("min_glm_treatment_pixels", 15),
+            caliper_width=config.get("caliper_width", 0.2),
+            max_controls_per_treatment=config.get("max_controls_per_treatment", 1),
+            random_seed=new_seed,
+            match_memory_mib=match_memory_mib,
+            matching_job_queue=config.get(
+                "matching_job_queue", "spot_fleet_1TB-io2-disk"
+            ),
+        )
     finally:
         db.close()

@@ -144,6 +144,16 @@ TASK_LIST_COLUMNS = [
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
     },
+    {
+        "headerName": "Actions",
+        "field": "actions",
+        "flex": 0.8,
+        "minWidth": 100,
+        "cellRenderer": "TaskActions",
+        "sortable": False,
+        "filter": False,
+        "pinned": "right",
+    },
 ]
 
 COVARIATE_COLUMNS = [
@@ -1252,6 +1262,7 @@ def dashboard_layout(user):
                 className="ae-section-card mb-4",
             ),
             # Stores & intervals
+            html.Div(id="recompute-from-list-result"),
             dcc.Store(id="task-list-store"),
             dcc.Interval(id="refresh-interval", interval=30000, n_intervals=0),
         ]
@@ -2087,6 +2098,17 @@ def task_detail_layout(user, task_id, shared_token=None):
                                 ),
                                 dbc.Button(
                                     [
+                                        html.I(className="bi bi-arrow-repeat me-1"),
+                                        "Recompute",
+                                    ],
+                                    id="recompute-task-btn",
+                                    color="outline-warning",
+                                    size="sm",
+                                    className="mt-1 me-2",
+                                    title="Resubmit this task with a new random seed",
+                                ),
+                                dbc.Button(
+                                    [
                                         html.I(className="bi bi-share me-1"),
                                         "Share",
                                     ],
@@ -2298,6 +2320,7 @@ def task_detail_layout(user, task_id, shared_token=None):
             navbar(user, active_page="/"),
             shared_banner,
             header_row,
+            html.Div(id="recompute-result"),
             html.Div(id="quality-warning-banner"),
             tabs,
             edit_modal,

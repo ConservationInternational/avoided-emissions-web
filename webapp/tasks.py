@@ -1075,3 +1075,24 @@ def poll_batch_tasks() -> dict:
         raise
     finally:
         db.close()
+
+
+@celery_app.task(name="tasks.generate_match_quality_summary")
+def generate_match_quality_summary_task(
+    task_id: str, results_s3_uri: str | None = None
+) -> dict:
+    """Generate the pre-computed match quality summary JSON for a task.
+
+    This is the *backfill* path for tasks that completed before the R
+    summarize script started producing ``results_match_quality_summary.json``.
+    It downloads the raw pixel-level CSVs to temporary files and processes
+    them with chunked reads to keep memory usage low, then uploads the
+    summary JSON to S3.
+
+    Routed to the ``merge`` queue (higher memory limit) via
+    ``celery_app.conf.task_routes``.
+    """
+    from services import generate_match_quality_summary
+
+    summary = generate_match_quality_summary(task_id, results_s3_uri)
+    return {"task_id": task_id, "success": summary is not None}

@@ -360,3 +360,53 @@ dagcomponentfuncs.LocalDateTime = function (props) {
     var minutes = String(d.getMinutes()).padStart(2, "0");
     return year + "-" + month + "-" + day + " " + hours + ":" + minutes;
 };
+
+/**
+ * TaskActions \u2013 renders per-row action buttons for the task list grid.
+ *
+ * Shows a small "Recompute" button that triggers resubmission of the task
+ * with a new random seed. Clicking the button fires setData which the Dash
+ * cellRendererData callback reads.
+ */
+dagcomponentfuncs.TaskActions = function (props) {
+    var data = props.data || {};
+    var status = (data.status || "").toLowerCase();
+
+    // Only allow recompute for tasks in terminal states
+    var terminal = ["succeeded", "failed", "cancelled"];
+    var canRecompute = terminal.indexOf(status) >= 0;
+
+    return React.createElement(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: "4px" } },
+        React.createElement(
+            "button",
+            {
+                style: {
+                    padding: "1px 6px",
+                    fontSize: "10px",
+                    fontWeight: 600,
+                    border: "1px solid #ffc107",
+                    borderRadius: "3px",
+                    backgroundColor: canRecompute ? "#fff" : "#e9ecef",
+                    color: canRecompute ? "#664d03" : "#6c757d",
+                    cursor: canRecompute ? "pointer" : "not-allowed",
+                },
+                disabled: !canRecompute,
+                title: canRecompute
+                    ? "Resubmit with a new random seed"
+                    : "Task must be completed, failed, or cancelled",
+                onClick: function (e) {
+                    e.stopPropagation();
+                    if (canRecompute) {
+                        props.setData({
+                            action: "recompute",
+                            task_id: data.id,
+                        });
+                    }
+                },
+            },
+            "\u21BB Recompute"
+        )
+    );
+};

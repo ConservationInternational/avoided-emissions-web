@@ -57,6 +57,7 @@ from services import (
     save_covariate_preset,
     save_user_site_set,
     start_gee_export,
+    resubmit_analysis_task,
     submit_analysis_task,
     update_task_info,
     validate_share_token,
@@ -1439,6 +1440,94 @@ def register_callbacks(app, limiter=None):
                 no_update,
             )
 
+    # -- Recompute task (detail page) ----------------------------------------
+
+    @app.callback(
+        Output("recompute-result", "children"),
+        Input("recompute-task-btn", "n_clicks"),
+        State("task-id-store", "data"),
+        prevent_initial_call=True,
+    )
+    def handle_recompute_task(n_clicks, task_id):
+        if not n_clicks or not task_id:
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user:
+            return dbc.Alert("Please log in first.", color="danger", dismissable=True)
+
+        try:
+            new_task_id = resubmit_analysis_task(task_id, str(user.id))
+            return dbc.Alert(
+                [
+                    html.P("Task resubmitted with a new random seed."),
+                    dcc.Link(
+                        f"View new task: {new_task_id}",
+                        href=f"/task/{new_task_id}",
+                    ),
+                ],
+                color="success",
+                dismissable=True,
+            )
+        except ValueError as exc:
+            logger.exception("Recompute failed (validation)")
+            report_exception()
+            return dbc.Alert(str(exc), color="danger", dismissable=True)
+        except Exception:
+            logger.exception("Recompute failed")
+            report_exception()
+            return dbc.Alert(
+                "Recompute failed. Please try again or contact support.",
+                color="danger",
+                dismissable=True,
+            )
+
+    # -- Recompute task (from task list table) --------------------------------
+
+    @app.callback(
+        Output("recompute-from-list-result", "children"),
+        Input("task-list-table", "cellRendererData"),
+        prevent_initial_call=True,
+    )
+    def handle_recompute_from_list(renderer_data):
+        if not renderer_data:
+            raise PreventUpdate
+
+        action = renderer_data.get("value", {}).get("action")
+        task_id = renderer_data.get("value", {}).get("task_id")
+        if action != "recompute" or not task_id:
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user:
+            return dbc.Alert("Please log in first.", color="danger", dismissable=True)
+
+        try:
+            new_task_id = resubmit_analysis_task(task_id, str(user.id))
+            return dbc.Alert(
+                [
+                    html.P("Task resubmitted with a new random seed."),
+                    dcc.Link(
+                        f"View new task: {new_task_id}",
+                        href=f"/task/{new_task_id}",
+                    ),
+                ],
+                color="success",
+                dismissable=True,
+            )
+        except ValueError as exc:
+            logger.exception("Recompute failed (validation)")
+            report_exception()
+            return dbc.Alert(str(exc), color="danger", dismissable=True)
+        except Exception:
+            logger.exception("Recompute failed")
+            report_exception()
+            return dbc.Alert(
+                "Recompute failed. Please try again or contact support.",
+                color="danger",
+                dismissable=True,
+            )
+
     # -- Admin: Covariates (unified export + merge) ---------------------------
 
     @app.callback(
@@ -2116,8 +2205,27 @@ def register_callbacks(app, limiter=None):
         if not store_data:
             raise PreventUpdate
 
-        df = pd.DataFrame(store_data["rows"])
-        covariate_cols = store_data["covariate_cols"]
+        site_filter = None
+        if selected_site and selected_site != "__all__":
+            site_filter = selected_site
+
+        quality_warnings = store_data.get("quality_warnings", [])
+        scope = site_filter if site_filter else None
+        warning_banner = _build_quality_warning_banner(
+            quality_warnings, scope_filter=scope
+        )
+
+        if store_data.get("has_summary"):
+            # New path: use pre-computed histograms and QQ quantiles
+            return html.Div(
+                [warning_banner] + _build_plots_from_summary(store_data, site_filter)
+            )
+
+        # Legacy path: raw pixel data (kept for backward compatibility
+        # with any data still in browser stores from before the
+        # pre-computation change).
+        df = pd.DataFrame(store_data.get("rows", []))
+        covariate_cols = store_data.get("covariate_cols", [])
         site_areas = store_data.get("site_areas", {})
 
         balance_rows = store_data.get("balance_rows")
@@ -2129,20 +2237,11 @@ def register_callbacks(app, limiter=None):
         if df.empty:
             return html.P("No data available.", className="text-muted")
 
-        site_filter = None
-        if selected_site and selected_site != "__all__":
-            site_filter = selected_site
+        if site_filter:
             df = df[df["site_id"].astype(str) == str(selected_site)]
 
         if df.empty:
             return html.P("No data for selected site.", className="text-muted")
-
-        # Show per-site or aggregate quality warnings
-        quality_warnings = store_data.get("quality_warnings", [])
-        scope = site_filter if site_filter else None
-        warning_banner = _build_quality_warning_banner(
-            quality_warnings, scope_filter=scope
-        )
 
         return html.Div(
             [warning_banner]
@@ -3425,9 +3524,9 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
             ),
             html.Ul(items, className="mb-2"),
             html.P(
-                "These matching results may not be reliable. We suggest "
-                "you review the matching carefully, and seek expert "
-                "advice on interpretation.",
+                "These matching results may not be reliable. Review "
+                "the matching results carefully, and seek expert "
+                "advice if needed.",
                 className="mb-0 fst-italic",
             ),
         ],
@@ -3536,18 +3635,25 @@ def _build_site_quality_table(warnings, totals=None):
 def _build_match_quality(task_id, task, sites=None, totals=None):
     """Build the match quality assessment section.
 
-    Fetches matched-pixel covariate data, balance statistics, and
-    propensity scores from S3.  Produces:
+    Loads a pre-computed summary JSON (small, ~250 KB) produced by the
+    R summarize step instead of the full pixel-level CSVs that could be
+    hundreds of MB and cause the webapp to OOM.  For tasks that were
+    completed before the R script started writing the summary, a
+    background Celery task is kicked off to generate it from the raw
+    CSVs using chunked reads.
 
-    * **Love plot** — horizontal dot plot of standardized mean differences
-      for each covariate with ±0.1 reference lines.
-    * **Propensity score QQ plot** — empirical quantile-quantile comparison
-      of treatment vs control propensity score distributions.
-    * **Covariate histograms** — overlaid treatment/control distributions
-      for each covariate (existing functionality).
+    Produces:
+
+    * **Love plot** — standardized mean differences (uses balance CSV,
+      which is always small).
+    * **Propensity score QQ plot** — from pre-computed quantiles.
+    * **Covariate histograms** — from pre-computed bin counts.
 
     Also provides download buttons for the underlying CSVs.
     """
+    import io
+    import json
+
     # Always render the callback target IDs so Dash doesn't error when
     # the callbacks reference them, even if the tab has no data yet.
     placeholder_ids = html.Div(
@@ -3576,48 +3682,15 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
             ]
         )
 
-    csv_content = download_results_csv(
-        task_id, "match_covariates", results_s3_uri=task.results_s3_uri
-    )
-    if not csv_content:
-        return html.Div(
-            [
-                html.P(
-                    "Match covariate data not available for this analysis.",
-                    className="text-muted",
-                ),
-                placeholder_ids,
-            ]
-        )
+    # Build a lookup of site_id -> area_ha from totals.
+    site_areas = {}
+    for t in totals or []:
+        sid = t.site_id if hasattr(t, "site_id") else t.get("site_id")
+        area = t.area_ha if hasattr(t, "area_ha") else t.get("area_ha")
+        if sid is not None:
+            site_areas[str(sid)] = area or 0
 
-    import io
-
-    df = pd.read_csv(io.StringIO(csv_content))
-
-    if df.empty:
-        return html.Div(
-            [
-                html.P("No matched pixels found.", className="text-muted"),
-                placeholder_ids,
-            ]
-        )
-
-    # Identify covariate columns (everything except identifiers/weights)
-    id_cols = {"cell", "site_id", "treatment", "match_group", "match_weight"}
-    covariate_cols = [c for c in df.columns if c not in id_cols]
-
-    if not covariate_cols:
-        return html.Div(
-            [
-                html.P(
-                    "No covariate columns found in match data.",
-                    className="text-muted",
-                ),
-                placeholder_ids,
-            ]
-        )
-
-    # Fetch balance statistics (Love plot data)
+    # Fetch balance statistics (Love plot data) — always small.
     balance_df = None
     balance_csv = download_results_csv(
         task_id, "balance", results_s3_uri=task.results_s3_uri
@@ -3627,31 +3700,63 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
         if balance_df.empty:
             balance_df = None
 
-    # Fetch propensity scores (QQ plot data)
-    pscore_df = None
-    pscore_csv = download_results_csv(
-        task_id, "propensity_scores", results_s3_uri=task.results_s3_uri
-    )
-    if pscore_csv:
-        pscore_df = pd.read_csv(io.StringIO(pscore_csv))
-        if pscore_df.empty or "pscore" not in pscore_df.columns:
-            pscore_df = None
-        elif pscore_df["pscore"].dropna().empty:
-            pscore_df = None
+    # Run quality checks (uses balance_df + totals — both small).
+    quality_warnings = _assess_match_quality(balance_df=balance_df, totals=totals)
 
-    # Build a lookup of site_id -> area_ha from totals (TaskResultTotal),
-    # which always has area from the R analysis results.
-    site_areas = {}
-    for t in totals or []:
-        sid = t.site_id if hasattr(t, "site_id") else t.get("site_id")
-        area = t.area_ha if hasattr(t, "area_ha") else t.get("area_ha")
-        if sid is not None:
-            site_areas[str(sid)] = area or 0
+    # ---- Try loading the pre-computed summary JSON -----------------------
+    summary = None
+    summary_raw = download_results_csv(
+        task_id,
+        "match_quality_summary",
+        results_s3_uri=task.results_s3_uri,
+    )
+    if summary_raw:
+        try:
+            summary = json.loads(summary_raw)
+        except (json.JSONDecodeError, ValueError):
+            summary = None
+
+    if not summary or not summary.get("histograms"):
+        # Summary not available — try to generate it in the background
+        # via a Celery task (routed to the merge queue which has more
+        # memory), then show a placeholder for now.
+        try:
+            from celery_app import celery_app
+
+            celery_app.send_task(
+                "tasks.generate_match_quality_summary",
+                args=[str(task_id)],
+                kwargs={"results_s3_uri": task.results_s3_uri},
+            )
+            logger.info("Dispatched backfill summary task for %s", task_id)
+        except Exception:
+            pass  # best effort
+
+        return html.Div(
+            [
+                html.P(
+                    "Match quality plots are being generated. "
+                    "Please refresh the page in a few moments.",
+                    className="text-muted",
+                ),
+                placeholder_ids,
+            ]
+        )
+
+    covariate_cols = summary.get("covariate_cols", [])
+
+    if not covariate_cols and not summary.get("qq_quantiles"):
+        return html.Div(
+            [
+                html.P(
+                    "No covariate data available for quality assessment.",
+                    className="text-muted",
+                ),
+                placeholder_ids,
+            ]
+        )
 
     content = []
-
-    # Run quality checks (used for per-site warnings in the site filter)
-    quality_warnings = _assess_match_quality(balance_df=balance_df, totals=totals)
 
     content.append(
         html.P(
@@ -3664,12 +3769,10 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
         )
     )
 
-    # --- Match quality diagnostics (all filterable by site) ----------------
     content.append(html.H5("Match Quality Diagnostics", className="mt-4 mb-2"))
 
-    # Per-site selector for filtering all diagnostic plots
-    site_ids = sorted(df["site_id"].unique())
-    # Build name map from totals (always has names from R analysis)
+    # Per-site selector — derive from summary stats keys
+    site_ids = sorted(k for k in summary.get("summary_stats", {}) if k != "__all__")
     site_name_map = {}
     for t in totals or []:
         sid = t.site_id if hasattr(t, "site_id") else t.get("site_id")
@@ -3690,37 +3793,34 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
                     id="match-quality-site-selector",
                     options=site_options,
                     value="__all__",
-                    style={"maxWidth": "350px", "display": "inline-block"},
+                    style={
+                        "maxWidth": "350px",
+                        "display": "inline-block",
+                    },
                 ),
             ],
             className="mb-3",
         )
     )
 
-    # Store the data for client-side filtering via a callback
+    # Store only the small summary data (not raw pixel rows)
     store_data = {
-        "rows": df.to_dict("records"),
+        "has_summary": True,
+        "summary_stats": summary.get("summary_stats", {}),
+        "histograms": summary.get("histograms", {}),
+        "qq_quantiles": summary.get("qq_quantiles", {}),
         "covariate_cols": covariate_cols,
         "site_areas": site_areas,
         "quality_warnings": quality_warnings,
     }
     if balance_df is not None:
         store_data["balance_rows"] = balance_df.to_dict("records")
-    if pscore_df is not None:
-        store_data["pscore_rows"] = pscore_df.to_dict("records")
     content.append(dcc.Store(id="match-quality-data-store", data=store_data))
 
     # Render initial plots for all sites (aggregate)
     content.append(
         html.Div(
-            _build_all_match_quality_plots(
-                df,
-                covariate_cols,
-                balance_df,
-                pscore_df,
-                site_filter=None,
-                site_areas=site_areas,
-            ),
+            _build_plots_from_summary(store_data, site_filter=None),
             id="match-quality-plots-container",
         )
     )
@@ -4035,6 +4135,243 @@ def _build_pscore_qq_plot(pscore_df, cov_df, site_filter=None):
     )
 
     return dcc.Graph(figure=fig)
+
+
+# ---------------------------------------------------------------------------
+# Summary-based plot builders (no raw pixel data needed)
+# ---------------------------------------------------------------------------
+
+
+def _build_plots_from_summary(store_data, site_filter=None):
+    """Build stat boxes, Love plot, QQ plot, and histograms from the
+    pre-computed summary stored in ``store_data``.
+
+    This is the memory-safe path: only small pre-aggregated data is
+    used rather than the full pixel-level CSVs.
+    """
+    site_areas = store_data.get("site_areas", {})
+
+    components = []
+
+    # --- Summary stat boxes ------------------------------------------------
+    scope_key = str(site_filter) if site_filter else "__all__"
+    stats = store_data.get("summary_stats", {}).get(scope_key, {})
+    n_treatment = stats.get("n_treatment", 0)
+    n_control = stats.get("n_control", 0)
+    n_sites = stats.get("n_sites", 0) if not site_filter else 1
+
+    if site_filter:
+        total_area = site_areas.get(str(site_filter), 0)
+    else:
+        total_area = sum(site_areas.values())
+
+    stat_cols = [
+        dbc.Col(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6("Treatment Pixels", className="text-muted mb-1"),
+                        html.H4(f"{n_treatment:,}"),
+                    ]
+                ),
+                className="text-center",
+            ),
+            md=3,
+        ),
+        dbc.Col(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6("Control Pixels", className="text-muted mb-1"),
+                        html.H4(f"{n_control:,}"),
+                    ]
+                ),
+                className="text-center",
+            ),
+            md=3,
+        ),
+        dbc.Col(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6(
+                            "Site Area (ha)" if site_filter else "Total Area (ha)",
+                            className="text-muted mb-1",
+                        ),
+                        html.H4(f"{total_area:,.1f}"),
+                    ]
+                ),
+                className="text-center",
+            ),
+            md=3,
+        ),
+    ]
+    if not site_filter:
+        stat_cols.append(
+            dbc.Col(
+                dbc.Card(
+                    dbc.CardBody(
+                        [
+                            html.H6("Sites", className="text-muted mb-1"),
+                            html.H4(f"{n_sites:,}"),
+                        ]
+                    ),
+                    className="text-center",
+                ),
+                md=3,
+            ),
+        )
+    components.append(dbc.Row(stat_cols, className="mb-4"))
+
+    # --- Love plot (from balance CSV — already small) ----------------------
+    balance_rows = store_data.get("balance_rows")
+    if balance_rows:
+        balance_df = pd.DataFrame(balance_rows)
+        if not balance_df.empty:
+            components.append(
+                html.H6("Covariate Balance (Love Plot)", className="mt-3 mb-2")
+            )
+            components.append(
+                html.P(
+                    "Standardized mean differences (SMD) for each covariate "
+                    "after matching.  Values within the dashed lines "
+                    "(|SMD| < 0.1) indicate good balance between treatment "
+                    "and control groups.",
+                    className="text-muted mb-2",
+                )
+            )
+            components.append(_build_love_plot(balance_df, pd.DataFrame(), site_filter))
+
+    # --- QQ plot from pre-computed quantiles --------------------------------
+    qq_data = store_data.get("qq_quantiles", {}).get(scope_key)
+    if qq_data:
+        components.append(html.H6("Propensity Score QQ Plot", className="mt-3 mb-2"))
+        components.append(
+            html.P(
+                "Empirical quantile-quantile plot comparing the propensity "
+                "score distributions of matched treatment and control "
+                "pixels. Points close to the 45° line indicate similar "
+                "distributions.",
+                className="text-muted mb-2",
+            )
+        )
+        components.append(_build_qq_from_summary(qq_data))
+
+    # --- Histograms from pre-computed bins ---------------------------------
+    hist_data = store_data.get("histograms", {}).get(scope_key, {})
+    if hist_data:
+        components.append(html.H6("Covariate Distributions", className="mt-3 mb-2"))
+        components.extend(_build_histograms_from_summary(hist_data))
+
+    return components
+
+
+def _build_qq_from_summary(qq_data):
+    """Render a QQ plot from pre-computed quantile pairs.
+
+    ``qq_data`` is a dict with keys ``treatment_values`` and
+    ``control_values`` (lists of floats of equal length).
+    """
+    t_q = qq_data["treatment_values"]
+    c_q = qq_data["control_values"]
+
+    fig = go.Figure()
+
+    q_min = min(min(t_q), min(c_q))
+    q_max = max(max(t_q), max(c_q))
+    fig.add_trace(
+        go.Scatter(
+            x=[q_min, q_max],
+            y=[q_min, q_max],
+            mode="lines",
+            line=dict(color="gray", dash="dash"),
+            name="45° line",
+            hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scattergl(
+            x=c_q,
+            y=t_q,
+            mode="markers",
+            marker=dict(size=4, color="#1f77b4", opacity=0.6),
+            name="Matched Pixels",
+            hovertemplate=(
+                "Control quantile: %{x:.3f}<br>"
+                "Treatment quantile: %{y:.3f}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title="Propensity Score QQ Plot (Treatment vs Control)",
+        xaxis_title="Control Quantiles",
+        yaxis_title="Treatment Quantiles",
+        height=450,
+        margin=dict(t=50, b=50, l=60, r=30),
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        xaxis=dict(scaleanchor="y", scaleratio=1),
+    )
+
+    return dcc.Graph(figure=fig)
+
+
+def _build_histograms_from_summary(hist_data):
+    """Build histogram figures from pre-computed bin counts.
+
+    ``hist_data`` is ``{covariate_name: {bin_edges, treatment_pct,
+    control_pct}}``.
+
+    Returns a list of ``dcc.Graph`` components.
+    """
+    plots = []
+    for col, data in hist_data.items():
+        edges = data["bin_edges"]
+        t_pct = data["treatment_pct"]
+        c_pct = data["control_pct"]
+
+        if not edges or len(edges) < 2:
+            continue
+
+        # Compute bin midpoints for the bar chart x-axis
+        mids = [(edges[i] + edges[i + 1]) / 2 for i in range(len(edges) - 1)]
+        bin_width = edges[1] - edges[0] if len(edges) > 1 else 1
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Bar(
+                x=mids,
+                y=t_pct,
+                name="Treatment",
+                opacity=0.6,
+                marker_color="#2ca02c",
+                width=bin_width,
+            )
+        )
+        fig.add_trace(
+            go.Bar(
+                x=mids,
+                y=c_pct,
+                name="Control",
+                opacity=0.6,
+                marker_color="#d62728",
+                width=bin_width,
+            )
+        )
+        fig.update_layout(
+            title=f"Covariate: {col}",
+            xaxis_title=col,
+            yaxis_title="Frequency (%)",
+            barmode="overlay",
+            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
+            height=350,
+            margin=dict(t=40, b=40, l=50, r=20),
+        )
+        plots.append(dcc.Graph(figure=fig))
+
+    if not plots:
+        return [html.P("No numeric covariates to display.", className="text-muted")]
+
+    return plots
 
 
 def _build_match_quality_plots(df, covariate_cols):
