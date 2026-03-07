@@ -1269,9 +1269,23 @@ def dashboard_layout(user):
     )
 
 
-def submit_layout(user):
-    """Task submission form with file upload and covariate selection."""
-    default_random_seed = random.SystemRandom().randint(1, 2147483647)
+def submit_layout(user, recompute_config=None):
+    """Task submission form with file upload and covariate selection.
+
+    Parameters
+    ----------
+    user : User
+        The currently logged-in user.
+    recompute_config : dict or None
+        When recomputing a previous task, a dict of settings returned by
+        :func:`services.get_recompute_config`.  All form fields are
+        pre-filled with the previous task's values (except for a fresh
+        random seed).  When *None* the form uses normal defaults.
+    """
+    rc = recompute_config or {}
+    default_random_seed = rc.get(
+        "random_seed", random.SystemRandom().randint(1, 2147483647)
+    )
 
     return dbc.Container(
         [
@@ -1317,6 +1331,9 @@ def submit_layout(user):
                                                                 id="task-name",
                                                                 type="text",
                                                                 placeholder="My analysis",
+                                                                value=rc.get(
+                                                                    "task_name", ""
+                                                                ),
                                                             ),
                                                         ],
                                                         xs=12,
@@ -1331,6 +1348,9 @@ def submit_layout(user):
                                                                 id="task-description",
                                                                 type="text",
                                                                 placeholder="Brief description",
+                                                                value=rc.get(
+                                                                    "description", ""
+                                                                ),
                                                             ),
                                                         ],
                                                         xs=12,
@@ -1688,7 +1708,10 @@ def submit_layout(user):
                                                                             dbc.Checklist(
                                                                                 id="exact-match-selection",
                                                                                 options=EXACT_MATCH_OPTIONS,
-                                                                                value=DEFAULT_EXACT_MATCH,
+                                                                                value=rc.get(
+                                                                                    "exact_match_vars",
+                                                                                    DEFAULT_EXACT_MATCH,
+                                                                                ),
                                                                                 inline=False,
                                                                                 className="ms-2",
                                                                             ),
@@ -1717,7 +1740,10 @@ def submit_layout(user):
                                                                                                 min=1,
                                                                                                 max=100000,
                                                                                                 step=1,
-                                                                                                value=1000,
+                                                                                                value=rc.get(
+                                                                                                    "max_treatment_pixels",
+                                                                                                    1000,
+                                                                                                ),
                                                                                             ),
                                                                                             html.Small(
                                                                                                 "Maximum treatment pixels sampled per group/site.",
@@ -1738,7 +1764,10 @@ def submit_layout(user):
                                                                                                 min=1,
                                                                                                 max=500,
                                                                                                 step=1,
-                                                                                                value=50,
+                                                                                                value=rc.get(
+                                                                                                    "control_multiplier",
+                                                                                                    50,
+                                                                                                ),
                                                                                             ),
                                                                                             html.Small(
                                                                                                 "Maximum controls sampled per treatment pixel.",
@@ -1764,7 +1793,10 @@ def submit_layout(user):
                                                                                                 min=0,
                                                                                                 max=100000,
                                                                                                 step=1,
-                                                                                                value=100,
+                                                                                                value=rc.get(
+                                                                                                    "min_site_area_ha",
+                                                                                                    100,
+                                                                                                ),
                                                                                             ),
                                                                                             html.Small(
                                                                                                 "Sites smaller than this are filtered before extraction.",
@@ -1785,7 +1817,10 @@ def submit_layout(user):
                                                                                                 min=1,
                                                                                                 max=10000,
                                                                                                 step=1,
-                                                                                                value=15,
+                                                                                                value=rc.get(
+                                                                                                    "min_glm_treatment_pixels",
+                                                                                                    15,
+                                                                                                ),
                                                                                             ),
                                                                                             html.Small(
                                                                                                 "Below this, matching uses Mahalanobis distance instead of GLM.",
@@ -1811,7 +1846,10 @@ def submit_layout(user):
                                                                                                 min=0,
                                                                                                 max=5.0,
                                                                                                 step=0.05,
-                                                                                                value=0.2,
+                                                                                                value=rc.get(
+                                                                                                    "caliper_width",
+                                                                                                    0.2,
+                                                                                                ),
                                                                                             ),
                                                                                             html.Small(
                                                                                                 "Maximum distance (in SD) for a valid match. "
@@ -1848,7 +1886,10 @@ def submit_layout(user):
                                                                                                         "value": 0,
                                                                                                     },
                                                                                                 ],
-                                                                                                value=1,
+                                                                                                value=rc.get(
+                                                                                                    "max_controls_per_treatment",
+                                                                                                    1,
+                                                                                                ),
                                                                                                 clearable=False,
                                                                                             ),
                                                                                             html.Small(
@@ -1935,7 +1976,10 @@ def submit_layout(user):
                                                                                                         "value": 240,
                                                                                                     },
                                                                                                 ],
-                                                                                                value=30,
+                                                                                                value=rc.get(
+                                                                                                    "match_memory_gb",
+                                                                                                    30,
+                                                                                                ),
                                                                                                 clearable=False,
                                                                                             ),
                                                                                             html.Small(
@@ -1955,7 +1999,10 @@ def submit_layout(user):
                                                                                             dcc.Dropdown(
                                                                                                 id="matching-job-queue",
                                                                                                 options=MATCHING_JOB_QUEUE_OPTIONS,
-                                                                                                value=DEFAULT_MATCHING_JOB_QUEUE,
+                                                                                                value=rc.get(
+                                                                                                    "matching_job_queue",
+                                                                                                    DEFAULT_MATCHING_JOB_QUEUE,
+                                                                                                ),
                                                                                                 clearable=False,
                                                                                             ),
                                                                                             html.Small(
@@ -2046,6 +2093,7 @@ def submit_layout(user):
             dcc.Store(id="presets-store"),
             dcc.Store(id="site-set-refresh-store"),
             dcc.Store(id="submit-lock-store", data=False),
+            dcc.Store(id="recompute-config-store", data=rc or None),
         ]
     )
 
@@ -2105,7 +2153,7 @@ def task_detail_layout(user, task_id, shared_token=None):
                                     color="outline-warning",
                                     size="sm",
                                     className="mt-1 me-2",
-                                    title="Resubmit this task with a new random seed",
+                                    title="Open submission form pre-filled with this task's settings",
                                 ),
                                 dbc.Button(
                                     [

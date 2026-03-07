@@ -2784,6 +2784,76 @@ def validate_share_token(token, record_access=True):
 # ---------------------------------------------------------------------------
 
 
+def get_recompute_config(task_id, user_id):
+    """Return the configuration of a task for pre-filling the submit form.
+
+    Loads the original task's settings and returns them as a plain dict
+    suitable for pre-populating the task-submission page.  A new random
+    seed is generated so the user starts with a fresh value.
+
+    Parameters
+    ----------
+    task_id : str
+        UUID of the ``AnalysisTask`` to recompute.
+    user_id : str
+        UUID of the user requesting the recompute.
+
+    Returns
+    -------
+    dict
+        Keys: ``task_name``, ``description``, ``covariates``,
+        ``exact_match_vars``, ``max_treatment_pixels``,
+        ``control_multiplier``, ``min_site_area_ha``,
+        ``min_glm_treatment_pixels``, ``caliper_width``,
+        ``max_controls_per_treatment``, ``random_seed``,
+        ``match_memory_gb``, ``matching_job_queue``, ``site_set_id``.
+
+    Raises
+    ------
+    ValueError
+        If the task is not found or the user is not authorised.
+    """
+    import random as _random
+
+    db = get_db()
+    try:
+        task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+        if not task:
+            raise ValueError("Task not found.")
+
+        from models import User
+
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError("User not found.")
+        if not user.is_admin and str(task.submitted_by) != str(user_id):
+            raise ValueError("You can only recompute your own tasks.")
+
+        config = task.config or {}
+        match_memory_mib = config.get("match_memory_mib", 30720)
+
+        return {
+            "task_name": f"{task.name} (recompute)",
+            "description": task.description or "",
+            "covariates": list(task.covariates or []),
+            "exact_match_vars": config.get("exact_match_vars", []),
+            "max_treatment_pixels": config.get("max_treatment_pixels", 1000),
+            "control_multiplier": config.get("control_multiplier", 50),
+            "min_site_area_ha": config.get("min_site_area_ha", 100),
+            "min_glm_treatment_pixels": config.get("min_glm_treatment_pixels", 15),
+            "caliper_width": config.get("caliper_width", 0.2),
+            "max_controls_per_treatment": config.get("max_controls_per_treatment", 1),
+            "random_seed": _random.randint(1, 2_147_483_647),
+            "match_memory_gb": max(1, match_memory_mib // 1024),
+            "matching_job_queue": config.get(
+                "matching_job_queue", "spot_fleet_1TB-io2-disk"
+            ),
+            "site_set_id": task.site_set_id,
+        }
+    finally:
+        db.close()
+
+
 def resubmit_analysis_task(task_id, user_id):
     """Resubmit a previously submitted task with a new random seed.
 

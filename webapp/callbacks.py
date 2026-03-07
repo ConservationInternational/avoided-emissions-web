@@ -59,7 +59,6 @@ from services import (
     save_covariate_preset,
     save_user_site_set,
     start_gee_export,
-    resubmit_analysis_task,
     submit_analysis_task,
     update_task_info,
     validate_share_token,
@@ -537,9 +536,14 @@ def register_callbacks(app, limiter=None):
     @app.callback(
         [Output("site-set-selector", "options"), Output("site-set-selector", "value")],
         [Input("url", "pathname"), Input("site-set-refresh-store", "data")],
-        State("site-set-selector", "value"),
+        [
+            State("site-set-selector", "value"),
+            State("recompute-config-store", "data"),
+        ],
     )
-    def refresh_site_set_options(pathname, _refresh_token, current_value):
+    def refresh_site_set_options(
+        pathname, _refresh_token, current_value, recompute_config
+    ):
         if pathname != "/submit":
             raise PreventUpdate
 
@@ -560,11 +564,18 @@ def register_callbacks(app, limiter=None):
         ]
 
         valid_ids = {s["id"] for s in site_sets}
-        value = (
-            current_value
-            if current_value in valid_ids
-            else (options[0]["value"] if options else None)
+
+        # When recomputing, prefer the original task's site set
+        recompute_site_set = (
+            (recompute_config or {}).get("site_set_id") if not current_value else None
         )
+        if recompute_site_set and recompute_site_set in valid_ids:
+            value = recompute_site_set
+        elif current_value in valid_ids:
+            value = current_value
+        else:
+            value = options[0]["value"] if options else None
+
         return options, value
 
     @app.callback(
@@ -577,6 +588,22 @@ def register_callbacks(app, limiter=None):
 
         ready_covariates = get_ready_covariate_names()
         return [{"label": cov, "value": cov} for cov in ready_covariates]
+
+    @app.callback(
+        Output("covariate-selection", "value", allow_duplicate=True),
+        Input("covariate-selection", "options"),
+        State("recompute-config-store", "data"),
+        prevent_initial_call=True,
+    )
+    def prefill_covariates_from_recompute(options, recompute_config):
+        """Set covariate checkboxes from the recompute config once options load."""
+        if not recompute_config or not options:
+            raise PreventUpdate
+        available = {opt["value"] for opt in options}
+        covs = [c for c in recompute_config.get("covariates", []) if c in available]
+        if not covs:
+            raise PreventUpdate
+        return covs
 
     @app.callback(
         [
@@ -1454,91 +1481,42 @@ def register_callbacks(app, limiter=None):
 
     # -- Recompute task (detail page) ----------------------------------------
 
-    @app.callback(
+    app.clientside_callback(
+        """
+        function(n_clicks, task_id) {
+            if (!n_clicks || !task_id) {
+                return window.dash_clientside.no_update;
+            }
+            window.location.href = '/submit?recompute=' + task_id;
+            return '';
+        }
+        """,
         Output("recompute-result", "children"),
         Input("recompute-task-btn", "n_clicks"),
         State("task-id-store", "data"),
         prevent_initial_call=True,
     )
-    def handle_recompute_task(n_clicks, task_id):
-        if not n_clicks or not task_id:
-            raise PreventUpdate
-
-        user = get_current_user()
-        if not user:
-            return dbc.Alert("Please log in first.", color="danger", dismissable=True)
-
-        try:
-            new_task_id = resubmit_analysis_task(task_id, str(user.id))
-            return dbc.Alert(
-                [
-                    html.P("Task resubmitted with a new random seed."),
-                    dcc.Link(
-                        f"View new task: {new_task_id}",
-                        href=f"/task/{new_task_id}",
-                    ),
-                ],
-                color="success",
-                dismissable=True,
-            )
-        except ValueError as exc:
-            logger.exception("Recompute failed (validation)")
-            report_exception()
-            return dbc.Alert(str(exc), color="danger", dismissable=True)
-        except Exception:
-            logger.exception("Recompute failed")
-            report_exception()
-            return dbc.Alert(
-                "Recompute failed. Please try again or contact support.",
-                color="danger",
-                dismissable=True,
-            )
 
     # -- Recompute task (from task list table) --------------------------------
 
-    @app.callback(
+    app.clientside_callback(
+        """
+        function(renderer_data) {
+            if (!renderer_data) {
+                return window.dash_clientside.no_update;
+            }
+            var value = renderer_data.value || {};
+            if (value.action !== 'recompute' || !value.task_id) {
+                return window.dash_clientside.no_update;
+            }
+            window.location.href = '/submit?recompute=' + value.task_id;
+            return '';
+        }
+        """,
         Output("recompute-from-list-result", "children"),
         Input("task-list-table", "cellRendererData"),
         prevent_initial_call=True,
     )
-    def handle_recompute_from_list(renderer_data):
-        if not renderer_data:
-            raise PreventUpdate
-
-        action = renderer_data.get("value", {}).get("action")
-        task_id = renderer_data.get("value", {}).get("task_id")
-        if action != "recompute" or not task_id:
-            raise PreventUpdate
-
-        user = get_current_user()
-        if not user:
-            return dbc.Alert("Please log in first.", color="danger", dismissable=True)
-
-        try:
-            new_task_id = resubmit_analysis_task(task_id, str(user.id))
-            return dbc.Alert(
-                [
-                    html.P("Task resubmitted with a new random seed."),
-                    dcc.Link(
-                        f"View new task: {new_task_id}",
-                        href=f"/task/{new_task_id}",
-                    ),
-                ],
-                color="success",
-                dismissable=True,
-            )
-        except ValueError as exc:
-            logger.exception("Recompute failed (validation)")
-            report_exception()
-            return dbc.Alert(str(exc), color="danger", dismissable=True)
-        except Exception:
-            logger.exception("Recompute failed")
-            report_exception()
-            return dbc.Alert(
-                "Recompute failed. Please try again or contact support.",
-                color="danger",
-                dismissable=True,
-            )
 
     # -- Admin: Covariates (unified export + merge) ---------------------------
 

@@ -516,7 +516,17 @@ def display_page(pathname, search):
     if pathname == "/" or pathname == "/dashboard":
         page = dashboard_layout(user)
     elif pathname == "/submit":
-        page = submit_layout(user)
+        recompute_config = None
+        recompute_id = parse_qs((search or "").lstrip("?")).get("recompute", [""])[0]
+        if recompute_id:
+            try:
+                _uuid.UUID(recompute_id)
+                from services import get_recompute_config
+
+                recompute_config = get_recompute_config(recompute_id, str(user.id))
+            except (ValueError, AttributeError):
+                pass
+        page = submit_layout(user, recompute_config=recompute_config)
     elif pathname == "/settings":
         page = settings_layout(user)
     elif pathname == "/admin":
