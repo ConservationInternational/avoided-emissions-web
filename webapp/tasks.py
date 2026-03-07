@@ -986,6 +986,8 @@ def poll_batch_tasks() -> dict:
         # After handling locally-known tasks, query the trends.earth API
         # for *all* executions of the avoided-emissions script and adopt
         # any that don't already have a local AnalysisTask record.
+        # Disabled by default outside development — set
+        # ENABLE_TASK_ADOPTION=true to opt in.
         adopted = 0
         try:
             from config import Config
@@ -993,8 +995,13 @@ def poll_batch_tasks() -> dict:
 
             from models import User
 
-            script_id = Config.TRENDSEARTH_SCRIPT_ID
-            if script_id and Config.TRENDSEARTH_CLIENT_ID:
+            if not Config.ENABLE_TASK_ADOPTION:
+                pass  # skip discovery entirely
+            elif not (Config.TRENDSEARTH_SCRIPT_ID and Config.TRENDSEARTH_CLIENT_ID):
+                pass  # not configured
+            else:
+                script_id = Config.TRENDSEARTH_SCRIPT_ID
+
                 # Pre-check: skip discovery entirely when no users exist.
                 # adopt_api_execution needs a user to assign ownership to.
                 has_users = db.query(User.id).first() is not None

@@ -35,6 +35,14 @@ class Config:
     GEE_PROJECT_ID = os.environ.get("GOOGLE_PROJECT_ID", "")
     GEE_ENDPOINT = os.environ.get("GEE_ENDPOINT", "")
     DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
+    # Auto-adopt untracked API executions.  Enabled by default only in
+    # development; set ENABLE_TASK_ADOPTION=true in production to opt in.
+    ENABLE_TASK_ADOPTION = (
+        os.environ.get(
+            "ENABLE_TASK_ADOPTION", str(ENVIRONMENT == "development")
+        ).lower()
+        == "true"
+    )
     R_ANALYSIS_IMAGE_TAG = os.environ.get("R_ANALYSIS_IMAGE_TAG", "latest")
     ROLLBAR_ACCESS_TOKEN = os.environ.get("ROLLBAR_ACCESS_TOKEN", "")
     ROLLBAR_ENVIRONMENT = os.environ.get(
