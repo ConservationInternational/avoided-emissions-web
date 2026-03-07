@@ -7,7 +7,6 @@ on:
       - develop
     paths:
       - 'webapp/**'
-      - 'r-analysis/**'
       - 'gee-export/**'
       - 'database/**'
       - 'deploy/**'
@@ -29,7 +28,6 @@ env:
   APPLICATION_NAME: avoided-emissions-web
   DEPLOYMENT_GROUP: avoided-emissions-web-staging
   ECR_REPOSITORY_WEBAPP: avoided-emissions-webapp
-  ECR_REPOSITORY_RANALYSIS: avoided-emissions-ranalysis
 
 concurrency:
   group: staging-deployment
@@ -68,19 +66,18 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Ensure ECR repositories exist
+    - name: Ensure ECR repository exists
       run: |
-        for REPO in "${{ env.ECR_REPOSITORY_WEBAPP }}" "${{ env.ECR_REPOSITORY_RANALYSIS }}"; do
-          if ! aws ecr describe-repositories --repository-names "$REPO" 2>/dev/null; then
-            echo "Creating ECR repository: $REPO"
-            aws ecr create-repository \
-              --repository-name "$REPO" \
-              --image-scanning-configuration scanOnPush=true \
-              --image-tag-mutability MUTABLE
-          else
-            echo "ECR repository exists: $REPO"
-          fi
-        done
+        REPO="${{ env.ECR_REPOSITORY_WEBAPP }}"
+        if ! aws ecr describe-repositories --repository-names "$REPO" 2>/dev/null; then
+          echo "Creating ECR repository: $REPO"
+          aws ecr create-repository \
+            --repository-name "$REPO" \
+            --image-scanning-configuration scanOnPush=true \
+            --image-tag-mutability MUTABLE
+        else
+          echo "ECR repository exists: $REPO"
+        fi
 
   build-webapp:
     name: Build Webapp Image
@@ -127,57 +124,12 @@ jobs:
           .
         echo "image-uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
-  build-ranalysis:
-    name: Build R Analysis Image
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment: staging
-    needs: setup
-    outputs:
-      image-uri: ${{ steps.build.outputs.image-uri }}
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Configure AWS credentials via OIDC
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
-        role-session-name: GitHubActionsStagingRanalysis
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Build and push R analysis image
-      id: build
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ needs.setup.outputs.image-tag }}
-      run: |
-        IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY_RANALYSIS }}:$IMAGE_TAG"
-        docker buildx build \
-          --platform linux/amd64 \
-          --cache-from=type=gha,scope=ranalysis-staging \
-          --cache-to=type=gha,mode=max,scope=ranalysis-staging \
-          --tag "$IMAGE_URI" \
-          --tag "$ECR_REGISTRY/${{ env.ECR_REPOSITORY_RANALYSIS }}:staging-latest" \
-          --push \
-          --file r-analysis/Dockerfile \
-          r-analysis/
-        echo "image-uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-
   deploy:
     name: Deploy to Staging via CodeDeploy
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: staging
-    needs: [build-webapp, build-ranalysis, setup]
+    needs: [build-webapp, setup]
 
     steps:
     - name: Checkout code
@@ -206,7 +158,6 @@ jobs:
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         WEBAPP_IMAGE: ${{ needs.build-webapp.outputs.image-uri }}
-        RANALYSIS_IMAGE: ${{ needs.build-ranalysis.outputs.image-uri }}
         IMAGE_TAG: ${{ needs.setup.outputs.image-tag }}
         SECRET_KEY: ${{ secrets.SECRET_KEY }}
         POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
@@ -238,8 +189,7 @@ jobs:
           echo "# Container images"
           echo "ECR_REGISTRY=$ECR_REGISTRY"
           echo "WEBAPP_IMAGE=$WEBAPP_IMAGE"
-          echo "RANALYSIS_IMAGE=$RANALYSIS_IMAGE"
-          echo "R_ANALYSIS_IMAGE_TAG=$IMAGE_TAG"
+          echo "R_ANALYSIS_IMAGE_TAG=staging-latest"
           echo ""
           echo "# Environment"
           echo "ENVIRONMENT=staging"

@@ -1,4 +1,4 @@
-name: Publish R-Analysis Script
+name: Publish R-Analysis Script & Build Image
 run-name: "Publish ${{ github.ref_name }} to ${{ github.event_name == 'workflow_dispatch' && inputs.api_environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}"
 
 on:
@@ -22,12 +22,37 @@ on:
 env:
   PRODUCTION_API_URL: https://api.trends.earth
   STAGING_API_URL: https://api-staging.trends.earth
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY_RANALYSIS: avoided-emissions-ranalysis
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
+  determine-environment:
+    name: Determine target environment
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+    steps:
+      - name: Determine environment
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "environment=${{ inputs.api_environment }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=staging" >> "$GITHUB_OUTPUT"
+          fi
+
   publish-script:
     name: Publish to trends.earth API
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: determine-environment
 
     steps:
       - name: Checkout repository
@@ -44,13 +69,7 @@ jobs:
       - name: Determine API URL
         id: api-url
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ENV="${{ inputs.api_environment }}"
-          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            ENV="production"
-          else
-            ENV="staging"
-          fi
+          ENV="${{ needs.determine-environment.outputs.environment }}"
 
           if [ "$ENV" = "production" ]; then
             echo "url=${{ env.PRODUCTION_API_URL }}" >> "$GITHUB_OUTPUT"
@@ -105,3 +124,66 @@ jobs:
         run: |
           cd r-analysis
           trends info
+
+  build-ranalysis:
+    name: Build & Push R Analysis Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: determine-environment
+    environment: ${{ needs.determine-environment.outputs.environment }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+        role-session-name: GitHubActionsRanalysis
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Ensure ECR repository exists
+      run: |
+        REPO="${{ env.ECR_REPOSITORY_RANALYSIS }}"
+        if ! aws ecr describe-repositories --repository-names "$REPO" 2>/dev/null; then
+          echo "Creating ECR repository: $REPO"
+          aws ecr create-repository \
+            --repository-name "$REPO" \
+            --image-scanning-configuration scanOnPush=true \
+            --image-tag-mutability MUTABLE
+        else
+          echo "ECR repository exists: $REPO"
+        fi
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push R analysis image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+      run: |
+        SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+        IMAGE_TAG="${ENVIRONMENT}-${SHORT_SHA}"
+        IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY_RANALYSIS }}:$IMAGE_TAG"
+
+        TAGS="--tag $IMAGE_URI --tag $ECR_REGISTRY/${{ env.ECR_REPOSITORY_RANALYSIS }}:${ENVIRONMENT}-latest"
+        if [ "$ENVIRONMENT" = "production" ]; then
+          TAGS="$TAGS --tag $ECR_REGISTRY/${{ env.ECR_REPOSITORY_RANALYSIS }}:latest"
+        fi
+
+        docker buildx build \
+          --platform linux/amd64 \
+          --cache-from=type=gha,scope=ranalysis-${ENVIRONMENT} \
+          --cache-to=type=gha,mode=max,scope=ranalysis-${ENVIRONMENT} \
+          $TAGS \
+          --push \
+          --file r-analysis/Dockerfile \
+          r-analysis/
+
+        echo "::notice::Pushed R analysis image: $IMAGE_URI"
