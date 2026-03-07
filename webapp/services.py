@@ -927,7 +927,7 @@ def submit_analysis_task(
             "task_description": description,
             "sites_s3_uri": sites_uri,
             "cog_bucket": Config.S3_BUCKET,
-            "cog_prefix": f"{Config.S3_PREFIX}/cog",
+            "cog_prefix": Config.S3_COG_PREFIX,
             "covariates": covariates,
             "exact_match_vars": exact_match_vars,
             "matching_extent": matching_extent,
@@ -1466,7 +1466,7 @@ def _cleanup_covariate_downstream(covariate_name, db):
 
     # 1. Delete S3 COG (if exists)
     if Config.S3_BUCKET:
-        cog_prefix = f"{Config.S3_PREFIX}/cog"
+        cog_prefix = Config.S3_COG_PREFIX
         try:
             delete_s3_cog(
                 Config.S3_BUCKET,
@@ -2258,7 +2258,7 @@ def force_remerge(covariate_name, user_id):
 
     # 1. Delete existing S3 COG
     if Config.S3_BUCKET:
-        cog_prefix = f"{Config.S3_PREFIX}/cog"
+        cog_prefix = Config.S3_COG_PREFIX
         try:
             delete_s3_cog(
                 Config.S3_BUCKET,
@@ -2366,7 +2366,7 @@ def get_covariate_inventory():
     s3_cogs: dict[str, dict] = {}
     try:
         if Config.S3_BUCKET:
-            cog_prefix = f"{Config.S3_PREFIX}/cog"
+            cog_prefix = Config.S3_COG_PREFIX
             for obj in list_s3_cog_objects(
                 Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
             ):
