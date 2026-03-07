@@ -52,7 +52,8 @@ def get_s3_client():
     return boto3.client("s3", region_name=Config.AWS_REGION)
 
 
-# Cost allocation tag applied to all S3 objects created by this app.
+# Cost-allocation tag applied to every S3 object created by this app.
+# Formatted as a URL query-string for the S3 ``Tagging`` header.
 S3_COST_TAGGING = "Project=avoided-emissions"
 
 
@@ -997,6 +998,7 @@ def submit_analysis_task(
             "timeout_seconds": Config.BATCH_TIMEOUT_SECONDS,
             "memory_mib": max(Config.BATCH_MEMORY_MIB, match_memory_mib),
             "vcpus": Config.BATCH_VCPUS,
+            "tags": {"Project": "avoided-emissions"},
         }
         if matching_job_queue:
             batch_overrides["job_queue"] = matching_job_queue
