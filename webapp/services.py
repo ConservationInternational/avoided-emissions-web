@@ -36,11 +36,11 @@ from models import (
 logger = logging.getLogger(__name__)
 
 ALLOWED_MATCHING_JOB_QUEUES = {
-    "spot_fleet_1TB-io2-disk",
-    "ondemand_fleet_1TB-io2-disk",
+    "ae-spot-1TB-io2-disk",
+    "ae-ondemand-1TB-io2-disk",
 }
 
-DEFAULT_MATCHING_JOB_QUEUE = "spot_fleet_1TB-io2-disk"
+DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-1TB-io2-disk"
 
 MAX_ARCHIVE_FILE_COUNT = 2_000
 MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
@@ -1000,7 +1000,6 @@ def submit_analysis_task(
             "timeout_seconds": Config.BATCH_TIMEOUT_SECONDS,
             "memory_mib": max(Config.BATCH_MEMORY_MIB, match_memory_mib),
             "vcpus": Config.BATCH_VCPUS,
-            "tags": {"Project": "avoided-emissions"},
         }
         if matching_job_queue:
             batch_overrides["job_queue"] = matching_job_queue
@@ -2850,7 +2849,7 @@ def get_recompute_config(task_id, user_id):
             "random_seed": _random.randint(1, 2_147_483_647),
             "match_memory_gb": max(1, match_memory_mib // 1024),
             "matching_job_queue": config.get(
-                "matching_job_queue", "spot_fleet_1TB-io2-disk"
+                "matching_job_queue", "ae-spot-1TB-io2-disk"
             ),
             "site_set_id": str(task.site_set_id) if task.site_set_id else None,
         }
@@ -2961,9 +2960,7 @@ def resubmit_analysis_task(task_id, user_id):
             max_controls_per_treatment=config.get("max_controls_per_treatment", 1),
             random_seed=new_seed,
             match_memory_mib=match_memory_mib,
-            matching_job_queue=config.get(
-                "matching_job_queue", "spot_fleet_1TB-io2-disk"
-            ),
+            matching_job_queue=config.get("matching_job_queue", "ae-spot-1TB-io2-disk"),
         )
     finally:
         db.close()

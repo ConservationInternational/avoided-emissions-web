@@ -68,16 +68,16 @@ DUAL_PURPOSE_VARS = ["ecoregion", "pa"]
 
 MATCHING_JOB_QUEUE_OPTIONS = [
     {
-        "label": "spot_fleet_1TB-io2-disk (default)",
-        "value": "spot_fleet_1TB-io2-disk",
+        "label": "ae-spot-1TB-io2-disk (default)",
+        "value": "ae-spot-1TB-io2-disk",
     },
     {
-        "label": "ondemand_fleet_1TB-io2-disk",
-        "value": "ondemand_fleet_1TB-io2-disk",
+        "label": "ae-ondemand-1TB-io2-disk",
+        "value": "ae-ondemand-1TB-io2-disk",
     },
 ]
 
-DEFAULT_MATCHING_JOB_QUEUE = "spot_fleet_1TB-io2-disk"
+DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-1TB-io2-disk"
 
 # -- Column definitions (AG Grid) -------------------------------------------
 
@@ -2009,7 +2009,7 @@ def submit_layout(user, recompute_config=None):
                                                                                                 [
                                                                                                     "Use ",
                                                                                                     html.Code(
-                                                                                                        "ondemand_fleet_1TB-io2-disk"
+                                                                                                        "ae-ondemand-1TB-io2-disk"
                                                                                                     ),
                                                                                                     " only when needed — it incurs much higher costs.",
                                                                                                 ],
