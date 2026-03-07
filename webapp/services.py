@@ -923,6 +923,8 @@ def submit_analysis_task(
         # Build params matching AvoidedEmissionsParams schema
         params = {
             "task_id": task_id,
+            "task_name": task_name,
+            "task_description": description,
             "sites_s3_uri": sites_uri,
             "cog_bucket": Config.S3_BUCKET,
             "cog_prefix": f"{Config.S3_PREFIX}/cog",
@@ -1405,8 +1407,10 @@ def adopt_api_execution(exec_data, db):
 
     task = AnalysisTask(
         id=uuid.uuid4(),
-        name=params.get("task_id", f"Discovered: {exec_id[:8]}"),
-        description=f"Auto-discovered from trends.earth API execution {exec_id}",
+        name=params.get("task_name")
+        or params.get("task_id", f"Discovered: {exec_id[:8]}"),
+        description=params.get("task_description")
+        or f"Auto-discovered from trends.earth API execution {exec_id}",
         submitted_by=owner.id,
         status=local_status,
         extract_job_id=f"api:{exec_id}",
