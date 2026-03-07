@@ -137,7 +137,12 @@ def _upload_to_s3(
         key,
     )
     s3 = boto3.client("s3", region_name=Config.AWS_REGION)
-    s3.upload_file(local_path, bucket, key, ExtraArgs={"ContentType": content_type})
+    s3.upload_file(
+        local_path,
+        bucket,
+        key,
+        ExtraArgs={"ContentType": content_type, "Tagging": "Project=avoided-emissions"},
+    )
     url = f"https://{bucket}.s3.amazonaws.com/{key}"
     logger.info("Upload complete: %s", url)
     return url

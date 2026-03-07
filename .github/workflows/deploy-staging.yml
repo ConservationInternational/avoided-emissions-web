@@ -74,10 +74,16 @@ jobs:
           aws ecr create-repository \
             --repository-name "$REPO" \
             --image-scanning-configuration scanOnPush=true \
-            --image-tag-mutability MUTABLE
+            --image-tag-mutability MUTABLE \
+            --tags Key=Project,Value=avoided-emissions
         else
           echo "ECR repository exists: $REPO"
         fi
+
+    - name: Ensure ECR repository is tagged
+      run: |
+        REPO_ARN=$(aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY_WEBAPP }}" --query 'repositories[0].repositoryArn' --output text)
+        aws ecr tag-resource --resource-arn "$REPO_ARN" --tags Key=Project,Value=avoided-emissions
 
   build-webapp:
     name: Build Webapp Image

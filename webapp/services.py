@@ -51,6 +51,10 @@ def get_s3_client():
     return boto3.client("s3", region_name=Config.AWS_REGION)
 
 
+# Cost allocation tag applied to all S3 objects created by this app.
+S3_COST_TAGGING = "Project=avoided-emissions"
+
+
 def _get_file_extension(filename):
     lower_name = (filename or "").lower()
     if lower_name.endswith(".tar.gz"):
@@ -549,6 +553,7 @@ def upload_user_site_set_geojson_to_s3(site_set_id, task_id):
         Key=key,
         Body=body.encode("utf-8"),
         ContentType="application/json",
+        Tagging=S3_COST_TAGGING,
     )
     return f"s3://{Config.S3_BUCKET}/{key}"
 
@@ -574,6 +579,7 @@ def upload_sites_to_s3(gdf, task_id):
         Key=key,
         Body=body.encode("utf-8"),
         ContentType="application/json",
+        Tagging=S3_COST_TAGGING,
     )
     return f"s3://{Config.S3_BUCKET}/{key}"
 

@@ -478,7 +478,10 @@ def _upload_to_s3(
         local_path,
         bucket,
         key,
-        ExtraArgs={"ContentType": "image/tiff"},
+        ExtraArgs={
+            "ContentType": "image/tiff",
+            "Tagging": "Project=avoided-emissions",
+        },
     )
     url = f"https://{bucket}.s3.amazonaws.com/{key}"
     logger.info("Upload complete: %s", url)
