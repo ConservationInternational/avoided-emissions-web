@@ -2852,7 +2852,7 @@ def get_recompute_config(task_id, user_id):
             "matching_job_queue": config.get(
                 "matching_job_queue", "spot_fleet_1TB-io2-disk"
             ),
-            "site_set_id": task.site_set_id,
+            "site_set_id": str(task.site_set_id) if task.site_set_id else None,
         }
     finally:
         db.close()
