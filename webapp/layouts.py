@@ -2785,6 +2785,29 @@ def settings_layout(user):
                         type="password",
                         className="mb-3",
                     ),
+                ]
+                + (
+                    [
+                        dbc.Alert(
+                            [
+                                "Don't have a trends.earth account yet? ",
+                                html.A(
+                                    "Register at api.trends.earth",
+                                    href="https://api.trends.earth",
+                                    target="_blank",
+                                    rel="noopener noreferrer",
+                                    className="alert-link",
+                                ),
+                                ".",
+                            ],
+                            color="info",
+                            className="mb-3",
+                        ),
+                    ]
+                    if not cred
+                    else []
+                )
+                + [
                     html.Div(id="te-link-message", className="mb-2"),
                     dbc.Button(
                         "Link Account",
