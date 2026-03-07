@@ -1167,6 +1167,21 @@ def reset_password_layout(token=""):
 
 def dashboard_layout(user):
     """Main dashboard showing task list with AG Grid and status overview."""
+    show_all_checkbox = (
+        dbc.Col(
+            dbc.Checkbox(
+                id="show-all-tasks-checkbox",
+                label="Show all users' tasks",
+                value=False,
+                className="ms-3",
+            ),
+            width="auto",
+            className="d-flex align-items-center",
+        )
+        if user and user.is_admin
+        else html.Div(id="show-all-tasks-checkbox", hidden=True)
+    )
+
     return dbc.Container(
         [
             navbar(user, active_page="/"),
@@ -1201,6 +1216,7 @@ def dashboard_layout(user):
                                         ),
                                         width=True,
                                     ),
+                                    show_all_checkbox,
                                     dbc.Col(
                                         [
                                             dbc.Button(

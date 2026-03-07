@@ -1076,9 +1076,15 @@ def submit_analysis_task(
 
 def get_task_list(user_id=None, limit=50):
     """Get recent analysis tasks, optionally filtered by user."""
+    from sqlalchemy.orm import joinedload
+
     db = get_db()
     try:
-        query = db.query(AnalysisTask).order_by(AnalysisTask.created_at.desc())
+        query = (
+            db.query(AnalysisTask)
+            .options(joinedload(AnalysisTask.user))
+            .order_by(AnalysisTask.created_at.desc())
+        )
         if user_id:
             query = query.filter(AnalysisTask.submitted_by == user_id)
         return query.limit(limit).all()

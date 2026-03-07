@@ -32,6 +32,7 @@ from config import report_exception
 from layouts import (
     RESULTS_TOTAL_COLUMNS,
     RESULTS_YEARLY_COLUMNS,
+    TASK_LIST_COLUMNS,
     _make_ag_grid,
 )
 from services import (
@@ -997,38 +998,63 @@ def register_callbacks(app, limiter=None):
     # -- Dashboard task list (AG Grid) ---------------------------------------
 
     @app.callback(
-        [Output("task-list-table", "rowData"), Output("task-total-count", "children")],
+        [
+            Output("task-list-table", "rowData"),
+            Output("task-list-table", "columnDefs"),
+            Output("task-total-count", "children"),
+        ],
         [
             Input("refresh-interval", "n_intervals"),
             Input("refresh-tasks-btn", "n_clicks"),
+            Input("show-all-tasks-checkbox", "value"),
         ],
     )
-    def refresh_task_list(_n_intervals, _n_clicks):
+    def refresh_task_list(_n_intervals, _n_clicks, show_all):
         user = get_current_user()
         if not user:
             raise PreventUpdate
 
-        user_filter = None if user.is_admin else user.id
+        show_all_users = bool(show_all) and user.is_admin
+        user_filter = None if show_all_users else user.id
         tasks = get_task_list(user_id=user_filter)
 
+        columns = list(TASK_LIST_COLUMNS)
+        if show_all_users:
+            columns = [
+                columns[0],
+                {
+                    "headerName": "Submitted By",
+                    "field": "submitted_by_name",
+                    "flex": 1.2,
+                    "minWidth": 140,
+                    "filter": "agTextColumnFilter",
+                    "filterParams": {
+                        "buttons": ["clear", "apply"],
+                        "closeOnApply": True,
+                    },
+                },
+                *columns[1:],
+            ]
+
         if not tasks:
-            return [], "Total: 0"
+            return [], columns, "Total: 0"
 
         rows = []
         for task in tasks:
-            rows.append(
-                {
-                    "id": str(task.id),
-                    "name": task.name,
-                    "status": task.status,
-                    "n_sites": task.n_sites or 0,
-                    "created_at": _fmt_dt(task.created_at),
-                    "submitted_at": _fmt_dt(task.submitted_at),
-                    "completed_at": _fmt_dt(task.completed_at),
-                }
-            )
+            row = {
+                "id": str(task.id),
+                "name": task.name,
+                "status": task.status,
+                "n_sites": task.n_sites or 0,
+                "created_at": _fmt_dt(task.created_at),
+                "submitted_at": _fmt_dt(task.submitted_at),
+                "completed_at": _fmt_dt(task.completed_at),
+            }
+            if show_all_users:
+                row["submitted_by_name"] = task.user.name if task.user else "Unknown"
+            rows.append(row)
 
-        return rows, f"Total: {len(rows)}"
+        return rows, columns, f"Total: {len(rows)}"
 
     # -- Task detail ---------------------------------------------------------
 
