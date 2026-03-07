@@ -1116,9 +1116,6 @@ def register_callbacks(app, limiter=None):
         }.get(task.status, "secondary")
         badge = dbc.Badge(task.status.upper(), color=status_color, className="fs-5")
 
-        # Overview tab
-        overview = _build_overview(task, sites, totals)
-
         # Quality warning banner (above tabs) — only for succeeded tasks
         quality_banner = html.Div()
         quality_warnings = []
@@ -1126,31 +1123,44 @@ def register_callbacks(app, limiter=None):
             quality_warnings = _compute_quality_warnings(task_id, task, totals)
             quality_banner = _build_quality_warning_banner(quality_warnings)
 
-        # Results tab (AG Grid tables)
-        results_content = _build_results_content(
-            results, totals, sites, quality_warnings=quality_warnings
-        )
+        # -----------------------------------------------------------
+        # Lazy tab rendering: only build content for the *active* tab.
+        # This dramatically reduces peak memory because heavy tabs
+        # (plots, match quality, map) are only built when viewed.
+        # Inactive tabs return ``no_update`` so Dash keeps whatever
+        # was last rendered (empty on first visit, populated once the
+        # user clicks the tab).
+        # -----------------------------------------------------------
+        overview = no_update
+        results_content = no_update
+        plots = no_update
+        match_quality = no_update
+        map_content = no_update
 
-        # Plots tab
-        plots = (
-            _build_plots(
-                results,
-                totals,
-                sites,
-                task=task,
-                quality_warnings=quality_warnings,
+        if active_tab == "tab-overview":
+            overview = _build_overview(task, sites, totals)
+        elif active_tab == "tab-results":
+            results_content = _build_results_content(
+                results, totals, sites, quality_warnings=quality_warnings
             )
-            if results
-            else html.P("Results not yet available.", className="text-muted")
-        )
-
-        # Match Quality tab
-        match_quality = _build_match_quality(task_id, task, sites, totals)
-
-        # Map tab
-        map_content = _build_map(
-            detail.get("sites_geojson"), totals, covariates=task.covariates
-        )
+        elif active_tab == "tab-plots":
+            plots = (
+                _build_plots(
+                    results,
+                    totals,
+                    sites,
+                    task=task,
+                    quality_warnings=quality_warnings,
+                )
+                if results
+                else html.P("Results not yet available.", className="text-muted")
+            )
+        elif active_tab == "tab-match-quality":
+            match_quality = _build_match_quality(task_id, task, sites, totals)
+        elif active_tab == "tab-map":
+            map_content = _build_map(
+                detail.get("sites_geojson"), totals, covariates=task.covariates
+            )
 
         return (
             title,

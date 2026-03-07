@@ -28,6 +28,7 @@ from models import (
     TaskResult,
     TaskResultTotal,
     TaskSite,
+    User,
     UserSiteSet,
     get_db,
 )
@@ -1081,14 +1082,31 @@ def submit_analysis_task(
 
 
 def get_task_list(user_id=None, limit=50):
-    """Get recent analysis tasks, optionally filtered by user."""
-    from sqlalchemy.orm import joinedload
+    """Get recent analysis tasks, optionally filtered by user.
+
+    Uses ``load_only`` to skip heavy JSON/array columns (``config``,
+    ``covariates``, ``extra_metadata``) that the task list view never
+    reads.  This reduces per-row memory from ~10-50 KB to ~1 KB.
+    """
+    from sqlalchemy.orm import joinedload, load_only
 
     db = get_db()
     try:
         query = (
             db.query(AnalysisTask)
-            .options(joinedload(AnalysisTask.user))
+            .options(
+                load_only(
+                    AnalysisTask.id,
+                    AnalysisTask.name,
+                    AnalysisTask.status,
+                    AnalysisTask.n_sites,
+                    AnalysisTask.submitted_by,
+                    AnalysisTask.created_at,
+                    AnalysisTask.submitted_at,
+                    AnalysisTask.completed_at,
+                ),
+                joinedload(AnalysisTask.user).load_only(User.id, User.name),
+            )
             .order_by(AnalysisTask.created_at.desc())
         )
         if user_id:

@@ -265,7 +265,9 @@ GH_ACTIONS_POLICY=$(cat <<EOF
                 "ecr:UploadLayerPart",
                 "ecr:CompleteLayerUpload",
                 "ecr:DescribeRepositories",
-                "ecr:CreateRepository"
+                "ecr:CreateRepository",
+                "ecr:TagResource",
+                "ecr:ListTagsForResource"
             ],
             "Resource": [
                 "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/${ECR_WEBAPP}",
@@ -373,7 +375,9 @@ EC2_APP_POLICY=$(cat <<EOF
                 "s3:GetObject",
                 "s3:PutObject",
                 "s3:ListBucket",
-                "s3:DeleteObject"
+                "s3:DeleteObject",
+                "s3:PutObjectTagging",
+                "s3:GetObjectTagging"
             ],
             "Resource": [
                 "arn:aws:s3:::${S3_DATA_BUCKET}",
