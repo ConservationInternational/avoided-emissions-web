@@ -3190,6 +3190,81 @@ def _build_overview(task, sites, totals):
             )
         )
 
+    # --- Matching statistics boxes -------------------------------------------
+    if task.status == "succeeded":
+        import json
+
+        mq_raw = download_results_csv(
+            task.id, "match_quality_summary", results_s3_uri=task.results_s3_uri
+        )
+        if mq_raw:
+            try:
+                mq_summary = json.loads(mq_raw)
+            except (json.JSONDecodeError, ValueError):
+                mq_summary = None
+            if mq_summary:
+                agg = mq_summary.get("summary_stats", {}).get("__all__", {})
+                n_treat = agg.get("n_treatment", 0)
+                n_ctrl = agg.get("n_control", 0)
+                n_treat_total = agg.get("n_treatment_total")
+                n_ctrl_sampled = agg.get("n_control_sampled")
+                n_ctrl_pool = agg.get("n_control_pool")
+
+                # Treatment card body
+                treat_body = [
+                    html.H4(f"{n_treat:,}", className="text-primary"),
+                    html.P("Treatment Pixels Matched", className="text-muted mb-0"),
+                ]
+                if n_treat_total and n_treat_total > n_treat:
+                    pct_t = n_treat / n_treat_total * 100
+                    treat_body.append(
+                        html.Small(
+                            f"of {n_treat_total:,} in site ({pct_t:.1f}% sampled)",
+                            className="text-muted",
+                        )
+                    )
+
+                # Control card body
+                ctrl_body = [
+                    html.H4(f"{n_ctrl:,}", className="text-primary"),
+                    html.P("Control Pixels Matched", className="text-muted mb-0"),
+                ]
+                if n_ctrl_sampled and n_ctrl_sampled > n_ctrl:
+                    sub = f"of {n_ctrl_sampled:,} sampled"
+                    if n_ctrl_pool and n_ctrl_pool > n_ctrl_sampled:
+                        pct_c = n_ctrl_sampled / n_ctrl_pool * 100
+                        sub += f" ({pct_c:.1f}% of {n_ctrl_pool:,} candidates)"
+                    ctrl_body.append(html.Small(sub, className="text-muted"))
+                elif n_ctrl_pool and n_ctrl_pool > n_ctrl:
+                    ctrl_body.append(
+                        html.Small(
+                            f"of {n_ctrl_pool:,} candidates",
+                            className="text-muted",
+                        )
+                    )
+
+                cards.append(
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                dbc.Card(
+                                    dbc.CardBody(treat_body),
+                                    color="primary",
+                                    outline=True,
+                                )
+                            ),
+                            dbc.Col(
+                                dbc.Card(
+                                    dbc.CardBody(ctrl_body),
+                                    color="primary",
+                                    outline=True,
+                                )
+                            ),
+                        ],
+                        className="mb-3",
+                    )
+                )
+
     # --- Failed sites alert --------------------------------------------------
     meta = task.extra_metadata or {}
     failed_sites = _normalize_metadata_list(meta.get("failed_sites", []))
