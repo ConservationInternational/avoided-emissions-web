@@ -117,11 +117,16 @@ def parse_config(argv: list[str] | None = None) -> dict:
     if args.site_id:
         config["site_id"] = args.site_id
 
-    # Defaults
-    config.setdefault("max_treatment_pixels", 1000)
-    config.setdefault("control_multiplier", 50)
-    config.setdefault("min_site_area_ha", 100)
-    config.setdefault("min_glm_treatment_pixels", 15)
+    # Validate required parameters (no silent defaults)
+    required = [
+        "max_treatment_pixels",
+        "control_multiplier",
+        "min_site_area_ha",
+        "min_glm_treatment_pixels",
+    ]
+    missing = [k for k in required if k not in config]
+    if missing:
+        raise KeyError(f"Missing required config parameters: {', '.join(missing)}")
 
     config["input_dir"] = os.path.join(config["data_dir"], "input")
     config["output_dir"] = os.path.join(config["data_dir"], "output")

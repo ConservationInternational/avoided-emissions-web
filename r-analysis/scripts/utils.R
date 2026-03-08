@@ -188,13 +188,15 @@ parse_config <- function(args = commandArgs(trailingOnly = TRUE)) {
         config$site_id <- site_id
     }
 
-    # Apply defaults for optional parameters
-    if (is.null(config$max_treatment_pixels)) config$max_treatment_pixels <- 1000
-    if (is.null(config$control_multiplier)) config$control_multiplier <- 50
-    if (is.null(config$min_site_area_ha)) config$min_site_area_ha <- 100
-    if (is.null(config$min_glm_treatment_pixels)) config$min_glm_treatment_pixels <- 15
-    if (is.null(config$caliper_width)) config$caliper_width <- 0.2
-    if (is.null(config$max_controls_per_treatment)) config$max_controls_per_treatment <- 1
+    # Validate required parameters (no silent defaults)
+    required_params <- c(
+        "max_treatment_pixels", "control_multiplier", "min_site_area_ha",
+        "min_glm_treatment_pixels", "caliper_width", "max_controls_per_treatment"
+    )
+    missing <- required_params[!required_params %in% names(config)]
+    if (length(missing) > 0) {
+        stop("Missing required config parameters: ", paste(missing, collapse = ", "))
+    }
 
     # Set up directory paths
     config$input_dir <- file.path(config$data_dir, "input")

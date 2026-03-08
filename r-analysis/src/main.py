@@ -189,17 +189,15 @@ def run(params, log=None):
         "sites_file": sites_local,
         "cog_bucket": params["cog_bucket"],
         "cog_prefix": params["cog_prefix"],
-        "covariates": params.get("covariates", []),
-        "exact_match_vars": params.get(
-            "exact_match_vars", ["region", "ecoregion", "pa"]
-        ),
-        "fc_years": params.get("fc_years", list(range(2000, 2024))),
-        "max_treatment_pixels": params.get("max_treatment_pixels", 1000),
-        "control_multiplier": params.get("control_multiplier", 50),
-        "min_site_area_ha": params.get("min_site_area_ha", 100),
-        "min_glm_treatment_pixels": params.get("min_glm_treatment_pixels", 15),
-        "caliper_width": params.get("caliper_width", 0.2),
-        "max_controls_per_treatment": params.get("max_controls_per_treatment", 0),
+        "covariates": params["covariates"],
+        "exact_match_vars": params["exact_match_vars"],
+        "fc_years": params["fc_years"],
+        "max_treatment_pixels": params["max_treatment_pixels"],
+        "control_multiplier": params["control_multiplier"],
+        "min_site_area_ha": params["min_site_area_ha"],
+        "min_glm_treatment_pixels": params["min_glm_treatment_pixels"],
+        "caliper_width": params["caliper_width"],
+        "max_controls_per_treatment": params["max_controls_per_treatment"],
     }
     if params.get("random_seed") is not None:
         config["random_seed"] = int(params["random_seed"])
