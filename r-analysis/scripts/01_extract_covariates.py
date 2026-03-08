@@ -545,10 +545,14 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     treatment_key["site_id"] = treatment_key["id_numeric"].map(id_to_site)
     log.info("Treatment cells: %d", len(treatment_key))
 
+    # Free the full-grid site mask — values are captured in treatment_key
+    del site_mask, site_ids_flat
+
     # --- 6. determine candidate control pixels ---
     # Rasterize the matching extent polygon to identify the area
     # where valid controls can exist (the intersection of all
-    # polygon-type exact-match layers that overlap the sites).
+    # polygon-type exact-match layers that overlap the sites,
+    # computed by the webapp via PostGIS).
     extent_mask_2d = rasterize(
         [(mapping(extent_geom), 1)],
         out_shape=(height, width),
@@ -558,9 +562,12 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         all_touched=True,
     )
     in_extent = extent_mask_2d.ravel().astype(bool)
+    del extent_mask_2d  # free full-grid raster
     candidate_mask = in_extent | treatment_mask
+    del in_extent, treatment_mask  # free boolean arrays
 
     candidate_indices = np.nonzero(candidate_mask)[0]
+    del candidate_mask
 
     log.info(
         "Extracting covariate values for %d candidate pixels...", len(candidate_indices)
@@ -604,6 +611,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         ds = ds.drop_vars(layer_name)
 
     covariate_df = pd.DataFrame(data)
+    del data  # free the dict; DataFrame now owns the arrays
 
     log.info("Total covariate values extracted: %d pixels", len(covariate_df))
 

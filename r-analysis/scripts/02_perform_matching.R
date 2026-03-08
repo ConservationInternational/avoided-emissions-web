@@ -16,12 +16,9 @@
 # Output:
 #   - {matches_dir}/m_{id_numeric}.rds : Matched pairs for each site
 
-library(dtplyr)
 library(dplyr, warn.conflicts = FALSE)
-library(tidyverse)
 library(foreach)
 library(optmatch)
-library(lubridate)
 library(arrow)
 library(jsonlite)
 
@@ -58,7 +55,13 @@ if ("geometry" %in% names(sites)) {
     sites <- st_as_sf(sites, wkt = "geometry", crs = 4326)
 }
 treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
-base_data <- read_parquet(file.path(config$output_dir, "treatments_and_controls.parquet"))
+# Keep parquet on disk as an Arrow dataset — avoids materialising the entire
+# table into R memory (which at double precision can easily be 10-30+ GB).
+# Per-site subsets are filtered in Arrow and collected just-in-time.
+base_dataset <- open_dataset(
+    file.path(config$output_dir, "treatments_and_controls.parquet"),
+    format = "parquet"
+)
 all_site_ids <- unique(treatment_key$id_numeric)
 all_treatment_cells <- unique(treatment_key$cell)
 
@@ -276,11 +279,14 @@ for (this_id in site_ids) {
             TRUE
         } else {
             # All candidate pixels (treatment + controls) are spatially
-            # constrained to the matching extent computed in the webapp
+            # constrained to the matching extent computed in the webapp.
+            # Filter in Arrow to avoid materialising the full parquet.
             site_treatment_cells <- treatment_cells$cell
-            vals <- base_data %>%
-                mutate(treatment = cell %in% site_treatment_cells) %>%
-                filter(treatment | !(cell %in% all_treatment_cells))
+            vals <- base_dataset %>%
+                filter(cell %in% site_treatment_cells |
+                       !(cell %in% all_treatment_cells)) %>%
+                collect() %>%
+                mutate(treatment = cell %in% site_treatment_cells)
 
             # Remove pixels with NA in exact-match grouping variables
             n_before <- nrow(vals)
@@ -424,6 +430,13 @@ for (this_id in site_ids) {
     })
 
     if (!ok) n_failed <- n_failed + 1L
+    # Free per-site temporaries and reclaim memory before next site
+    rm(list = intersect(
+        c("vals", "m", "treatment_cells", "site_treatment_cells",
+          "sample_sizes"),
+        ls()
+    ))
+    gc()
 }
 
 if (n_failed > 0L) {
