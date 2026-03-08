@@ -56,7 +56,6 @@ if ("geometry" %in% names(sites)) {
 }
 treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
 # Keep parquet on disk as an Arrow dataset — avoids materialising the entire
-# table into R memory (which at double precision can easily be 10-30+ GB).
 # Per-site subsets are filtered in Arrow and collected just-in-time.
 base_dataset <- open_dataset(
     file.path(config$output_dir, "treatments_and_controls.parquet"),

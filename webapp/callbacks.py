@@ -2706,6 +2706,61 @@ def register_callbacks(app, limiter=None):
             )
         children.append(dcc.Graph(figure=fig_defor))
 
+        # --- Cumulative deforestation plot ---
+        site_sorted = site_df.sort_values("year")
+        fig_cum = go.Figure()
+        fig_cum.add_trace(
+            go.Scatter(
+                x=site_sorted["year"],
+                y=site_sorted["treatment_defor_ha"].cumsum(),
+                mode="lines+markers",
+                name="Project Site",
+                line=dict(color="#2ca02c", width=2),
+                marker=dict(size=6),
+            )
+        )
+        fig_cum.add_trace(
+            go.Scatter(
+                x=site_sorted["year"],
+                y=site_sorted["control_defor_ha"].cumsum(),
+                mode="lines+markers",
+                name="Matched Controls",
+                line=dict(color="#d62728", width=2),
+                marker=dict(size=6),
+            )
+        )
+        fig_cum.update_layout(
+            title=f"Cumulative Deforestation: {site_name}{sub_note}",
+            xaxis_title="Year",
+            yaxis_title="Cumulative Deforestation (ha)",
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
+            hovermode="x unified",
+        )
+        if not pre_years.empty:
+            fig_cum.add_vrect(
+                x0=pre_years.min() - 0.5,
+                x1=pre_years.max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Pre-intervention",
+                annotation_position="top left",
+                annotation_font_color="gray",
+            )
+        if end_date:
+            end_year = int(end_date[:4])
+            fig_cum.add_vrect(
+                x0=end_year + 0.5,
+                x1=site_sorted["year"].max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Post-intervention",
+                annotation_position="top right",
+                annotation_font_color="gray",
+            )
+        children.append(dcc.Graph(figure=fig_cum))
+
         # --- Emissions comparison plot ---
         has_emissions = (
             site_df["treatment_emissions_mgco2e"].sum() > 0
@@ -3615,6 +3670,73 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
                     annotation_font_color="gray",
                 )
         plots.append(dcc.Graph(figure=fig_defor))
+
+        # --- Cumulative deforestation plot ---
+        agg_df = agg_df.sort_values("year")
+        agg_df["cum_treatment_defor_ha"] = agg_df["treatment_defor_ha"].cumsum()
+        agg_df["cum_control_defor_ha"] = agg_df["control_defor_ha"].cumsum()
+
+        fig_cum = go.Figure()
+        fig_cum.add_trace(
+            go.Scatter(
+                x=agg_df["year"],
+                y=agg_df["cum_treatment_defor_ha"],
+                mode="lines+markers",
+                name="Project Sites",
+                line=dict(color="#2ca02c", width=2),
+                marker=dict(size=6),
+            )
+        )
+        fig_cum.add_trace(
+            go.Scatter(
+                x=agg_df["year"],
+                y=agg_df["cum_control_defor_ha"],
+                mode="lines+markers",
+                name="Matched Controls",
+                line=dict(color="#d62728", width=2),
+                marker=dict(size=6),
+            )
+        )
+        fig_cum.update_layout(
+            title=(
+                "Cumulative Deforestation: Project Sites vs Matched Controls"
+                + title_suffix
+            ),
+            xaxis_title="Year",
+            yaxis_title="Cumulative Deforestation (ha)",
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
+            hovermode="x unified",
+        )
+        if not pre_years.empty:
+            fig_cum.add_vrect(
+                x0=pre_years.min() - 0.5,
+                x1=pre_years.max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Pre-intervention",
+                annotation_position="top left",
+                annotation_font_color="gray",
+            )
+        if sites:
+            post_start = None
+            for s in sites:
+                if s.end_date:
+                    end_yr = s.end_date.year
+                    if post_start is None or end_yr < post_start:
+                        post_start = end_yr
+            if post_start is not None:
+                fig_cum.add_vrect(
+                    x0=post_start + 0.5,
+                    x1=agg_df["year"].max() + 0.5,
+                    fillcolor="gray",
+                    opacity=0.12,
+                    line_width=0,
+                    annotation_text="Post-intervention",
+                    annotation_position="top right",
+                    annotation_font_color="gray",
+                )
+        plots.append(dcc.Graph(figure=fig_cum))
 
     # --- Existing avoided-emissions bar charts -----------------------------
 
