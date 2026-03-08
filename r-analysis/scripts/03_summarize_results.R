@@ -313,18 +313,82 @@ if (length(match_files) > 0) {
         covariate_cols = all_covs_for_balance
     )
 
+    # -- Read total treatment / control counts from match files -----------
+    # Each match RDS file carries per-site pre-matching counts that were
+    # recorded during step 2:
+    #   sampled_fraction  = n_treatment_sampled / n_treatment_total
+    #   n_control_sampled = controls fed into the matching algorithm
+    #   n_control_pool    = controls available before subsampling
+    # We also read the treatment_cell_key for total treatment counts.
+    treatment_key_path <- file.path(
+        config$output_dir, "treatment_cell_key.parquet"
+    )
+    total_treatment_by_site <- list()
+    if (file.exists(treatment_key_path)) {
+        tk <- read_parquet(treatment_key_path) %>% as_tibble()
+        tk_counts <- tk %>%
+            count(site_id, name = "n") %>%
+            mutate(site_id = as.character(site_id))
+        for (i in seq_len(nrow(tk_counts))) {
+            total_treatment_by_site[[tk_counts$site_id[i]]] <-
+                tk_counts$n[i]
+        }
+    }
+
+    # Aggregate n_control_sampled and n_control_pool from match files
+    control_sampled_by_site <- list()
+    control_pool_by_site <- list()
+    for (f in match_files) {
+        m_tmp <- readRDS(f)
+        sid_str <- as.character(m_tmp$site_id[1])
+        if ("n_control_sampled" %in% names(m_tmp)) {
+            control_sampled_by_site[[sid_str]] <-
+                m_tmp$n_control_sampled[1]
+        }
+        if ("n_control_pool" %in% names(m_tmp)) {
+            control_pool_by_site[[sid_str]] <-
+                m_tmp$n_control_pool[1]
+        }
+    }
+
     if (nrow(match_cov_data) > 0 && length(all_covs_for_balance) > 0) {
         # -- Summary stats per site and aggregate --------------------------
+        n_treatment_total_all <- sum(
+            unlist(total_treatment_by_site), na.rm = TRUE
+        )
+        n_control_sampled_all <- sum(
+            unlist(control_sampled_by_site), na.rm = TRUE
+        )
+        n_control_pool_all <- sum(
+            unlist(control_pool_by_site), na.rm = TRUE
+        )
         mq_summary$summary_stats[["__all__"]] <- list(
             n_treatment = sum(match_cov_data$treatment),
             n_control = sum(!match_cov_data$treatment),
-            n_sites = length(unique(match_cov_data$site_id))
+            n_sites = length(unique(match_cov_data$site_id)),
+            n_treatment_total = n_treatment_total_all,
+            n_control_sampled = if (n_control_sampled_all > 0) {
+                n_control_sampled_all
+            } else {
+                NULL
+            },
+            n_control_pool = if (n_control_pool_all > 0) {
+                n_control_pool_all
+            } else {
+                NULL
+            }
         )
         for (sid in unique(match_cov_data$site_id)) {
             site_mask <- match_cov_data$site_id == sid
-            mq_summary$summary_stats[[as.character(sid)]] <- list(
+            sid_str <- as.character(sid)
+            mq_summary$summary_stats[[sid_str]] <- list(
                 n_treatment = sum(match_cov_data$treatment[site_mask]),
-                n_control = sum(!match_cov_data$treatment[site_mask])
+                n_control = sum(!match_cov_data$treatment[site_mask]),
+                n_treatment_total = total_treatment_by_site[[sid_str]],
+                n_control_sampled =
+                    control_sampled_by_site[[sid_str]],
+                n_control_pool =
+                    control_pool_by_site[[sid_str]]
             )
         }
 

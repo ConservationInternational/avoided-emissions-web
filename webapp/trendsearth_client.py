@@ -381,6 +381,24 @@ class TrendsEarthClient:
         resp.raise_for_status()
         return resp.json()
 
+    def cancel_execution(self, execution_id):
+        """Cancel a running execution on the API."""
+        url = f"{self.api_url}/execution/{execution_id}/cancel"
+        resp = self._session.post(
+            url,
+            headers=self._headers(),
+            timeout=_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "[TE-API] POST %s → %d %s",
+                url,
+                resp.status_code,
+                resp.reason,
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     def get_execution(self, execution_id):
         """Fetch an execution's current state."""
         url = f"{self.api_url}/execution/{execution_id}"

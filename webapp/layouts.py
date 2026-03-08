@@ -13,6 +13,8 @@ import dash_ag_grid as dag
 import dash_bootstrap_components as dbc
 from dash import dcc, html
 
+from services import ANALYSIS_DEFAULTS, DEFAULT_MATCHING_JOB_QUEUE
+
 # Default covariates for the matching formula
 DEFAULT_COVARIATES = [
     "lc_2015_agriculture",
@@ -76,8 +78,6 @@ MATCHING_JOB_QUEUE_OPTIONS = [
         "value": "ae-ondemand-1TB-io2-disk",
     },
 ]
-
-DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-1TB-io2-disk"
 
 # -- Column definitions (AG Grid) -------------------------------------------
 
@@ -1263,6 +1263,7 @@ def dashboard_layout(user):
             ),
             # Stores & intervals
             html.Div(id="recompute-from-list-result"),
+            html.Div(id="cancel-from-list-result"),
             dcc.Store(id="task-list-store"),
             dcc.Interval(id="refresh-interval", interval=30000, n_intervals=0),
         ]
@@ -1742,7 +1743,9 @@ def submit_layout(user, recompute_config=None):
                                                                                                 step=1,
                                                                                                 value=rc.get(
                                                                                                     "max_treatment_pixels",
-                                                                                                    1000,
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "max_treatment_pixels"
+                                                                                                    ],
                                                                                                 ),
                                                                                             ),
                                                                                             html.Small(
@@ -1766,7 +1769,9 @@ def submit_layout(user, recompute_config=None):
                                                                                                 step=1,
                                                                                                 value=rc.get(
                                                                                                     "control_multiplier",
-                                                                                                    50,
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "control_multiplier"
+                                                                                                    ],
                                                                                                 ),
                                                                                             ),
                                                                                             html.Small(
@@ -1795,7 +1800,9 @@ def submit_layout(user, recompute_config=None):
                                                                                                 step=1,
                                                                                                 value=rc.get(
                                                                                                     "min_site_area_ha",
-                                                                                                    100,
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "min_site_area_ha"
+                                                                                                    ],
                                                                                                 ),
                                                                                             ),
                                                                                             html.Small(
@@ -1819,7 +1826,9 @@ def submit_layout(user, recompute_config=None):
                                                                                                 step=1,
                                                                                                 value=rc.get(
                                                                                                     "min_glm_treatment_pixels",
-                                                                                                    15,
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "min_glm_treatment_pixels"
+                                                                                                    ],
                                                                                                 ),
                                                                                             ),
                                                                                             html.Small(
@@ -1848,7 +1857,9 @@ def submit_layout(user, recompute_config=None):
                                                                                                 step=0.05,
                                                                                                 value=rc.get(
                                                                                                     "caliper_width",
-                                                                                                    0.2,
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "caliper_width"
+                                                                                                    ],
                                                                                                 ),
                                                                                             ),
                                                                                             html.Small(
@@ -1888,7 +1899,9 @@ def submit_layout(user, recompute_config=None):
                                                                                                 ],
                                                                                                 value=rc.get(
                                                                                                     "max_controls_per_treatment",
-                                                                                                    1,
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "max_controls_per_treatment"
+                                                                                                    ],
                                                                                                 ),
                                                                                                 clearable=False,
                                                                                             ),
@@ -1978,7 +1991,9 @@ def submit_layout(user, recompute_config=None):
                                                                                                 ],
                                                                                                 value=rc.get(
                                                                                                     "match_memory_gb",
-                                                                                                    30,
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "match_memory_gb"
+                                                                                                    ],
                                                                                                 ),
                                                                                                 clearable=False,
                                                                                             ),
@@ -2045,18 +2060,14 @@ def submit_layout(user, recompute_config=None):
                                 children=[
                                     html.Div(
                                         [
+                                            html.Div(
+                                                id="review-summary",
+                                                className="mb-3",
+                                            ),
                                             dbc.Card(
                                                 [
                                                     dbc.CardBody(
                                                         [
-                                                            html.H5(
-                                                                "Ready to submit",
-                                                                className="mb-2",
-                                                            ),
-                                                            html.P(
-                                                                "Confirm your uploaded sites and matching settings in the previous tabs, then submit the task.",
-                                                                className="text-muted mb-3",
-                                                            ),
                                                             dcc.Loading(
                                                                 dbc.Button(
                                                                     "Submit Task",
@@ -2154,6 +2165,17 @@ def task_detail_layout(user, task_id, shared_token=None):
                                     size="sm",
                                     className="mt-1 me-2",
                                     title="Open submission form pre-filled with this task's settings",
+                                ),
+                                dbc.Button(
+                                    [
+                                        html.I(className="bi bi-x-circle me-1"),
+                                        "Cancel",
+                                    ],
+                                    id="cancel-task-btn",
+                                    color="outline-danger",
+                                    size="sm",
+                                    className="mt-1 me-2",
+                                    title="Cancel this running task",
                                 ),
                                 dbc.Button(
                                     [
@@ -2369,6 +2391,7 @@ def task_detail_layout(user, task_id, shared_token=None):
             shared_banner,
             header_row,
             html.Div(id="recompute-result"),
+            html.Div(id="cancel-task-result"),
             html.Div(id="quality-warning-banner"),
             tabs,
             edit_modal,

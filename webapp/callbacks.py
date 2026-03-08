@@ -30,13 +30,16 @@ from auth import (
 )
 from config import report_exception
 from layouts import (
+    EXACT_MATCH_OPTIONS,
     RESULTS_TOTAL_COLUMNS,
     RESULTS_YEARLY_COLUMNS,
     TASK_LIST_COLUMNS,
     _make_ag_grid,
 )
 from services import (
+    ANALYSIS_DEFAULTS,
     approve_user,
+    cancel_task,
     change_user_role,
     create_share_link,
     delete_covariate_preset,
@@ -605,6 +608,252 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
         return covs
 
+    # ------------------------------------------------------------------
+    # Review summary — rendered when the user switches to the Review tab
+    # ------------------------------------------------------------------
+    _EXACT_MATCH_LABELS = {opt["value"]: opt["label"] for opt in EXACT_MATCH_OPTIONS}
+
+    @app.callback(
+        Output("review-summary", "children"),
+        Input("submit-tabs", "active_tab"),
+        State("task-name", "value"),
+        State("task-description", "value"),
+        State("parsed-sites-store", "data"),
+        State("covariate-selection", "value"),
+        State("exact-match-selection", "value"),
+        State("max-treatment-pixels", "value"),
+        State("control-multiplier", "value"),
+        State("min-site-area-ha", "value"),
+        State("min-glm-treatment-pixels", "value"),
+        State("caliper-width", "value"),
+        State("max-controls-per-treatment", "value"),
+        State("random-seed", "value"),
+        State("match-memory-gb", "value"),
+        State("matching-job-queue", "value"),
+        prevent_initial_call=True,
+    )
+    def populate_review_summary(
+        active_tab,
+        name,
+        description,
+        sites_data,
+        covariates,
+        exact_match_vars,
+        max_treatment_pixels,
+        control_multiplier,
+        min_site_area_ha,
+        min_glm_treatment_pixels,
+        caliper_width,
+        max_controls_per_treatment,
+        random_seed,
+        match_memory_gb,
+        matching_job_queue,
+    ):
+        if active_tab != "tab-submit-review":
+            raise PreventUpdate
+
+        warnings = []
+
+        # --- Task info ---
+        task_name = name or ""
+        if not task_name.strip():
+            warnings.append("Task name is empty.")
+
+        # --- Sites ---
+        if sites_data:
+            n_sites = sites_data.get("n_sites", "?")
+            site_set_name = sites_data.get("name", "Uploaded file")
+        else:
+            n_sites = 0
+            site_set_name = None
+            warnings.append("No sites have been uploaded or selected.")
+
+        # --- Covariates ---
+        cov_list = covariates or []
+        if not cov_list:
+            warnings.append("No covariates selected.")
+
+        # --- Exact match ---
+        em_list = exact_match_vars or []
+        if not em_list:
+            warnings.append("No exact match variables selected.")
+
+        overlap = set(cov_list) & set(em_list)
+        if overlap:
+            warnings.append(
+                "Overlap between covariates and exact match: "
+                + ", ".join(sorted(overlap))
+            )
+
+        em_labels = [_EXACT_MATCH_LABELS.get(v, v) for v in em_list]
+
+        # --- Matching params ---
+        mcpt = max_controls_per_treatment
+        if mcpt == 0:
+            mcpt_label = "No limit (full matching)"
+        else:
+            mcpt_label = str(mcpt)
+            if mcpt == 1:
+                mcpt_label += " (pair matching)"
+
+        def _param_row(label, value):
+            return html.Tr(
+                [
+                    html.Td(label, className="text-muted pe-3", style={"width": "50%"}),
+                    html.Td(html.Strong(value)),
+                ]
+            )
+
+        # --- Warnings banner ---
+        warning_banner = []
+        if warnings:
+            warning_banner = [
+                dbc.Alert(
+                    [
+                        html.Strong("Please fix before submitting:"),
+                        html.Ul(
+                            [html.Li(w) for w in warnings],
+                            className="mb-0 mt-1",
+                        ),
+                    ],
+                    color="warning",
+                    className="mb-3",
+                )
+            ]
+
+        # --- Build summary cards ---
+        task_card = dbc.Card(
+            [
+                dbc.CardHeader("Task"),
+                dbc.CardBody(
+                    html.Table(
+                        html.Tbody(
+                            [
+                                _param_row("Name", task_name or "—"),
+                                _param_row("Description", description or "(none)"),
+                                _param_row(
+                                    "Sites",
+                                    (
+                                        f"{n_sites} site(s)"
+                                        + (
+                                            f" — {site_set_name}"
+                                            if site_set_name
+                                            else ""
+                                        )
+                                    )
+                                    if sites_data
+                                    else "—",
+                                ),
+                            ]
+                        ),
+                        className="table table-sm table-borderless mb-0",
+                    )
+                ),
+            ],
+            className="ae-section-card mb-3",
+        )
+
+        covariates_card = dbc.Card(
+            [
+                dbc.CardHeader(f"Covariates ({len(cov_list)})"),
+                dbc.CardBody(
+                    html.Div(
+                        [
+                            dbc.Badge(c, color="info", className="me-1 mb-1")
+                            for c in cov_list
+                        ]
+                    )
+                    if cov_list
+                    else html.P("None selected", className="text-muted mb-0"),
+                ),
+            ],
+            className="ae-section-card mb-3",
+        )
+
+        exact_match_card = dbc.Card(
+            [
+                dbc.CardHeader(f"Exact Match Variables ({len(em_list)})"),
+                dbc.CardBody(
+                    html.Div(
+                        [
+                            dbc.Badge(lbl, color="secondary", className="me-1 mb-1")
+                            for lbl in em_labels
+                        ]
+                    )
+                    if em_list
+                    else html.P("None selected", className="text-muted mb-0"),
+                ),
+            ],
+            className="ae-section-card mb-3",
+        )
+
+        settings_card = dbc.Card(
+            [
+                dbc.CardHeader("Matching Settings"),
+                dbc.CardBody(
+                    html.Table(
+                        html.Tbody(
+                            [
+                                _param_row(
+                                    "Max treatment pixels",
+                                    str(max_treatment_pixels),
+                                ),
+                                _param_row(
+                                    "Control multiplier",
+                                    str(control_multiplier),
+                                ),
+                                _param_row(
+                                    "Min site area (ha)",
+                                    str(min_site_area_ha),
+                                ),
+                                _param_row(
+                                    "Min GLM treatment pixels",
+                                    str(min_glm_treatment_pixels),
+                                ),
+                                _param_row(
+                                    "Caliper width (SD)",
+                                    str(caliper_width),
+                                ),
+                                _param_row(
+                                    "Max controls per treatment",
+                                    mcpt_label,
+                                ),
+                                _param_row(
+                                    "Random seed",
+                                    str(random_seed) if random_seed else "—",
+                                ),
+                                _param_row(
+                                    "Matching memory",
+                                    f"{match_memory_gb} GB",
+                                ),
+                                _param_row(
+                                    "Batch job queue",
+                                    str(matching_job_queue or "—"),
+                                ),
+                            ]
+                        ),
+                        className="table table-sm table-borderless mb-0",
+                    )
+                ),
+            ],
+            className="ae-section-card mb-3",
+        )
+
+        return warning_banner + [
+            html.H5("Review Settings", className="mb-3"),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [task_card, covariates_card, exact_match_card],
+                        xs=12,
+                        lg=6,
+                    ),
+                    dbc.Col(settings_card, xs=12, lg=6),
+                ],
+                className="g-3 mb-3",
+            ),
+        ]
+
     @app.callback(
         [
             Output("upload-status", "children"),
@@ -941,30 +1190,45 @@ def register_callbacks(app, limiter=None):
             # pre-intervention deforestation covariate, and forward
             # to the latest end_year (or current year if open-ended).
             start_dates = pd.to_datetime(gdf["start_date"])
-            fc_min = max(2000, int(start_dates.dt.year.min()) - 5)
+            fc_min = max(
+                ANALYSIS_DEFAULTS["fc_year_start"],
+                int(start_dates.dt.year.min()) - 5,
+            )
             if "end_date" in gdf.columns and gdf["end_date"].notna().any():
                 end_years = pd.to_datetime(
                     gdf.loc[gdf["end_date"].notna(), "end_date"]
                 ).dt.year
-                fc_max = min(2024, int(end_years.max()))
+                fc_max = min(
+                    ANALYSIS_DEFAULTS["fc_year_end"],
+                    int(end_years.max()),
+                )
             else:
-                fc_max = 2024
+                fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
             fc_years = list(range(fc_min, fc_max + 1))
 
             # Server-side bounds validation (mirrors the HTML input
             # min/max attributes so tampered requests are rejected).
-            _mtp = int(max_treatment_pixels or 1000)
-            _cm = int(control_multiplier or 50)
-            _msa = int(min_site_area_ha or 100)
-            _mglm = int(min_glm_treatment_pixels or 15)
-            _cw = float(caliper_width if caliper_width is not None else 0.2)
+            _mtp = int(
+                max_treatment_pixels or ANALYSIS_DEFAULTS["max_treatment_pixels"]
+            )
+            _cm = int(control_multiplier or ANALYSIS_DEFAULTS["control_multiplier"])
+            _msa = int(min_site_area_ha or ANALYSIS_DEFAULTS["min_site_area_ha"])
+            _mglm = int(
+                min_glm_treatment_pixels
+                or ANALYSIS_DEFAULTS["min_glm_treatment_pixels"]
+            )
+            _cw = float(
+                caliper_width
+                if caliper_width is not None
+                else ANALYSIS_DEFAULTS["caliper_width"]
+            )
             _mcpt = int(
                 max_controls_per_treatment
                 if max_controls_per_treatment is not None
-                else 1
+                else ANALYSIS_DEFAULTS["max_controls_per_treatment"]
             )
             _seed = int(random_seed) if random_seed not in (None, "") else None
-            _mmgb = int(match_memory_gb or 30)
+            _mmgb = int(match_memory_gb or ANALYSIS_DEFAULTS["match_memory_gb"])
 
             bounds = [
                 (_mtp, 1, 100_000, "Max treatment pixels"),
@@ -1497,26 +1761,94 @@ def register_callbacks(app, limiter=None):
         prevent_initial_call=True,
     )
 
-    # -- Recompute task (from task list table) --------------------------------
+    # -- Cancel task (detail page) -------------------------------------------
 
-    app.clientside_callback(
-        """
-        function(renderer_data) {
-            if (!renderer_data) {
-                return window.dash_clientside.no_update;
-            }
-            var value = renderer_data.value || {};
-            if (value.action !== 'recompute' || !value.task_id) {
-                return window.dash_clientside.no_update;
-            }
-            window.location.href = '/submit?recompute=' + value.task_id;
-            return '';
-        }
-        """,
-        Output("recompute-from-list-result", "children"),
+    @app.callback(
+        Output("cancel-task-result", "children"),
+        Input("cancel-task-btn", "n_clicks"),
+        State("task-id-store", "data"),
+        prevent_initial_call=True,
+    )
+    def handle_cancel_task(n_clicks, task_id):
+        if not n_clicks or not task_id:
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user:
+            return dbc.Alert("Please log in first.", color="danger", duration=4000)
+
+        try:
+            cancel_task(task_id, user)
+            return dbc.Alert(
+                "Task cancelled successfully. Refreshing…",
+                color="success",
+                duration=3000,
+            )
+        except (ValueError, PermissionError) as e:
+            return dbc.Alert(str(e), color="warning", duration=4000)
+        except Exception:
+            logger.exception("Error cancelling task %s", task_id)
+            return dbc.Alert("Failed to cancel task.", color="danger", duration=4000)
+
+    # -- Task actions from task list table (recompute / cancel) ---------------
+
+    @app.callback(
+        [
+            Output("recompute-from-list-result", "children"),
+            Output("cancel-from-list-result", "children"),
+        ],
         Input("task-list-table", "cellRendererData"),
         prevent_initial_call=True,
     )
+    def handle_task_list_actions(renderer_data):
+        if not renderer_data:
+            raise PreventUpdate
+
+        value = renderer_data.get("value") or {}
+        action = value.get("action")
+        task_id = value.get("task_id")
+        if not action or not task_id:
+            raise PreventUpdate
+
+        if action == "recompute":
+            return (
+                dcc.Location(
+                    href=f"/submit?recompute={task_id}",
+                    id="_recompute-redirect",
+                ),
+                no_update,
+            )
+
+        if action == "cancel":
+            user = get_current_user()
+            if not user:
+                return (
+                    no_update,
+                    dbc.Alert("Please log in first.", color="danger", duration=4000),
+                )
+            try:
+                cancel_task(task_id, user)
+                return (
+                    no_update,
+                    dbc.Alert("Task cancelled.", color="success", duration=3000),
+                )
+            except (ValueError, PermissionError) as e:
+                return (
+                    no_update,
+                    dbc.Alert(str(e), color="warning", duration=4000),
+                )
+            except Exception:
+                logger.exception("Error cancelling task %s from list", task_id)
+                return (
+                    no_update,
+                    dbc.Alert(
+                        "Failed to cancel task.",
+                        color="danger",
+                        duration=4000,
+                    ),
+                )
+
+        raise PreventUpdate
 
     # -- Admin: Covariates (unified export + merge) ---------------------------
 
@@ -3894,27 +4226,29 @@ def _build_all_match_quality_plots(
     else:
         total_area = sum(site_areas.values())
 
+    # Treatment pixels card body
+    treatment_body = [
+        html.H6("Treatment Pixels", className="text-muted mb-1"),
+        html.H4(f"{n_treatment:,}"),
+    ]
+
+    # Control pixels card body
+    control_body = [
+        html.H6("Control Pixels", className="text-muted mb-1"),
+        html.H4(f"{n_control:,}"),
+    ]
+
     stat_cols = [
         dbc.Col(
             dbc.Card(
-                dbc.CardBody(
-                    [
-                        html.H6("Treatment Pixels", className="text-muted mb-1"),
-                        html.H4(f"{n_treatment:,}"),
-                    ]
-                ),
+                dbc.CardBody(treatment_body),
                 className="text-center",
             ),
             md=3,
         ),
         dbc.Col(
             dbc.Card(
-                dbc.CardBody(
-                    [
-                        html.H6("Control Pixels", className="text-muted mb-1"),
-                        html.H4(f"{n_control:,}"),
-                    ]
-                ),
+                dbc.CardBody(control_body),
                 className="text-center",
             ),
             md=3,
@@ -4176,27 +4510,63 @@ def _build_plots_from_summary(store_data, site_filter=None):
     else:
         total_area = sum(site_areas.values())
 
+    # Treatment pixels card with optional total-in-site sub-number
+    n_treatment_total = stats.get("n_treatment_total")
+    treatment_body = [
+        html.H6("Treatment Pixels", className="text-muted mb-1"),
+        html.H4(f"{n_treatment:,}"),
+    ]
+    if n_treatment_total and n_treatment_total > n_treatment:
+        treatment_body.append(
+            html.Small(
+                f"of {n_treatment_total:,} in site",
+                className="text-muted",
+            )
+        )
+
+    # Control pixels card with sampled / pool sub-numbers
+    n_control_sampled = stats.get("n_control_sampled")
+    n_control_pool = stats.get("n_control_pool")
+    control_body = [
+        html.H6("Control Pixels", className="text-muted mb-1"),
+        html.H4(f"{n_control:,}"),
+    ]
+    if n_control_sampled and n_control_sampled > n_control:
+        pct = n_control_sampled / n_control_pool * 100 if n_control_pool else 0
+        if n_control_pool and pct < 100:
+            control_body.append(
+                html.Small(
+                    f"of {n_control_sampled:,} sampled "
+                    f"({pct:.1f}% of {n_control_pool:,})",
+                    className="text-muted",
+                )
+            )
+        else:
+            control_body.append(
+                html.Small(
+                    f"of {n_control_sampled:,} sampled",
+                    className="text-muted",
+                )
+            )
+    elif n_control_pool and n_control_pool > n_control:
+        control_body.append(
+            html.Small(
+                f"of {n_control_pool:,} candidates",
+                className="text-muted",
+            )
+        )
+
     stat_cols = [
         dbc.Col(
             dbc.Card(
-                dbc.CardBody(
-                    [
-                        html.H6("Treatment Pixels", className="text-muted mb-1"),
-                        html.H4(f"{n_treatment:,}"),
-                    ]
-                ),
+                dbc.CardBody(treatment_body),
                 className="text-center",
             ),
             md=3,
         ),
         dbc.Col(
             dbc.Card(
-                dbc.CardBody(
-                    [
-                        html.H6("Control Pixels", className="text-muted mb-1"),
-                        html.H4(f"{n_control:,}"),
-                    ]
-                ),
+                dbc.CardBody(control_body),
                 className="text-center",
             ),
             md=3,

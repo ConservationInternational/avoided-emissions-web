@@ -42,6 +42,22 @@ ALLOWED_MATCHING_JOB_QUEUES = {
 
 DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-1TB-io2-disk"
 
+# -- Analysis task default settings ------------------------------------------
+# Single source of truth for matching parameter defaults.  Imported by
+# layouts.py (UI form pre-fill) and callbacks.py (server-side fallbacks).
+ANALYSIS_DEFAULTS = {
+    "max_treatment_pixels": 1000,
+    "control_multiplier": 50,
+    "min_site_area_ha": 100,
+    "min_glm_treatment_pixels": 15,
+    "caliper_width": 0.2,
+    "max_controls_per_treatment": 1,
+    "match_memory_gb": 30,
+    "match_memory_mib": 30 * 1024,  # 30 GB in MiB
+    "fc_year_start": 2000,
+    "fc_year_end": 2024,  # exclusive upper bound for range()
+}
+
 MAX_ARCHIVE_FILE_COUNT = 2_000
 MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 MAX_ARCHIVE_MEMBER_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
@@ -723,14 +739,14 @@ def submit_analysis_task(
     exact_match_vars,
     fc_years=None,
     site_set_id=None,
-    max_treatment_pixels=1000,
-    control_multiplier=50,
-    min_site_area_ha=100,
-    min_glm_treatment_pixels=15,
-    caliper_width=0.2,
-    max_controls_per_treatment=1,
+    max_treatment_pixels=ANALYSIS_DEFAULTS["max_treatment_pixels"],
+    control_multiplier=ANALYSIS_DEFAULTS["control_multiplier"],
+    min_site_area_ha=ANALYSIS_DEFAULTS["min_site_area_ha"],
+    min_glm_treatment_pixels=ANALYSIS_DEFAULTS["min_glm_treatment_pixels"],
+    caliper_width=ANALYSIS_DEFAULTS["caliper_width"],
+    max_controls_per_treatment=ANALYSIS_DEFAULTS["max_controls_per_treatment"],
     random_seed=None,
-    match_memory_mib=30720,
+    match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
 ):
     """Create and submit a full analysis task via the trends.earth API.
@@ -838,7 +854,9 @@ def submit_analysis_task(
     )
 
     if fc_years is None:
-        fc_years = list(range(2000, 2024))
+        fc_years = list(
+            range(ANALYSIS_DEFAULTS["fc_year_start"], ANALYSIS_DEFAULTS["fc_year_end"])
+        )
 
     db = get_db()
     try:
@@ -1080,6 +1098,60 @@ def submit_analysis_task(
                 task.error_message = str(e)
                 db.commit()
         raise
+    finally:
+        db.close()
+
+
+def cancel_task(task_id, user):
+    """Cancel a running task and its API execution.
+
+    Sets the local task status to ``cancelled`` and calls the
+    trends.earth API cancel endpoint if an execution ID is tracked.
+    """
+    db = get_db()
+    try:
+        task = db.query(AnalysisTask).get(task_id)
+        if not task:
+            raise ValueError("Task not found.")
+
+        if not user.is_admin and str(task.submitted_by) != str(user.id):
+            raise PermissionError("You can only cancel your own tasks.")
+
+        if task.status in ("succeeded", "failed", "cancelled"):
+            raise ValueError(f"Task is already {task.status}.")
+
+        # Cancel on the API side if we have an execution ID
+        exec_ref = task.extract_job_id or ""
+        if exec_ref.startswith("api:"):
+            api_exec_id = exec_ref[4:]
+            try:
+                from credential_store import get_decrypted_secret
+                from trendsearth_client import TrendsEarthClient
+
+                user_creds = get_decrypted_secret(user.id)
+                if user_creds:
+                    client = TrendsEarthClient.from_oauth2_credentials(
+                        api_url=Config.TRENDSEARTH_API_URL,
+                        client_id=user_creds[0],
+                        client_secret=user_creds[1],
+                    )
+                    client.cancel_execution(api_exec_id)
+                    logger.info(
+                        "[CANCEL] Task %s: API execution %s cancelled",
+                        task_id,
+                        api_exec_id,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "[CANCEL] Task %s: failed to cancel API execution %s: %s",
+                    task_id,
+                    api_exec_id,
+                    e,
+                )
+
+        task.status = "cancelled"
+        db.commit()
+        logger.info("[CANCEL] Task %s: status → cancelled", task_id)
     finally:
         db.close()
 
@@ -2076,11 +2148,38 @@ def generate_match_quality_summary(task_id, results_s3_uri=None):
 
             summary["covariate_cols"] = covariate_cols
 
+            # --- Read sampling-by-site for total treatment counts ----------
+            sampling_by_site = {}
+            sampling_key = f"{prefix}/results_sampling_by_site.csv"
+            try:
+                import io as _io
+
+                obj = s3.get_object(Bucket=bucket, Key=sampling_key)
+                sbs_df = pd.read_csv(_io.BytesIO(obj["Body"].read()))
+                for _, row in sbs_df.iterrows():
+                    sid_str = str(row.get("site_id", ""))
+                    frac = row.get("sampled_fraction", 1.0)
+                    if sid_str and frac and frac > 0:
+                        sampling_by_site[sid_str] = float(frac)
+            except Exception:
+                pass  # Not available for older tasks
+
+            # Compute total treatment / control pool counts
+            for sid_str, stats in site_stats.items():
+                frac = sampling_by_site.get(sid_str, 1.0)
+                if frac > 0:
+                    stats["n_treatment_total"] = round(stats["n_treatment"] / frac)
+
             # Summary stats
+            n_treatment_total_all = sum(
+                s.get("n_treatment_total", s["n_treatment"])
+                for s in site_stats.values()
+            )
             summary["summary_stats"]["__all__"] = {
                 "n_treatment": sum(s["n_treatment"] for s in site_stats.values()),
                 "n_control": sum(s["n_control"] for s in site_stats.values()),
                 "n_sites": len(site_stats),
+                "n_treatment_total": n_treatment_total_all,
             }
             for sid_str, stats in site_stats.items():
                 summary["summary_stats"][sid_str] = stats

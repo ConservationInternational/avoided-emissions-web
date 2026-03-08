@@ -371,10 +371,7 @@ dagcomponentfuncs.LocalDateTime = function (props) {
 dagcomponentfuncs.TaskActions = function (props) {
     var data = props.data || {};
     var status = (data.status || "").toLowerCase();
-
-    // Only allow recompute for tasks in terminal states
-    var terminal = ["succeeded", "failed", "cancelled"];
-    var canRecompute = terminal.indexOf(status) >= 0;
+    var canCancel = ["pending", "submitted", "running"].indexOf(status) >= 0;
 
     return React.createElement(
         "div",
@@ -388,25 +385,49 @@ dagcomponentfuncs.TaskActions = function (props) {
                     fontWeight: 600,
                     border: "1px solid #ffc107",
                     borderRadius: "3px",
-                    backgroundColor: canRecompute ? "#fff" : "#e9ecef",
-                    color: canRecompute ? "#664d03" : "#6c757d",
-                    cursor: canRecompute ? "pointer" : "not-allowed",
+                    backgroundColor: "#fff",
+                    color: "#664d03",
+                    cursor: "pointer",
                 },
-                disabled: !canRecompute,
-                title: canRecompute
-                    ? "Resubmit with a new random seed"
-                    : "Task must be completed, failed, or cancelled",
+                title: "Resubmit with a new random seed",
                 onClick: function (e) {
                     e.stopPropagation();
-                    if (canRecompute) {
+                    props.setData({
+                        action: "recompute",
+                        task_id: data.id,
+                    });
+                },
+            },
+            "\u21BB Recompute"
+        ),
+        React.createElement(
+            "button",
+            {
+                style: {
+                    padding: "1px 6px",
+                    fontSize: "10px",
+                    fontWeight: 600,
+                    border: "1px solid #dc3545",
+                    borderRadius: "3px",
+                    backgroundColor: canCancel ? "#fff" : "#e9ecef",
+                    color: canCancel ? "#842029" : "#6c757d",
+                    cursor: canCancel ? "pointer" : "not-allowed",
+                },
+                disabled: !canCancel,
+                title: canCancel
+                    ? "Cancel this task"
+                    : "Only pending/running tasks can be cancelled",
+                onClick: function (e) {
+                    e.stopPropagation();
+                    if (canCancel) {
                         props.setData({
-                            action: "recompute",
+                            action: "cancel",
                             task_id: data.id,
                         });
                     }
                 },
             },
-            "\u21BB Recompute"
+            "\u2715 Cancel"
         )
     );
 };

@@ -275,9 +275,8 @@ for (this_id in site_ids) {
             )
             TRUE
         } else {
-            # All candidate pixels (treatment + controls) are already spatially
-            # constrained to the matching extent computed in the webapp, so no
-            # region-based filtering is needed here.
+            # All candidate pixels (treatment + controls) are spatially
+            # constrained to the matching extent computed in the webapp
             site_treatment_cells <- treatment_cells$cell
             vals <- base_data %>%
                 mutate(treatment = cell %in% site_treatment_cells) %>%
@@ -295,6 +294,9 @@ for (this_id in site_ids) {
 
             # Filter to groups present in both treatment and control
             vals <- filter_groups(vals, EXACT_MATCH_VARS)
+
+            # Record control pool size before subsampling
+            n_control_pool_site <- sum(!vals$treatment)
 
             # Sample to manageable sizes
             sample_sizes <- vals %>% count(treatment, group)
@@ -394,6 +396,8 @@ for (this_id in site_ids) {
                     m$id_numeric <- this_id
                     m$site_id <- site$site_id
                     m$sampled_fraction <- n_treatment_final / n_treatment_total
+                    m$n_control_sampled <- n_control_final
+                    m$n_control_pool <- n_control_pool_site
                     saveRDS(m, match_path)
                     message("  Saved ", nrow(m), " matched rows")
                 }
