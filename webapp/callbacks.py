@@ -13,6 +13,7 @@ import random
 import uuid as _uuid
 
 import dash_bootstrap_components as dbc
+import flask
 import flask_login
 import geopandas as gpd
 import pandas as pd
@@ -23,10 +24,12 @@ from dash.exceptions import PreventUpdate
 
 from auth import (
     authenticate,
+    create_refresh_token,
     get_current_user,
     register_user,
     request_password_reset,
     reset_password_with_token,
+    revoke_refresh_token,
 )
 from config import report_exception
 from layouts import (
@@ -364,6 +367,22 @@ def register_callbacks(app, limiter=None):
             return not is_open
         return is_open
 
+    # -- Session activity check ----------------------------------------------
+    # Fires every 5 minutes via dcc.Interval.  The request itself triggers
+    # the before_request refresh-token validation in app.py.  If the user
+    # has been inactive for >4 hours the before_request hook invalidates
+    # the session and this callback redirects to /login.
+
+    @app.callback(
+        Output("session-check-output", "children"),
+        Input("session-check-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def check_session_alive(n_intervals):
+        if not flask_login.current_user.is_authenticated:
+            return dcc.Location(pathname="/login", id="redirect-session-expired")
+        raise PreventUpdate
+
     # -- Login ---------------------------------------------------------------
 
     @app.callback(
@@ -384,7 +403,12 @@ def register_callbacks(app, limiter=None):
         if result == "pending_approval":
             return "Your account is pending admin approval."
         if result:
-            flask_login.login_user(result)
+            flask_login.login_user(result, remember=True)
+            # Create a refresh token — the after_request hook in app.py
+            # reads this from the Flask session and sets the cookie.
+            token = create_refresh_token(result.id)
+            if token:
+                flask.session["_pending_refresh_token"] = token
             return dcc.Location(pathname="/", id="redirect-login")
         return "Invalid email or password."
 
@@ -2510,7 +2534,10 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
         success, message = delete_user(user.id)
         if success:
+            cookie_token = flask.request.cookies.get("ae_refresh_token")
+            revoke_refresh_token(cookie_token)
             flask_login.logout_user()
+            flask.session["_clear_refresh_cookie"] = True
             return dcc.Location(pathname="/login", id="redirect-after-delete")
         return dbc.Alert(message, color="danger", duration=4000)
 

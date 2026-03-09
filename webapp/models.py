@@ -688,6 +688,106 @@ class PasswordResetToken(Base):
         db.flush()
 
 
+class RefreshToken(Base):
+    """Database-backed refresh token for persistent login.
+
+    Each token has an absolute expiry (30 days) and an inactivity
+    timeout (4 hours).  ``last_activity`` is updated on authenticated
+    requests so the token stays valid while the user is active.
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    INACTIVITY_TIMEOUT_HOURS = 4
+    ABSOLUTE_EXPIRY_DAYS = 30
+    # Only update last_activity once per minute to reduce DB writes.
+    ACTIVITY_UPDATE_INTERVAL_SECONDS = 60
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    token_hash = Column(String(255), unique=True, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    expires_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc) + timedelta(days=30),
+    )
+    last_activity = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    revoked_at = Column(DateTime(timezone=True))
+
+    user = relationship("User")
+
+    @property
+    def is_valid(self):
+        """Return True if the token has not expired, not been revoked,
+        and was used within the inactivity window."""
+        now = datetime.now(timezone.utc)
+        if self.revoked_at is not None:
+            return False
+        if now >= self.expires_at:
+            return False
+        inactivity_deadline = self.last_activity + timedelta(
+            hours=self.INACTIVITY_TIMEOUT_HOURS
+        )
+        return now < inactivity_deadline
+
+    def touch_activity(self):
+        """Update last_activity if enough time has elapsed.
+
+        Returns True if the timestamp was actually updated (caller
+        should flush/commit), False if skipped to reduce DB writes.
+        """
+        now = datetime.now(timezone.utc)
+        elapsed = (now - self.last_activity).total_seconds()
+        if elapsed >= self.ACTIVITY_UPDATE_INTERVAL_SECONDS:
+            self.last_activity = now
+            return True
+        return False
+
+    def revoke(self):
+        """Mark this token as revoked."""
+        self.revoked_at = datetime.now(timezone.utc)
+
+    @classmethod
+    def create_token(cls, user_id, db):
+        """Create a new refresh token for *user_id*.
+
+        Returns ``(RefreshToken, plaintext_token)`` tuple.  The plaintext
+        token is what gets stored in the cookie; only its SHA-256 hash
+        is persisted in the database.
+        """
+        import hashlib
+
+        plaintext = secrets.token_urlsafe(64)
+        token_hash = hashlib.sha256(plaintext.encode()).hexdigest()
+        refresh = cls(user_id=user_id, token_hash=token_hash)
+        db.add(refresh)
+        db.flush()
+        return refresh, plaintext
+
+    @classmethod
+    def get_by_plaintext(cls, plaintext, db):
+        """Look up a token by its plaintext value (hashes first)."""
+        import hashlib
+
+        token_hash = hashlib.sha256(plaintext.encode()).hexdigest()
+        return db.query(cls).filter(cls.token_hash == token_hash).first()
+
+    @classmethod
+    def revoke_all_for_user(cls, user_id, db):
+        """Revoke all active refresh tokens for a user."""
+        now = datetime.now(timezone.utc)
+        db.query(cls).filter(cls.user_id == user_id, cls.revoked_at.is_(None)).update(
+            {cls.revoked_at: now}
+        )
+        db.flush()
+
+
 # Database session management
 engine = create_engine(
     Config.DATABASE_URL,

@@ -14,7 +14,7 @@ import flask
 import flask_login
 
 from config import Config, report_exception
-from models import PasswordResetToken, User, get_db
+from models import PasswordResetToken, RefreshToken, User, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -359,6 +359,127 @@ def change_password(user_id: str, current_password: str, new_password: str):
         return False, "An error occurred. Please try again."
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Refresh token helpers
+# ---------------------------------------------------------------------------
+
+REFRESH_TOKEN_COOKIE = "ae_refresh_token"
+
+
+def create_refresh_token(user_id):
+    """Create a new refresh token and return the plaintext value.
+
+    Revokes any existing tokens for the user first.
+    """
+    db = get_db()
+    try:
+        RefreshToken.revoke_all_for_user(user_id, db)
+        _token_obj, plaintext = RefreshToken.create_token(user_id, db)
+        db.commit()
+        return plaintext
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to create refresh token for user %s", user_id)
+        return None
+    finally:
+        db.close()
+
+
+def validate_and_refresh(plaintext_token):
+    """Validate a refresh token, rotate it, and return the new session.
+
+    Performs **token rotation**: the old token is revoked and a brand-new
+    token is issued.  This limits the window during which a stolen token
+    can be replayed.
+
+    Returns ``(SessionUser, new_plaintext_token)`` on success, or
+    ``(None, None)`` on failure.
+    """
+    if not plaintext_token:
+        return None, None
+    db = get_db()
+    try:
+        token = RefreshToken.get_by_plaintext(plaintext_token, db)
+        if not token or not token.is_valid:
+            return None, None
+        user = db.query(User).filter(User.id == token.user_id).first()
+        if not user or not user.is_active or not user.is_approved:
+            return None, None
+        # Rotate: revoke old, issue new
+        token.revoke()
+        _new_token_obj, new_plaintext = RefreshToken.create_token(user.id, db)
+        db.commit()
+        return SessionUser(user), new_plaintext
+    except Exception:
+        db.rollback()
+        logger.exception("Error validating refresh token")
+        return None, None
+    finally:
+        db.close()
+
+
+def touch_refresh_token(plaintext_token):
+    """Update the activity timestamp on an existing refresh token.
+
+    Called on authenticated requests to keep the inactivity timer alive.
+    """
+    if not plaintext_token:
+        return
+    db = get_db()
+    try:
+        token = RefreshToken.get_by_plaintext(plaintext_token, db)
+        if token and token.is_valid and token.touch_activity():
+            db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error touching refresh token")
+    finally:
+        db.close()
+
+
+def revoke_refresh_token(plaintext_token):
+    """Revoke a refresh token (used at logout)."""
+    if not plaintext_token:
+        return
+    db = get_db()
+    try:
+        token = RefreshToken.get_by_plaintext(plaintext_token, db)
+        if token:
+            token.revoke()
+            db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Error revoking refresh token")
+    finally:
+        db.close()
+
+
+def set_refresh_cookie(response, plaintext_token):
+    """Set the refresh token cookie on a Flask response."""
+    response.set_cookie(
+        REFRESH_TOKEN_COOKIE,
+        plaintext_token,
+        max_age=RefreshToken.ABSOLUTE_EXPIRY_DAYS * 86400,
+        httponly=True,
+        samesite="Lax",
+        secure=not Config.DEBUG,
+        path="/",
+    )
+
+
+def clear_refresh_cookie(response):
+    """Remove the refresh token cookie from a Flask response."""
+    response.set_cookie(
+        REFRESH_TOKEN_COOKIE,
+        "",
+        max_age=0,
+        httponly=True,
+        samesite="Lax",
+        secure=not Config.DEBUG,
+        path="/",
+    )
 
 
 def require_login(func):

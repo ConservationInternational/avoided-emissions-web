@@ -13,6 +13,7 @@ from urllib.parse import parse_qs
 
 import dash
 import dash_bootstrap_components as dbc
+import flask
 import flask_login
 import rollbar
 import rollbar.contrib.flask
@@ -22,7 +23,13 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_wtf.csrf import CSRFProtect
 
-from auth import login_manager
+from auth import (
+    REFRESH_TOKEN_COOKIE,
+    clear_refresh_cookie,
+    login_manager,
+    touch_refresh_token,
+    validate_and_refresh,
+)
 from callbacks import register_callbacks
 from config import Config
 from layouts import (
@@ -191,6 +198,66 @@ def health_check():
     return "ok", 200
 
 
+# -- Session-check endpoint (called by client-side interval) -----------------
+@server.route("/api/session-check")
+def session_check():
+    """Return whether the current user is still authenticated.
+
+    Called by a ``dcc.Interval`` in the client to detect inactivity
+    logouts and redirect to ``/login``.
+    """
+    if flask_login.current_user.is_authenticated:
+        return jsonify({"authenticated": True})
+    return jsonify({"authenticated": False}), 401
+
+
+# -- Refresh-token based session management -----------------------------------
+# On every request:
+#   1. If the user already has a valid Flask-Login session *and* a refresh
+#      token cookie, touch the token's ``last_activity`` so the 4-hour
+#      inactivity window keeps rolling.
+#   2. If the Flask-Login session has expired but a valid refresh token
+#      exists (last activity < 4 h ago), transparently re-login the user.
+#   3. If the token has expired or been revoked, force logout.
+
+_REFRESH_SKIP_PREFIXES = ("/health", "/_dash-", "/assets/")
+
+
+@server.before_request
+def _refresh_token_check():
+    cookie_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
+
+    # Skip for paths that don't need auth checks
+    path = request.path
+    if any(path.startswith(p) for p in _REFRESH_SKIP_PREFIXES):
+        return None
+
+    if flask_login.current_user.is_authenticated:
+        # User has a live session — just keep the refresh token alive
+        if cookie_token:
+            touch_refresh_token(cookie_token)
+        return None
+
+    # No active session — try to restore from refresh token
+    if not cookie_token:
+        return None
+
+    session_user, new_token = validate_and_refresh(cookie_token)
+    if session_user and new_token:
+        flask_login.login_user(session_user)
+        # Store the rotated token so the after_request hook sets the
+        # new cookie (replacing the old one).
+        flask.session["_pending_refresh_token"] = new_token
+    else:
+        # Token invalid/expired — clear the stale cookie on this response
+        @flask.after_this_request
+        def _clear_cookie(response):
+            clear_refresh_cookie(response)
+            return response
+
+    return None
+
+
 # -- Security headers -------------------------------------------------------
 # Applied to every response.  CSP is intentionally permissive for the CDN
 # assets loaded by Dash/OpenLayers; tighten further when possible.
@@ -206,6 +273,19 @@ def _set_security_headers(response):
         response.headers["Strict-Transport-Security"] = (
             "max-age=63072000; includeSubDomains"
         )
+
+    # -- Refresh token cookie management ------------------------------------
+    # The login callback stores a plaintext token in the Flask session;
+    # we move it to a dedicated HTTP-only cookie here so it persists
+    # across browser sessions.  Logout sets a clear flag instead.
+    from auth import set_refresh_cookie
+
+    pending_token = flask.session.pop("_pending_refresh_token", None)
+    if pending_token:
+        set_refresh_cookie(response, pending_token)
+
+    if flask.session.pop("_clear_refresh_cookie", None):
+        clear_refresh_cookie(response)
     # CSP: allow Dash inline scripts/styles, CDN assets (OL, GeoTIFF),
     # Google Fonts, and S3-hosted resources used by presigned URLs.
     # Keep sources centralised in module-level lists for easier updates.
@@ -442,6 +522,15 @@ app.layout = html.Div(
     [
         dcc.Location(id="url", refresh=True),
         html.Div(id="page-content"),
+        # Fires every 5 minutes to detect inactivity-based logouts.
+        # The callback hits /api/session-check which triggers the
+        # before_request refresh-token validation.
+        dcc.Interval(
+            id="session-check-interval",
+            interval=5 * 60 * 1000,  # 5 minutes in ms
+            n_intervals=0,
+        ),
+        html.Div(id="session-check-output", style={"display": "none"}),
     ]
 )
 
@@ -473,7 +562,12 @@ def display_page(pathname, search):
         return reset_password_layout(token)
 
     if pathname == "/logout":
+        from auth import revoke_refresh_token
+
+        cookie_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
+        revoke_refresh_token(cookie_token)
         flask_login.logout_user()
+        flask.session["_clear_refresh_cookie"] = True
         return dcc.Location(pathname="/login", id="redirect-logout")
 
     # Shared task view — no login required
