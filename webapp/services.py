@@ -831,8 +831,8 @@ def submit_analysis_task(
     if not user_creds:
         raise ValueError(
             "You must link your trends.earth account before "
-            "submitting analysis tasks.  Go to Settings \u2192 "
-            "trends.earth Integration to connect your account."
+            "submitting analysis tasks.  Go to Profile \u2192 "
+            "trends.earth API Integration to connect your account."
         )
     script_id = Config.TRENDSEARTH_SCRIPT_ID
     if not script_id:
