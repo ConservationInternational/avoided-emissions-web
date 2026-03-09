@@ -271,8 +271,8 @@ def parse_sites_file(file_content, filename):
     if gdf is not None and not gdf.empty:
         null_geom = gdf.geometry.is_empty | gdf.geometry.isna()
         if null_geom.any():
-            indices = list(gdf[null_geom].index[:10])
-            errors.append(f"Features with missing/empty geometry at indices: {indices}")
+            feature_nums = [i + 1 for i in gdf[null_geom].index[:10]]
+            errors.append(f"Features with missing/empty geometry: {feature_nums}")
         valid_mask = ~null_geom
         if valid_mask.any():
             bad_type = ~gdf.loc[valid_mask].geometry.geom_type.isin(
@@ -281,7 +281,7 @@ def parse_sites_file(file_content, filename):
             if bad_type.any():
                 bad_rows = gdf.loc[valid_mask][bad_type]
                 details = [
-                    f"Feature {idx}: geometry type={row.geometry.geom_type}"
+                    f"Feature {idx + 1}: geometry type={row.geometry.geom_type}"
                     for idx, row in bad_rows.iterrows()
                 ]
                 errors.append(
