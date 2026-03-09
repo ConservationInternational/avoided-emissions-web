@@ -629,6 +629,24 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         compression="zstd",
     )
 
+    # Save grid metadata so downstream steps can convert cell indices
+    # back to geographic coordinates (lon/lat).
+    grid_meta = {
+        "width": width,
+        "height": height,
+        "pixel_size_deg": float(xres),
+        "transform": [
+            float(transform.a),
+            float(transform.b),
+            float(transform.c),
+            float(transform.d),
+            float(transform.e),
+            float(transform.f),
+        ],
+    }
+    with open(os.path.join(output_dir, "grid_metadata.json"), "w") as gf:
+        json.dump(grid_meta, gf)
+
     log.info("Saved treatment_cell_key.parquet and treatments_and_controls.parquet")
 
 

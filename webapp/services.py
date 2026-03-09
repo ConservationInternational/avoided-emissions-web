@@ -1372,6 +1372,9 @@ def import_execution_results(task_id, results_payload, db=None):
                     is_pre_intervention=bool(
                         metadata.get("is_pre_intervention", False)
                     ),
+                    is_post_intervention=bool(
+                        metadata.get("is_post_intervention", False)
+                    ),
                     n_matched_pixels=metadata.get("n_matched_pixels"),
                     sampled_fraction=metadata.get("sampled_fraction"),
                 )
@@ -1391,6 +1394,7 @@ def import_execution_results(task_id, results_payload, db=None):
                     emissions_avoided_mgco2e=values.get("emissions_avoided_mgco2e"),
                     area_ha=values.get("area_ha"),
                     n_matched_pixels=metadata.get("n_matched_pixels"),
+                    n_treatment_pixels=metadata.get("n_treatment_pixels"),
                     sampled_fraction=metadata.get("sampled_fraction"),
                     first_year=rec.get("period_start"),
                     last_year=rec.get("period_end"),
@@ -1997,6 +2001,7 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         "balance": "results_balance.csv",
         "propensity_scores": "results_propensity_scores.csv",
         "match_quality_summary": "results_match_quality_summary.json",
+        "matched_pixels": "results_matched_pixels.csv",
     }
     filename = filename_map.get(result_type)
     if not filename:
@@ -3036,13 +3041,9 @@ def resubmit_analysis_task(task_id, user_id):
         # Derive fc_years the same way the original submission does
         start_dates = pd.to_datetime(gdf["start_date"])
         fc_min = max(2000, int(start_dates.dt.year.min()) - 5)
-        if "end_date" in gdf.columns and gdf["end_date"].notna().any():
-            end_years = pd.to_datetime(
-                gdf.loc[gdf["end_date"].notna(), "end_date"]
-            ).dt.year
-            fc_max = min(2024, int(end_years.max()))
-        else:
-            fc_max = 2024
+        # Always pull all available FC years so post-end-date
+        # deforestation data is available for comparison plots.
+        fc_max = 2024
         fc_years = list(range(fc_min, fc_max + 1))
 
         # Memory is stored in MiB in config

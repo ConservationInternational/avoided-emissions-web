@@ -70,6 +70,7 @@ EXTRACT_OUTPUT_FILES = [
     "treatments_and_controls.parquet",
     "formula.json",
     "site_id_key.csv",
+    "grid_metadata.json",
 ]
 
 
@@ -594,6 +595,10 @@ def _collect_results(output_dir, task_id, log):
                                 "is_pre_intervention", ""
                             ).upper()
                             == "TRUE",
+                            "is_post_intervention": row.get(
+                                "is_post_intervention", ""
+                            ).upper()
+                            == "TRUE",
                         },
                     )
                 )
@@ -626,6 +631,11 @@ def _collect_results(output_dir, task_id, log):
                             "n_matched_pixels": int(row.get("n_matched_pixels", 0)),
                             "sampled_fraction": float(row.get("sampled_fraction", 1)),
                             "n_years": int(row.get("n_years", 0)),
+                            "n_treatment_pixels": (
+                                int(row["n_treatment_pixels"])
+                                if row.get("n_treatment_pixels")
+                                else None
+                            ),
                         },
                     )
                 )

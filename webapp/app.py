@@ -513,6 +513,53 @@ def vector_layers_list():
     return jsonify({"layers": layers})
 
 
+@server.route("/api/matched-pixels/<task_id>")
+@flask_login.login_required
+def matched_pixels(task_id):
+    """Return matched treatment/control pixel locations as GeoJSON.
+
+    Reads ``results_matched_pixels.csv`` from S3 for the given task and
+    returns a GeoJSON FeatureCollection of Point features.  Each feature
+    has properties ``site_id``, ``treatment`` (bool), and ``match_group``.
+
+    Query parameters:
+        site_id – optional, filter to a single site.
+    """
+    import csv as csv_mod
+    import io
+
+    from services import get_result_csv
+
+    csv_text = get_result_csv(task_id, "matched_pixels")
+    if not csv_text:
+        return jsonify({"type": "FeatureCollection", "features": []})
+
+    site_filter = request.args.get("site_id")
+    features = []
+    reader = csv_mod.DictReader(io.StringIO(csv_text))
+    for row in reader:
+        if site_filter and row.get("site_id") != site_filter:
+            continue
+        try:
+            lon = float(row["lon"])
+            lat = float(row["lat"])
+        except (ValueError, KeyError):
+            continue
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": {
+                    "site_id": row.get("site_id", ""),
+                    "treatment": row.get("treatment", "").upper() == "TRUE",
+                    "match_group": row.get("match_group", ""),
+                },
+            }
+        )
+
+    return jsonify({"type": "FeatureCollection", "features": features})
+
+
 # Initialize Flask-Login
 login_manager.init_app(server)
 login_manager.login_view = "/login"

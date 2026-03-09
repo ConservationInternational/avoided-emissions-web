@@ -295,6 +295,98 @@
         mapEl._dragZoomControlAdded = true;
     }
 
+    // -- Matched-pixel layer --------------------------------------------------
+
+    function pixelStyle(feature) {
+        var isTreatment = feature.get("treatment") === true;
+        return new ol.style.Style({
+            image: new ol.style.Circle({
+                radius: 4,
+                fill: new ol.style.Fill({
+                    color: isTreatment
+                        ? "rgba(46, 125, 50, 0.7)"   // green for treatment
+                        : "rgba(30, 136, 229, 0.7)",  // blue for control
+                }),
+                stroke: new ol.style.Stroke({
+                    color: isTreatment ? "#1b5e20" : "#0d47a1",
+                    width: 1,
+                }),
+            }),
+        });
+    }
+
+    function ensurePixelLayerControl(mapEl, map) {
+        var taskId = mapEl.getAttribute("data-task-id");
+        if (!taskId || mapEl._pixelControlAdded) {
+            return;
+        }
+        mapEl._pixelControlAdded = true;
+
+        var pixelSource = new ol.source.Vector();
+        var pixelLayer = new ol.layer.Vector({
+            source: pixelSource,
+            style: pixelStyle,
+            visible: false,
+            zIndex: 5,
+        });
+        map.addLayer(pixelLayer);
+        mapEl._pixelLayer = pixelLayer;
+        mapEl._pixelSource = pixelSource;
+
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "ol-pixel-toggle-btn";
+        button.title = "Toggle matched pixels";
+        button.setAttribute("aria-label", "Toggle matched pixels");
+        button.innerHTML = "&#9679;&#9679;"; // ●●
+
+        var loaded = false;
+        var active = false;
+
+        button.addEventListener("click", function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            active = !active;
+            button.classList.toggle("active", active);
+            pixelLayer.setVisible(active);
+
+            if (active && !loaded) {
+                loaded = true;
+                fetchPixels(mapEl, taskId, pixelSource);
+            }
+        });
+
+        var element = document.createElement("div");
+        element.className = "ol-unselectable ol-control ol-pixel-toggle";
+        element.appendChild(button);
+
+        map.addControl(new ol.control.Control({ element: element }));
+    }
+
+    function fetchPixels(mapEl, taskId, pixelSource) {
+        var url = "/api/matched-pixels/" + encodeURIComponent(taskId);
+        fetch(url, { credentials: "same-origin" })
+            .then(function (resp) {
+                if (!resp.ok) {
+                    return null;
+                }
+                return resp.json();
+            })
+            .then(function (geojson) {
+                if (!geojson || !geojson.features) {
+                    return;
+                }
+                var features = new ol.format.GeoJSON().readFeatures(geojson, {
+                    dataProjection: "EPSG:4326",
+                    featureProjection: "EPSG:3857",
+                });
+                pixelSource.addFeatures(features);
+            })
+            .catch(function () {
+                // Silently ignore fetch errors.
+            });
+    }
+
     function ensureMap(el) {
         if (el._olMap) {
             return el._olMap;
@@ -316,6 +408,7 @@
         ensureZoomExtentControl(el, map);
         ensureScaleBarControl(el, map);
         ensureDragZoomControl(el, map);
+        ensurePixelLayerControl(el, map);
 
         // Notify other scripts (e.g. COG layer control) that a map is ready.
         el.dispatchEvent(

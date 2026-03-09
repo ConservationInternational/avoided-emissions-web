@@ -117,6 +117,22 @@ h1, h2, h3, h4, h5 {
     color: #fff;
 }
 
+.ol-sites-map .ol-pixel-toggle {
+    top: 10.5em;
+    left: 0.5em;
+}
+
+.ol-sites-map .ol-pixel-toggle-btn {
+    font-size: 12px;
+    line-height: 1;
+    letter-spacing: -2px;
+}
+
+.ol-sites-map .ol-pixel-toggle-btn.active {
+    background-color: rgba(0, 60, 136, 0.7);
+    color: #fff;
+}
+
 .ol-sites-map .ae-scale-line {
     left: 0.5em;
     bottom: 0.75em;

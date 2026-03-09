@@ -109,6 +109,7 @@ message("  Found ", length(match_files), " match files")
 # Forest cover year columns
 fc_cols <- paste0("fc_", config$fc_years)
 fc_year_min <- min(config$fc_years)
+fc_year_max <- max(config$fc_years)
 
 # Number of pre-intervention years to include in results (for plotting
 # treatment-vs-control deforestation baselines).  The actual range is
@@ -512,11 +513,13 @@ if (length(match_files) > 0) {
             group_by(site_id, cell, treatment) %>%
             # Include PRE_INTERVENTION_YEARS before start for baseline
             # plotting; need one extra year for the diff() baseline.
+            # Use fc_year_max instead of end_year so post-end-date
+            # deforestation data is available for comparison plots.
             filter(between(
                 year,
                 max(fc_year_min,
                     start_year[1] - PRE_INTERVENTION_YEARS - 1),
-                end_year[1]
+                fc_year_max
             )) %>%
             # Convert forest cover fraction to hectares
             mutate(
@@ -538,7 +541,7 @@ if (length(match_files) > 0) {
                 year,
                 max(fc_year_min + 1,
                     start_year[1] - PRE_INTERVENTION_YEARS),
-                end_year[1]
+                fc_year_max
             )) %>%
             as_tibble()
     }
@@ -642,13 +645,14 @@ if (length(match_files) > 0) {
 
     results_by_year %>%
         left_join(
-            sites %>% select(site_id, site_name, start_year),
+            sites %>% select(site_id, site_name, start_year, end_year),
             by = "site_id"
         ) %>%
         mutate(
-            is_pre_intervention = year < start_year
+            is_pre_intervention = year < start_year,
+            is_post_intervention = year > end_year
         ) %>%
-        select(-start_year) %>%
+        select(-start_year, -end_year) %>%
         write_csv(file.path(config$output_dir,
                             "results_by_site_year.csv"))
 
@@ -658,10 +662,10 @@ if (length(match_files) > 0) {
     # Summarize totals by site (intervention period only)
     results_total <- results_by_year %>%
         left_join(
-            sites %>% select(site_id, start_year),
+            sites %>% select(site_id, start_year, end_year),
             by = "site_id"
         ) %>%
-        filter(year >= start_year) %>%
+        filter(year >= start_year, year <= end_year) %>%
         group_by(site_id) %>%
         summarise(
             forest_loss_avoided_ha =
@@ -678,6 +682,12 @@ if (length(match_files) > 0) {
         left_join(
             sites %>% select(site_id, site_name, area_ha),
             by = "site_id"
+        ) %>%
+        mutate(
+            n_treatment_pixels = as.integer(sapply(
+                as.character(site_id),
+                function(sid) total_treatment_by_site[[sid]] %||% NA_integer_
+            ))
         )
 
     results_total %>%
@@ -685,6 +695,53 @@ if (length(match_files) > 0) {
                             "results_by_site_total.csv"))
 
     message("  Per-site totals: ", nrow(results_total), " sites")
+
+    # --- Matched pixel locations for map visualisation --------------------
+    # Read the grid metadata saved by the extract step and convert cell
+    # indices to geographic coordinates so the webapp can plot treatment
+    # and control pixels on the map.
+    grid_meta_path <- file.path(config$output_dir, "grid_metadata.json")
+    if (file.exists(grid_meta_path) && nrow(match_cov_data) > 0) {
+        grid_meta <- fromJSON(grid_meta_path)
+        grid_width <- grid_meta$width
+        # Affine transform: [a, b, c, d, e, f]
+        # lon = c + col * a + 0.5 * a  (pixel centre)
+        # lat = f + row * e + 0.5 * e  (pixel centre)
+        tf <- grid_meta$transform
+        tf_a <- tf[1]  # pixel width (positive)
+        tf_c <- tf[3]  # x origin (left edge)
+        tf_e <- tf[5]  # pixel height (negative)
+        tf_f <- tf[6]  # y origin (top edge)
+
+        pixel_locations <- match_cov_data %>%
+            distinct(cell, site_id, treatment, match_group) %>%
+            mutate(
+                row = cell %/% grid_width,
+                col = cell %% grid_width,
+                lon = tf_c + (col + 0.5) * tf_a,
+                lat = tf_f + (row + 0.5) * tf_e
+            ) %>%
+            select(cell, site_id, treatment, match_group, lon, lat)
+
+        write_csv(
+            pixel_locations,
+            file.path(config$output_dir,
+                      "results_matched_pixels.csv")
+        )
+        message("  Matched pixel locations: ",
+                nrow(pixel_locations), " pixels")
+    } else {
+        # Write empty file
+        write_csv(
+            tibble(
+                cell = integer(), site_id = character(),
+                treatment = logical(), match_group = character(),
+                lon = numeric(), lat = numeric()
+            ),
+            file.path(config$output_dir,
+                      "results_matched_pixels.csv")
+        )
+    }
 } else {
     # No successful matches — produce empty result files
     message("  No match files — all sites failed or had no matches")
@@ -712,7 +769,8 @@ if (length(match_files) > 0) {
         first_year = integer(),
         last_year = integer(),
         n_years = integer(),
-        area_ha = numeric()
+        area_ha = numeric(),
+        n_treatment_pixels = integer()
     )
     write_csv(results_by_year,
               file.path(config$output_dir, "results_by_site_year.csv"))
@@ -760,6 +818,16 @@ if (length(match_files) > 0) {
             match_weight = numeric(), pscore = numeric()
         ),
         file.path(config$output_dir, "results_propensity_scores.csv")
+    )
+
+    # Empty matched pixel locations
+    write_csv(
+        tibble(
+            cell = integer(), site_id = character(),
+            treatment = logical(), match_group = character(),
+            lon = numeric(), lat = numeric()
+        ),
+        file.path(config$output_dir, "results_matched_pixels.csv")
     )
 
     # Empty match quality summary

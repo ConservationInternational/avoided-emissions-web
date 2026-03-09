@@ -431,3 +431,22 @@ dagcomponentfuncs.TaskActions = function (props) {
         )
     );
 };
+
+/**
+ * SeverityIcon – renders a coloured icon based on the severity value.
+ *
+ * "Critical" → red X-circle, anything else → amber warning triangle.
+ */
+dagcomponentfuncs.SeverityIcon = function (props) {
+    var isCritical = props.value === "Critical";
+    return React.createElement("i", {
+        className: isCritical
+            ? "bi bi-x-circle-fill"
+            : "bi bi-exclamation-triangle-fill",
+        style: {
+            color: isCritical ? "#dc3545" : "#ffc107",
+            fontSize: "16px",
+        },
+        title: props.value,
+    });
+};

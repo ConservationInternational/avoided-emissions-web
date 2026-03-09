@@ -252,6 +252,7 @@ def _openlayers_map_component(
     height="260px",
     enable_cog_layers=False,
     cog_filter_covariates=None,
+    task_id=None,
 ):
     attrs = {
         "data-geojson": geojson_text or "",
@@ -261,6 +262,8 @@ def _openlayers_map_component(
         attrs["data-enable-cog-layers"] = "true"
     if cog_filter_covariates:
         attrs["data-cog-filter"] = ",".join(cog_filter_covariates)
+    if task_id:
+        attrs["data-task-id"] = str(task_id)
     return html.Div(
         id=map_id,
         className="ol-sites-map",
@@ -1212,22 +1215,16 @@ def register_callbacks(app, limiter=None):
             # Auto-derive forest cover year range from site dates.
             # Need years back to (earliest start_year - 5) for the
             # pre-intervention deforestation covariate, and forward
-            # to the latest end_year (or current year if open-ended).
+            # to the latest available year so post-end-date
+            # deforestation data is available for comparison plots.
             start_dates = pd.to_datetime(gdf["start_date"])
             fc_min = max(
                 ANALYSIS_DEFAULTS["fc_year_start"],
                 int(start_dates.dt.year.min()) - 5,
             )
-            if "end_date" in gdf.columns and gdf["end_date"].notna().any():
-                end_years = pd.to_datetime(
-                    gdf.loc[gdf["end_date"].notna(), "end_date"]
-                ).dt.year
-                fc_max = min(
-                    ANALYSIS_DEFAULTS["fc_year_end"],
-                    int(end_years.max()),
-                )
-            else:
-                fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
+            # Always pull all available FC years so post-end-date
+            # deforestation data is available for comparison plots.
+            fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
             fc_years = list(range(fc_min, fc_max + 1))
 
             # Server-side bounds validation (mirrors the HTML input
@@ -1455,7 +1452,9 @@ def register_callbacks(app, limiter=None):
         map_content = no_update
 
         if active_tab == "tab-overview":
-            overview = _build_overview(task, sites, totals)
+            overview = _build_overview(
+                task, sites, totals, quality_warnings=quality_warnings
+            )
         elif active_tab == "tab-results":
             results_content = _build_results_content(
                 results, totals, sites, quality_warnings=quality_warnings
@@ -1476,7 +1475,10 @@ def register_callbacks(app, limiter=None):
             match_quality = _build_match_quality(task_id, task, sites, totals)
         elif active_tab == "tab-map":
             map_content = _build_map(
-                detail.get("sites_geojson"), totals, covariates=task.covariates
+                detail.get("sites_geojson"),
+                totals,
+                covariates=task.covariates,
+                task_id=task_id,
             )
 
         return (
@@ -1782,6 +1784,40 @@ def register_callbacks(app, limiter=None):
         Output("recompute-result", "children"),
         Input("recompute-task-btn", "n_clicks"),
         State("task-id-store", "data"),
+        prevent_initial_call=True,
+    )
+
+    # -- Sort-order radio for site-level deforestation dropdown --------------
+
+    app.clientside_callback(
+        """
+        function(sortOrder, storedOptions) {
+            if (!storedOptions || !storedOptions[sortOrder]) {
+                return window.dash_clientside.no_update;
+            }
+            return storedOptions[sortOrder];
+        }
+        """,
+        Output("site-defor-selector", "options"),
+        Input("site-defor-sort-order", "value"),
+        State("site-defor-sort-options", "data"),
+        prevent_initial_call=True,
+    )
+
+    # -- Sort-order radio for match quality site dropdown --------------------
+
+    app.clientside_callback(
+        """
+        function(sortOrder, storedOptions) {
+            if (!storedOptions || !storedOptions[sortOrder]) {
+                return window.dash_clientside.no_update;
+            }
+            return storedOptions[sortOrder];
+        }
+        """,
+        Output("match-quality-site-selector", "options"),
+        Input("match-quality-sort-order", "value"),
+        State("match-quality-sort-options", "data"),
         prevent_initial_call=True,
     )
 
@@ -3096,7 +3132,7 @@ def register_callbacks(app, limiter=None):
 # -- Helper functions for building detail page content -----------------------
 
 
-def _build_overview(task, sites, totals):
+def _build_overview(task, sites, totals, quality_warnings=None):
     """Build the overview cards for a task detail page."""
     cards = []
 
@@ -3346,6 +3382,211 @@ def _build_overview(task, sites, totals):
                         className="mb-3",
                     )
                 )
+
+    # --- Quality issues (compact table instead of long bullet list) --------
+    if quality_warnings:
+        per_site = [w for w in quality_warnings if w["scope"] != "aggregate"]
+        if per_site:
+            # Build lookups from totals
+            name_lookup = {}
+            totals_lookup = {}  # sid → {n_matched, area_ha, ...}
+            if totals:
+                for t in totals:
+                    name_lookup[str(t.site_id)] = t.site_name or str(t.site_id)
+                    totals_lookup[str(t.site_id)] = {
+                        "n_matched": t.n_matched_pixels or 0,
+                        "n_treatment": t.n_treatment_pixels,
+                        "area_ha": t.area_ha,
+                        "sampled_fraction": t.sampled_fraction,
+                    }
+
+            # Group by site, preserving insertion order
+            site_map = {}
+            for w in per_site:
+                site_map.setdefault(w["scope"], []).append(w)
+
+            # Build AG Grid rows
+            grid_rows = []
+            for sid, ws in site_map.items():
+                sname = name_lookup.get(sid, sid)
+                if sname and str(sname) != str(sid):
+                    site_label = f"{sname} ({sid})"
+                else:
+                    site_label = str(sid)
+                has_danger = any(w["level"] == "danger" for w in ws)
+                issues_text = "; ".join(w["message"] for w in ws)
+                tinfo = totals_lookup.get(sid, {})
+                n_matched = tinfo.get("n_matched", 0) or 0
+                area_ha = tinfo.get("area_ha")
+                sampled_frac = tinfo.get("sampled_fraction") or 1.0
+
+                # Estimate % of treatment pixels matched
+                n_treatment = tinfo.get("n_treatment")
+                pct_matched = None
+                if n_treatment and n_treatment > 0:
+                    eligible = n_treatment * sampled_frac
+                    if eligible > 0:
+                        pct_matched = min(n_matched / eligible * 100, 100)
+                elif area_ha and area_ha > 0:
+                    # Fallback for old results without n_treatment_pixels
+                    approx_pixels = area_ha / 86.0
+                    eligible = approx_pixels * sampled_frac
+                    if eligible > 0:
+                        pct_matched = min(n_matched / eligible * 100, 100)
+
+                grid_rows.append(
+                    {
+                        "severity": "Critical" if has_danger else "Caution",
+                        "site": site_label,
+                        "area_ha": round(area_ha, 1) if area_ha else None,
+                        "matched_pixels": n_matched,
+                        "pct_matched": round(pct_matched, 1) if pct_matched else None,
+                        "issues": issues_text,
+                    }
+                )
+
+            # Sort: critical first, then alphabetical
+            grid_rows.sort(
+                key=lambda r: (
+                    0 if r["severity"] == "Critical" else 1,
+                    r["site"].lower(),
+                )
+            )
+
+            n_danger = sum(1 for r in grid_rows if r["severity"] == "Critical")
+            n_caution = len(grid_rows) - n_danger
+            summary_parts = []
+            if n_danger:
+                summary_parts.append(f"{n_danger} site(s) with critical issues")
+            if n_caution:
+                summary_parts.append(f"{n_caution} site(s) with quality concerns")
+            subtitle = ", ".join(summary_parts)
+
+            quality_cols = [
+                {
+                    "headerName": "",
+                    "field": "severity",
+                    "width": 50,
+                    "maxWidth": 50,
+                    "cellRenderer": "SeverityIcon",
+                    "sortable": False,
+                    "filter": False,
+                },
+                {
+                    "headerName": "Site",
+                    "field": "site",
+                    "flex": 1.2,
+                    "minWidth": 180,
+                    "filter": True,
+                },
+                {
+                    "headerName": "Area (ha)",
+                    "field": "area_ha",
+                    "flex": 0.6,
+                    "minWidth": 95,
+                    "type": "numericColumn",
+                    "valueFormatter": {
+                        "function": (
+                            "params.value != null"
+                            " ? d3.format(',.0f')(params.value)"
+                            " : '\u2014'"
+                        )
+                    },
+                },
+                {
+                    "headerName": "Matched Px",
+                    "field": "matched_pixels",
+                    "flex": 0.6,
+                    "minWidth": 95,
+                    "type": "numericColumn",
+                    "valueFormatter": {
+                        "function": (
+                            "params.value != null"
+                            " ? d3.format(',')(params.value)"
+                            " : '\u2014'"
+                        )
+                    },
+                },
+                {
+                    "headerName": "% Matched",
+                    "field": "pct_matched",
+                    "flex": 0.55,
+                    "minWidth": 90,
+                    "type": "numericColumn",
+                    "valueFormatter": {
+                        "function": (
+                            "params.value != null"
+                            " ? d3.format('.1f')(params.value) + '%'"
+                            " : '\u2014'"
+                        )
+                    },
+                },
+                {
+                    "headerName": "Issues",
+                    "field": "issues",
+                    "flex": 2.5,
+                    "minWidth": 300,
+                    "wrapText": True,
+                    "autoHeight": True,
+                    "cellStyle": {"whiteSpace": "normal", "lineHeight": "1.4"},
+                },
+            ]
+
+            severity_styles = [
+                {
+                    "condition": "params.data.severity === 'Critical'",
+                    "style": {"backgroundColor": "#fce4e4"},
+                },
+                {
+                    "condition": "params.data.severity === 'Caution'",
+                    "style": {"backgroundColor": "#fff8e1"},
+                },
+            ]
+
+            # Compute table height: header + rows capped at 10 visible
+            row_height = 60
+            visible_rows = min(len(grid_rows), 10)
+            table_h = 42 + visible_rows * row_height
+
+            cards.append(
+                dbc.Card(
+                    [
+                        dbc.CardHeader(
+                            [
+                                html.I(
+                                    className=(
+                                        "bi bi-exclamation-triangle-fill "
+                                        "text-danger me-2"
+                                    )
+                                ),
+                                html.Strong("Match Quality Issues"),
+                                html.Span(
+                                    f" — {subtitle}",
+                                    className="text-muted ms-1",
+                                ),
+                            ]
+                        ),
+                        dbc.CardBody(
+                            _make_ag_grid(
+                                "quality-issues-grid",
+                                quality_cols,
+                                row_data=grid_rows,
+                                height=f"{table_h}px",
+                                style_conditions=severity_styles,
+                                grid_options_extra={
+                                    "domLayout": (
+                                        "autoHeight"
+                                        if len(grid_rows) <= 10
+                                        else "normal"
+                                    ),
+                                },
+                            ),
+                            className="p-2",
+                        ),
+                    ],
+                    className="mb-3 border-danger",
+                )
+            )
 
     # --- Failed sites alert --------------------------------------------------
     meta = task.extra_metadata or {}
@@ -3608,6 +3849,7 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
                 "treatment_emissions_mgco2e": r.treatment_emissions_mgco2e or 0,
                 "control_emissions_mgco2e": r.control_emissions_mgco2e or 0,
                 "is_pre_intervention": bool(r.is_pre_intervention),
+                "is_post_intervention": bool(getattr(r, "is_post_intervention", False)),
             }
             for r in results
         ]
@@ -3664,38 +3906,42 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
             hovermode="x unified",
         )
-        # Shade the pre-intervention period
-        pre_years = df.loc[df["is_pre_intervention"], "year"]
-        if not pre_years.empty:
-            fig_defor.add_vrect(
-                x0=pre_years.min() - 0.5,
-                x1=pre_years.max() + 0.5,
-                fillcolor="gray",
-                opacity=0.12,
-                line_width=0,
-                annotation_text="Pre-intervention",
-                annotation_position="top left",
-                annotation_font_color="gray",
-            )
-        # Shade post-intervention period if any site has an end date
+        # Only shade pre/post-intervention when all sites share the
+        # same start/end year — mixed dates make a single band misleading.
+        unique_start_years = set()
+        unique_end_years = set()
         if sites:
-            post_start = None
             for s in sites:
+                if s.start_date:
+                    unique_start_years.add(s.start_date.year)
                 if s.end_date:
-                    end_yr = s.end_date.year
-                    if post_start is None or end_yr < post_start:
-                        post_start = end_yr
-            if post_start is not None:
+                    unique_end_years.add(s.end_date.year)
+
+        if len(unique_start_years) == 1:
+            pre_years = df.loc[df["is_pre_intervention"], "year"]
+            if not pre_years.empty:
                 fig_defor.add_vrect(
-                    x0=post_start + 0.5,
-                    x1=agg_df["year"].max() + 0.5,
+                    x0=pre_years.min() - 0.5,
+                    x1=pre_years.max() + 0.5,
                     fillcolor="gray",
                     opacity=0.12,
                     line_width=0,
-                    annotation_text="Post-intervention",
-                    annotation_position="top right",
+                    annotation_text="Pre-intervention",
+                    annotation_position="top left",
                     annotation_font_color="gray",
                 )
+        if len(unique_end_years) == 1:
+            (post_start,) = unique_end_years
+            fig_defor.add_vrect(
+                x0=post_start + 0.5,
+                x1=agg_df["year"].max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Post-intervention",
+                annotation_position="top right",
+                annotation_font_color="gray",
+            )
         plots.append(dcc.Graph(figure=fig_defor))
 
         # --- Cumulative deforestation plot ---
@@ -3734,35 +3980,31 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
             hovermode="x unified",
         )
-        if not pre_years.empty:
-            fig_cum.add_vrect(
-                x0=pre_years.min() - 0.5,
-                x1=pre_years.max() + 0.5,
-                fillcolor="gray",
-                opacity=0.12,
-                line_width=0,
-                annotation_text="Pre-intervention",
-                annotation_position="top left",
-                annotation_font_color="gray",
-            )
-        if sites:
-            post_start = None
-            for s in sites:
-                if s.end_date:
-                    end_yr = s.end_date.year
-                    if post_start is None or end_yr < post_start:
-                        post_start = end_yr
-            if post_start is not None:
+        if len(unique_start_years) == 1:
+            pre_years = df.loc[df["is_pre_intervention"], "year"]
+            if not pre_years.empty:
                 fig_cum.add_vrect(
-                    x0=post_start + 0.5,
-                    x1=agg_df["year"].max() + 0.5,
+                    x0=pre_years.min() - 0.5,
+                    x1=pre_years.max() + 0.5,
                     fillcolor="gray",
                     opacity=0.12,
                     line_width=0,
-                    annotation_text="Post-intervention",
-                    annotation_position="top right",
+                    annotation_text="Pre-intervention",
+                    annotation_position="top left",
                     annotation_font_color="gray",
                 )
+        if len(unique_end_years) == 1:
+            (post_start,) = unique_end_years
+            fig_cum.add_vrect(
+                x0=post_start + 0.5,
+                x1=agg_df["year"].max() + 0.5,
+                fillcolor="gray",
+                opacity=0.12,
+                line_width=0,
+                annotation_text="Post-intervention",
+                annotation_position="top right",
+                annotation_font_color="gray",
+            )
         plots.append(dcc.Graph(figure=fig_cum))
 
     # --- Existing avoided-emissions bar charts -----------------------------
@@ -3852,7 +4094,11 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
         # Annotate dropdown labels for subsampled sites
         site_options = []
         for sid in site_ids:
-            sname = site_info_map.get(str(sid), {}).get("site_name", str(sid))
+            sname = (
+                site_info_map.get(str(sid), {}).get("site_name")
+                or totals_name_map.get(str(sid))
+                or str(sid)
+            )
             if sname and str(sname) != str(sid):
                 label = f"{sname} ({sid})"
             else:
@@ -3861,6 +4107,8 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
                 pct = subsampled_map[sid].get("sampled_percent", 100)
                 label += f" (subsampled {pct:.0f}%)"
             site_options.append({"label": label, "value": sid})
+        # Pre-sort options by name (alphabetical) for the alternate order
+        site_options_by_name = sorted(site_options, key=lambda o: o["label"].lower())
 
         # Include subsampled-site info in the store so the drill-down
         # callback can annotate individual site plots.
@@ -3880,9 +4128,39 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
             )
         )
         plots.append(
+            dcc.Store(
+                id="site-defor-sort-options",
+                data={
+                    "by_site": site_options,
+                    "by_name": site_options_by_name,
+                },
+            )
+        )
+        plots.append(
+            html.Div(
+                [
+                    html.Label("Sort sites:", className="fw-bold me-2"),
+                    dbc.RadioItems(
+                        id="site-defor-sort-order",
+                        options=[
+                            {"label": "By site ID", "value": "by_site"},
+                            {
+                                "label": "Alphabetical",
+                                "value": "by_name",
+                            },
+                        ],
+                        value="by_name",
+                        inline=True,
+                        className="d-inline-flex",
+                    ),
+                ],
+                className="mb-2 d-flex align-items-center",
+            )
+        )
+        plots.append(
             dbc.Select(
                 id="site-defor-selector",
-                options=site_options,
+                options=site_options_by_name,
                 placeholder="Select a site...",
                 className="mb-3",
                 style={"maxWidth": "400px"},
@@ -3903,8 +4181,8 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
 _SMD_CRITICAL = 0.25  # |SMD| above this → critical imbalance
 _SMD_WARN = 0.1  # |SMD| above this → imperfect balance
 _SMD_POOR_FRAC = 0.20  # fraction of covariates with |SMD| > 0.1 to trigger warning
-_MIN_PIXELS_CRITICAL = 50  # matched-pixel count below this → critical
-_MIN_PIXELS_WARN = 200  # matched-pixel count below this → warning
+_PCT_MATCHED_CRITICAL = 5  # % matched below this → critical
+_PCT_MATCHED_WARN = 25  # % matched below this → warning
 
 
 def _assess_match_quality(balance_df=None, totals=None):
@@ -3918,31 +4196,47 @@ def _assess_match_quality(balance_df=None, totals=None):
     """
     warnings = []
 
-    # -- Matched-pixel count per site ---------------------------------------
+    # -- Matched-pixel percentage per site ----------------------------------
     if totals:
         for t in totals:
-            site_label = t.site_name or t.site_id
             n_px = t.n_matched_pixels or 0
-            if n_px < _MIN_PIXELS_CRITICAL:
+            n_treatment = t.n_treatment_pixels
+            area_ha = t.area_ha
+            sampled_frac = t.sampled_fraction or 1.0
+
+            if n_treatment and n_treatment > 0:
+                eligible = n_treatment * sampled_frac
+                pct = (n_px / eligible * 100) if eligible > 0 else 0
+                pct = min(pct, 100)
+            elif area_ha and area_ha > 0:
+                # Fallback for old results without n_treatment_pixels
+                approx_pixels = area_ha / 86.0
+                eligible = approx_pixels * sampled_frac
+                pct = (n_px / eligible * 100) if eligible > 0 else 0
+                pct = min(pct, 100)
+            else:
+                pct = None
+
+            if pct is not None and pct < _PCT_MATCHED_CRITICAL:
                 warnings.append(
                     {
                         "level": "danger",
                         "scope": str(t.site_id),
                         "message": (
-                            f"Site \u2018{site_label}\u2019 has only {n_px} "
-                            f"matched pixels, which is very low for "
+                            f"Only ~{pct:.0f}% of treatment pixels matched "
+                            f"({n_px:,} pixels), which is very low for "
                             f"reliable results."
                         ),
                     }
                 )
-            elif n_px < _MIN_PIXELS_WARN:
+            elif pct is not None and pct < _PCT_MATCHED_WARN:
                 warnings.append(
                     {
                         "level": "warning",
                         "scope": str(t.site_id),
                         "message": (
-                            f"Site \u2018{site_label}\u2019 has only {n_px} "
-                            f"matched pixels, which may limit result "
+                            f"Only ~{pct:.0f}% of treatment pixels matched "
+                            f"({n_px:,} pixels), which may limit result "
                             f"reliability."
                         ),
                     }
@@ -4096,6 +4390,90 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                 "advice if needed.",
                 className="mb-0 fst-italic",
             ),
+            html.Details(
+                [
+                    html.Summary(
+                        "What do these warnings mean?",
+                        style={
+                            "cursor": "pointer",
+                            "fontSize": "0.9em",
+                            "fontWeight": "600",
+                            "marginBottom": "0.5rem",
+                        },
+                    ),
+                    html.Div(
+                        [
+                            html.P(
+                                [
+                                    html.Strong("Critical quality issue"),
+                                    " (red) — Results are likely unreliable. "
+                                    "Triggers include:",
+                                ],
+                                className="mb-1",
+                            ),
+                            html.Ul(
+                                [
+                                    html.Li(
+                                        f"Fewer than {_PCT_MATCHED_CRITICAL}% "
+                                        f"of treatment pixels matched — "
+                                        f"too few for statistical confidence."
+                                    ),
+                                    html.Li(
+                                        f"One or more covariates with "
+                                        f"|SMD| \u2265 {_SMD_CRITICAL} — "
+                                        f"severe imbalance between treatment "
+                                        f"and control groups, meaning matching "
+                                        f"failed to find comparable areas."
+                                    ),
+                                ],
+                                className="mb-2",
+                            ),
+                            html.P(
+                                [
+                                    html.Strong("Quality concern"),
+                                    " (yellow) — Results may be limited but "
+                                    "are not necessarily invalid. "
+                                    "Triggers include:",
+                                ],
+                                className="mb-1",
+                            ),
+                            html.Ul(
+                                [
+                                    html.Li(
+                                        f"Fewer than {_PCT_MATCHED_WARN}% "
+                                        f"of treatment pixels matched — "
+                                        f"low sample size that may limit "
+                                        f"reliability."
+                                    ),
+                                    html.Li(
+                                        f"More than {_SMD_POOR_FRAC:.0%} of "
+                                        f"covariates with |SMD| > {_SMD_WARN} "
+                                        f"— overall matching quality is "
+                                        f"imperfect."
+                                    ),
+                                ],
+                                className="mb-2",
+                            ),
+                            html.P(
+                                [
+                                    html.Strong("SMD"),
+                                    " (Standardized Mean Difference) measures "
+                                    "how similar the treatment and control "
+                                    "groups are for each covariate. Values "
+                                    "closer to 0 indicate better balance.",
+                                ],
+                                className="mb-0 text-muted",
+                                style={"fontSize": "0.85em"},
+                            ),
+                        ],
+                        style={
+                            "fontSize": "0.88em",
+                            "marginTop": "0.5rem",
+                        },
+                    ),
+                ],
+                className="mt-2",
+            ),
         ],
         color=color,
         className="mb-3",
@@ -4231,6 +4609,11 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
                 style={"display": "none"},
             ),
             dcc.Store(id="match-quality-data-store", data={}),
+            dcc.Store(id="match-quality-sort-options", data={}),
+            dbc.RadioItems(
+                id="match-quality-sort-order",
+                style={"display": "none"},
+            ),
             html.Div(id="match-quality-plots-container"),
             dbc.Button(
                 id="download-match-covariates",
@@ -4346,19 +4729,42 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
         sname = t.site_name if hasattr(t, "site_name") else t.get("site_name")
         if sid is not None and sname and str(sname) != str(sid):
             site_name_map[str(sid)] = sname
-    site_options = [{"label": "All sites (aggregate)", "value": "__all__"}]
+    per_site_options = []
     for sid in site_ids:
         sname = site_name_map.get(str(sid))
         label = f"{sname} ({sid})" if sname else str(sid)
-        site_options.append({"label": label, "value": sid})
+        per_site_options.append({"label": label, "value": sid})
+    per_site_by_name = sorted(per_site_options, key=lambda o: o["label"].lower())
+    aggregate_entry = [{"label": "All sites (aggregate)", "value": "__all__"}]
+    site_options_by_site = aggregate_entry + per_site_options
+    site_options_by_name = aggregate_entry + per_site_by_name
 
+    content.append(
+        dcc.Store(
+            id="match-quality-sort-options",
+            data={
+                "by_site": site_options_by_site,
+                "by_name": site_options_by_name,
+            },
+        )
+    )
     content.append(
         html.Div(
             [
                 html.Label("Filter by site:", className="fw-bold me-2"),
+                dbc.RadioItems(
+                    id="match-quality-sort-order",
+                    options=[
+                        {"label": "By site ID", "value": "by_site"},
+                        {"label": "Alphabetical", "value": "by_name"},
+                    ],
+                    value="by_name",
+                    inline=True,
+                    className="d-inline-flex me-3",
+                ),
                 dbc.Select(
                     id="match-quality-site-selector",
-                    options=site_options,
+                    options=site_options_by_name,
                     value="__all__",
                     style={
                         "maxWidth": "350px",
@@ -4366,7 +4772,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
                     },
                 ),
             ],
-            className="mb-3",
+            className="mb-3 d-flex align-items-center",
         )
     )
 
@@ -5043,7 +5449,7 @@ def _build_match_quality_plots(df, covariate_cols):
     return plots
 
 
-def _build_map(sites_geojson, totals, covariates=None):
+def _build_map(sites_geojson, totals, covariates=None, task_id=None):
     """Build an OpenLayers map for task sites and summary values."""
     enriched_geojson = _attach_totals_to_geojson(sites_geojson, totals)
     if not enriched_geojson:
@@ -5054,4 +5460,5 @@ def _build_map(sites_geojson, totals, covariates=None):
         height="500px",
         enable_cog_layers=True,
         cog_filter_covariates=covariates,
+        task_id=task_id,
     )

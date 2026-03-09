@@ -334,6 +334,7 @@ class TaskResult(Base):
     treatment_emissions_mgco2e = Column(Float)
     control_emissions_mgco2e = Column(Float)
     is_pre_intervention = Column(Boolean, default=False)
+    is_post_intervention = Column(Boolean, default=False)
     n_matched_pixels = Column(Integer)
     sampled_fraction = Column(Float)
 
@@ -356,6 +357,7 @@ class TaskResultTotal(Base):
     emissions_avoided_mgco2e = Column(Float)
     area_ha = Column(Float)
     n_matched_pixels = Column(Integer)
+    n_treatment_pixels = Column(Integer)
     sampled_fraction = Column(Float)
     first_year = Column(Integer)
     last_year = Column(Integer)
