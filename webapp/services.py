@@ -269,17 +269,25 @@ def parse_sites_file(file_content, filename):
 
     # Validate geometries
     if gdf is not None and not gdf.empty:
-        bad_type = ~gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])
-        if bad_type.any():
-            bad_rows = gdf[bad_type]
-            details = [
-                f"Feature {idx}: geometry type={row.geometry.geom_type}"
-                for idx, row in bad_rows.iterrows()
-            ]
-            errors.append(
-                "All geometries must be Polygon or MultiPolygon.\n"
-                + "\n".join(details[:10])
+        null_geom = gdf.geometry.is_empty | gdf.geometry.isna()
+        if null_geom.any():
+            indices = list(gdf[null_geom].index[:10])
+            errors.append(f"Features with missing/empty geometry at indices: {indices}")
+        valid_mask = ~null_geom
+        if valid_mask.any():
+            bad_type = ~gdf.loc[valid_mask].geometry.geom_type.isin(
+                ["Polygon", "MultiPolygon"]
             )
+            if bad_type.any():
+                bad_rows = gdf.loc[valid_mask][bad_type]
+                details = [
+                    f"Feature {idx}: geometry type={row.geometry.geom_type}"
+                    for idx, row in bad_rows.iterrows()
+                ]
+                errors.append(
+                    "All geometries must be Polygon or MultiPolygon.\n"
+                    + "\n".join(details[:10])
+                )
         # Ensure EPSG:4326
         if gdf.crs and gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
