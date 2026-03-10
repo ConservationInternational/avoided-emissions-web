@@ -1376,7 +1376,18 @@ def submit_layout(user, recompute_config=None):
                                                                             placeholder="Select a saved site set...",
                                                                         ),
                                                                         xs=12,
-                                                                        md=9,
+                                                                        md=7,
+                                                                    ),
+                                                                    dbc.Col(
+                                                                        dbc.Button(
+                                                                            "Archive",
+                                                                            id="archive-site-set-btn",
+                                                                            color="warning",
+                                                                            outline=True,
+                                                                            className="w-100",
+                                                                        ),
+                                                                        xs=6,
+                                                                        md=2,
                                                                     ),
                                                                     dbc.Col(
                                                                         dbc.Button(
@@ -1386,7 +1397,7 @@ def submit_layout(user, recompute_config=None):
                                                                             outline=True,
                                                                             className="w-100",
                                                                         ),
-                                                                        xs=12,
+                                                                        xs=6,
                                                                         md=3,
                                                                     ),
                                                                 ],
@@ -1947,6 +1958,11 @@ def submit_layout(user, recompute_config=None):
                                                                                         xs=12,
                                                                                         sm=6,
                                                                                     ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
                                                                                     dbc.Col(
                                                                                         [
                                                                                             html.Div(

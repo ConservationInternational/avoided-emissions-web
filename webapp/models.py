@@ -283,6 +283,7 @@ class UserSiteSet(Base):
     n_sites = Column(Integer, nullable=False)
     bounds = Column(JSON)
     extra_metadata = Column("metadata", JSON, default=dict)
+    is_archived = Column(Boolean, default=False, nullable=False, server_default="false")
 
     user = relationship("User", back_populates="site_sets")
     sites = relationship(

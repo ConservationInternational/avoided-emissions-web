@@ -500,16 +500,14 @@ def save_user_site_set(user_id, filename, file_content):
         db.close()
 
 
-def list_user_site_sets(user_id):
+def list_user_site_sets(user_id, include_archived=False):
     """Return reusable site sets for a user ordered by most recent first."""
     db = get_db()
     try:
-        site_sets = (
-            db.query(UserSiteSet)
-            .filter(UserSiteSet.user_id == user_id)
-            .order_by(UserSiteSet.uploaded_at.desc())
-            .all()
-        )
+        q = db.query(UserSiteSet).filter(UserSiteSet.user_id == user_id)
+        if not include_archived:
+            q = q.filter(UserSiteSet.is_archived.is_(False))
+        site_sets = q.order_by(UserSiteSet.uploaded_at.desc()).all()
         return [_site_set_summary_row(row) for row in site_sets]
     finally:
         db.close()
@@ -643,12 +641,40 @@ def delete_user_site_set(site_set_id, user_id):
         if task_count > 0:
             return (
                 False,
-                "This site set is linked to submitted tasks and cannot be deleted.",
+                "This site set is linked to submitted tasks and cannot be deleted."
+                " Use Archive to hide it instead.",
             )
 
         db.delete(site_set)
         db.commit()
         return True, "Site set deleted."
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def archive_user_site_set(site_set_id, user_id, archive=True):
+    """Archive (or unarchive) a user-owned site set.
+
+    Archived site sets are hidden from the dropdown but remain in the
+    database for tasks that reference them.
+    """
+    db = get_db()
+    try:
+        site_set = (
+            db.query(UserSiteSet)
+            .filter(UserSiteSet.id == site_set_id, UserSiteSet.user_id == user_id)
+            .first()
+        )
+        if not site_set:
+            return False, "Site set not found."
+
+        site_set.is_archived = archive
+        db.commit()
+        action = "archived" if archive else "restored"
+        return True, f"Site set {action}."
     except Exception:
         db.rollback()
         raise

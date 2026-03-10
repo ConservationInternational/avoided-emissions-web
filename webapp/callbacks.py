@@ -68,6 +68,7 @@ from services import (
     submit_analysis_task,
     update_task_info,
     validate_share_token,
+    archive_user_site_set,
     delete_user_site_set,
 )
 
@@ -894,12 +895,16 @@ def register_callbacks(app, limiter=None):
             Output("site-set-refresh-store", "data"),
             Output("site-set-selector", "value", allow_duplicate=True),
         ],
-        [Input("upload-sites", "contents"), Input("delete-site-set-btn", "n_clicks")],
+        [
+            Input("upload-sites", "contents"),
+            Input("delete-site-set-btn", "n_clicks"),
+            Input("archive-site-set-btn", "n_clicks"),
+        ],
         [State("upload-sites", "filename"), State("site-set-selector", "value")],
         prevent_initial_call=True,
     )
     def handle_site_set_upload_or_delete(
-        contents, _delete_clicks, filename, selected_set_id
+        contents, _delete_clicks, _archive_clicks, filename, selected_set_id
     ):
         ctx = callback_context
         if not ctx.triggered:
@@ -966,7 +971,7 @@ def register_callbacks(app, limiter=None):
                     no_update,
                     dbc.Alert(message, color=color),
                     str(_uuid.uuid4()),
-                    None,
+                    None if success else no_update,
                 )
             except Exception:
                 logger.exception("Failed to delete site set")
@@ -974,6 +979,34 @@ def register_callbacks(app, limiter=None):
                 return (
                     no_update,
                     dbc.Alert("Failed to delete site set.", color="danger"),
+                    no_update,
+                    no_update,
+                )
+
+        if trigger_id == "archive-site-set-btn":
+            if not selected_set_id:
+                return (
+                    no_update,
+                    dbc.Alert("Select a site set to archive.", color="warning"),
+                    no_update,
+                    no_update,
+                )
+
+            try:
+                success, message = archive_user_site_set(selected_set_id, user.id)
+                color = "success" if success else "warning"
+                return (
+                    no_update,
+                    dbc.Alert(message, color=color),
+                    str(_uuid.uuid4()),
+                    None if success else no_update,
+                )
+            except Exception:
+                logger.exception("Failed to archive site set")
+                report_exception()
+                return (
+                    no_update,
+                    dbc.Alert("Failed to archive site set.", color="danger"),
                     no_update,
                     no_update,
                 )

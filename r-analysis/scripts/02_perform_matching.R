@@ -62,6 +62,11 @@ sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %
 # Reconstruct sf geometry from the WKB column written by GeoPandas
 if ("geometry" %in% names(sites)) {
     sites <- st_as_sf(sites, wkt = "geometry", crs = 4326)
+    # Repair any geometries that are invalid under S2 spherical geometry
+    # (e.g. degenerate edges with duplicate vertices).  The webapp repairs
+    # geometries at upload time via Shapely, but Shapely does not catch
+    # all S2-incompatible cases.
+    sites <- st_make_valid(sites)
 }
 
 # Load grid metadata for cell-index → lon/lat conversion (needed for
