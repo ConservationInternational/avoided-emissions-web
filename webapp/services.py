@@ -856,6 +856,45 @@ def compute_matching_extent(
         db.close()
 
 
+def compute_sites_exclusion_buffer(gdf, distance_km):
+    """Compute a buffer around all site geometries using PostGIS geography.
+
+    Uses ``ST_Buffer`` on a geography cast so the *distance_km* is
+    interpreted in metres on the sphere — no S2 issues and correct
+    at all latitudes.  Returns a GeoJSON-compatible dict or ``None``
+    when buffering is disabled (distance_km <= 0).
+    """
+    if distance_km <= 0:
+        return None
+
+    from shapely.geometry import mapping
+    from shapely.validation import make_valid
+
+    sites_union = gdf.unary_union
+    if not sites_union.is_valid:
+        sites_union = make_valid(sites_union)
+    sites_geojson = json.dumps(mapping(sites_union))
+
+    db = get_db()
+    try:
+        row = db.execute(
+            text(
+                "SELECT ST_AsGeoJSON("
+                "  ST_Buffer("
+                "    ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326)::geography,"
+                "    :dist_m"
+                "  )::geometry"
+                ")"
+            ),
+            {"sites": sites_geojson, "dist_m": distance_km * 1000},
+        ).fetchone()
+        if row and row[0]:
+            return json.loads(row[0])
+        return None
+    finally:
+        db.close()
+
+
 def submit_analysis_task(
     task_name,
     description,
@@ -982,6 +1021,17 @@ def submit_analysis_task(
         _time.perf_counter() - _submit_t0,
     )
 
+    # Pre-compute the exclusion buffer around all sites in PostGIS
+    # (geography-based, so distance is correct on the sphere).
+    _buf_t0 = _time.perf_counter()
+    sites_exclusion_buffer = compute_sites_exclusion_buffer(
+        gdf, min_control_distance_km
+    )
+    logger.info(
+        "[SUBMIT] sites exclusion buffer computed in %.2fs",
+        _time.perf_counter() - _buf_t0,
+    )
+
     if fc_years is None:
         fc_years = list(
             range(ANALYSIS_DEFAULTS["fc_year_start"], ANALYSIS_DEFAULTS["fc_year_end"])
@@ -1086,6 +1136,12 @@ def submit_analysis_task(
             "min_glm_treatment_pixels": min_glm_treatment_pixels,
             "caliper_width": caliper_width,
             "max_controls_per_treatment": max_controls_per_treatment,
+            "min_control_distance_km": min_control_distance_km,
+            **(
+                {"sites_exclusion_buffer": sites_exclusion_buffer}
+                if sites_exclusion_buffer
+                else {}
+            ),
             **({"random_seed": random_seed} if random_seed is not None else {}),
             "results_s3_uri": (
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"

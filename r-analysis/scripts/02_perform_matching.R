@@ -59,14 +59,16 @@ EXACT_MATCH_VARS <- config$exact_match_vars
 # Load data — step 1 now outputs Parquet (from the Python rewrite)
 sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %>%
     as_tibble()
-# Reconstruct sf geometry from the WKB column written by GeoPandas
+# Reconstruct sf geometry from the WKB column written by GeoPandas.
+# Temporarily disable S2 so that st_as_sf() does not reject geometries
+# with degenerate edges or self-intersections under spherical rules.
+# After repairing with st_make_valid(), S2 is re-enabled.
 if ("geometry" %in% names(sites)) {
+    s2_was_on <- sf_use_s2()
+    sf_use_s2(FALSE)
     sites <- st_as_sf(sites, wkt = "geometry", crs = 4326)
-    # Repair any geometries that are invalid under S2 spherical geometry
-    # (e.g. degenerate edges with duplicate vertices).  The webapp repairs
-    # geometries at upload time via Shapely, but Shapely does not catch
-    # all S2-incompatible cases.
     sites <- st_make_valid(sites)
+    sf_use_s2(s2_was_on)
 }
 
 # Load grid metadata for cell-index → lon/lat conversion (needed for
@@ -102,16 +104,31 @@ all_treatment_cells <- unique(treatment_key$cell)
 # control distance exclusion.  Controls for any site must be at least
 # MIN_CONTROL_DISTANCE_KM away from every treatment polygon.
 if (MIN_CONTROL_DISTANCE_KM > 0) {
-    all_sites_union <- st_union(st_geometry(sites))
-    all_sites_buffer <- st_buffer(
-        all_sites_union,
-        dist = units::set_units(MIN_CONTROL_DISTANCE_KM, "km")
-    )
-    message(
-        "  Distance exclusion buffer computed: ",
-        MIN_CONTROL_DISTANCE_KM, " km around all ",
-        nrow(sites), " site(s)"
-    )
+    if (!is.null(config$sites_exclusion_buffer)) {
+        # Use the pre-computed buffer from PostGIS (geography-based,
+        # avoids S2 edge-crossing issues in R).
+        buf_json <- toJSON(config$sites_exclusion_buffer, auto_unbox = TRUE)
+        s2_state <- sf_use_s2()
+        sf_use_s2(FALSE)
+        all_sites_buffer <- st_make_valid(
+            st_set_crs(st_as_sfc(buf_json, GeoJSON = TRUE), 4326)
+        )
+        sf_use_s2(s2_state)
+        message(
+            "  Distance exclusion buffer loaded from config: ",
+            MIN_CONTROL_DISTANCE_KM, " km around all ",
+            nrow(sites), " site(s)"
+        )
+    } else {
+        # Fallback: compute buffer locally.  The webapp normally
+        # pre-computes this in PostGIS; this path only runs for
+        # manual/legacy invocations.
+        warning("sites_exclusion_buffer not in config; computing locally")
+        all_sites_buffer <- st_buffer(
+            st_union(st_geometry(sites)),
+            dist = units::set_units(MIN_CONTROL_DISTANCE_KM, "km")
+        )
+    }
 } else {
     all_sites_buffer <- NULL
 }
