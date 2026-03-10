@@ -1947,11 +1947,6 @@ def submit_layout(user, recompute_config=None):
                                                                                         xs=12,
                                                                                         sm=6,
                                                                                     ),
-                                                                                ],
-                                                                                className="g-3 mt-1",
-                                                                            ),
-                                                                            dbc.Row(
-                                                                                [
                                                                                     dbc.Col(
                                                                                         [
                                                                                             html.Div(
