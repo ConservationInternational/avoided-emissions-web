@@ -528,9 +528,9 @@ def matched_pixels(task_id):
     import csv as csv_mod
     import io
 
-    from services import get_result_csv
+    from services import download_results_csv
 
-    csv_text = get_result_csv(task_id, "matched_pixels")
+    csv_text = download_results_csv(task_id, "matched_pixels")
     if not csv_text:
         return jsonify({"type": "FeatureCollection", "features": []})
 
