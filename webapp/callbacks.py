@@ -654,6 +654,7 @@ def register_callbacks(app, limiter=None):
         State("min-glm-treatment-pixels", "value"),
         State("caliper-width", "value"),
         State("max-controls-per-treatment", "value"),
+        State("min-control-distance-km", "value"),
         State("random-seed", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
@@ -672,6 +673,7 @@ def register_callbacks(app, limiter=None):
         min_glm_treatment_pixels,
         caliper_width,
         max_controls_per_treatment,
+        min_control_distance_km,
         random_seed,
         match_memory_gb,
         matching_job_queue,
@@ -844,6 +846,10 @@ def register_callbacks(app, limiter=None):
                                 _param_row(
                                     "Max controls per treatment",
                                     mcpt_label,
+                                ),
+                                _param_row(
+                                    "Min control distance (km)",
+                                    str(min_control_distance_km),
                                 ),
                                 _param_row(
                                     "Random seed",
@@ -1147,6 +1153,7 @@ def register_callbacks(app, limiter=None):
         State("min-glm-treatment-pixels", "value"),
         State("caliper-width", "value"),
         State("max-controls-per-treatment", "value"),
+        State("min-control-distance-km", "value"),
         State("random-seed", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
@@ -1165,6 +1172,7 @@ def register_callbacks(app, limiter=None):
         min_glm_treatment_pixels,
         caliper_width,
         max_controls_per_treatment,
+        min_control_distance_km,
         random_seed,
         match_memory_gb,
         matching_job_queue,
@@ -1248,6 +1256,11 @@ def register_callbacks(app, limiter=None):
                 if max_controls_per_treatment is not None
                 else ANALYSIS_DEFAULTS["max_controls_per_treatment"]
             )
+            _mcd = int(
+                min_control_distance_km
+                if min_control_distance_km is not None
+                else ANALYSIS_DEFAULTS["min_control_distance_km"]
+            )
             _seed = int(random_seed) if random_seed not in (None, "") else None
             _mmgb = int(match_memory_gb or ANALYSIS_DEFAULTS["match_memory_gb"])
 
@@ -1257,6 +1270,7 @@ def register_callbacks(app, limiter=None):
                 (_msa, 0, 100_000, "Minimum site area"),
                 (_mglm, 1, 10_000, "Min GLM treatment pixels"),
                 (_mcpt, 0, 100, "Max controls per treatment"),
+                (_mcd, 0, 500, "Min control distance (km)"),
                 (_mmgb, 1, 240, "Matching memory (GB)"),
             ]
             for val, lo, hi, label in bounds:
@@ -1282,6 +1296,7 @@ def register_callbacks(app, limiter=None):
                 min_glm_treatment_pixels=_mglm,
                 caliper_width=_cw,
                 max_controls_per_treatment=_mcpt,
+                min_control_distance_km=_mcd,
                 random_seed=_seed,
                 match_memory_mib=_mmgb * 1024,
                 matching_job_queue=matching_job_queue,
@@ -1479,6 +1494,7 @@ def register_callbacks(app, limiter=None):
                 totals,
                 covariates=task.covariates,
                 task_id=task_id,
+                sites=sites,
             )
 
         return (
@@ -1544,7 +1560,7 @@ def register_callbacks(app, limiter=None):
 
         csv = download_results_csv(task_id, "match_covariates")
         if csv:
-            return dict(content=csv, filename="results_match_covariates.csv")
+            return dict(content=csv, filename="results_pixel_covariates.csv")
         return no_update
 
     # -- Share modal ----------------------------------------------------------
@@ -1818,6 +1834,44 @@ def register_callbacks(app, limiter=None):
         Output("match-quality-site-selector", "options"),
         Input("match-quality-sort-order", "value"),
         State("match-quality-sort-options", "data"),
+        prevent_initial_call=True,
+    )
+
+    # -- Sort-order radio for map site dropdown ------------------------------
+
+    app.clientside_callback(
+        """
+        function(sortOrder, storedOptions) {
+            if (!storedOptions || !storedOptions[sortOrder]) {
+                return window.dash_clientside.no_update;
+            }
+            return storedOptions[sortOrder];
+        }
+        """,
+        Output("map-site-selector", "options"),
+        Input("map-site-sort-order", "value"),
+        State("map-site-sort-options", "data"),
+        prevent_initial_call=True,
+    )
+
+    # -- Map site selector: zoom to site and filter pixels -------------------
+
+    app.clientside_callback(
+        """
+        function(selectedSite) {
+            var mapEl = document.getElementById("task-sites-map");
+            if (mapEl) {
+                mapEl.dispatchEvent(
+                    new CustomEvent("zoom-to-site", {
+                        detail: { siteId: selectedSite || "" },
+                    })
+                );
+            }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("map-site-selector", "id"),
+        Input("map-site-selector", "value"),
         prevent_initial_call=True,
     )
 
@@ -3218,6 +3272,10 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         ),
                         _detail_row("Caliper width (SD)", caliper_display),
                         _detail_row("Max controls per treatment", max_ctrl_display),
+                        _detail_row(
+                            "Min control distance (km)",
+                            config.get("min_control_distance_km", "—"),
+                        ),
                         _detail_row(
                             "Random seed",
                             config.get("random_seed", "Not set"),
@@ -5449,12 +5507,38 @@ def _build_match_quality_plots(df, covariate_cols):
     return plots
 
 
-def _build_map(sites_geojson, totals, covariates=None, task_id=None):
+def _build_map(sites_geojson, totals, covariates=None, task_id=None, sites=None):
     """Build an OpenLayers map for task sites and summary values."""
     enriched_geojson = _attach_totals_to_geojson(sites_geojson, totals)
     if not enriched_geojson:
         return html.P("No site geometries available.", className="text-muted")
-    return _openlayers_map_component(
+
+    # Build site dropdown options for zoom-to-site control
+    site_name_map = {}
+    if totals:
+        for t in totals:
+            if t.site_name and str(t.site_name) != str(t.site_id):
+                site_name_map[str(t.site_id)] = t.site_name
+    if sites:
+        for s in sites:
+            sid = str(s.site_id)
+            if s.site_name and s.site_name != sid and sid not in site_name_map:
+                site_name_map[sid] = s.site_name
+
+    # Extract site IDs from GeoJSON features
+    fc = json.loads(enriched_geojson)
+    site_ids = sorted(
+        {str(f["properties"].get("site_id", "")) for f in fc.get("features", [])} - {""}
+    )
+
+    site_options = []
+    for sid in site_ids:
+        sname = site_name_map.get(sid)
+        label = f"{sname} ({sid})" if sname else sid
+        site_options.append({"label": label, "value": sid})
+    site_options_by_name = sorted(site_options, key=lambda o: o["label"].lower())
+
+    map_component = _openlayers_map_component(
         "task-sites-map",
         enriched_geojson,
         height="500px",
@@ -5462,3 +5546,36 @@ def _build_map(sites_geojson, totals, covariates=None, task_id=None):
         cog_filter_covariates=covariates,
         task_id=task_id,
     )
+
+    controls = html.Div(
+        [
+            dcc.Store(
+                id="map-site-sort-options",
+                data={
+                    "by_site": [{"label": "All sites", "value": ""}] + site_options,
+                    "by_name": [{"label": "All sites", "value": ""}]
+                    + site_options_by_name,
+                },
+            ),
+            html.Label("Zoom to site:", className="fw-bold me-2"),
+            dbc.RadioItems(
+                id="map-site-sort-order",
+                options=[
+                    {"label": "By site ID", "value": "by_site"},
+                    {"label": "Alphabetical", "value": "by_name"},
+                ],
+                value="by_name",
+                inline=True,
+                className="d-inline-flex me-3",
+            ),
+            dbc.Select(
+                id="map-site-selector",
+                options=[{"label": "All sites", "value": ""}] + site_options_by_name,
+                value="",
+                style={"maxWidth": "350px", "display": "inline-block"},
+            ),
+        ],
+        className="mb-3 d-flex align-items-center",
+    )
+
+    return html.Div([controls, map_component])

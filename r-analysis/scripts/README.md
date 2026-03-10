@@ -69,7 +69,12 @@ All scripts read a JSON configuration file specifying:
 
 - `results_by_site_year.csv`
 - `results_by_site_total.csv`
-- `results_pixel_level.csv`
+- `results_pixel_year_emissions.csv`
 - `results_summary.json`
 - `results_sampling_by_site.csv`
 - `results_failed_sites.csv`
+- `results_pixel_covariates.csv`
+- `results_covariate_balance.csv`
+- `results_propensity_scores.csv`
+- `results_pixel_locations.csv`
+- `results_match_quality_summary.json`

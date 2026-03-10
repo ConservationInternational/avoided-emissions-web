@@ -52,6 +52,7 @@ ANALYSIS_DEFAULTS = {
     "min_glm_treatment_pixels": 15,
     "caliper_width": 0.2,
     "max_controls_per_treatment": 1,
+    "min_control_distance_km": 10,
     "match_memory_gb": 30,
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
     "fc_year_start": 2000,
@@ -753,6 +754,7 @@ def submit_analysis_task(
     min_glm_treatment_pixels=ANALYSIS_DEFAULTS["min_glm_treatment_pixels"],
     caliper_width=ANALYSIS_DEFAULTS["caliper_width"],
     max_controls_per_treatment=ANALYSIS_DEFAULTS["max_controls_per_treatment"],
+    min_control_distance_km=ANALYSIS_DEFAULTS["min_control_distance_km"],
     random_seed=None,
     match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
@@ -821,6 +823,8 @@ def submit_analysis_task(
         raise ValueError("caliper_width must be zero (disabled) or positive")
     if max_controls_per_treatment < 0:
         raise ValueError("max_controls_per_treatment must be 0 (no limit) or positive")
+    if min_control_distance_km < 0:
+        raise ValueError("min_control_distance_km must be 0 (disabled) or positive")
     if random_seed is not None and (random_seed < 1 or random_seed > 2_147_483_647):
         raise ValueError("random_seed must be between 1 and 2147483647")
     if matching_job_queue not in ALLOWED_MATCHING_JOB_QUEUES:
@@ -895,6 +899,7 @@ def submit_analysis_task(
                 "min_glm_treatment_pixels": min_glm_treatment_pixels,
                 "caliper_width": caliper_width,
                 "max_controls_per_treatment": max_controls_per_treatment,
+                "min_control_distance_km": min_control_distance_km,
                 **({"random_seed": random_seed} if random_seed is not None else {}),
                 "match_memory_mib": match_memory_mib,
                 "matching_job_queue": matching_job_queue,
@@ -1980,7 +1985,8 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
     Args:
         task_id: The task UUID.
         result_type: One of 'by_site_year', 'by_site_total', 'pixel_level',
-            'match_covariates', 'balance', 'propensity_scores'.
+            'match_covariates', 'balance', 'propensity_scores',
+            'match_quality_summary', 'matched_pixels'.
         results_s3_uri: Optional ``s3://bucket/prefix`` URI pointing to the
             output directory.  When provided the bucket and prefix are
             extracted from this URI instead of being derived from
@@ -1996,12 +2002,12 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
     filename_map = {
         "by_site_year": "results_by_site_year.csv",
         "by_site_total": "results_by_site_total.csv",
-        "pixel_level": "results_pixel_level.csv",
-        "match_covariates": "results_match_covariates.csv",
-        "balance": "results_balance.csv",
+        "pixel_level": "results_pixel_year_emissions.csv",
+        "match_covariates": "results_pixel_covariates.csv",
+        "balance": "results_covariate_balance.csv",
         "propensity_scores": "results_propensity_scores.csv",
         "match_quality_summary": "results_match_quality_summary.json",
-        "matched_pixels": "results_matched_pixels.csv",
+        "matched_pixels": "results_pixel_locations.csv",
     }
     filename = filename_map.get(result_type)
     if not filename:
@@ -2113,8 +2119,8 @@ def generate_match_quality_summary(task_id, results_s3_uri=None):
         "covariate_cols": [],
     }
 
-    # ---- Histograms from results_match_covariates.csv --------------------
-    cov_key = f"{prefix}/results_match_covariates.csv"
+    # ---- Histograms from results_pixel_covariates.csv --------------------
+    cov_key = f"{prefix}/results_pixel_covariates.csv"
     try:
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
             s3.download_fileobj(Bucket=bucket, Key=cov_key, Fileobj=tmp)
@@ -2958,6 +2964,7 @@ def get_recompute_config(task_id, user_id):
             "min_glm_treatment_pixels": config.get("min_glm_treatment_pixels", 15),
             "caliper_width": config.get("caliper_width", 0.2),
             "max_controls_per_treatment": config.get("max_controls_per_treatment", 1),
+            "min_control_distance_km": config.get("min_control_distance_km", 10),
             "random_seed": _random.randint(1, 2_147_483_647),
             "match_memory_gb": max(1, match_memory_mib // 1024),
             "matching_job_queue": config.get(
@@ -3066,6 +3073,7 @@ def resubmit_analysis_task(task_id, user_id):
             min_glm_treatment_pixels=config.get("min_glm_treatment_pixels", 15),
             caliper_width=config.get("caliper_width", 0.2),
             max_controls_per_treatment=config.get("max_controls_per_treatment", 1),
+            min_control_distance_km=config.get("min_control_distance_km", 10),
             random_seed=new_seed,
             match_memory_mib=match_memory_mib,
             matching_job_queue=config.get("matching_job_queue", "ae-spot-1TB-io2-disk"),

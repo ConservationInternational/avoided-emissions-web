@@ -1922,6 +1922,38 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
+                                                                                            dbc.Label(
+                                                                                                "Min control distance (km)"
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="min-control-distance-km",
+                                                                                                type="number",
+                                                                                                min=0,
+                                                                                                max=500,
+                                                                                                step=1,
+                                                                                                value=rc.get(
+                                                                                                    "min_control_distance_km",
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "min_control_distance_km"
+                                                                                                    ],
+                                                                                                ),
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Controls closer than this to treatment polygons "
+                                                                                                "are excluded. Set to 0 to disable.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        sm=6,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
                                                                                             html.Div(
                                                                                                 [
                                                                                                     dbc.Label(

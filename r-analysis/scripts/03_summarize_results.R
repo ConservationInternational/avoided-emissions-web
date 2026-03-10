@@ -12,13 +12,14 @@
 #   Avoided = control_emissions - treatment_emissions
 #
 # Output:
-#   - {output_dir}/results_by_site_year.csv    : Per-site per-year results
-#   - {output_dir}/results_by_site_total.csv   : Per-site totals
-#   - {output_dir}/results_pixel_level.csv     : Pixel-level detail
-#   - {output_dir}/results_summary.json        : Global summary
-#   - {output_dir}/results_match_covariates.csv: Matched pixel covariate values
-#   - {output_dir}/results_balance.csv         : SMD balance statistics (Love plot)
-#   - {output_dir}/results_propensity_scores.csv: Propensity scores (QQ plot)
+#   - {output_dir}/results_by_site_year.csv              : Per-site per-year results
+#   - {output_dir}/results_by_site_total.csv             : Per-site totals
+#   - {output_dir}/results_pixel_year_emissions.csv      : Per-pixel per-year detail
+#   - {output_dir}/results_summary.json                  : Global summary
+#   - {output_dir}/results_pixel_covariates.csv          : Matched pixel covariate values
+#   - {output_dir}/results_covariate_balance.csv         : SMD balance statistics (Love plot)
+#   - {output_dir}/results_propensity_scores.csv         : Propensity scores (QQ plot)
+#   - {output_dir}/results_pixel_locations.csv           : Matched pixel lon/lat for map
 
 library(tidyverse)
 library(foreach)
@@ -160,7 +161,7 @@ if (length(match_files) > 0) {
     if (nrow(match_cov_data) > 0) {
         write_csv(
             match_cov_data,
-            file.path(config$output_dir, "results_match_covariates.csv")
+            file.path(config$output_dir, "results_pixel_covariates.csv")
         )
         message("  Match quality data: ", nrow(match_cov_data),
                 " rows, ", length(covariate_cols), " covariates")
@@ -175,7 +176,7 @@ if (length(match_files) > 0) {
         )
         write_csv(
             empty_cov,
-            file.path(config$output_dir, "results_match_covariates.csv")
+            file.path(config$output_dir, "results_pixel_covariates.csv")
         )
     }
 
@@ -248,7 +249,7 @@ if (length(match_files) > 0) {
         balance_table <- bind_rows(balance_agg, balance_by_site)
         write_csv(
             balance_table,
-            file.path(config$output_dir, "results_balance.csv")
+            file.path(config$output_dir, "results_covariate_balance.csv")
         )
         message("  Balance statistics: ", nrow(balance_table),
                 " rows (", length(all_covs_for_balance), " covariates)")
@@ -259,7 +260,7 @@ if (length(match_files) > 0) {
                 mean_treatment = numeric(), mean_control = numeric(),
                 pooled_sd = numeric(), smd = numeric()
             ),
-            file.path(config$output_dir, "results_balance.csv")
+            file.path(config$output_dir, "results_covariate_balance.csv")
         )
     }
 
@@ -567,7 +568,7 @@ if (length(match_files) > 0) {
         select(cell, site_id, year, treatment, sampled_fraction,
                match_group, match_weight, forest_at_year_end,
                forest_change_ha, Emissions_MgCO2e) %>%
-        write_csv(file.path(config$output_dir, "results_pixel_level.csv"))
+        write_csv(file.path(config$output_dir, "results_pixel_year_emissions.csv"))
 
     # Summarize by site and year.
     # Aggregation is done per matched set using match_weight so that it
@@ -726,7 +727,7 @@ if (length(match_files) > 0) {
         write_csv(
             pixel_locations,
             file.path(config$output_dir,
-                      "results_matched_pixels.csv")
+                      "results_pixel_locations.csv")
         )
         message("  Matched pixel locations: ",
                 nrow(pixel_locations), " pixels")
@@ -739,7 +740,7 @@ if (length(match_files) > 0) {
                 lon = numeric(), lat = numeric()
             ),
             file.path(config$output_dir,
-                      "results_matched_pixels.csv")
+                      "results_pixel_locations.csv")
         )
     }
 } else {
@@ -797,7 +798,7 @@ if (length(match_files) > 0) {
             match_group = character(),
             match_weight = numeric()
         ),
-        file.path(config$output_dir, "results_match_covariates.csv")
+        file.path(config$output_dir, "results_pixel_covariates.csv")
     )
 
     # Empty balance file
@@ -807,7 +808,7 @@ if (length(match_files) > 0) {
             mean_treatment = numeric(), mean_control = numeric(),
             pooled_sd = numeric(), smd = numeric()
         ),
-        file.path(config$output_dir, "results_balance.csv")
+        file.path(config$output_dir, "results_covariate_balance.csv")
     )
 
     # Empty propensity scores file
@@ -827,7 +828,7 @@ if (length(match_files) > 0) {
             treatment = logical(), match_group = character(),
             lon = numeric(), lat = numeric()
         ),
-        file.path(config$output_dir, "results_matched_pixels.csv")
+        file.path(config$output_dir, "results_pixel_locations.csv")
     )
 
     # Empty match quality summary

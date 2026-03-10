@@ -44,6 +44,15 @@ RANDOM_SEED <- if (is.null(config$random_seed)) {
     as.integer(config$random_seed)
 }
 
+# Minimum distance (km) from treatment polygons for control pixels.
+# Controls whose centroids fall within this buffer are excluded.
+# 0 disables the distance exclusion.
+MIN_CONTROL_DISTANCE_KM <- if (is.null(config$min_control_distance_km)) {
+    10
+} else {
+    as.numeric(config$min_control_distance_km)
+}
+
 # Exact-match variables read from config (e.g. admin1, ecoregion, pa)
 EXACT_MATCH_VARS <- config$exact_match_vars
 
@@ -53,6 +62,26 @@ sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %
 # Reconstruct sf geometry from the WKB column written by GeoPandas
 if ("geometry" %in% names(sites)) {
     sites <- st_as_sf(sites, wkt = "geometry", crs = 4326)
+}
+
+# Load grid metadata for cell-index → lon/lat conversion (needed for
+# the minimum control distance exclusion).
+grid_meta <- fromJSON(file.path(config$output_dir, "grid_metadata.json"))
+
+cell_to_lonlat <- function(cells, gm) {
+    # Convert flat cell indices to pixel-centre lon/lat using the
+    # affine transform stored in grid_metadata.json.
+    # transform = [a, b, c, d, e, f] where:
+    #   x = c + col * a  (a = pixel width)
+    #   y = f + row * e  (e = pixel height, negative for north-up)
+    tf <- gm$transform
+    w <- gm$width
+    rows <- cells %/% w
+    cols <- cells %% w
+    data.frame(
+        lon = tf[3] + (cols + 0.5) * tf[1],
+        lat = tf[6] + (rows + 0.5) * tf[5]
+    )
 }
 treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
 # Keep parquet on disk as an Arrow dataset — avoids materialising the entire
@@ -299,6 +328,43 @@ for (this_id in site_ids) {
 
             # Filter to groups present in both treatment and control
             vals <- filter_groups(vals, EXACT_MATCH_VARS)
+
+            # Exclude control pixels too close to treatment polygons
+            if (MIN_CONTROL_DISTANCE_KM > 0) {
+                control_mask <- !vals$treatment
+                n_ctrl_before <- sum(control_mask)
+                if (n_ctrl_before > 0) {
+                    coords <- cell_to_lonlat(
+                        vals$cell[control_mask], grid_meta
+                    )
+                    ctrl_pts <- st_as_sf(
+                        coords,
+                        coords = c("lon", "lat"), crs = 4326
+                    )
+                    site_buf <- st_buffer(
+                        st_geometry(site),
+                        dist = units::set_units(
+                            MIN_CONTROL_DISTANCE_KM, "km"
+                        )
+                    )
+                    too_close <- lengths(
+                        st_intersects(ctrl_pts, site_buf)
+                    ) > 0
+                    n_excluded <- sum(too_close)
+                    if (n_excluded > 0) {
+                        exclude_rows <- which(control_mask)[too_close]
+                        vals <- vals[-exclude_rows, ]
+                        message(
+                            "  Excluded ", n_excluded,
+                            " control pixels within ",
+                            MIN_CONTROL_DISTANCE_KM,
+                            " km of treatment polygons"
+                        )
+                    }
+                }
+                # Re-filter groups after distance exclusion
+                vals <- filter_groups(vals, EXACT_MATCH_VARS)
+            }
 
             # Record control pool size before subsampling
             n_control_pool_site <- sum(!vals$treatment)

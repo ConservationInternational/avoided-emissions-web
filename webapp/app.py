@@ -518,7 +518,7 @@ def vector_layers_list():
 def matched_pixels(task_id):
     """Return matched treatment/control pixel locations as GeoJSON.
 
-    Reads ``results_matched_pixels.csv`` from S3 for the given task and
+    Reads ``results_pixel_locations.csv`` from S3 for the given task and
     returns a GeoJSON FeatureCollection of Point features.  Each feature
     has properties ``site_id``, ``treatment`` (bool), and ``match_group``.
 

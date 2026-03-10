@@ -381,10 +381,35 @@
                     featureProjection: "EPSG:3857",
                 });
                 pixelSource.addFeatures(features);
+                mapEl._allPixelFeatures = features;
+                // Apply any pending site filter
+                filterPixelsBySite(mapEl, mapEl._pixelFilterSiteId || "");
             })
             .catch(function () {
                 // Silently ignore fetch errors.
             });
+    }
+
+    function filterPixelsBySite(mapEl, siteId) {
+        var source = mapEl._pixelSource;
+        if (!source) {
+            return;
+        }
+        var allFeatures = mapEl._allPixelFeatures;
+        if (!allFeatures) {
+            return;
+        }
+        var normalized = normalizeSiteId(siteId);
+        mapEl._pixelFilterSiteId = normalized;
+        source.clear();
+        if (!normalized) {
+            source.addFeatures(allFeatures);
+        } else {
+            var filtered = allFeatures.filter(function (f) {
+                return normalizeSiteId(f.get("site_id")) === normalized;
+            });
+            source.addFeatures(filtered);
+        }
     }
 
     function ensureMap(el) {
@@ -409,6 +434,18 @@
         ensureScaleBarControl(el, map);
         ensureDragZoomControl(el, map);
         ensurePixelLayerControl(el, map);
+
+        // Listen for zoom-to-site events from the Dash dropdown.
+        el.addEventListener("zoom-to-site", function (evt) {
+            var siteId = (evt.detail && evt.detail.siteId) || "";
+            setSelectedSite(el, siteId);
+            if (siteId) {
+                zoomToFeature(el, map, siteId);
+            } else {
+                fitToAllSites(el, map);
+            }
+            filterPixelsBySite(el, siteId);
+        });
 
         // Notify other scripts (e.g. COG layer control) that a map is ready.
         el.dispatchEvent(
