@@ -3379,7 +3379,10 @@ def _build_overview(task, sites, totals, quality_warnings=None):
             except (json.JSONDecodeError, ValueError):
                 mq_summary = None
             if mq_summary:
-                agg = mq_summary.get("summary_stats", {}).get("__all__", {})
+                stats = mq_summary.get("summary_stats", {})
+                if not isinstance(stats, dict):
+                    stats = {}
+                agg = stats.get("__all__", {})
                 n_treat = agg.get("n_treatment", 0)
                 n_ctrl = agg.get("n_control", 0)
                 n_treat_total = agg.get("n_treatment_total")
