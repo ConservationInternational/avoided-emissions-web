@@ -709,9 +709,9 @@ def main(argv: list[str] | None = None) -> None:
         # Save processed sites (Parquet for downstream R steps).
         # Convert geometry to WKT text so R's arrow::read_parquet() +
         # sf::st_as_sf(wkt=) can reconstruct it without needing sfarrow.
-        sites_out = sites.copy()
-        sites_out["geometry"] = sites_out.geometry.to_wkt()
-        pd.DataFrame(sites_out).to_parquet(
+        sites_out = pd.DataFrame(sites.copy())
+        sites_out["geometry"] = sites.geometry.to_wkt()
+        sites_out.to_parquet(
             os.path.join(config["output_dir"], "sites_processed.parquet"),
             index=False,
             compression="zstd",
