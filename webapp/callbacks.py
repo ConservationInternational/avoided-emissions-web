@@ -566,14 +566,18 @@ def register_callbacks(app, limiter=None):
 
     @app.callback(
         [Output("site-set-selector", "options"), Output("site-set-selector", "value")],
-        [Input("url", "pathname"), Input("site-set-refresh-store", "data")],
+        [
+            Input("url", "pathname"),
+            Input("site-set-refresh-store", "data"),
+            Input("show-archived-site-sets", "value"),
+        ],
         [
             State("site-set-selector", "value"),
             State("recompute-config-store", "data"),
         ],
     )
     def refresh_site_set_options(
-        pathname, _refresh_token, current_value, recompute_config
+        pathname, _refresh_token, show_archived, current_value, recompute_config
     ):
         if pathname != "/submit":
             raise PreventUpdate
@@ -582,17 +586,16 @@ def register_callbacks(app, limiter=None):
         if not user:
             raise PreventUpdate
 
-        site_sets = list_user_site_sets(user.id)
-        options = [
-            {
-                "label": (
-                    f"{s['name']} ({s['n_sites']} sites, "
-                    f"{(s['uploaded_at'] or '')[:19].replace('T', ' ')})"
-                ),
-                "value": s["id"],
-            }
-            for s in site_sets
-        ]
+        site_sets = list_user_site_sets(user.id, include_archived=bool(show_archived))
+        options = []
+        for s in site_sets:
+            label = (
+                f"{s['name']} ({s['n_sites']} sites, "
+                f"{(s['uploaded_at'] or '')[:19].replace('T', ' ')})"
+            )
+            if s.get("is_archived"):
+                label += " [Archived]"
+            options.append({"label": label, "value": s["id"]})
 
         valid_ids = {s["id"] for s in site_sets}
 
@@ -1012,6 +1015,24 @@ def register_callbacks(app, limiter=None):
                 )
 
         raise PreventUpdate
+
+    @app.callback(
+        Output("archive-site-set-btn", "children"),
+        Input("site-set-selector", "value"),
+        State("show-archived-site-sets", "value"),
+        prevent_initial_call=True,
+    )
+    def update_archive_button_label(selected_set_id, show_archived):
+        if not selected_set_id or not show_archived:
+            return "Archive"
+        user = get_current_user()
+        if not user:
+            return "Archive"
+        site_sets = list_user_site_sets(user.id, include_archived=True)
+        for s in site_sets:
+            if s["id"] == selected_set_id and s.get("is_archived"):
+                return "Restore"
+        return "Archive"
 
     @app.callback(
         [

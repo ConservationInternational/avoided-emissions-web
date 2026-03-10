@@ -399,6 +399,7 @@ def _site_set_summary_row(row):
         "n_sites": row.n_sites or 0,
         "file_size_bytes": int(row.file_size_bytes or 0),
         "file_format": row.file_format,
+        "is_archived": bool(row.is_archived),
     }
 
 
@@ -655,9 +656,10 @@ def delete_user_site_set(site_set_id, user_id):
         db.close()
 
 
-def archive_user_site_set(site_set_id, user_id, archive=True):
+def archive_user_site_set(site_set_id, user_id, archive=None):
     """Archive (or unarchive) a user-owned site set.
 
+    When *archive* is ``None`` (default), the current state is toggled.
     Archived site sets are hidden from the dropdown but remain in the
     database for tasks that reference them.
     """
@@ -671,6 +673,8 @@ def archive_user_site_set(site_set_id, user_id, archive=True):
         if not site_set:
             return False, "Site set not found."
 
+        if archive is None:
+            archive = not site_set.is_archived
         site_set.is_archived = archive
         db.commit()
         action = "archived" if archive else "restored"

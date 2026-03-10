@@ -1403,6 +1403,12 @@ def submit_layout(user, recompute_config=None):
                                                                 ],
                                                                 className="g-2 mb-2",
                                                             ),
+                                                            dbc.Checkbox(
+                                                                id="show-archived-site-sets",
+                                                                label="Show archived site sets",
+                                                                value=False,
+                                                                className="mb-2",
+                                                            ),
                                                             html.Div(
                                                                 id="site-set-metadata"
                                                             ),
