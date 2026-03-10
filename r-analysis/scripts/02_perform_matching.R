@@ -93,6 +93,24 @@ base_dataset <- open_dataset(
 all_site_ids <- unique(treatment_key$id_numeric)
 all_treatment_cells <- unique(treatment_key$cell)
 
+# Pre-compute the buffer around ALL treatment sites for the minimum
+# control distance exclusion.  Controls for any site must be at least
+# MIN_CONTROL_DISTANCE_KM away from every treatment polygon.
+if (MIN_CONTROL_DISTANCE_KM > 0) {
+    all_sites_union <- st_union(st_geometry(sites))
+    all_sites_buffer <- st_buffer(
+        all_sites_union,
+        dist = units::set_units(MIN_CONTROL_DISTANCE_KM, "km")
+    )
+    message(
+        "  Distance exclusion buffer computed: ",
+        MIN_CONTROL_DISTANCE_KM, " km around all ",
+        nrow(sites), " site(s)"
+    )
+} else {
+    all_sites_buffer <- NULL
+}
+
 # Load formula from JSON
 formula_json <- fromJSON(file.path(config$output_dir, "formula.json"))
 f <- as.formula(formula_json$formula_str)
@@ -329,7 +347,7 @@ for (this_id in site_ids) {
             # Filter to groups present in both treatment and control
             vals <- filter_groups(vals, EXACT_MATCH_VARS)
 
-            # Exclude control pixels too close to treatment polygons
+            # Exclude control pixels too close to ANY treatment polygon
             if (MIN_CONTROL_DISTANCE_KM > 0) {
                 control_mask <- !vals$treatment
                 n_ctrl_before <- sum(control_mask)
@@ -341,14 +359,8 @@ for (this_id in site_ids) {
                         coords,
                         coords = c("lon", "lat"), crs = 4326
                     )
-                    site_buf <- st_buffer(
-                        st_geometry(site),
-                        dist = units::set_units(
-                            MIN_CONTROL_DISTANCE_KM, "km"
-                        )
-                    )
                     too_close <- lengths(
-                        st_intersects(ctrl_pts, site_buf)
+                        st_intersects(ctrl_pts, all_sites_buffer)
                     ) > 0
                     n_excluded <- sum(too_close)
                     if (n_excluded > 0) {

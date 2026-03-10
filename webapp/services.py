@@ -234,6 +234,85 @@ def _read_sites_from_archive(file_content, filename):
         return gpd.read_file(geojsons[0], driver="GeoJSON")
 
 
+def _remove_duplicate_vertices(coords):
+    """Remove consecutive duplicate vertices from a coordinate sequence."""
+    cleaned = [coords[0]]
+    for pt in coords[1:]:
+        if pt != cleaned[-1]:
+            cleaned.append(pt)
+    return cleaned
+
+
+def _clean_polygon(polygon):
+    """Remove consecutive duplicate vertices from a Polygon's rings."""
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    ext = _remove_duplicate_vertices(list(polygon.exterior.coords))
+    # A valid ring needs at least 4 coords (3 distinct + closing point)
+    if len(ext) < 4:
+        return polygon
+
+    ints = []
+    for ring in polygon.interiors:
+        cleaned = _remove_duplicate_vertices(list(ring.coords))
+        if len(cleaned) >= 4:
+            ints.append(cleaned)
+
+    return ShapelyPolygon(ext, ints)
+
+
+def _repair_geometries(gdf):
+    """Fix geometries that would be invalid under S2 spherical geometry.
+
+    Applies two repairs to every non-null Polygon/MultiPolygon:
+      1. Removes consecutive duplicate vertices (S2 "degenerate edge" errors).
+      2. Applies ``shapely.validation.make_valid`` for self-intersections,
+         then re-extracts Polygon/MultiPolygon parts.
+
+    Returns a new GeoDataFrame with cleaned geometries.
+    """
+    from shapely.geometry import MultiPolygon as ShapelyMultiPolygon
+    from shapely.validation import make_valid
+
+    def _repair_one(geom):
+        if geom is None or geom.is_empty:
+            return geom
+
+        # Step 1: strip consecutive duplicate vertices
+        if geom.geom_type == "Polygon":
+            geom = _clean_polygon(geom)
+        elif geom.geom_type == "MultiPolygon":
+            geom = ShapelyMultiPolygon([_clean_polygon(p) for p in geom.geoms])
+
+        # Step 2: fix self-intersections / crossing edges
+        if not geom.is_valid:
+            geom = make_valid(geom)
+            # make_valid can produce GeometryCollections; keep only polygons
+            if geom.geom_type == "GeometryCollection":
+                polys = [
+                    g for g in geom.geoms if g.geom_type in ("Polygon", "MultiPolygon")
+                ]
+                if not polys:
+                    return geom
+                geom = (
+                    polys[0]
+                    if len(polys) == 1
+                    else ShapelyMultiPolygon(
+                        [
+                            p
+                            for g in polys
+                            for p in (g.geoms if g.geom_type == "MultiPolygon" else [g])
+                        ]
+                    )
+                )
+
+        return geom
+
+    gdf = gdf.copy()
+    gdf["geometry"] = gdf["geometry"].apply(_repair_one)
+    return gdf
+
+
 def parse_sites_file(file_content, filename):
     """Parse uploaded site files into a GeoDataFrame.
 
@@ -292,6 +371,14 @@ def parse_sites_file(file_content, filename):
         # Ensure EPSG:4326
         if gdf.crs and gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
+
+        # Repair geometries so they are valid under S2 (used by the R sf
+        # package).  Two common issues:
+        #   1. Consecutive duplicate vertices → "Edge N is degenerate"
+        #   2. Self-intersecting rings → "Edge N crosses edge M"
+        # ST_MakeValid in PostGIS fixes (2) but not (1), so we clean both
+        # in Shapely before the data reaches PostGIS.
+        gdf = _repair_geometries(gdf)
 
     return gdf, errors
 
