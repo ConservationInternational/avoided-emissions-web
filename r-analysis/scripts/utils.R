@@ -332,13 +332,39 @@ filter_groups <- function(vals, exact_match_vars) {
     # Assign group interaction from the exact-match variables and keep
     # only groups present in both treatment and control sets.
     vals$group <- interaction(vals[, exact_match_vars, drop = FALSE])
-    vals <- filter(vals, group %in% unique(filter(vals, treatment)$group))
 
+    # Drop control-only groups (no treatment pixels)
+    all_groups <- unique(vals$group)
     treatment_groups <- unique(filter(vals, treatment)$group)
+    control_only <- setdiff(all_groups, treatment_groups)
+    if (length(control_only) > 0) {
+        n_ctrl_lost <- sum(!vals$treatment & vals$group %in% control_only)
+        message("    filter_groups: dropping ", length(control_only),
+                " control-only group(s) (", n_ctrl_lost,
+                " control pixels removed)")
+    }
+    vals <- filter(vals, group %in% treatment_groups)
+
+    # Drop treatment-only groups (no control pixels)
     control_groups <- unique(filter(vals, !treatment)$group)
     shared_groups <- treatment_groups[treatment_groups %in% control_groups]
+    treatment_only <- setdiff(as.character(treatment_groups),
+                              as.character(shared_groups))
+    if (length(treatment_only) > 0) {
+        n_treat_lost <- sum(vals$treatment &
+                            vals$group %in% treatment_only)
+        message("    filter_groups: dropping ", length(treatment_only),
+                " treatment-only group(s) (", n_treat_lost,
+                " treatment pixels lost): ",
+                paste(head(treatment_only, 10), collapse = ", "))
+    }
     vals <- filter(vals, group %in% shared_groups)
     vals$group <- droplevels(vals$group)
+
+    message("    filter_groups: ", length(shared_groups),
+            " shared group(s) remaining, ",
+            sum(vals$treatment), " treatment / ",
+            sum(!vals$treatment), " control pixels")
 
     return(vals)
 }

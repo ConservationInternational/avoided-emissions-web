@@ -302,6 +302,8 @@ match_site <- function(d, f) {
 
     m <- foreach(this_group = unique(d$group), .combine = foreach_rbind) %do% {
         this_d <- filter(d, group == this_group)
+        n_treatment_grp <- sum(this_d$treatment)
+        n_control_grp <- sum(!this_d$treatment)
 
         # Drop rows with NA in any formula variable so that glm() and
         # predict() operate on the same set of rows (glm uses na.omit
@@ -321,6 +323,7 @@ match_site <- function(d, f) {
         n_treatment <- sum(this_d$treatment)
 
         if (n_treatment < 1) {
+            message("    Group ", this_group, ": 0 treatment pixels, skipping")
             return(NULL)
         } else if (n_treatment < MIN_GLM) {
             # Too few treatment pixels for GLM; use Mahalanobis distance
@@ -347,7 +350,17 @@ match_site <- function(d, f) {
                         dists <- dists + caliper(dists, width = CALIPER_WIDTH)
                     }
                     this_d$pscore <- NA_real_
-                    return(get_matches(this_d, dists))
+                    grp_fb <- get_matches(this_d, dists)
+                    n_fb <- if (is.data.frame(grp_fb)) {
+                        sum(grp_fb$treatment)
+                    } else {
+                        0L
+                    }
+                    message("    Group ", this_group,
+                            " (fallback): T=", n_treatment_grp,
+                            " C=", n_control_grp,
+                            " -> ", n_fb, " matched")
+                    return(grp_fb)
                 }
             }
 
@@ -359,7 +372,20 @@ match_site <- function(d, f) {
                 dists <- dists + caliper(dists, width = CALIPER_WIDTH)
             }
         }
-        return(get_matches(this_d, dists))
+        grp_result <- get_matches(this_d, dists)
+        n_matched <- if (is.data.frame(grp_result)) {
+            sum(grp_result$treatment)
+        } else {
+            0L
+        }
+        if (n_matched == 0) {
+            message("    Group ", this_group, ": T=", n_treatment_grp,
+                    " C=", n_control_grp, " -> 0 matches")
+        } else {
+            message("    Group ", this_group, ": T=", n_treatment_grp,
+                    " C=", n_control_grp, " -> ", n_matched, " matched")
+        }
+        return(grp_result)
     }
 
     if (is.null(m) || nrow(m) == 0) {
