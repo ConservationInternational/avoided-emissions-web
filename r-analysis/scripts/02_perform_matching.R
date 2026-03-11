@@ -329,6 +329,7 @@ match_site <- function(d, f) {
     #   result              : data.frame of matched rows (or NULL)
     #   separation_warnings : list of per-group separation diagnostics
     sep_warnings <- list()
+    fn_env <- environment()  # explicit ref for use inside foreach
 
     m <- foreach(this_group = unique(d$group), .combine = foreach_rbind) %do% {
         this_d <- filter(d, group == this_group)
@@ -370,7 +371,9 @@ match_site <- function(d, f) {
                     message("    Separation detected in group ",
                             this_group, ": ", d_msg)
                 }
-                sep_warnings[[as.character(this_group)]] <<- sep$details
+                sw <- get("sep_warnings", envir = fn_env)
+                sw[[as.character(this_group)]] <- sep$details
+                assign("sep_warnings", sw, envir = fn_env)
 
                 if (SEPARATION_FALLBACK) {
                     message("    Falling back to Mahalanobis distance ",
