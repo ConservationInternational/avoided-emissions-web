@@ -379,6 +379,102 @@
         }
     }
 
+    // ?????? No Data composite layer ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+
+    /**
+     * Build or rebuild the composite "No Data" layer.  This layer renders
+     * red any pixel that is NoData in *any* of the currently checked
+     * covariate layers.  Each checked layer's COG becomes a separate band
+     * in a single multi-source ol.source.GeoTIFF.
+     *
+     * @param {ol.Map} map - OpenLayers map instance.
+     * @param {Element} mapEl - The map container element.
+     * @param {Object} cache - Per-map COG layer cache (name ??? {layer, def}).
+     * @param {Element} content - The layer-control content container (for
+     *     finding checkboxes).
+     * @param {Element} warningEl - DOM element to show/hide band-limit warning.
+     */
+    function rebuildNodataLayer(map, mapEl, cache, content, warningEl) {
+        // Remove the existing nodata layer from the map.
+        if (mapEl._nodataLayer) {
+            map.removeLayer(mapEl._nodataLayer);
+            mapEl._nodataLayer = null;
+        }
+
+        // Collect the checked COG layers that have a known nodata value.
+        var checkedCbs = content.querySelectorAll(
+            "input[type=\"checkbox\"][data-layer-name]"
+        );
+        var sources = [];
+        var nodataValues = [];
+
+        for (var i = 0; i < checkedCbs.length; i++) {
+            if (!checkedCbs[i].checked) continue;
+            var name = checkedCbs[i].dataset.layerName;
+            var entry = cache[name];
+            if (!entry) continue;
+            var nd = (entry.def.style || {}).nodata_value;
+            // Only include layers with an explicit nodata value
+            if (nd == null) continue;
+            sources.push({ url: entry.def.url });
+            nodataValues.push(nd);
+        }
+
+        // Show/hide band-limit warning.  WebGL backends typically support
+        // many texture samplers but GeoTIFF multi-source rendering may
+        // degrade beyond ~12 bands.  We warn but never cap.
+        var WARN_THRESHOLD = 12;
+        if (warningEl) {
+            warningEl.style.display =
+                sources.length > WARN_THRESHOLD ? "block" : "none";
+        }
+
+        if (sources.length === 0) {
+            return;
+        }
+
+        // Build a WebGL color expression:
+        // case(band1==nd1 || band2==nd2 || …, red, transparent)
+        var orParts = ["==", ["band", 1], nodataValues[0]];
+        for (var b = 1; b < nodataValues.length; b++) {
+            orParts = ["any", orParts, ["==", ["band", b + 1], nodataValues[b]]];
+        }
+        var colorExpr = [
+            "case",
+            orParts,
+            ["color", 220, 38, 38, 0.7],   // red highlight
+            ["color", 0, 0, 0, 0],          // transparent
+        ];
+
+        try {
+            var source = new ol.source.GeoTIFF({
+                sources: sources,
+                normalize: false,
+                convertToRGB: false,
+                opaque: false,
+                transition: 0,
+            });
+
+            var layer = new ol.layer.WebGLTile({
+                source: source,
+                visible: true,
+                opacity: mapEl._nodataOpacity != null ? mapEl._nodataOpacity : 0.7,
+                style: { color: colorExpr },
+                properties: { title: "No Data Highlight" },
+            });
+
+            // Insert on top of other COG layers (just below site polygons).
+            var mapLayers = map.getLayers();
+            mapLayers.insertAt(mapLayers.getLength() - 1, layer);
+            mapEl._nodataLayer = layer;
+            console.debug(
+                LOG_PREFIX + "nodata layer built with " + sources.length + " bands"
+            );
+        } catch (err) {
+            console.error(LOG_PREFIX + "error creating nodata layer", err);
+        }
+    }
+
     // ?????? Layer control panel ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
     function buildLayerControl(map, mapEl, layers, vectorLayers) {
@@ -504,6 +600,69 @@
             content.appendChild(warn);
         }
 
+        // --- No Data highlight toggle ---
+        var ndDiv = document.createElement("div");
+        ndDiv.className = "ae-layer-cat ae-nodata-section";
+
+        var ndRow = document.createElement("label");
+        ndRow.className = "ae-layer-row";
+
+        var ndCb = document.createElement("input");
+        ndCb.type = "checkbox";
+        ndCb.id = "ae-nodata-toggle-" + mapEl.id;
+        if (!hasGeoTIFFSupport()) {
+            ndCb.disabled = true;
+        }
+        ndRow.appendChild(ndCb);
+
+        var ndSpan = document.createElement("span");
+        ndSpan.textContent = " No Data Highlight";
+        ndSpan.title = "Show pixels that are NoData in any selected covariate layer";
+        ndRow.appendChild(ndSpan);
+
+        var ndSlider = document.createElement("input");
+        ndSlider.type = "range";
+        ndSlider.min = "0";
+        ndSlider.max = "100";
+        ndSlider.value = "70";
+        ndSlider.className = "ae-layer-opacity";
+        ndSlider.id = "ae-nodata-opacity-" + mapEl.id;
+        ndSlider.title = "Opacity";
+        ndRow.appendChild(ndSlider);
+
+        ndDiv.appendChild(ndRow);
+
+        // Legend swatch for the nodata layer
+        var ndLegend = document.createElement("div");
+        ndLegend.className = "ae-layer-legend ae-nodata-legend";
+        ndLegend.style.display = "none";
+
+        var ndLegendItem = document.createElement("div");
+        ndLegendItem.className = "ae-legend-cat-item";
+
+        var ndSwatch = document.createElement("span");
+        ndSwatch.className = "ae-legend-swatch";
+        ndSwatch.style.backgroundColor = "rgb(220, 38, 38)";
+        ndLegendItem.appendChild(ndSwatch);
+
+        var ndLegendLabel = document.createElement("span");
+        ndLegendLabel.className = "ae-legend-cat-label";
+        ndLegendLabel.textContent = "NoData on any selected layer";
+        ndLegendItem.appendChild(ndLegendLabel);
+
+        ndLegend.appendChild(ndLegendItem);
+        ndDiv.appendChild(ndLegend);
+
+        // Warning for high band count
+        var ndWarn = document.createElement("div");
+        ndWarn.className = "ae-nodata-warning";
+        ndWarn.textContent =
+            "Many layers selected \u2014 rendering may be slow.";
+        ndWarn.style.display = "none";
+        ndDiv.appendChild(ndWarn);
+
+        content.appendChild(ndDiv);
+
         var catOrder = Object.keys(categories).sort();
         for (var ci = 0; ci < catOrder.length; ci++) {
             var catName = catOrder[ci];
@@ -566,6 +725,36 @@
             e.stopPropagation();
             var isVisible = content.style.display !== "none";
             content.style.display = isVisible ? "none" : "block";
+        });
+
+        // Helper: trigger a nodata layer rebuild when needed.
+        function maybeRebuildNodata() {
+            if (ndCb.checked) {
+                rebuildNodataLayer(map, mapEl, cache, content, ndWarn);
+            }
+        }
+
+        // --- No Data checkbox handler ---
+        ndCb.addEventListener("change", function () {
+            if (ndCb.checked) {
+                rebuildNodataLayer(map, mapEl, cache, content, ndWarn);
+            } else {
+                // Remove nodata layer.
+                if (mapEl._nodataLayer) {
+                    map.removeLayer(mapEl._nodataLayer);
+                    mapEl._nodataLayer = null;
+                }
+                ndWarn.style.display = "none";
+            }
+            ndLegend.style.display = ndCb.checked ? "block" : "none";
+        });
+
+        // --- No Data opacity slider ---
+        ndSlider.addEventListener("input", function () {
+            mapEl._nodataOpacity = parseInt(ndSlider.value, 10) / 100;
+            if (mapEl._nodataLayer) {
+                mapEl._nodataLayer.setOpacity(mapEl._nodataOpacity);
+            }
         });
 
         // --- COG checkbox handler (lazy-create raster layers) ---
@@ -647,6 +836,9 @@
             if (legendEl) {
                 legendEl.style.display = target.checked ? "block" : "none";
             }
+
+            // Rebuild nodata composite if active.
+            maybeRebuildNodata();
         });
 
         content.addEventListener("input", function (e) {

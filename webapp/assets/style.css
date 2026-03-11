@@ -375,6 +375,20 @@ h1, h2, h3, h4, h5 {
     color: #666;
 }
 
+/* No Data highlight section */
+.ae-nodata-section {
+    border-bottom: 1px solid #dee2e6;
+    padding-bottom: 6px;
+    margin-bottom: 6px;
+}
+
+.ae-nodata-warning {
+    font-size: 10px;
+    color: #dc3545;
+    margin: 2px 0 0 22px;
+    font-style: italic;
+}
+
 /* —— Footer ———————————————————————————————————————————————————————————— */
 .ae-footer {
     margin-top: 2rem;
