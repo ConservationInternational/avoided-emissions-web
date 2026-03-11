@@ -433,6 +433,40 @@ dagcomponentfuncs.TaskActions = function (props) {
 };
 
 /**
+ * TruncatedList – renders an abbreviated comma-separated list with a
+ * tooltip showing the full list on mouseover.
+ *
+ * Expects the cell value to be a comma-separated string.
+ * The tooltipField on the column should point to the full list field.
+ * Shows the first few items plus a count of remaining items.
+ */
+dagcomponentfuncs.TruncatedList = function (props) {
+    var raw = props.value;
+    if (!raw) return React.createElement("span", { style: { color: "#adb5bd" } }, "\u2014");
+    var items = raw.split(", ");
+    var maxShow = 2;
+    var display;
+    if (items.length <= maxShow) {
+        display = raw;
+    } else {
+        display = items.slice(0, maxShow).join(", ") + " +" + (items.length - maxShow);
+    }
+    return React.createElement(
+        "span",
+        {
+            title: raw,
+            style: {
+                cursor: "default",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+            },
+        },
+        display
+    );
+};
+
+/**
  * SeverityIcon – renders a coloured icon based on the severity value.
  *
  * "Critical" → red X-circle, anything else → amber warning triangle.

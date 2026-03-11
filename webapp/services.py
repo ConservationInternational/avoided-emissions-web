@@ -1188,8 +1188,8 @@ def submit_analysis_task(
                         {
                             "name": "match",
                             "command": ["match"],
-                            "array_size": len(gdf),
-                            "timeout_seconds": 14400,  # 4 h per site
+                            "array_size": len(gdf) * n_replicates,
+                            "timeout_seconds": 14400,  # 4 h per element
                             "memory_mib": match_memory_mib,
                             "vcpus": max(2, match_memory_mib // 15360),
                             "retry_attempts": 5,
@@ -1359,9 +1359,8 @@ def cancel_task(task_id, user):
 def get_task_list(user_id=None, limit=50):
     """Get recent analysis tasks, optionally filtered by user.
 
-    Uses ``load_only`` to skip heavy JSON/array columns (``config``,
-    ``covariates``, ``extra_metadata``) that the task list view never
-    reads.  This reduces per-row memory from ~10-50 KB to ~1 KB.
+    Uses ``load_only`` to skip the heavy ``extra_metadata`` JSON column
+    that the task list view never reads.
     """
     from sqlalchemy.orm import joinedload, load_only
 
@@ -1376,6 +1375,8 @@ def get_task_list(user_id=None, limit=50):
                     AnalysisTask.status,
                     AnalysisTask.n_sites,
                     AnalysisTask.submitted_by,
+                    AnalysisTask.config,
+                    AnalysisTask.covariates,
                     AnalysisTask.created_at,
                     AnalysisTask.submitted_at,
                     AnalysisTask.completed_at,

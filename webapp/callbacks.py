@@ -1448,11 +1448,22 @@ def register_callbacks(app, limiter=None):
 
         rows = []
         for task in tasks:
+            cfg = task.config or {}
+            covariates = task.covariates or []
+            exact_matches = cfg.get("exact_match_vars", [])
             row = {
                 "id": str(task.id),
                 "name": task.name,
                 "status": task.status,
                 "n_sites": task.n_sites or 0,
+                "covariates_short": ", ".join(covariates),
+                "covariates_full": ", ".join(covariates),
+                "exact_matches_short": ", ".join(exact_matches),
+                "exact_matches_full": ", ".join(exact_matches),
+                "max_treatment_pixels": cfg.get("max_treatment_pixels"),
+                "control_multiplier": cfg.get("control_multiplier"),
+                "caliper_width": cfg.get("caliper_width"),
+                "max_controls_per_treatment": cfg.get("max_controls_per_treatment"),
                 "created_at": _fmt_dt(task.created_at),
                 "submitted_at": _fmt_dt(task.submitted_at),
                 "completed_at": _fmt_dt(task.completed_at),
@@ -4045,6 +4056,27 @@ def _build_results_content(results, totals, sites=None, quality_warnings=None):
     return html.Div(content)
 
 
+_FILE_DESCRIPTIONS = {
+    "formula.json": "Propensity score model formula used for matching",
+    "grid_metadata.json": "Raster grid dimensions and affine transform",
+    "results_by_site_total.csv": "Avoided emissions totals per site",
+    "results_by_site_year.csv": "Avoided emissions per site per year",
+    "results_covariate_balance.csv": "Covariate balance SMD statistics (Love plot)",
+    "results_failed_sites.csv": "Sites that failed matching with reasons",
+    "results_match_quality_summary.json": "Match quality diagnostics per site",
+    "results_pixel_covariates.csv": "Covariate values for each matched pixel",
+    "results_pixel_locations.csv": "Lon/lat coordinates for matched pixels (map)",
+    "results_pixel_year_emissions.csv": "Per-pixel per-year forest change and emissions",
+    "results_propensity_scores.csv": "Propensity scores for matched pixels (QQ plot)",
+    "results_sampling_by_site.csv": "Subsampling fraction per site",
+    "results_summary.json": "Global summary of avoided emissions and site counts",
+    "site_id_key.csv": "Mapping between numeric and string site IDs",
+    "sites_processed.parquet": "Processed site geometries and metadata",
+    "treatment_cell_key.parquet": "Raster cells belonging to each treatment site",
+    "treatments_and_controls.parquet": "Extracted covariates for all treatment/control pixels",
+}
+
+
 def _build_raw_results(task):
     """Build a table of downloadable S3 files for the Raw Results tab."""
     if task.status != "succeeded":
@@ -4072,10 +4104,17 @@ def _build_raw_results(task):
 
     rows = []
     for f in sorted(files, key=lambda x: x["filename"]):
+        desc = _FILE_DESCRIPTIONS.get(f["filename"], "")
+        # Match files inside subdirectories (e.g. matches/m_1.rds)
+        if not desc and "/" in f["filename"]:
+            prefix = f["filename"].split("/")[0]
+            if prefix == "matches":
+                desc = "Serialized R match object for one site"
         rows.append(
             html.Tr(
                 [
                     html.Td(f["filename"]),
+                    html.Td(desc, className="text-muted"),
                     html.Td(_fmt_size(f["size_bytes"])),
                     html.Td(
                         html.A(
@@ -4091,7 +4130,16 @@ def _build_raw_results(task):
         )
     table = dbc.Table(
         [
-            html.Thead(html.Tr([html.Th("File"), html.Th("Size"), html.Th("")])),
+            html.Thead(
+                html.Tr(
+                    [
+                        html.Th("File"),
+                        html.Th("Description"),
+                        html.Th("Size"),
+                        html.Th(""),
+                    ]
+                )
+            ),
             html.Tbody(rows),
         ],
         bordered=True,
