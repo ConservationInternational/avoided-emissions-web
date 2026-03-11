@@ -460,8 +460,18 @@ for (this_id in site_ids) {
         )
         node_match_paths <- rep_match_paths
     }
-    failure_path <- file.path(config$matches_dir,
-                              paste0("failed_", this_id, ".json"))
+    # Include replicate in failure marker name when parallelised,
+    # so each array child writes a distinct file.
+    if (!is.null(BATCH_REPLICATE)) {
+        failure_path <- file.path(
+            config$matches_dir,
+            paste0("failed_", this_id, "_rep", BATCH_REPLICATE, ".json")
+        )
+    } else {
+        failure_path <- file.path(
+            config$matches_dir, paste0("failed_", this_id, ".json")
+        )
+    }
 
     # Check if the replicates this node is responsible for already exist
     node_reps_done <- all(file.exists(node_match_paths))

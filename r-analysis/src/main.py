@@ -428,15 +428,23 @@ def _write_match_failure_marker(matches_dir, output_dir, error_msg, log):
         except Exception:  # noqa: BLE001
             log.debug("Could not resolve array index to id_numeric", exc_info=True)
 
+    # Compute which replicate this array element represents
+    rep_k = None
+    if array_index is not None and n_rep > 1:
+        rep_k = int(array_index) % n_rep + 1
+
     marker = {
         "array_index": array_index,
         "id_numeric": id_numeric,
         "site_id": site_id,
+        "replicate": rep_k,
         "error": error_msg,
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
 
-    if id_numeric is not None:
+    if id_numeric is not None and rep_k is not None:
+        name = f"failed_{id_numeric}_rep{rep_k}.json"
+    elif id_numeric is not None:
         name = f"failed_{id_numeric}.json"
     elif array_index is not None:
         name = f"failed_array_{array_index}.json"
