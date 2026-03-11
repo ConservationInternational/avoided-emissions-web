@@ -384,45 +384,52 @@
     /**
      * Build or rebuild the composite "No Data" layer.  This layer renders
      * red any pixel that is NoData in *any* of the currently checked
-     * covariate layers.  Each checked layer's COG becomes a separate band
-     * in a single multi-source ol.source.GeoTIFF.
+     * covariate layers.
+     *
+     * Mechanism: each checked COG becomes a separate source in one
+     * ``ol.source.GeoTIFF`` created with ``normalize: true``.  When
+     * normalizing, OL reads each GeoTIFF's NoData tag from its metadata
+     * and produces an alpha band per source (255 = valid, 0 = nodata).
+     * For N single-band sources the band layout is:
+     *
+     *   source 1: band 1 (data), band 2 (alpha)
+     *   source 2: band 3 (data), band 4 (alpha)
+     *   source N: band 2N-1 (data), band 2N (alpha)
+     *
+     * The WebGL color expression checks whether **any** alpha band is 0
+     * and paints those pixels red.
      *
      * @param {ol.Map} map - OpenLayers map instance.
      * @param {Element} mapEl - The map container element.
-     * @param {Object} cache - Per-map COG layer cache (name ??? {layer, def}).
+     * @param {Object} defByName - Layer definition lookup (name → def).
      * @param {Element} content - The layer-control content container (for
      *     finding checkboxes).
      * @param {Element} warningEl - DOM element to show/hide band-limit warning.
      */
-    function rebuildNodataLayer(map, mapEl, cache, content, warningEl) {
+    function rebuildNodataLayer(map, mapEl, defByName, content, warningEl) {
         // Remove the existing nodata layer from the map.
         if (mapEl._nodataLayer) {
             map.removeLayer(mapEl._nodataLayer);
             mapEl._nodataLayer = null;
         }
 
-        // Collect the checked COG layers that have a known nodata value.
+        // Collect the checked COG layers.
         var checkedCbs = content.querySelectorAll(
             "input[type=\"checkbox\"][data-layer-name]"
         );
         var sources = [];
-        var nodataValues = [];
 
         for (var i = 0; i < checkedCbs.length; i++) {
             if (!checkedCbs[i].checked) continue;
             var name = checkedCbs[i].dataset.layerName;
-            var entry = cache[name];
-            if (!entry) continue;
-            var nd = (entry.def.style || {}).nodata_value;
-            // Only include layers with an explicit nodata value
-            if (nd == null) continue;
-            sources.push({ url: entry.def.url });
-            nodataValues.push(nd);
+            var def = defByName[name];
+            if (!def || !def.url) continue;
+            sources.push({ url: def.url });
         }
 
         // Show/hide band-limit warning.  WebGL backends typically support
         // many texture samplers but GeoTIFF multi-source rendering may
-        // degrade beyond ~12 bands.  We warn but never cap.
+        // degrade beyond ~12 sources.  We warn but never cap.
         var WARN_THRESHOLD = 12;
         if (warningEl) {
             warningEl.style.display =
@@ -433,11 +440,14 @@
             return;
         }
 
-        // Build a WebGL color expression:
-        // case(band1==nd1 || band2==nd2 || …, red, transparent)
-        var orParts = ["==", ["band", 1], nodataValues[0]];
-        for (var b = 1; b < nodataValues.length; b++) {
-            orParts = ["any", orParts, ["==", ["band", b + 1], nodataValues[b]]];
+        // Build a WebGL color expression that checks each source's alpha
+        // band.  With normalize=true each single-band source produces two
+        // bands: data (odd) + alpha (even).  Alpha == 0 means NoData.
+        var alphaBand = 2; // first source's alpha band
+        var orParts = ["==", ["band", alphaBand], 0];
+        for (var s = 1; s < sources.length; s++) {
+            alphaBand = (s + 1) * 2;
+            orParts = ["any", orParts, ["==", ["band", alphaBand], 0]];
         }
         var colorExpr = [
             "case",
@@ -449,10 +459,14 @@
         try {
             var source = new ol.source.GeoTIFF({
                 sources: sources,
-                normalize: false,
+                normalize: true,
                 convertToRGB: false,
                 opaque: false,
                 transition: 0,
+            });
+
+            source.on("tileloaderror", function (evt) {
+                console.error(LOG_PREFIX + "nodata tile load error", evt);
             });
 
             var layer = new ol.layer.WebGLTile({
@@ -468,7 +482,8 @@
             mapLayers.insertAt(mapLayers.getLength() - 1, layer);
             mapEl._nodataLayer = layer;
             console.debug(
-                LOG_PREFIX + "nodata layer built with " + sources.length + " bands"
+                LOG_PREFIX + "nodata layer built with " +
+                sources.length + " sources (" + (sources.length * 2) + " bands)"
             );
         } catch (err) {
             console.error(LOG_PREFIX + "error creating nodata layer", err);
@@ -730,14 +745,14 @@
         // Helper: trigger a nodata layer rebuild when needed.
         function maybeRebuildNodata() {
             if (ndCb.checked) {
-                rebuildNodataLayer(map, mapEl, cache, content, ndWarn);
+                rebuildNodataLayer(map, mapEl, defByName, content, ndWarn);
             }
         }
 
         // --- No Data checkbox handler ---
         ndCb.addEventListener("change", function () {
             if (ndCb.checked) {
-                rebuildNodataLayer(map, mapEl, cache, content, ndWarn);
+                rebuildNodataLayer(map, mapEl, defByName, content, ndWarn);
             } else {
                 // Remove nodata layer.
                 if (mapEl._nodataLayer) {
