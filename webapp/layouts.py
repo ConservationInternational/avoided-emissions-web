@@ -169,6 +169,18 @@ TASK_LIST_COLUMNS = [
         "headerTooltip": "Max controls per treatment",
     },
     {
+        "headerName": "Method",
+        "field": "matching_method",
+        "flex": 0.7,
+        "minWidth": 90,
+        "filter": "agTextColumnFilter",
+        "headerTooltip": "Matching method (optimal or nearest)",
+        "filterParams": {
+            "buttons": ["clear", "apply"],
+            "closeOnApply": True,
+        },
+    },
+    {
         "headerName": "Created",
         "field": "created_at",
         "flex": 1.5,

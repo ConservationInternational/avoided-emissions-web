@@ -1475,6 +1475,7 @@ def register_callbacks(app, limiter=None):
                 "control_multiplier": cfg.get("control_multiplier"),
                 "caliper_width": cfg.get("caliper_width"),
                 "max_controls_per_treatment": cfg.get("max_controls_per_treatment"),
+                "matching_method": cfg.get("matching_method", "optimal"),
                 "created_at": _fmt_dt(task.created_at),
                 "submitted_at": _fmt_dt(task.submitted_at),
                 "completed_at": _fmt_dt(task.completed_at),
@@ -3465,6 +3466,12 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                             "Mahalanobis"
                             if config.get("separation_fallback_mahalanobis")
                             else "Disabled",
+                        ),
+                        _detail_row(
+                            "Matching method",
+                            "Nearest neighbour (MatchIt)"
+                            if config.get("matching_method") == "nearest"
+                            else "Optimal (optmatch)",
                         ),
                         _detail_row(
                             "Replicates",
