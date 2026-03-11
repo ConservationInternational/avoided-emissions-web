@@ -202,6 +202,8 @@ def run(params, log=None):
     }
     if params.get("random_seed") is not None:
         config["random_seed"] = int(params["random_seed"])
+    if params.get("n_replicates") is not None:
+        config["n_replicates"] = int(params["n_replicates"])
     if params.get("matching_extent"):
         config["matching_extent"] = params["matching_extent"]
     if params.get("site_id"):
@@ -526,6 +528,66 @@ def _download_s3_files(s3_uri, local_dir, filenames, log):
         s3.download_file(bucket, key, local_path)
 
 
+def _safe_float(row, key, default=0.0):
+    """Return float(row[key]) if the key exists and is non-empty, else default."""
+    val = row.get(key, "")
+    if val == "" or val is None:
+        return default
+    return float(val)
+
+
+def _build_time_step_values(row):
+    """Build the values dict for an AnalysisTimeStep, including CI columns if present."""
+    vals = {
+        "forest_loss_avoided_ha": _safe_float(row, "forest_loss_avoided_ha"),
+        "emissions_avoided_mgco2e": _safe_float(row, "emissions_avoided_mgco2e"),
+        "treatment_defor_ha": _safe_float(row, "treatment_defor_ha"),
+        "control_defor_ha": _safe_float(row, "control_defor_ha"),
+        "treatment_emissions_mgco2e": _safe_float(row, "treatment_emissions_mgco2e"),
+        "control_emissions_mgco2e": _safe_float(row, "control_emissions_mgco2e"),
+    }
+    # CI columns are present only when n_replicates > 1
+    ci_keys = [
+        "treatment_defor_ha_ci_lower",
+        "treatment_defor_ha_ci_upper",
+        "control_defor_ha_ci_lower",
+        "control_defor_ha_ci_upper",
+        "forest_loss_avoided_ha_ci_lower",
+        "forest_loss_avoided_ha_ci_upper",
+        "treatment_emissions_mgco2e_ci_lower",
+        "treatment_emissions_mgco2e_ci_upper",
+        "control_emissions_mgco2e_ci_lower",
+        "control_emissions_mgco2e_ci_upper",
+        "emissions_avoided_mgco2e_ci_lower",
+        "emissions_avoided_mgco2e_ci_upper",
+    ]
+    for k in ci_keys:
+        val = row.get(k, "")
+        if val not in ("", None):
+            vals[k] = float(val)
+    return vals
+
+
+def _build_record_values(row):
+    """Build the values dict for an AnalysisRecord, including CI columns if present."""
+    vals = {
+        "forest_loss_avoided_ha": _safe_float(row, "forest_loss_avoided_ha"),
+        "emissions_avoided_mgco2e": _safe_float(row, "emissions_avoided_mgco2e"),
+        "area_ha": _safe_float(row, "area_ha"),
+    }
+    ci_keys = [
+        "forest_loss_avoided_ha_ci_lower",
+        "forest_loss_avoided_ha_ci_upper",
+        "emissions_avoided_mgco2e_ci_lower",
+        "emissions_avoided_mgco2e_ci_upper",
+    ]
+    for k in ci_keys:
+        val = row.get(k, "")
+        if val not in ("", None):
+            vals[k] = float(val)
+    return vals
+
+
 def _collect_results(output_dir, task_id, log):
     """Read the summary files written by step 3 and build an AnalysisResults dict.
 
@@ -547,6 +609,7 @@ def _collect_results(output_dir, task_id, log):
         "task_id": task_id,
         "n_sites": summary.get("n_sites", 0),
         "n_failed_sites": summary.get("n_failed_sites", 0),
+        "n_replicates": summary.get("n_replicates", 1),
         "total_emissions_avoided_mgco2e": summary.get(
             "total_emissions_avoided_mgco2e", 0.0
         ),
@@ -569,24 +632,7 @@ def _collect_results(output_dir, task_id, log):
                     AnalysisTimeStep(
                         entity_id=row["site_id"],
                         year=int(row["year"]),
-                        values={
-                            "forest_loss_avoided_ha": float(
-                                row.get("forest_loss_avoided_ha", 0)
-                            ),
-                            "emissions_avoided_mgco2e": float(
-                                row.get("emissions_avoided_mgco2e", 0)
-                            ),
-                            "treatment_defor_ha": float(
-                                row.get("treatment_defor_ha", 0)
-                            ),
-                            "control_defor_ha": float(row.get("control_defor_ha", 0)),
-                            "treatment_emissions_mgco2e": float(
-                                row.get("treatment_emissions_mgco2e", 0)
-                            ),
-                            "control_emissions_mgco2e": float(
-                                row.get("control_emissions_mgco2e", 0)
-                            ),
-                        },
+                        values=_build_time_step_values(row),
                         entity_name=row.get("site_name") or None,
                         metadata={
                             "n_matched_pixels": int(row.get("n_matched_pixels", 0)),
@@ -611,15 +657,7 @@ def _collect_results(output_dir, task_id, log):
                 records.append(
                     AnalysisRecord(
                         entity_id=row["site_id"],
-                        values={
-                            "forest_loss_avoided_ha": float(
-                                row.get("forest_loss_avoided_ha", 0)
-                            ),
-                            "emissions_avoided_mgco2e": float(
-                                row.get("emissions_avoided_mgco2e", 0)
-                            ),
-                            "area_ha": float(row.get("area_ha", 0)),
-                        },
+                        values=_build_record_values(row),
                         entity_name=row.get("site_name") or None,
                         period_start=(
                             int(row["first_year"]) if row.get("first_year") else None

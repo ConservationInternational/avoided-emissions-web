@@ -44,6 +44,14 @@ RANDOM_SEED <- if (is.null(config$random_seed)) {
     as.integer(config$random_seed)
 }
 
+# Number of times to repeat the matching (with different random samples)
+# to construct confidence intervals. Default 1 (single run, no CIs).
+N_REPLICATES <- if (is.null(config$n_replicates)) {
+    1L
+} else {
+    as.integer(config$n_replicates)
+}
+
 # When TRUE and GLM separation is detected, fall back to Mahalanobis
 # distance matching instead of failing outright.  Default FALSE so
 # users must opt in via the webapp.
@@ -371,13 +379,26 @@ for (this_id in site_ids) {
     this_site_id <- site$site_id[1]
     this_site_name <- if ("site_name" %in% names(site)) site$site_name[1] else NA_character_
     this_batch_index <- match(this_id, all_site_ids) - 1L
-    match_path <- file.path(config$matches_dir, paste0("m_", this_id, ".rds"))
+    # Build replicate-specific match file paths.
+    # When N_REPLICATES == 1, use the original naming for backward compat.
+    if (N_REPLICATES > 1L) {
+        rep_match_paths <- file.path(
+            config$matches_dir,
+            paste0("m_", this_id, "_rep", seq_len(N_REPLICATES), ".rds")
+        )
+    } else {
+        rep_match_paths <- file.path(
+            config$matches_dir, paste0("m_", this_id, ".rds")
+        )
+    }
     failure_path <- file.path(config$matches_dir,
                               paste0("failed_", this_id, ".json"))
 
-    if (file.exists(match_path)) {
+    # Check if all replicate match files already exist and are valid
+    all_reps_done <- all(file.exists(rep_match_paths))
+    if (all_reps_done) {
         existing_ok <- tryCatch({
-            existing <- readRDS(match_path)
+            existing <- readRDS(rep_match_paths[1])
             missing_cols <- setdiff(required_match_cols, names(existing))
             if (length(missing_cols) > 0) {
                 message(
@@ -405,15 +426,11 @@ for (this_id in site_ids) {
             next
         }
 
-        unlink(match_path, force = TRUE)
+        for (rp in rep_match_paths) unlink(rp, force = TRUE)
     }
     message("  Processing site_id ", this_site_id,
-            " (batch_index=", this_batch_index, ")")
-
-    # Deterministic per-site sampling for reproducibility across reruns.
-    if (!is.null(RANDOM_SEED)) {
-        set.seed(RANDOM_SEED + as.integer(this_id))
-    }
+            " (batch_index=", this_batch_index,
+            ", replicates=", N_REPLICATES, ")")
 
     # Wrap per-site matching in tryCatch so that a failure in one site
     # (e.g. memory allocation error in optmatch) does not abort the
@@ -498,35 +515,75 @@ for (this_id in site_ids) {
             # Record control pool size before subsampling
             n_control_pool_site <- sum(!vals$treatment)
 
-            # Sample to manageable sizes
-            sample_sizes <- vals %>% count(treatment, group)
-            vals <- bind_rows(
-                filter(vals, treatment) %>%
-                    group_by(group) %>%
-                    sample_n(min(MAX_TREATMENT, n())),
-                filter(vals, !treatment) %>%
-                    group_by(this_group = group) %>%
-                    sample_n(min(
-                        CONTROL_MULTIPLIER * filter(
-                            sample_sizes, treatment == TRUE,
-                            group == this_group[1]
-                        )$n,
-                        n()
-                    ))
-            ) %>%
-                ungroup() %>%
-                select(-any_of("this_group"))
-
-            # Add pre-intervention deforestation for sites >= 2005
+            # Determine formula update for pre-intervention deforestation
+            # (deterministic — computed once, applied inside each replicate)
             estab_year <- site$start_year
             this_f <- f
+            add_defor_pre <- FALSE
+            fc_init_name <- NULL
+            fc_final_name <- NULL
 
             if (estab_year >= 2005) {
                 fc_init_name <- paste0("fc_", estab_year - 5)
                 fc_final_name <- paste0("fc_", estab_year)
-
                 if (fc_init_name %in% names(vals) &&
                     fc_final_name %in% names(vals)) {
+                    add_defor_pre <- TRUE
+                    this_f <- update(this_f, ~ . + defor_pre_intervention)
+                }
+            }
+
+            # Save unsampled data for replicate re-use
+            vals_base <- vals
+
+            # ---- Replicate loop ----
+            for (rep_k in seq_len(N_REPLICATES)) {
+                match_path_k <- rep_match_paths[rep_k]
+
+                if (file.exists(match_path_k)) {
+                    message("    Replicate ", rep_k,
+                            "/", N_REPLICATES, ": already exists, skipping")
+                    next
+                }
+
+                # Deterministic per-site, per-replicate seed
+                if (!is.null(RANDOM_SEED)) {
+                    if (N_REPLICATES > 1L) {
+                        set.seed(
+                            RANDOM_SEED + as.integer(this_id) * 1000L + rep_k
+                        )
+                    } else {
+                        set.seed(RANDOM_SEED + as.integer(this_id))
+                    }
+                }
+
+                if (N_REPLICATES > 1L) {
+                    message("    Replicate ", rep_k, "/", N_REPLICATES)
+                }
+
+                vals <- vals_base
+
+                # Sample to manageable sizes
+                sample_sizes <- vals %>% count(treatment, group)
+                vals <- bind_rows(
+                    filter(vals, treatment) %>%
+                        group_by(group) %>%
+                        sample_n(min(MAX_TREATMENT, n())),
+                    filter(vals, !treatment) %>%
+                        group_by(this_group = group) %>%
+                        sample_n(min(
+                            CONTROL_MULTIPLIER * filter(
+                                sample_sizes, treatment == TRUE,
+                                group == this_group[1]
+                            )$n,
+                            n()
+                        ))
+                ) %>%
+                    ungroup() %>%
+                    select(-any_of("this_group"))
+
+                # Add pre-intervention deforestation for sites >= 2005
+                if (add_defor_pre) {
                     init_fc <- vals[[fc_init_name]]
                     final_fc <- vals[[fc_final_name]]
                     vals$defor_pre_intervention <-
@@ -534,62 +591,21 @@ for (this_id in site_ids) {
                     vals$defor_pre_intervention[init_fc == 0] <- 0
                     vals <- filter(vals, .data[[fc_init_name]] != 0)
                     vals <- filter_groups(vals, EXACT_MATCH_VARS)
-                    this_f <- update(this_f, ~ . + defor_pre_intervention)
                 }
-            }
 
-            n_treatment_final <- sum(vals$treatment)
-            n_control_final <- sum(!vals$treatment)
-            message("  Treatment pixels: ", n_treatment_final,
-                    ", Control pixels: ", n_control_final)
+                n_treatment_final <- sum(vals$treatment)
+                n_control_final <- sum(!vals$treatment)
+                message("    Treatment pixels: ", n_treatment_final,
+                        ", Control pixels: ", n_control_final)
 
-            if (n_treatment_final == 0) {
-                message("  No treatment pixels remaining after filtering")
-                failure_info <- list(
-                    id_numeric = this_id,
-                    site_id = this_site_id,
-                    site_name = this_site_name,
-                    error = "No treatment pixels remaining after filtering",
-                    timestamp = format(
-                        Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
-                    ),
-                    array_index = this_batch_index
-                )
-                write_json(
-                    failure_info, failure_path,
-                    auto_unbox = TRUE, pretty = TRUE
-                )
-                TRUE
-            } else {
-                # Run matching
-                match_result <- match_site(vals, this_f)
-                m <- match_result$result
-                sep_warnings <- match_result$separation_warnings
-
-                if (is.null(m)) {
-                    message("  No matches found")
-                    # Write a failure marker so the summarize step
-                    # knows this site was processed but produced no
-                    # matches (e.g. caliper too tight, perfect
-                    # separation in propensity scores).
-                    error_msg <- paste0(
-                        "No matches found (treatment=",
-                        n_treatment_final,
-                        ", control=", n_control_final, ")"
-                    )
-                    if (length(sep_warnings) > 0) {
-                        error_msg <- paste0(
-                            error_msg,
-                            "; separation detected in ",
-                            length(sep_warnings), " group(s)"
-                        )
-                    }
+                if (n_treatment_final == 0) {
+                    message("    No treatment pixels remaining after filtering")
                     failure_info <- list(
                         id_numeric = this_id,
                         site_id = this_site_id,
                         site_name = this_site_name,
-                        error = error_msg,
-                        separation_warnings = sep_warnings,
+                        replicate = rep_k,
+                        error = "No treatment pixels remaining after filtering",
                         timestamp = format(
                             Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
                         ),
@@ -599,31 +615,72 @@ for (this_id in site_ids) {
                         failure_info, failure_path,
                         auto_unbox = TRUE, pretty = TRUE
                     )
-                    message(
-                        "  No-match marker written to ",
-                        failure_path
-                    )
                 } else {
-                    m$id_numeric <- this_id
-                    m$site_id <- site$site_id
-                    m$sampled_fraction <- n_treatment_final / n_treatment_total
-                    m$n_control_sampled <- n_control_final
-                    m$n_control_pool <- n_control_pool_site
-                    if (length(sep_warnings) > 0) {
-                        # Attach separation warnings as an attribute
-                        # so the summarize step can surface them
-                        attr(m, "separation_warnings") <- sep_warnings
-                    }
-                    saveRDS(m, match_path)
-                    message("  Saved ", nrow(m), " matched rows")
-                    if (length(sep_warnings) > 0) {
-                        message("  WARNING: separation detected in ",
+                    # Run matching
+                    match_result <- match_site(vals, this_f)
+                    m <- match_result$result
+                    sep_warnings <- match_result$separation_warnings
+
+                    if (is.null(m)) {
+                        message("    No matches found")
+                        error_msg <- paste0(
+                            "No matches found (treatment=",
+                            n_treatment_final,
+                            ", control=", n_control_final, ")"
+                        )
+                        if (length(sep_warnings) > 0) {
+                            error_msg <- paste0(
+                                error_msg,
+                                "; separation detected in ",
+                                length(sep_warnings), " group(s)"
+                            )
+                        }
+                        failure_info <- list(
+                            id_numeric = this_id,
+                            site_id = this_site_id,
+                            site_name = this_site_name,
+                            replicate = rep_k,
+                            error = error_msg,
+                            separation_warnings = sep_warnings,
+                            timestamp = format(
+                                Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
+                            ),
+                            array_index = this_batch_index
+                        )
+                        write_json(
+                            failure_info, failure_path,
+                            auto_unbox = TRUE, pretty = TRUE
+                        )
+                        message(
+                            "    No-match marker written to ",
+                            failure_path
+                        )
+                    } else {
+                        m$id_numeric <- this_id
+                        m$site_id <- site$site_id
+                        m$sampled_fraction <-
+                            n_treatment_final / n_treatment_total
+                        m$n_control_sampled <- n_control_final
+                        m$n_control_pool <- n_control_pool_site
+                        m$replicate <- rep_k
+                        if (length(sep_warnings) > 0) {
+                            attr(m, "separation_warnings") <-
+                                sep_warnings
+                        }
+                        saveRDS(m, match_path_k)
+                        message("    Saved ", nrow(m), " matched rows")
+                        if (length(sep_warnings) > 0) {
+                            message(
+                                "    WARNING: separation detected in ",
                                 length(sep_warnings),
-                                " group(s) but matching succeeded")
+                                " group(s) but matching succeeded"
+                            )
+                        }
                     }
                 }
-                TRUE
             }
+            # ---- End replicate loop ----
+            TRUE
         }
     }, error = function(e) {
         msg <- conditionMessage(e)
@@ -647,8 +704,8 @@ for (this_id in site_ids) {
     if (!ok) n_failed <- n_failed + 1L
     # Free per-site temporaries and reclaim memory before next site
     rm(list = intersect(
-        c("vals", "m", "treatment_cells", "site_treatment_cells",
-          "sample_sizes"),
+        c("vals", "vals_base", "m", "treatment_cells",
+          "site_treatment_cells", "sample_sizes"),
         ls()
     ))
     gc()

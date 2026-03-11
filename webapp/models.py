@@ -339,6 +339,20 @@ class TaskResult(Base):
     n_matched_pixels = Column(Integer)
     sampled_fraction = Column(Float)
 
+    # Confidence interval bounds (populated when n_replicates > 1)
+    treatment_defor_ha_ci_lower = Column(Float)
+    treatment_defor_ha_ci_upper = Column(Float)
+    control_defor_ha_ci_lower = Column(Float)
+    control_defor_ha_ci_upper = Column(Float)
+    forest_loss_avoided_ha_ci_lower = Column(Float)
+    forest_loss_avoided_ha_ci_upper = Column(Float)
+    treatment_emissions_mgco2e_ci_lower = Column(Float)
+    treatment_emissions_mgco2e_ci_upper = Column(Float)
+    control_emissions_mgco2e_ci_lower = Column(Float)
+    control_emissions_mgco2e_ci_upper = Column(Float)
+    emissions_avoided_mgco2e_ci_lower = Column(Float)
+    emissions_avoided_mgco2e_ci_upper = Column(Float)
+
     task = relationship("AnalysisTask", back_populates="results")
 
 
@@ -363,6 +377,12 @@ class TaskResultTotal(Base):
     first_year = Column(Integer)
     last_year = Column(Integer)
     n_years = Column(Integer)
+
+    # Confidence interval bounds (populated when n_replicates > 1)
+    forest_loss_avoided_ha_ci_lower = Column(Float)
+    forest_loss_avoided_ha_ci_upper = Column(Float)
+    emissions_avoided_mgco2e_ci_lower = Column(Float)
+    emissions_avoided_mgco2e_ci_upper = Column(Float)
 
     task = relationship("AnalysisTask", back_populates="results_total")
 

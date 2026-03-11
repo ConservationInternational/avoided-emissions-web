@@ -1998,6 +1998,40 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
+                                                                                            dbc.Label(
+                                                                                                "Number of replicates"
+                                                                                            ),
+                                                                                            dbc.Input(
+                                                                                                id="n-replicates",
+                                                                                                type="number",
+                                                                                                min=1,
+                                                                                                max=1000,
+                                                                                                step=1,
+                                                                                                value=rc.get(
+                                                                                                    "n_replicates",
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "n_replicates"
+                                                                                                    ],
+                                                                                                ),
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Run matching multiple times with different random "
+                                                                                                "samples to construct confidence intervals around "
+                                                                                                "deforestation and emissions estimates. "
+                                                                                                "Set to 1 for a single run (no CIs).",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        sm=6,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
                                                                                             html.Div(
                                                                                                 [
                                                                                                     dbc.Label(
@@ -2450,6 +2484,19 @@ def task_detail_layout(user, task_id, shared_token=None):
                                 className="p-0",
                             ),
                             className="ae-section-card ae-map-card",
+                        ),
+                        className="p-3",
+                    ),
+                ],
+            ),
+            dbc.Tab(
+                label="Raw Results",
+                tab_id="tab-raw-results",
+                children=[
+                    html.Div(
+                        dbc.Card(
+                            dbc.CardBody(html.Div(id="task-raw-results")),
+                            className="ae-section-card",
                         ),
                         className="p-3",
                     ),

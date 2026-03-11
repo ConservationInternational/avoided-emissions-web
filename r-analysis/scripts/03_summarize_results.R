@@ -39,13 +39,47 @@ RANDOM_SEED <- if (is.null(config$random_seed)) {
     as.integer(config$random_seed)
 }
 
+N_REPLICATES <- if (is.null(config$n_replicates)) {
+    1L
+} else {
+    as.integer(config$n_replicates)
+}
+
 # Load site metadata (Parquet from Python step 1)
 sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %>%
     as_tibble()
 
-# Load all match files
-match_files <- list.files(config$matches_dir, pattern = "^m_[0-9]+\\.rds$",
-                          full.names = TRUE)
+# Load match files.
+# When N_REPLICATES > 1 files are named m_{id}_rep{k}.rds;
+# when N_REPLICATES == 1 files use the original m_{id}.rds naming.
+if (N_REPLICATES > 1L) {
+    match_files_all <- list.files(
+        config$matches_dir,
+        pattern = "^m_[0-9]+(_rep[0-9]+)?\\.rds$",
+        full.names = TRUE
+    )
+    # Use replicate-1 files for match-quality assessment
+    match_files <- list.files(
+        config$matches_dir,
+        pattern = "^m_[0-9]+_rep1\\.rds$",
+        full.names = TRUE
+    )
+    # Backward compat: if old-style files exist, treat them as rep 1
+    if (length(match_files) == 0) {
+        match_files <- list.files(
+            config$matches_dir,
+            pattern = "^m_[0-9]+\\.rds$",
+            full.names = TRUE
+        )
+    }
+} else {
+    match_files_all <- list.files(
+        config$matches_dir,
+        pattern = "^m_[0-9]+\\.rds$",
+        full.names = TRUE
+    )
+    match_files <- match_files_all
+}
 
 # Load failure markers written by step 2 (tryCatch) or by the Python
 # wrapper (OOM-killed subprocess)
@@ -95,7 +129,7 @@ write_csv(
     file.path(config$output_dir, "results_failed_sites.csv")
 )
 
-if (length(match_files) == 0 && n_failed == 0) {
+if (length(match_files_all) == 0 && n_failed == 0) {
     stop("No match files and no failure markers found. Run step 2 first.")
 }
 if (n_failed > 0) {
@@ -118,7 +152,7 @@ fc_year_max <- max(config$fc_years)
 # since we lose one year computing the diff).
 PRE_INTERVENTION_YEARS <- 5
 
-if (length(match_files) > 0) {
+if (length(match_files_all) > 0) {
     required_match_cols <- c(
         "cell", "site_id", "id_numeric", "area_ha", "treatment",
         "sampled_fraction", "total_biomass", "match_group", "match_weight"
@@ -482,72 +516,190 @@ if (length(match_files) > 0) {
     message("  Match quality summary: written")
 
     # Process in chunks
-    m_processed <- foreach(f = match_files, .combine = bind_rows) %do% {
-        m <- readRDS(f)
-        missing_cols <- setdiff(required_match_cols, names(m))
-        if (length(missing_cols) > 0) {
-            stop(
-                paste0(
-                    "Match file ", basename(f),
-                    " is missing required columns: ",
-                    paste(missing_cols, collapse = ", "),
-                    ". Re-run steps 1 and 2 to regenerate match files."
-                )
-            )
-        }
-
-        m %>%
-            select(cell, site_id, id_numeric, area_ha, treatment,
-                   sampled_fraction, total_biomass, match_group,
-                   match_weight,
-                   all_of(fc_cols[fc_cols %in% names(m)])) %>%
-            left_join(
-                sites %>% select(site_id, start_year, end_year),
-                by = "site_id"
-            ) %>%
-            pivot_longer(
-                cols = starts_with("fc_"),
-                names_to = "year",
-                values_to = "forest_at_year_end"
-            ) %>%
-            mutate(year = as.integer(str_replace(year, "fc_", ""))) %>%
-            group_by(site_id, cell, treatment) %>%
-            # Include PRE_INTERVENTION_YEARS before start for baseline
-            # plotting; need one extra year for the diff() baseline.
-            # Use fc_year_max instead of end_year so post-end-date
-            # deforestation data is available for comparison plots.
-            filter(between(
-                year,
-                max(fc_year_min,
-                    start_year[1] - PRE_INTERVENTION_YEARS - 1),
-                fc_year_max
-            )) %>%
-            # Convert forest cover fraction to hectares
-            mutate(
-                forest_at_year_end = forest_at_year_end / 100 * area_ha
-            ) %>%
-            arrange(cell, year) %>%
-            mutate(
-                forest_change_ha = c(NA, diff(forest_at_year_end)),
-                forest_frac_remaining =
-                    forest_at_year_end / forest_at_year_end[1],
-                biomass_at_year_end =
-                    total_biomass * forest_frac_remaining,
-                # Biomass to carbon (* 0.5), then carbon to CO2e (* -3.67)
-                C_change = c(NA, diff(biomass_at_year_end)) * 0.5,
-                Emissions_MgCO2e = C_change * -3.67
-            ) %>%
-            # Drop the earliest year (only needed for diff() baseline)
-            filter(between(
-                year,
-                max(fc_year_min + 1,
-                    start_year[1] - PRE_INTERVENTION_YEARS),
-                fc_year_max
-            )) %>%
-            as_tibble()
+    # Group match files by replicate for CI computation
+    if (N_REPLICATES > 1L) {
+        rep_nums <- as.integer(
+            str_match(basename(match_files_all),
+                      "_rep([0-9]+)\\.rds$")[, 2]
+        )
+        # Backward compat: old-style m_ID.rds files treated as rep 1
+        rep_nums[is.na(rep_nums)] <- 1L
+        match_file_groups <- split(match_files_all, rep_nums)
+    } else {
+        match_file_groups <- list("1" = match_files_all)
     }
 
-    message("  Processed ", nrow(m_processed), " pixel-year records")
+    process_match_files <- function(mfiles) {
+        foreach(f = mfiles, .combine = bind_rows) %do% {
+            m <- readRDS(f)
+            missing_cols <- setdiff(required_match_cols, names(m))
+            if (length(missing_cols) > 0) {
+                stop(
+                    paste0(
+                        "Match file ", basename(f),
+                        " is missing required columns: ",
+                        paste(missing_cols, collapse = ", "),
+                        ". Re-run steps 1 and 2."
+                    )
+                )
+            }
+
+            m %>%
+                select(cell, site_id, id_numeric, area_ha, treatment,
+                       sampled_fraction, total_biomass, match_group,
+                       match_weight,
+                       all_of(fc_cols[fc_cols %in% names(m)])) %>%
+                left_join(
+                    sites %>% select(site_id, start_year, end_year),
+                    by = "site_id"
+                ) %>%
+                pivot_longer(
+                    cols = starts_with("fc_"),
+                    names_to = "year",
+                    values_to = "forest_at_year_end"
+                ) %>%
+                mutate(
+                    year = as.integer(str_replace(year, "fc_", ""))
+                ) %>%
+                group_by(site_id, cell, treatment) %>%
+                filter(between(
+                    year,
+                    max(fc_year_min,
+                        start_year[1] - PRE_INTERVENTION_YEARS - 1),
+                    fc_year_max
+                )) %>%
+                mutate(
+                    forest_at_year_end =
+                        forest_at_year_end / 100 * area_ha
+                ) %>%
+                arrange(cell, year) %>%
+                mutate(
+                    forest_change_ha =
+                        c(NA, diff(forest_at_year_end)),
+                    forest_frac_remaining =
+                        forest_at_year_end / forest_at_year_end[1],
+                    biomass_at_year_end =
+                        total_biomass * forest_frac_remaining,
+                    C_change =
+                        c(NA, diff(biomass_at_year_end)) * 0.5,
+                    Emissions_MgCO2e = C_change * -3.67
+                ) %>%
+                filter(between(
+                    year,
+                    max(fc_year_min + 1,
+                        start_year[1] - PRE_INTERVENTION_YEARS),
+                    fc_year_max
+                )) %>%
+                as_tibble()
+        }
+    }
+
+    aggregate_to_site_year <- function(m_proc) {
+        by_match <- m_proc %>%
+            group_by(match_group, site_id, year) %>%
+            summarise(
+                treatment_defor_ha = sum(
+                    abs(forest_change_ha[treatment]) *
+                        match_weight[treatment],
+                    na.rm = TRUE
+                ),
+                control_defor_ha = sum(
+                    abs(forest_change_ha[!treatment]) *
+                        match_weight[!treatment],
+                    na.rm = TRUE
+                ),
+                treatment_emissions_mgco2e = sum(
+                    abs(Emissions_MgCO2e[treatment]) *
+                        match_weight[treatment],
+                    na.rm = TRUE
+                ),
+                control_emissions_mgco2e = sum(
+                    abs(Emissions_MgCO2e[!treatment]) *
+                        match_weight[!treatment],
+                    na.rm = TRUE
+                ),
+                n_treated_pixels = sum(treatment),
+                .groups = "drop"
+            ) %>%
+            mutate(
+                forest_loss_avoided_ha =
+                    control_defor_ha - treatment_defor_ha,
+                emissions_avoided_mgco2e =
+                    control_emissions_mgco2e -
+                    treatment_emissions_mgco2e
+            )
+
+        by_match %>%
+            group_by(site_id, year) %>%
+            summarise(
+                treatment_defor_ha =
+                    sum(treatment_defor_ha, na.rm = TRUE),
+                control_defor_ha =
+                    sum(control_defor_ha, na.rm = TRUE),
+                forest_loss_avoided_ha =
+                    sum(forest_loss_avoided_ha, na.rm = TRUE),
+                treatment_emissions_mgco2e =
+                    sum(treatment_emissions_mgco2e, na.rm = TRUE),
+                control_emissions_mgco2e =
+                    sum(control_emissions_mgco2e, na.rm = TRUE),
+                emissions_avoided_mgco2e =
+                    sum(emissions_avoided_mgco2e, na.rm = TRUE),
+                n_matched_pixels =
+                    sum(n_treated_pixels, na.rm = TRUE),
+                .groups = "drop"
+            ) %>%
+            left_join(
+                m_proc %>% distinct(site_id, sampled_fraction),
+                by = "site_id"
+            ) %>%
+            mutate(
+                treatment_defor_ha =
+                    treatment_defor_ha / sampled_fraction,
+                control_defor_ha =
+                    control_defor_ha / sampled_fraction,
+                forest_loss_avoided_ha =
+                    forest_loss_avoided_ha / sampled_fraction,
+                treatment_emissions_mgco2e =
+                    treatment_emissions_mgco2e / sampled_fraction,
+                control_emissions_mgco2e =
+                    control_emissions_mgco2e / sampled_fraction,
+                emissions_avoided_mgco2e =
+                    emissions_avoided_mgco2e / sampled_fraction
+            )
+    }
+
+    # Process each replicate and collect site-year results
+    all_rep_results <- list()
+    m_processed_rep1 <- NULL
+
+    for (rep_name in names(match_file_groups)) {
+        rep_files <- match_file_groups[[rep_name]]
+        if (length(rep_files) == 0) next
+        m_proc <- process_match_files(rep_files)
+        if (nrow(m_proc) == 0) next
+
+        if (is.null(m_processed_rep1)) {
+            m_processed_rep1 <- m_proc
+        }
+
+        rep_by_year <- aggregate_to_site_year(m_proc)
+        all_rep_results[[rep_name]] <- rep_by_year
+
+        message("    Replicate ", rep_name, ": ",
+                nrow(m_proc), " pixel-year records -> ",
+                nrow(rep_by_year), " site-year rows")
+
+        # Free memory between replicates
+        if (rep_name != names(match_file_groups)[1]) {
+            rm(m_proc)
+            gc()
+        }
+    }
+
+    # Use rep-1 processed data for pixel-level output and sampling table
+    m_processed <- m_processed_rep1
+
+    message("  Processed ", length(all_rep_results), " replicate(s)")
 
     # Per-site sampling table (includes indicator for subsampled sites)
     sampling_by_site <- m_processed %>%
@@ -563,86 +715,60 @@ if (length(match_files) > 0) {
         file.path(config$output_dir, "results_sampling_by_site.csv")
     )
 
-    # Save pixel-level results
+    # Save pixel-level results (rep 1 only to keep output manageable)
     m_processed %>%
         select(cell, site_id, year, treatment, sampled_fraction,
                match_group, match_weight, forest_at_year_end,
                forest_change_ha, Emissions_MgCO2e) %>%
-        write_csv(file.path(config$output_dir, "results_pixel_year_emissions.csv"))
+        write_csv(file.path(
+            config$output_dir, "results_pixel_year_emissions.csv"
+        ))
 
-    # Summarize by site and year.
-    # Aggregation is done per matched set using match_weight so that it
-    # remains correct for both pair matching and full matching (where a
-    # set may contain multiple treated pixels).
-    results_by_match_year <- m_processed %>%
-        group_by(match_group, site_id, year) %>%
-        summarise(
-            treatment_defor_ha = sum(
-                abs(forest_change_ha[treatment]) *
-                    match_weight[treatment],
-                na.rm = TRUE
-            ),
-            control_defor_ha = sum(
-                abs(forest_change_ha[!treatment]) *
-                    match_weight[!treatment],
-                na.rm = TRUE
-            ),
-            treatment_emissions_mgco2e = sum(
-                abs(Emissions_MgCO2e[treatment]) *
-                    match_weight[treatment],
-                na.rm = TRUE
-            ),
-            control_emissions_mgco2e = sum(
-                abs(Emissions_MgCO2e[!treatment]) *
-                    match_weight[!treatment],
-                na.rm = TRUE
-            ),
-            n_treated_pixels = sum(treatment),
-            .groups = "drop"
-        ) %>%
-        mutate(
-            forest_loss_avoided_ha =
-                control_defor_ha - treatment_defor_ha,
-            emissions_avoided_mgco2e =
-                control_emissions_mgco2e - treatment_emissions_mgco2e
-        )
+    # Combine replicate results and compute CIs
+    ci_metrics <- c(
+        "treatment_defor_ha", "control_defor_ha",
+        "forest_loss_avoided_ha",
+        "treatment_emissions_mgco2e",
+        "control_emissions_mgco2e",
+        "emissions_avoided_mgco2e"
+    )
 
-    results_by_year <- results_by_match_year %>%
-        group_by(site_id, year) %>%
-        summarise(
-            treatment_defor_ha = sum(treatment_defor_ha, na.rm = TRUE),
-            control_defor_ha = sum(control_defor_ha, na.rm = TRUE),
-            forest_loss_avoided_ha =
-                sum(forest_loss_avoided_ha, na.rm = TRUE),
-            treatment_emissions_mgco2e =
-                sum(treatment_emissions_mgco2e, na.rm = TRUE),
-            control_emissions_mgco2e =
-                sum(control_emissions_mgco2e, na.rm = TRUE),
-            emissions_avoided_mgco2e =
-                sum(emissions_avoided_mgco2e, na.rm = TRUE),
-            n_matched_pixels = sum(n_treated_pixels, na.rm = TRUE),
-            .groups = "drop"
-        ) %>%
-        left_join(
-            m_processed %>%
-                distinct(site_id, sampled_fraction),
-            by = "site_id"
-        ) %>%
-        mutate(
-            # Scale up for sampled sites
-            treatment_defor_ha =
-                treatment_defor_ha / sampled_fraction,
-            control_defor_ha =
-                control_defor_ha / sampled_fraction,
-            forest_loss_avoided_ha =
-                forest_loss_avoided_ha / sampled_fraction,
-            treatment_emissions_mgco2e =
-                treatment_emissions_mgco2e / sampled_fraction,
-            control_emissions_mgco2e =
-                control_emissions_mgco2e / sampled_fraction,
-            emissions_avoided_mgco2e =
-                emissions_avoided_mgco2e / sampled_fraction
-        )
+    if (length(all_rep_results) > 1) {
+        stacked <- bind_rows(all_rep_results, .id = "replicate")
+
+        # Mean of each metric across replicates
+        results_by_year <- stacked %>%
+            group_by(site_id, year) %>%
+            summarise(
+                across(
+                    all_of(ci_metrics),
+                    list(
+                        mean = ~ mean(.x, na.rm = TRUE),
+                        ci_lower = ~ quantile(.x, 0.025,
+                                              na.rm = TRUE),
+                        ci_upper = ~ quantile(.x, 0.975,
+                                              na.rm = TRUE)
+                    ),
+                    .names = "{.col}__{.fn}"
+                ),
+                n_matched_pixels =
+                    as.integer(round(mean(n_matched_pixels,
+                                         na.rm = TRUE))),
+                sampled_fraction = sampled_fraction[1],
+                n_replicates_available = n(),
+                .groups = "drop"
+            ) %>%
+            rename_with(
+                ~ str_replace(.x, "__mean$", ""),
+                ends_with("__mean")
+            ) %>%
+            rename_with(
+                ~ str_replace(.x, "__", "_"),
+                matches("__ci_(lower|upper)$")
+            )
+    } else {
+        results_by_year <- all_rep_results[[1]]
+    }
 
     results_by_year %>%
         left_join(
@@ -687,9 +813,50 @@ if (length(match_files) > 0) {
         mutate(
             n_treatment_pixels = as.integer(sapply(
                 as.character(site_id),
-                function(sid) total_treatment_by_site[[sid]] %||% NA_integer_
+                function(sid) {
+                    total_treatment_by_site[[sid]] %||% NA_integer_
+                }
             ))
         )
+
+    # For multi-replicate runs, also compute CI on totals
+    if (length(all_rep_results) > 1) {
+        rep_totals <- bind_rows(all_rep_results, .id = "replicate") %>%
+            left_join(
+                sites %>% select(site_id, start_year, end_year),
+                by = "site_id"
+            ) %>%
+            filter(year >= start_year, year <= end_year) %>%
+            group_by(replicate, site_id) %>%
+            summarise(
+                forest_loss_avoided_ha =
+                    sum(forest_loss_avoided_ha, na.rm = TRUE),
+                emissions_avoided_mgco2e =
+                    sum(emissions_avoided_mgco2e, na.rm = TRUE),
+                .groups = "drop"
+            )
+
+        total_cis <- rep_totals %>%
+            group_by(site_id) %>%
+            summarise(
+                forest_loss_avoided_ha_ci_lower =
+                    quantile(forest_loss_avoided_ha, 0.025,
+                             na.rm = TRUE),
+                forest_loss_avoided_ha_ci_upper =
+                    quantile(forest_loss_avoided_ha, 0.975,
+                             na.rm = TRUE),
+                emissions_avoided_mgco2e_ci_lower =
+                    quantile(emissions_avoided_mgco2e, 0.025,
+                             na.rm = TRUE),
+                emissions_avoided_mgco2e_ci_upper =
+                    quantile(emissions_avoided_mgco2e, 0.975,
+                             na.rm = TRUE),
+                .groups = "drop"
+            )
+
+        results_total <- results_total %>%
+            left_join(total_cis, by = "site_id")
+    }
 
     results_total %>%
         write_csv(file.path(config$output_dir,
@@ -897,6 +1064,7 @@ summary_data <- list(
     n_sites = nrow(results_total),
     n_failed_sites = n_failed,
     random_seed = RANDOM_SEED,
+    n_replicates = N_REPLICATES,
     total_emissions_avoided_mgco2e = sum(
         results_total$emissions_avoided_mgco2e, na.rm = TRUE
     ),

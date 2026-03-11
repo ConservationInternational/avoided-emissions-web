@@ -58,6 +58,7 @@ from services import (
     get_user_site_set_detail,
     grant_te_script_access,
     list_share_links,
+    list_task_s3_files,
     list_user_site_sets,
     get_user_list,
     revoke_share_link,
@@ -660,6 +661,7 @@ def register_callbacks(app, limiter=None):
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
         State("separation-fallback-mahalanobis", "value"),
+        State("n-replicates", "value"),
         State("random-seed", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
@@ -680,6 +682,7 @@ def register_callbacks(app, limiter=None):
         max_controls_per_treatment,
         min_control_distance_km,
         separation_fallback_mahalanobis,
+        n_replicates,
         random_seed,
         match_memory_gb,
         matching_job_queue,
@@ -862,6 +865,10 @@ def register_callbacks(app, limiter=None):
                                     "Mahalanobis"
                                     if separation_fallback_mahalanobis
                                     else "Disabled (GLM fails)",
+                                ),
+                                _param_row(
+                                    "Replicates",
+                                    str(n_replicates or 1),
                                 ),
                                 _param_row(
                                     "Random seed",
@@ -1217,6 +1224,7 @@ def register_callbacks(app, limiter=None):
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
         State("separation-fallback-mahalanobis", "value"),
+        State("n-replicates", "value"),
         State("random-seed", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
@@ -1237,6 +1245,7 @@ def register_callbacks(app, limiter=None):
         max_controls_per_treatment,
         min_control_distance_km,
         separation_fallback_mahalanobis,
+        n_replicates,
         random_seed,
         match_memory_gb,
         matching_job_queue,
@@ -1327,6 +1336,7 @@ def register_callbacks(app, limiter=None):
             )
             _seed = int(random_seed) if random_seed not in (None, "") else None
             _mmgb = int(match_memory_gb or ANALYSIS_DEFAULTS["match_memory_gb"])
+            _nrep = int(n_replicates or ANALYSIS_DEFAULTS["n_replicates"])
 
             bounds = [
                 (_mtp, 1, 100_000, "Max treatment pixels"),
@@ -1336,6 +1346,7 @@ def register_callbacks(app, limiter=None):
                 (_mcpt, 0, 100, "Max controls per treatment"),
                 (_mcd, 0, 500, "Min control distance (km)"),
                 (_mmgb, 1, 240, "Matching memory (GB)"),
+                (_nrep, 1, 1000, "Number of replicates"),
             ]
             for val, lo, hi, label in bounds:
                 if val < lo or val > hi:
@@ -1363,6 +1374,7 @@ def register_callbacks(app, limiter=None):
                 min_control_distance_km=_mcd,
                 separation_fallback_mahalanobis=bool(separation_fallback_mahalanobis),
                 random_seed=_seed,
+                n_replicates=_nrep,
                 match_memory_mib=_mmgb * 1024,
                 matching_job_queue=matching_job_queue,
             )
@@ -1462,6 +1474,7 @@ def register_callbacks(app, limiter=None):
             Output("task-plots", "children"),
             Output("task-match-quality", "children"),
             Output("task-map", "children"),
+            Output("task-raw-results", "children"),
             Output("quality-warning-banner", "children"),
             Output("detail-refresh-interval", "disabled"),
         ],
@@ -1479,13 +1492,35 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
 
         if not _authorize_task_access(task_id, share_token):
-            return ("Task Not Found", None, None, None, None, None, None, None, True)
+            return (
+                "Task Not Found",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                True,
+            )
 
         # Batch task status is polled by the Celery Beat worker;
         # this callback just reads the current DB state.
         detail = get_task_detail(task_id)
         if not detail:
-            return ("Task Not Found", None, None, None, None, None, None, None, True)
+            return (
+                "Task Not Found",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                True,
+            )
 
         task = detail["task"]
         sites = detail["sites"]
@@ -1530,6 +1565,7 @@ def register_callbacks(app, limiter=None):
         plots = no_update
         match_quality = no_update
         map_content = no_update
+        raw_results = no_update
 
         if active_tab == "tab-overview":
             overview = _build_overview(
@@ -1561,6 +1597,8 @@ def register_callbacks(app, limiter=None):
                 task_id=task_id,
                 sites=sites,
             )
+        elif active_tab == "tab-raw-results":
+            raw_results = _build_raw_results(task)
 
         return (
             title,
@@ -1570,6 +1608,7 @@ def register_callbacks(app, limiter=None):
             plots,
             match_quality,
             map_content,
+            raw_results,
             quality_banner,
             disable_interval,
         )
@@ -2807,6 +2846,10 @@ def register_callbacks(app, limiter=None):
         site_info = sites_data.get(selected_site, {})
         site_name = site_info.get("site_name", selected_site)
         end_date = site_info.get("end_date")
+        site_has_ci = (
+            "treatment_defor_ha_ci_lower" in site_df.columns
+            and site_df["treatment_defor_ha_ci_lower"].notna().any()
+        )
 
         # Check if this site was subsampled
         sub_info = subsampled_data.get(selected_site)
@@ -2856,6 +2899,23 @@ def register_callbacks(app, limiter=None):
                 marker=dict(size=6),
             )
         )
+        if site_has_ci:
+            _add_ci_band(
+                fig_defor,
+                site_df["year"],
+                site_df["treatment_defor_ha_ci_lower"],
+                site_df["treatment_defor_ha_ci_upper"],
+                color="rgba(44,160,44,0.15)",
+                name="Project Site 95% CI",
+            )
+            _add_ci_band(
+                fig_defor,
+                site_df["year"],
+                site_df["control_defor_ha_ci_lower"],
+                site_df["control_defor_ha_ci_upper"],
+                color="rgba(214,39,40,0.15)",
+                name="Matched Controls 95% CI",
+            )
         fig_defor.update_layout(
             title=f"Annual Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
@@ -2890,11 +2950,13 @@ def register_callbacks(app, limiter=None):
 
         # --- Cumulative deforestation plot ---
         site_sorted = site_df.sort_values("year")
+        cum_treatment = site_sorted["treatment_defor_ha"].cumsum()
+        cum_control = site_sorted["control_defor_ha"].cumsum()
         fig_cum = go.Figure()
         fig_cum.add_trace(
             go.Scatter(
                 x=site_sorted["year"],
-                y=site_sorted["treatment_defor_ha"].cumsum(),
+                y=cum_treatment,
                 mode="lines+markers",
                 name="Project Site",
                 line=dict(color="#2ca02c", width=2),
@@ -2904,13 +2966,30 @@ def register_callbacks(app, limiter=None):
         fig_cum.add_trace(
             go.Scatter(
                 x=site_sorted["year"],
-                y=site_sorted["control_defor_ha"].cumsum(),
+                y=cum_control,
                 mode="lines+markers",
                 name="Matched Controls",
                 line=dict(color="#d62728", width=2),
                 marker=dict(size=6),
             )
         )
+        if site_has_ci:
+            _add_ci_band(
+                fig_cum,
+                site_sorted["year"],
+                site_sorted["treatment_defor_ha_ci_lower"].cumsum(),
+                site_sorted["treatment_defor_ha_ci_upper"].cumsum(),
+                color="rgba(44,160,44,0.15)",
+                name="Project Site 95% CI",
+            )
+            _add_ci_band(
+                fig_cum,
+                site_sorted["year"],
+                site_sorted["control_defor_ha_ci_lower"].cumsum(),
+                site_sorted["control_defor_ha_ci_upper"].cumsum(),
+                color="rgba(214,39,40,0.15)",
+                name="Matched Controls 95% CI",
+            )
         fig_cum.update_layout(
             title=f"Cumulative Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
@@ -2970,6 +3049,23 @@ def register_callbacks(app, limiter=None):
                     marker=dict(size=6),
                 )
             )
+            if site_has_ci and "treatment_emissions_mgco2e_ci_lower" in site_df.columns:
+                _add_ci_band(
+                    fig_em,
+                    site_df["year"],
+                    site_df["treatment_emissions_mgco2e_ci_lower"],
+                    site_df["treatment_emissions_mgco2e_ci_upper"],
+                    color="rgba(44,160,44,0.15)",
+                    name="Project Site 95% CI",
+                )
+                _add_ci_band(
+                    fig_em,
+                    site_df["year"],
+                    site_df["control_emissions_mgco2e_ci_lower"],
+                    site_df["control_emissions_mgco2e_ci_upper"],
+                    color="rgba(214,39,40,0.15)",
+                    name="Matched Controls 95% CI",
+                )
             fig_em.update_layout(
                 title=f"Annual Emissions: {site_name}{sub_note}",
                 xaxis_title="Year",
@@ -3949,6 +4045,98 @@ def _build_results_content(results, totals, sites=None, quality_warnings=None):
     return html.Div(content)
 
 
+def _build_raw_results(task):
+    """Build a table of downloadable S3 files for the Raw Results tab."""
+    if task.status != "succeeded":
+        return html.P(
+            "Raw results are only available after the task completes.",
+            className="text-muted",
+        )
+    try:
+        files = list_task_s3_files(task.id, task.results_s3_uri)
+    except Exception:
+        logger.exception("Failed to list S3 files for task %s", task.id)
+        return html.P(
+            "Unable to retrieve file listing from S3.",
+            className="text-danger",
+        )
+    if not files:
+        return html.P("No output files found on S3.", className="text-muted")
+
+    def _fmt_size(n):
+        for unit in ("B", "KB", "MB", "GB"):
+            if abs(n) < 1024:
+                return f"{n:.1f} {unit}"
+            n /= 1024
+        return f"{n:.1f} TB"
+
+    rows = []
+    for f in sorted(files, key=lambda x: x["filename"]):
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(f["filename"]),
+                    html.Td(_fmt_size(f["size_bytes"])),
+                    html.Td(
+                        html.A(
+                            "Download",
+                            href=f["download_url"],
+                            target="_blank",
+                            rel="noopener noreferrer",
+                            className="btn btn-sm btn-outline-primary",
+                        )
+                    ),
+                ]
+            )
+        )
+    table = dbc.Table(
+        [
+            html.Thead(html.Tr([html.Th("File"), html.Th("Size"), html.Th("")])),
+            html.Tbody(rows),
+        ],
+        bordered=True,
+        hover=True,
+        size="sm",
+        className="mt-2",
+    )
+    return html.Div(
+        [
+            html.P(
+                f"{len(files)} files available. Download links expire after 1 hour.",
+                className="text-muted mb-2",
+            ),
+            table,
+        ]
+    )
+
+
+def _add_ci_band(fig, x, y_lower, y_upper, color, name):
+    """Add a shaded confidence-interval band to a Plotly figure."""
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y_upper,
+            mode="lines",
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y_lower,
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            fillcolor=color,
+            name=name,
+            showlegend=True,
+            hoverinfo="skip",
+        )
+    )
+
+
 def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
     """Build interactive plots for task results.
 
@@ -3992,10 +4180,35 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
                 "control_emissions_mgco2e": r.control_emissions_mgco2e or 0,
                 "is_pre_intervention": bool(r.is_pre_intervention),
                 "is_post_intervention": bool(getattr(r, "is_post_intervention", False)),
+                "treatment_defor_ha_ci_lower": getattr(
+                    r, "treatment_defor_ha_ci_lower", None
+                ),
+                "treatment_defor_ha_ci_upper": getattr(
+                    r, "treatment_defor_ha_ci_upper", None
+                ),
+                "control_defor_ha_ci_lower": getattr(
+                    r, "control_defor_ha_ci_lower", None
+                ),
+                "control_defor_ha_ci_upper": getattr(
+                    r, "control_defor_ha_ci_upper", None
+                ),
+                "forest_loss_avoided_ha_ci_lower": getattr(
+                    r, "forest_loss_avoided_ha_ci_lower", None
+                ),
+                "forest_loss_avoided_ha_ci_upper": getattr(
+                    r, "forest_loss_avoided_ha_ci_upper", None
+                ),
+                "emissions_avoided_mgco2e_ci_lower": getattr(
+                    r, "emissions_avoided_mgco2e_ci_lower", None
+                ),
+                "emissions_avoided_mgco2e_ci_upper": getattr(
+                    r, "emissions_avoided_mgco2e_ci_upper", None
+                ),
             }
             for r in results
         ]
     )
+    has_ci = df["treatment_defor_ha_ci_lower"].notna().any()
 
     plots = []
 
@@ -4004,15 +4217,26 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
         df["treatment_defor_ha"].sum() > 0 or df["control_defor_ha"].sum() > 0
     )
     if has_defor_data:
-        agg_df = (
-            df.groupby("year")
-            .agg(
-                treatment_defor_ha=("treatment_defor_ha", "sum"),
-                control_defor_ha=("control_defor_ha", "sum"),
+        agg_cols = {
+            "treatment_defor_ha": ("treatment_defor_ha", "sum"),
+            "control_defor_ha": ("control_defor_ha", "sum"),
+        }
+        if has_ci:
+            agg_cols.update(
+                {
+                    "treatment_defor_ha_ci_lower": (
+                        "treatment_defor_ha_ci_lower",
+                        "sum",
+                    ),
+                    "treatment_defor_ha_ci_upper": (
+                        "treatment_defor_ha_ci_upper",
+                        "sum",
+                    ),
+                    "control_defor_ha_ci_lower": ("control_defor_ha_ci_lower", "sum"),
+                    "control_defor_ha_ci_upper": ("control_defor_ha_ci_upper", "sum"),
+                }
             )
-            .reset_index()
-            .sort_values("year")
-        )
+        agg_df = df.groupby("year").agg(**agg_cols).reset_index().sort_values("year")
         fig_defor = go.Figure()
         fig_defor.add_trace(
             go.Scatter(
@@ -4034,6 +4258,23 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
                 marker=dict(size=6),
             )
         )
+        if has_ci:
+            _add_ci_band(
+                fig_defor,
+                agg_df["year"],
+                agg_df["treatment_defor_ha_ci_lower"],
+                agg_df["treatment_defor_ha_ci_upper"],
+                color="rgba(44,160,44,0.15)",
+                name="Project Sites 95% CI",
+            )
+            _add_ci_band(
+                fig_defor,
+                agg_df["year"],
+                agg_df["control_defor_ha_ci_lower"],
+                agg_df["control_defor_ha_ci_upper"],
+                color="rgba(214,39,40,0.15)",
+                name="Matched Controls 95% CI",
+            )
         n_successful = len(df["site_id"].unique())
         title_suffix = f" ({n_successful} sites"
         if failed_site_ids:
@@ -4090,6 +4331,19 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
         agg_df = agg_df.sort_values("year")
         agg_df["cum_treatment_defor_ha"] = agg_df["treatment_defor_ha"].cumsum()
         agg_df["cum_control_defor_ha"] = agg_df["control_defor_ha"].cumsum()
+        if has_ci:
+            agg_df["cum_treatment_defor_ha_ci_lower"] = agg_df[
+                "treatment_defor_ha_ci_lower"
+            ].cumsum()
+            agg_df["cum_treatment_defor_ha_ci_upper"] = agg_df[
+                "treatment_defor_ha_ci_upper"
+            ].cumsum()
+            agg_df["cum_control_defor_ha_ci_lower"] = agg_df[
+                "control_defor_ha_ci_lower"
+            ].cumsum()
+            agg_df["cum_control_defor_ha_ci_upper"] = agg_df[
+                "control_defor_ha_ci_upper"
+            ].cumsum()
 
         fig_cum = go.Figure()
         fig_cum.add_trace(
@@ -4112,6 +4366,23 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
                 marker=dict(size=6),
             )
         )
+        if has_ci:
+            _add_ci_band(
+                fig_cum,
+                agg_df["year"],
+                agg_df["cum_treatment_defor_ha_ci_lower"],
+                agg_df["cum_treatment_defor_ha_ci_upper"],
+                color="rgba(44,160,44,0.15)",
+                name="Project Sites 95% CI",
+            )
+            _add_ci_band(
+                fig_cum,
+                agg_df["year"],
+                agg_df["cum_control_defor_ha_ci_lower"],
+                agg_df["cum_control_defor_ha_ci_upper"],
+                color="rgba(214,39,40,0.15)",
+                name="Matched Controls 95% CI",
+            )
         fig_cum.update_layout(
             title=(
                 "Cumulative Deforestation: Project Sites vs Matched Controls"
@@ -4165,6 +4436,31 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
         },
     )
     fig_emissions.update_layout(barmode="stack")
+    if has_ci:
+        agg_em = df.groupby("year", as_index=False).agg(
+            total=("emissions_avoided_mgco2e", "sum"),
+            ci_lower=("emissions_avoided_mgco2e_ci_lower", "sum"),
+            ci_upper=("emissions_avoided_mgco2e_ci_upper", "sum"),
+        )
+        fig_emissions.add_trace(
+            go.Scatter(
+                x=agg_em["year"],
+                y=agg_em["total"],
+                mode="markers",
+                marker=dict(size=0, opacity=0),
+                error_y=dict(
+                    type="data",
+                    symmetric=False,
+                    array=agg_em["ci_upper"] - agg_em["total"],
+                    arrayminus=agg_em["total"] - agg_em["ci_lower"],
+                    color="rgba(0,0,0,0.4)",
+                    thickness=1.5,
+                    width=4,
+                ),
+                name="95% CI",
+                showlegend=True,
+            )
+        )
     plots.append(dcc.Graph(figure=fig_emissions))
 
     # Forest loss avoided over time
@@ -4181,6 +4477,31 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
         },
     )
     fig_forest.update_layout(barmode="stack")
+    if has_ci:
+        agg_fl = df.groupby("year", as_index=False).agg(
+            total=("forest_loss_avoided_ha", "sum"),
+            ci_lower=("forest_loss_avoided_ha_ci_lower", "sum"),
+            ci_upper=("forest_loss_avoided_ha_ci_upper", "sum"),
+        )
+        fig_forest.add_trace(
+            go.Scatter(
+                x=agg_fl["year"],
+                y=agg_fl["total"],
+                mode="markers",
+                marker=dict(size=0, opacity=0),
+                error_y=dict(
+                    type="data",
+                    symmetric=False,
+                    array=agg_fl["ci_upper"] - agg_fl["total"],
+                    arrayminus=agg_fl["total"] - agg_fl["ci_lower"],
+                    color="rgba(0,0,0,0.4)",
+                    thickness=1.5,
+                    width=4,
+                ),
+                name="95% CI",
+                showlegend=True,
+            )
+        )
     plots.append(dcc.Graph(figure=fig_forest))
 
     # Per-site totals bar chart

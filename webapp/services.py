@@ -54,6 +54,7 @@ ANALYSIS_DEFAULTS = {
     "max_controls_per_treatment": 1,
     "min_control_distance_km": 10,
     "separation_fallback_mahalanobis": False,
+    "n_replicates": 1,
     "match_memory_gb": 30,
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
     "fc_year_start": 2000,
@@ -915,6 +916,7 @@ def submit_analysis_task(
     separation_fallback_mahalanobis=ANALYSIS_DEFAULTS[
         "separation_fallback_mahalanobis"
     ],
+    n_replicates=ANALYSIS_DEFAULTS["n_replicates"],
     random_seed=None,
     match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
@@ -987,6 +989,8 @@ def submit_analysis_task(
         raise ValueError("min_control_distance_km must be 0 (disabled) or positive")
     if random_seed is not None and (random_seed < 1 or random_seed > 2_147_483_647):
         raise ValueError("random_seed must be between 1 and 2147483647")
+    if n_replicates < 1 or n_replicates > 1000:
+        raise ValueError("n_replicates must be between 1 and 1000")
     if matching_job_queue not in ALLOWED_MATCHING_JOB_QUEUES:
         raise ValueError(
             "matching_job_queue must be one of: "
@@ -1074,6 +1078,7 @@ def submit_analysis_task(
                 "separation_fallback_mahalanobis": bool(
                     separation_fallback_mahalanobis
                 ),
+                "n_replicates": n_replicates,
                 **({"random_seed": random_seed} if random_seed is not None else {}),
                 "match_memory_mib": match_memory_mib,
                 "matching_job_queue": matching_job_queue,
@@ -1145,6 +1150,7 @@ def submit_analysis_task(
             "max_controls_per_treatment": max_controls_per_treatment,
             "min_control_distance_km": min_control_distance_km,
             "separation_fallback_mahalanobis": bool(separation_fallback_mahalanobis),
+            "n_replicates": n_replicates,
             **(
                 {"sites_exclusion_buffer": sites_exclusion_buffer}
                 if sites_exclusion_buffer
@@ -1533,6 +1539,7 @@ def import_execution_results(task_id, results_payload, db=None):
             meta["n_failed_sites"] = summary.get("n_failed_sites", 0)
             meta["subsampled_sites"] = summary.get("subsampled_sites", [])
             meta["n_sites"] = summary.get("n_sites", 0)
+            meta["n_replicates"] = summary.get("n_replicates", 1)
             task_obj.extra_metadata = meta
 
         # Delete any existing results (idempotent re-import)
@@ -1563,6 +1570,38 @@ def import_execution_results(task_id, results_payload, db=None):
                     ),
                     n_matched_pixels=metadata.get("n_matched_pixels"),
                     sampled_fraction=metadata.get("sampled_fraction"),
+                    treatment_defor_ha_ci_lower=values.get(
+                        "treatment_defor_ha_ci_lower"
+                    ),
+                    treatment_defor_ha_ci_upper=values.get(
+                        "treatment_defor_ha_ci_upper"
+                    ),
+                    control_defor_ha_ci_lower=values.get("control_defor_ha_ci_lower"),
+                    control_defor_ha_ci_upper=values.get("control_defor_ha_ci_upper"),
+                    forest_loss_avoided_ha_ci_lower=values.get(
+                        "forest_loss_avoided_ha_ci_lower"
+                    ),
+                    forest_loss_avoided_ha_ci_upper=values.get(
+                        "forest_loss_avoided_ha_ci_upper"
+                    ),
+                    treatment_emissions_mgco2e_ci_lower=values.get(
+                        "treatment_emissions_mgco2e_ci_lower"
+                    ),
+                    treatment_emissions_mgco2e_ci_upper=values.get(
+                        "treatment_emissions_mgco2e_ci_upper"
+                    ),
+                    control_emissions_mgco2e_ci_lower=values.get(
+                        "control_emissions_mgco2e_ci_lower"
+                    ),
+                    control_emissions_mgco2e_ci_upper=values.get(
+                        "control_emissions_mgco2e_ci_upper"
+                    ),
+                    emissions_avoided_mgco2e_ci_lower=values.get(
+                        "emissions_avoided_mgco2e_ci_lower"
+                    ),
+                    emissions_avoided_mgco2e_ci_upper=values.get(
+                        "emissions_avoided_mgco2e_ci_upper"
+                    ),
                 )
             )
 
@@ -1585,6 +1624,18 @@ def import_execution_results(task_id, results_payload, db=None):
                     first_year=rec.get("period_start"),
                     last_year=rec.get("period_end"),
                     n_years=metadata.get("n_years"),
+                    forest_loss_avoided_ha_ci_lower=values.get(
+                        "forest_loss_avoided_ha_ci_lower"
+                    ),
+                    forest_loss_avoided_ha_ci_upper=values.get(
+                        "forest_loss_avoided_ha_ci_upper"
+                    ),
+                    emissions_avoided_mgco2e_ci_lower=values.get(
+                        "emissions_avoided_mgco2e_ci_lower"
+                    ),
+                    emissions_avoided_mgco2e_ci_upper=values.get(
+                        "emissions_avoided_mgco2e_ci_upper"
+                    ),
                 )
             )
 
@@ -2233,6 +2284,40 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         return response["Body"].read().decode("utf-8")
     except s3.exceptions.NoSuchKey:
         return None
+
+
+def list_task_s3_files(task_id, results_s3_uri=None):
+    """List all S3 files under a task's output directory.
+
+    Returns a list of dicts with ``key``, ``filename``, ``size_bytes``,
+    and ``last_modified`` for each object found.
+    """
+    bucket, prefix = _resolve_results_s3(task_id, results_s3_uri)
+    s3 = get_s3_client()
+    paginator = s3.get_paginator("list_objects_v2")
+    files = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            rel = key[len(prefix) :].lstrip("/")
+            if not rel:
+                continue
+            files.append(
+                {
+                    "key": key,
+                    "filename": rel,
+                    "size_bytes": obj.get("Size", 0),
+                    "last_modified": obj.get("LastModified", "").isoformat()
+                    if hasattr(obj.get("LastModified", ""), "isoformat")
+                    else str(obj.get("LastModified", "")),
+                    "download_url": s3.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": bucket, "Key": key},
+                        ExpiresIn=3600,
+                    ),
+                }
+            )
+    return files
 
 
 def _resolve_results_s3(task_id, results_s3_uri=None):
@@ -3146,6 +3231,7 @@ def get_recompute_config(task_id, user_id):
             "caliper_width": config.get("caliper_width", 0.2),
             "max_controls_per_treatment": config.get("max_controls_per_treatment", 1),
             "min_control_distance_km": config.get("min_control_distance_km", 10),
+            "n_replicates": config.get("n_replicates", 1),
             "random_seed": _random.randint(1, 2_147_483_647),
             "match_memory_gb": max(1, match_memory_mib // 1024),
             "matching_job_queue": config.get(
