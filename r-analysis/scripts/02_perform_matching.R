@@ -32,6 +32,12 @@ rollbar_init()
 with_rollbar({
 
 options("optmatch_max_problem_size" = Inf)
+# Use the RELAX-IV network flow solver (via rrelaxiv) which is 2-5x
+# faster than the default LEMON solver for large matching problems.
+if (requireNamespace("rrelaxiv", quietly = TRUE)) {
+    options("optmatch_solver" = "RELAX-IV")
+    message("Using RELAX-IV solver")
+}
 
 config <- parse_config()
 message("Step 2: Propensity score matching")
