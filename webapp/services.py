@@ -1191,7 +1191,7 @@ def submit_analysis_task(
                             "array_size": len(gdf) * n_replicates,
                             "timeout_seconds": 14400,  # 4 h per element
                             "memory_mib": match_memory_mib,
-                            "vcpus": max(2, match_memory_mib // 15360),
+                            "vcpus": 2,
                             "retry_attempts": 5,
                         },
                         {
