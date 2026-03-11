@@ -36,11 +36,11 @@ from models import (
 logger = logging.getLogger(__name__)
 
 ALLOWED_MATCHING_JOB_QUEUES = {
-    "ae-spot-1TB-io2-disk",
-    "ae-ondemand-1TB-io2-disk",
+    "ae-spot-gp3",
+    "ae-ondemand-gp3",
 }
 
-DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-1TB-io2-disk"
+DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-gp3"
 
 # -- Analysis task default settings ------------------------------------------
 # Single source of truth for matching parameter defaults.  Imported by
@@ -3239,9 +3239,7 @@ def get_recompute_config(task_id, user_id):
             "n_replicates": config.get("n_replicates", 1),
             "random_seed": _random.randint(1, 2_147_483_647),
             "match_memory_gb": max(1, match_memory_mib // 1024),
-            "matching_job_queue": config.get(
-                "matching_job_queue", "ae-spot-1TB-io2-disk"
-            ),
+            "matching_job_queue": config.get("matching_job_queue", "ae-spot-gp3"),
             "site_set_id": str(task.site_set_id) if task.site_set_id else None,
         }
     finally:
@@ -3352,7 +3350,7 @@ def resubmit_analysis_task(task_id, user_id):
             n_replicates=config.get("n_replicates", 1),
             random_seed=new_seed,
             match_memory_mib=match_memory_mib,
-            matching_job_queue=config.get("matching_job_queue", "ae-spot-1TB-io2-disk"),
+            matching_job_queue=config.get("matching_job_queue", "ae-spot-gp3"),
         )
     finally:
         db.close()

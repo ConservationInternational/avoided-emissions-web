@@ -70,12 +70,12 @@ DUAL_PURPOSE_VARS = ["ecoregion", "pa"]
 
 MATCHING_JOB_QUEUE_OPTIONS = [
     {
-        "label": "ae-spot-1TB-io2-disk (default)",
-        "value": "ae-spot-1TB-io2-disk",
+        "label": "ae-spot-gp3 (default)",
+        "value": "ae-spot-gp3",
     },
     {
-        "label": "ae-ondemand-1TB-io2-disk",
-        "value": "ae-ondemand-1TB-io2-disk",
+        "label": "ae-ondemand-gp3",
+        "value": "ae-ondemand-gp3",
     },
 ]
 
@@ -2184,7 +2184,7 @@ def submit_layout(user, recompute_config=None):
                                                                                                 [
                                                                                                     "Use ",
                                                                                                     html.Code(
-                                                                                                        "ae-ondemand-1TB-io2-disk"
+                                                                                                        "ae-ondemand-gp3"
                                                                                                     ),
                                                                                                     " only when needed — it incurs much higher costs.",
                                                                                                 ],
