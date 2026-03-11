@@ -33,6 +33,7 @@ with_rollbar({
 
 config <- parse_config()
 message("Step 3: Summarizing results")
+step3_timer <- proc.time()
 RANDOM_SEED <- if (is.null(config$random_seed)) {
     NULL
 } else {
@@ -140,6 +141,8 @@ if (n_failed > 0) {
     }
 }
 message("  Found ", length(match_files), " match files")
+load_elapsed <- (proc.time() - step3_timer)["elapsed"]
+message("  [TIMING] Match file discovery: ", round(load_elapsed, 1), "s")
 
 # Forest cover year columns
 fc_cols <- paste0("fc_", config$fc_years)
@@ -671,6 +674,7 @@ if (length(match_files_all) > 0) {
     # Process each replicate and collect site-year results
     all_rep_results <- list()
     m_processed_rep1 <- NULL
+    rep_loop_timer <- proc.time()
 
     for (rep_name in names(match_file_groups)) {
         rep_files <- match_file_groups[[rep_name]]
@@ -699,7 +703,12 @@ if (length(match_files_all) > 0) {
     # Use rep-1 processed data for pixel-level output and sampling table
     m_processed <- m_processed_rep1
 
-    message("  Processed ", length(all_rep_results), " replicate(s)")
+    rep_loop_elapsed <- (proc.time() - rep_loop_timer)["elapsed"]
+    message(
+        "  [TIMING] Replicate processing: ",
+        round(rep_loop_elapsed, 1), "s for ",
+        length(all_rep_results), " replicate(s)"
+    )
 
     # Per-site sampling table (includes indicator for subsampled sites)
     sampling_by_site <- m_processed %>%
@@ -1094,6 +1103,8 @@ write_json(
     auto_unbox = TRUE, pretty = TRUE
 )
 
+step3_elapsed <- (proc.time() - step3_timer)["elapsed"]
+message("[TIMING] Step 3 total: ", round(step3_elapsed, 1), "s")
 message("Step 3 complete. Results written to: ", config$output_dir)
 
 }, step_name = "03_summarize_results")

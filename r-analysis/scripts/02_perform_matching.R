@@ -4,8 +4,12 @@
 # (outside the site, within the precomputed matching extent) using propensity
 # scores estimated via logistic regression or Mahalanobis distance.
 #
-# When run on AWS Batch as an array job, each array element processes one site
-# (specified by --site-id or AWS_BATCH_JOB_ARRAY_INDEX).
+# When run on AWS Batch as an array job, each array element processes one
+# (site, replicate) combination.  The composite array index is decoded as:
+#   site_index      = floor(array_index / N_REPLICATES)
+#   replicate_index = (array_index %% N_REPLICATES) + 1
+# When N_REPLICATES == 1 the mapping is identical to the old behaviour
+# (one element per site).
 #
 # Input:
 #   - {output_dir}/sites_processed.parquet
@@ -14,7 +18,7 @@
 #   - {output_dir}/formula.json
 #
 # Output:
-#   - {matches_dir}/m_{id_numeric}.rds : Matched pairs for each site
+#   - {matches_dir}/m_{id_numeric}[_rep{k}].rds : Matched pairs for each site
 
 library(dplyr, warn.conflicts = FALSE)
 library(foreach)
@@ -31,6 +35,7 @@ options("optmatch_max_problem_size" = Inf)
 
 config <- parse_config()
 message("Step 2: Propensity score matching")
+step2_timer <- proc.time()
 
 MAX_TREATMENT <- config$max_treatment_pixels
 CONTROL_MULTIPLIER <- config$control_multiplier
@@ -152,7 +157,11 @@ if (MIN_CONTROL_DISTANCE_KM > 0) {
 formula_json <- fromJSON(file.path(config$output_dir, "formula.json"))
 f <- as.formula(formula_json$formula_str)
 
-# Determine which site(s) to process
+# Determine which site(s) and replicate(s) to process.
+# BATCH_REPLICATE will be set to a single integer when the array index
+# specifies a specific replicate; NULL means "run all replicates".
+BATCH_REPLICATE <- NULL
+
 if (!is.null(config$site_id)) {
     # Process a specific site
     target_site <- filter(sites, site_id == config$site_id)
@@ -164,11 +173,32 @@ if (!is.null(config$site_id)) {
     # Check for AWS Batch array index
     array_index <- Sys.getenv("AWS_BATCH_JOB_ARRAY_INDEX", "")
     if (array_index != "") {
-        idx <- as.integer(array_index) + 1  # AWS uses 0-based indexing
-        site_ids <- all_site_ids[idx]
-        batch_site_id <- filter(sites, id_numeric == site_ids)$site_id[1]
-        message("  AWS Batch array index: ", array_index,
-                " -> site_id ", batch_site_id)
+        ai <- as.integer(array_index)
+        n_sites <- length(all_site_ids)
+        if (N_REPLICATES > 1L) {
+            # Composite index: site_index * N_REPLICATES + replicate_index
+            site_idx_0 <- ai %/% N_REPLICATES  # 0-based site index
+            rep_idx_0 <- ai %% N_REPLICATES    # 0-based replicate index
+            BATCH_REPLICATE <- rep_idx_0 + 1L   # 1-based
+            site_ids <- all_site_ids[site_idx_0 + 1L]
+            batch_site_id <- filter(
+                sites, id_numeric == site_ids
+            )$site_id[1]
+            message(
+                "  AWS Batch array index: ", array_index,
+                " -> site_id ", batch_site_id,
+                ", replicate ", BATCH_REPLICATE, "/", N_REPLICATES
+            )
+        } else {
+            site_ids <- all_site_ids[ai + 1L]
+            batch_site_id <- filter(
+                sites, id_numeric == site_ids
+            )$site_id[1]
+            message(
+                "  AWS Batch array index: ", array_index,
+                " -> site_id ", batch_site_id
+            )
+        }
     } else {
         # Process all sites sequentially
         site_ids <- all_site_ids
@@ -405,6 +435,13 @@ for (this_id in site_ids) {
     this_site_id <- site$site_id[1]
     this_site_name <- if ("site_name" %in% names(site)) site$site_name[1] else NA_character_
     this_batch_index <- match(this_id, all_site_ids) - 1L
+    # Which replicates should this node process?
+    replicate_range <- if (!is.null(BATCH_REPLICATE)) {
+        BATCH_REPLICATE  # single replicate when parallelised
+    } else {
+        seq_len(N_REPLICATES)
+    }
+
     # Build replicate-specific match file paths.
     # When N_REPLICATES == 1, use the original naming for backward compat.
     if (N_REPLICATES > 1L) {
@@ -412,19 +449,25 @@ for (this_id in site_ids) {
             config$matches_dir,
             paste0("m_", this_id, "_rep", seq_len(N_REPLICATES), ".rds")
         )
+        # Paths for only the replicates this node will process
+        node_match_paths <- file.path(
+            config$matches_dir,
+            paste0("m_", this_id, "_rep", replicate_range, ".rds")
+        )
     } else {
         rep_match_paths <- file.path(
             config$matches_dir, paste0("m_", this_id, ".rds")
         )
+        node_match_paths <- rep_match_paths
     }
     failure_path <- file.path(config$matches_dir,
                               paste0("failed_", this_id, ".json"))
 
-    # Check if all replicate match files already exist and are valid
-    all_reps_done <- all(file.exists(rep_match_paths))
-    if (all_reps_done) {
+    # Check if the replicates this node is responsible for already exist
+    node_reps_done <- all(file.exists(node_match_paths))
+    if (node_reps_done) {
         existing_ok <- tryCatch({
-            existing <- readRDS(rep_match_paths[1])
+            existing <- readRDS(node_match_paths[1])
             missing_cols <- setdiff(required_match_cols, names(existing))
             if (length(missing_cols) > 0) {
                 message(
@@ -452,16 +495,23 @@ for (this_id in site_ids) {
             next
         }
 
-        for (rp in rep_match_paths) unlink(rp, force = TRUE)
+        for (rp in node_match_paths) unlink(rp, force = TRUE)
+    }
+    rep_label <- if (!is.null(BATCH_REPLICATE)) {
+        paste0("replicate ", BATCH_REPLICATE, "/", N_REPLICATES)
+    } else {
+        paste0("replicates=", N_REPLICATES)
     }
     message("  Processing site_id ", this_site_id,
             " (batch_index=", this_batch_index,
-            ", replicates=", N_REPLICATES, ")")
+            ", ", rep_label, ")")
 
     # Wrap per-site matching in tryCatch so that a failure in one site
     # (e.g. memory allocation error in optmatch) does not abort the
     # entire job.  A failure marker JSON is written instead.
     ok <- tryCatch({
+        site_timer <- proc.time()
+
         # Get treatment cell IDs for this site
         treatment_cells <- filter(treatment_key, id_numeric == this_id)
         n_treatment_total <- nrow(treatment_cells)
@@ -541,6 +591,14 @@ for (this_id in site_ids) {
             # Record control pool size before subsampling
             n_control_pool_site <- sum(!vals$treatment)
 
+            data_elapsed <- (proc.time() - site_timer)["elapsed"]
+            message(
+                "    [TIMING] Data loading & filtering: ",
+                round(data_elapsed, 1), "s",
+                " (T=", sum(vals$treatment),
+                ", C=", n_control_pool_site, ")"
+            )
+
             # Determine formula update for pre-intervention deforestation
             # (deterministic — computed once, applied inside each replicate)
             estab_year <- site$start_year
@@ -563,7 +621,8 @@ for (this_id in site_ids) {
             vals_base <- vals
 
             # ---- Replicate loop ----
-            for (rep_k in seq_len(N_REPLICATES)) {
+            for (rep_k in replicate_range) {
+                rep_timer <- proc.time()
                 match_path_k <- rep_match_paths[rep_k]
 
                 if (file.exists(match_path_k)) {
@@ -643,9 +702,15 @@ for (this_id in site_ids) {
                     )
                 } else {
                     # Run matching
+                    match_timer <- proc.time()
                     match_result <- match_site(vals, this_f)
+                    match_elapsed <- (proc.time() - match_timer)["elapsed"]
                     m <- match_result$result
                     sep_warnings <- match_result$separation_warnings
+                    message(
+                        "    [TIMING] Matching: ",
+                        round(match_elapsed, 1), "s"
+                    )
 
                     if (is.null(m)) {
                         message("    No matches found")
@@ -704,6 +769,11 @@ for (this_id in site_ids) {
                         }
                     }
                 }
+                rep_elapsed <- (proc.time() - rep_timer)["elapsed"]
+                message(
+                    "    [TIMING] Replicate ", rep_k,
+                    " total: ", round(rep_elapsed, 1), "s"
+                )
             }
             # ---- End replicate loop ----
             TRUE
@@ -742,6 +812,8 @@ if (n_failed > 0L) {
             "(failure markers written)")
 }
 
+step2_elapsed <- (proc.time() - step2_timer)["elapsed"]
+message("[TIMING] Step 2 total: ", round(step2_elapsed, 1), "s")
 message("Step 2 complete.")
 
 }, step_name = "02_perform_matching")

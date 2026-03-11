@@ -406,15 +406,25 @@ def _write_match_failure_marker(matches_dir, output_dir, error_msg, log):
     id_numeric = None
     site_id = None
 
-    # Try to resolve the array index → id_numeric using the treatment key
+    # Try to resolve the array index → id_numeric using the treatment key.
+    # When n_replicates > 1 the array uses a composite index:
+    #   site_index = array_index // n_replicates
+    # so we divide before looking up the site.
     tk_path = os.path.join(output_dir, "treatment_cell_key.parquet")
+    config_path = os.path.join(os.path.dirname(output_dir), "config.json")
     if array_index is not None and os.path.isfile(tk_path):
         try:
             tk = pd.read_parquet(tk_path, columns=["id_numeric"])
             unique_ids = tk["id_numeric"].unique()  # preserves first-seen order
             idx = int(array_index)
-            if 0 <= idx < len(unique_ids):
-                id_numeric = int(unique_ids[idx])
+            # Read n_replicates from the config written by run()
+            n_rep = 1
+            if os.path.isfile(config_path):
+                with open(config_path) as _cf:
+                    n_rep = int(json.load(_cf).get("n_replicates", 1))
+            site_idx = idx // max(n_rep, 1)
+            if 0 <= site_idx < len(unique_ids):
+                id_numeric = int(unique_ids[site_idx])
         except Exception:  # noqa: BLE001
             log.debug("Could not resolve array index to id_numeric", exc_info=True)
 
