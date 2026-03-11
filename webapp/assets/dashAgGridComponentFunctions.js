@@ -117,10 +117,12 @@ dagcomponentfuncs.StatusBadge = function (props) {
 
     var label = status.replace(/_/g, " ");
     var colors = colorMap[status] || { bg: "#adb5bd", text: "#212529" };
+    var errorMessage = props.data && props.data.error_message;
 
     return React.createElement(
         "span",
         {
+            title: status === "failed" && errorMessage ? errorMessage : undefined,
             style: {
                 display: "inline-block",
                 padding: "2px 8px",
@@ -132,6 +134,7 @@ dagcomponentfuncs.StatusBadge = function (props) {
                 backgroundColor: colors.bg,
                 color: colors.text,
                 lineHeight: "1.5",
+                cursor: status === "failed" && errorMessage ? "help" : undefined,
             },
         },
         label

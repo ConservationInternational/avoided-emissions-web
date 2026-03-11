@@ -1467,6 +1467,7 @@ def register_callbacks(app, limiter=None):
                 "created_at": _fmt_dt(task.created_at),
                 "submitted_at": _fmt_dt(task.submitted_at),
                 "completed_at": _fmt_dt(task.completed_at),
+                "error_message": task.error_message or "",
             }
             if show_all_users:
                 row["submitted_by_name"] = task.user.name if task.user else "Unknown"
@@ -3447,6 +3448,16 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         _detail_row(
                             "Min control distance (km)",
                             config.get("min_control_distance_km", "—"),
+                        ),
+                        _detail_row(
+                            "Separation fallback",
+                            "Mahalanobis"
+                            if config.get("separation_fallback_mahalanobis")
+                            else "Disabled",
+                        ),
+                        _detail_row(
+                            "Replicates",
+                            config.get("n_replicates", 1),
                         ),
                         _detail_row(
                             "Random seed",

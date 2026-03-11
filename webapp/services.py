@@ -1167,11 +1167,11 @@ def submit_analysis_task(
             # For multi-site jobs, use a pipeline of chained AWS Batch
             # jobs (extract → match array → summarize) so each site
             # can run its matching step in parallel as an array child.
-            # For single-site jobs, skip the pipeline entirely and run
-            # all steps in one container (step="all") — this avoids
-            # the overhead of S3 intermediate data transfer and extra
-            # job scheduling.  The R analysis container handles both
-            # modes via the ``step`` parameter.
+            # For single-site, single-replicate jobs, skip the pipeline
+            # entirely and run all steps in one container (step="all")
+            # — this avoids the overhead of S3 intermediate data
+            # transfer and extra job scheduling.  The R analysis
+            # container handles both modes via the ``step`` parameter.
             **(
                 {
                     "pipeline": [
@@ -1204,7 +1204,7 @@ def submit_analysis_task(
                         },
                     ],
                 }
-                if len(gdf) > 1
+                if len(gdf) > 1 or n_replicates > 1
                 else {}
             ),
         }
@@ -1380,6 +1380,7 @@ def get_task_list(user_id=None, limit=50):
                     AnalysisTask.created_at,
                     AnalysisTask.submitted_at,
                     AnalysisTask.completed_at,
+                    AnalysisTask.error_message,
                 ),
                 joinedload(AnalysisTask.user).load_only(User.id, User.name),
             )
@@ -3232,6 +3233,9 @@ def get_recompute_config(task_id, user_id):
             "caliper_width": config.get("caliper_width", 0.2),
             "max_controls_per_treatment": config.get("max_controls_per_treatment", 1),
             "min_control_distance_km": config.get("min_control_distance_km", 10),
+            "separation_fallback_mahalanobis": config.get(
+                "separation_fallback_mahalanobis", False
+            ),
             "n_replicates": config.get("n_replicates", 1),
             "random_seed": _random.randint(1, 2_147_483_647),
             "match_memory_gb": max(1, match_memory_mib // 1024),
@@ -3342,6 +3346,10 @@ def resubmit_analysis_task(task_id, user_id):
             caliper_width=config.get("caliper_width", 0.2),
             max_controls_per_treatment=config.get("max_controls_per_treatment", 1),
             min_control_distance_km=config.get("min_control_distance_km", 10),
+            separation_fallback_mahalanobis=config.get(
+                "separation_fallback_mahalanobis", False
+            ),
+            n_replicates=config.get("n_replicates", 1),
             random_seed=new_seed,
             match_memory_mib=match_memory_mib,
             matching_job_queue=config.get("matching_job_queue", "ae-spot-1TB-io2-disk"),
