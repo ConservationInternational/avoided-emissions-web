@@ -53,6 +53,7 @@ ANALYSIS_DEFAULTS = {
     "caliper_width": 0.2,
     "max_controls_per_treatment": 1,
     "min_control_distance_km": 10,
+    "separation_fallback_mahalanobis": False,
     "match_memory_gb": 30,
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
     "fc_year_start": 2000,
@@ -911,6 +912,9 @@ def submit_analysis_task(
     caliper_width=ANALYSIS_DEFAULTS["caliper_width"],
     max_controls_per_treatment=ANALYSIS_DEFAULTS["max_controls_per_treatment"],
     min_control_distance_km=ANALYSIS_DEFAULTS["min_control_distance_km"],
+    separation_fallback_mahalanobis=ANALYSIS_DEFAULTS[
+        "separation_fallback_mahalanobis"
+    ],
     random_seed=None,
     match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
@@ -1067,6 +1071,9 @@ def submit_analysis_task(
                 "caliper_width": caliper_width,
                 "max_controls_per_treatment": max_controls_per_treatment,
                 "min_control_distance_km": min_control_distance_km,
+                "separation_fallback_mahalanobis": bool(
+                    separation_fallback_mahalanobis
+                ),
                 **({"random_seed": random_seed} if random_seed is not None else {}),
                 "match_memory_mib": match_memory_mib,
                 "matching_job_queue": matching_job_queue,
@@ -1137,6 +1144,7 @@ def submit_analysis_task(
             "caliper_width": caliper_width,
             "max_controls_per_treatment": max_controls_per_treatment,
             "min_control_distance_km": min_control_distance_km,
+            "separation_fallback_mahalanobis": bool(separation_fallback_mahalanobis),
             **(
                 {"sites_exclusion_buffer": sites_exclusion_buffer}
                 if sites_exclusion_buffer

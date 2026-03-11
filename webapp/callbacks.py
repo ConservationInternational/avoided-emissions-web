@@ -659,6 +659,7 @@ def register_callbacks(app, limiter=None):
         State("caliper-width", "value"),
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
+        State("separation-fallback-mahalanobis", "value"),
         State("random-seed", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
@@ -678,6 +679,7 @@ def register_callbacks(app, limiter=None):
         caliper_width,
         max_controls_per_treatment,
         min_control_distance_km,
+        separation_fallback_mahalanobis,
         random_seed,
         match_memory_gb,
         matching_job_queue,
@@ -854,6 +856,12 @@ def register_callbacks(app, limiter=None):
                                 _param_row(
                                     "Min control distance (km)",
                                     str(min_control_distance_km),
+                                ),
+                                _param_row(
+                                    "Separation fallback",
+                                    "Mahalanobis"
+                                    if separation_fallback_mahalanobis
+                                    else "Disabled (GLM fails)",
                                 ),
                                 _param_row(
                                     "Random seed",
@@ -1208,6 +1216,7 @@ def register_callbacks(app, limiter=None):
         State("caliper-width", "value"),
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
+        State("separation-fallback-mahalanobis", "value"),
         State("random-seed", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
@@ -1227,6 +1236,7 @@ def register_callbacks(app, limiter=None):
         caliper_width,
         max_controls_per_treatment,
         min_control_distance_km,
+        separation_fallback_mahalanobis,
         random_seed,
         match_memory_gb,
         matching_job_queue,
@@ -1351,6 +1361,7 @@ def register_callbacks(app, limiter=None):
                 caliper_width=_cw,
                 max_controls_per_treatment=_mcpt,
                 min_control_distance_km=_mcd,
+                separation_fallback_mahalanobis=bool(separation_fallback_mahalanobis),
                 random_seed=_seed,
                 match_memory_mib=_mmgb * 1024,
                 matching_job_queue=matching_job_queue,
@@ -3716,7 +3727,23 @@ def _build_overview(task, sites, totals, quality_warnings=None):
             else:
                 label = str(site_id)
             error = fs.get("error", "Unknown error")
-            failed_items.append(html.Li(f"{label}: {error}"))
+            item_children = [html.Strong(f"{label}: "), error]
+            # Show separation diagnostics when available
+            sep_warnings = fs.get("separation_warnings")
+            if sep_warnings and isinstance(sep_warnings, dict):
+                sep_details = []
+                for group_name, details in sep_warnings.items():
+                    if isinstance(details, list):
+                        for d in details:
+                            sep_details.append(
+                                html.Li(
+                                    f"Group {group_name}: {d}",
+                                    style={"fontSize": "0.85em"},
+                                )
+                            )
+                if sep_details:
+                    item_children.append(html.Ul(sep_details, className="mb-0 mt-1"))
+            failed_items.append(html.Li(item_children))
         cards.append(
             dbc.Alert(
                 [

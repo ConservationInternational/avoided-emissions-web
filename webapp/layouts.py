@@ -1971,6 +1971,33 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
+                                                                                            dbc.Checkbox(
+                                                                                                id="separation-fallback-mahalanobis",
+                                                                                                label="Use Mahalanobis distance when GLM separation detected",
+                                                                                                value=rc.get(
+                                                                                                    "separation_fallback_mahalanobis",
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "separation_fallback_mahalanobis"
+                                                                                                    ],
+                                                                                                ),
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "When covariates perfectly separate treatment/control groups, "
+                                                                                                "the GLM cannot converge. Enable this to fall back to "
+                                                                                                "Mahalanobis distance matching for those groups instead of "
+                                                                                                "failing the site.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
                                                                                             html.Div(
                                                                                                 [
                                                                                                     dbc.Label(

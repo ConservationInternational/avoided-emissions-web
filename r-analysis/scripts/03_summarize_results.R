@@ -856,12 +856,18 @@ failed_sites_summary <- lapply(failed_sites, function(fs) {
             site_name <- site_row$site_name[1]
         }
     }
-    list(
+    entry <- list(
         id_numeric = fs$id_numeric,
         site_id = fs$site_id,
         site_name = site_name,
         error = fs$error
     )
+    # Include separation diagnostics when present
+    if (!is.null(fs$separation_warnings) &&
+        length(fs$separation_warnings) > 0) {
+        entry$separation_warnings <- fs$separation_warnings
+    }
+    entry
 })
 
 subsampled_sites_summary <- if (exists("sampling_by_site")) {

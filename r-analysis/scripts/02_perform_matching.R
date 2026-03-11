@@ -44,6 +44,13 @@ RANDOM_SEED <- if (is.null(config$random_seed)) {
     as.integer(config$random_seed)
 }
 
+# When TRUE and GLM separation is detected, fall back to Mahalanobis
+# distance matching instead of failing outright.  Default FALSE so
+# users must opt in via the webapp.
+SEPARATION_FALLBACK <- isTRUE(
+    config$separation_fallback_mahalanobis
+)
+
 # Minimum distance (km) from treatment polygons for control pixels.
 # Controls whose centroids fall within this buffer are excluded.
 # 0 disables the distance exclusion.
@@ -161,6 +168,67 @@ if (!is.null(config$site_id)) {
 }
 
 
+check_separation <- function(d, f) {
+    # Detect quasi-complete separation in the data before fitting GLM.
+    # Returns a list with:
+    #   separated    : logical — TRUE if any covariate is problematic
+    #   details      : character vector describing each problem
+    #
+    # Checks two things:
+    # 1. Factor levels that appear only in treatment or only in control
+    # 2. Continuous variables with zero overlap between groups
+    formula_vars <- all.vars(f)
+    rhs_vars <- setdiff(formula_vars, "treatment")
+    problems <- character(0)
+
+    for (v in rhs_vars) {
+        if (!v %in% names(d)) next
+        col <- d[[v]]
+        treat_vals <- col[d$treatment]
+        ctrl_vals <- col[!d$treatment]
+
+        if (is.factor(col) || is.character(col)) {
+            treat_levels <- unique(as.character(treat_vals))
+            ctrl_levels <- unique(as.character(ctrl_vals))
+            only_treat <- setdiff(treat_levels, ctrl_levels)
+            only_ctrl <- setdiff(ctrl_levels, treat_levels)
+            if (length(only_treat) > 0) {
+                problems <- c(problems, paste0(
+                    v, ": ", length(only_treat),
+                    " level(s) only in treatment (",
+                    paste(head(only_treat, 5), collapse = ", "),
+                    if (length(only_treat) > 5) ", ..." else "",
+                    ")"
+                ))
+            }
+            if (length(only_ctrl) > 0) {
+                problems <- c(problems, paste0(
+                    v, ": ", length(only_ctrl),
+                    " level(s) only in control (",
+                    paste(head(only_ctrl, 5), collapse = ", "),
+                    if (length(only_ctrl) > 5) ", ..." else "",
+                    ")"
+                ))
+            }
+        } else if (is.numeric(col)) {
+            t_range <- range(treat_vals, na.rm = TRUE)
+            c_range <- range(ctrl_vals, na.rm = TRUE)
+            if (t_range[2] < c_range[1] || c_range[2] < t_range[1]) {
+                problems <- c(problems, paste0(
+                    v, ": no overlap (treatment [",
+                    round(t_range[1], 3), ", ", round(t_range[2], 3),
+                    "], control [",
+                    round(c_range[1], 3), ", ", round(c_range[2], 3),
+                    "])"
+                ))
+            }
+        }
+    }
+
+    list(separated = length(problems) > 0, details = problems)
+}
+
+
 get_matches <- function(d, dists) {
     # Attempt matching and return matched pairs with weights.
     # Returns empty data.frame if matching fails.
@@ -218,6 +286,12 @@ match_site <- function(d, f) {
     # Run propensity score matching within each exact-match group.
     # Propensity scores (from GLM) are stored in a ``pscore`` column on
     # the returned data.frame.  Groups too small for GLM get NA scores.
+    #
+    # Returns a list with:
+    #   result              : data.frame of matched rows (or NULL)
+    #   separation_warnings : list of per-group separation diagnostics
+    sep_warnings <- list()
+
     m <- foreach(this_group = unique(d$group), .combine = foreach_rbind) %do% {
         this_d <- filter(d, group == this_group)
 
@@ -248,6 +322,27 @@ match_site <- function(d, f) {
             }
             this_d$pscore <- NA_real_
         } else {
+            # Check for quasi-complete separation before fitting GLM
+            sep <- check_separation(this_d, f)
+            if (sep$separated) {
+                for (d_msg in sep$details) {
+                    message("    Separation detected in group ",
+                            this_group, ": ", d_msg)
+                }
+                sep_warnings[[as.character(this_group)]] <<- sep$details
+
+                if (SEPARATION_FALLBACK) {
+                    message("    Falling back to Mahalanobis distance ",
+                            "(separation_fallback_mahalanobis=true)")
+                    dists <- match_on(f, data = this_d)
+                    if (CALIPER_WIDTH > 0) {
+                        dists <- dists + caliper(dists, width = CALIPER_WIDTH)
+                    }
+                    this_d$pscore <- NA_real_
+                    return(get_matches(this_d, dists))
+                }
+            }
+
             # Estimate propensity scores with logistic regression
             model <- glm(f, data = this_d, family = binomial())
             this_d$pscore <- predict(model, type = "response")
@@ -260,9 +355,9 @@ match_site <- function(d, f) {
     }
 
     if (is.null(m) || nrow(m) == 0) {
-        return(NULL)
+        return(list(result = NULL, separation_warnings = sep_warnings))
     }
-    return(m)
+    return(list(result = m, separation_warnings = sep_warnings))
 }
 
 n_failed <- 0L
@@ -467,7 +562,9 @@ for (this_id in site_ids) {
                 TRUE
             } else {
                 # Run matching
-                m <- match_site(vals, this_f)
+                match_result <- match_site(vals, this_f)
+                m <- match_result$result
+                sep_warnings <- match_result$separation_warnings
 
                 if (is.null(m)) {
                     message("  No matches found")
@@ -475,15 +572,24 @@ for (this_id in site_ids) {
                     # knows this site was processed but produced no
                     # matches (e.g. caliper too tight, perfect
                     # separation in propensity scores).
+                    error_msg <- paste0(
+                        "No matches found (treatment=",
+                        n_treatment_final,
+                        ", control=", n_control_final, ")"
+                    )
+                    if (length(sep_warnings) > 0) {
+                        error_msg <- paste0(
+                            error_msg,
+                            "; separation detected in ",
+                            length(sep_warnings), " group(s)"
+                        )
+                    }
                     failure_info <- list(
                         id_numeric = this_id,
                         site_id = this_site_id,
                         site_name = this_site_name,
-                        error = paste0(
-                            "No matches found (treatment=",
-                            n_treatment_final,
-                            ", control=", n_control_final, ")"
-                        ),
+                        error = error_msg,
+                        separation_warnings = sep_warnings,
                         timestamp = format(
                             Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
                         ),
@@ -503,8 +609,18 @@ for (this_id in site_ids) {
                     m$sampled_fraction <- n_treatment_final / n_treatment_total
                     m$n_control_sampled <- n_control_final
                     m$n_control_pool <- n_control_pool_site
+                    if (length(sep_warnings) > 0) {
+                        # Attach separation warnings as an attribute
+                        # so the summarize step can surface them
+                        attr(m, "separation_warnings") <- sep_warnings
+                    }
                     saveRDS(m, match_path)
                     message("  Saved ", nrow(m), " matched rows")
+                    if (length(sep_warnings) > 0) {
+                        message("  WARNING: separation detected in ",
+                                length(sep_warnings),
+                                " group(s) but matching succeeded")
+                    }
                 }
                 TRUE
             }
