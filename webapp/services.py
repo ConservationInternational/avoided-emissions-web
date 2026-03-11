@@ -54,6 +54,7 @@ ANALYSIS_DEFAULTS = {
     "max_controls_per_treatment": 1,
     "min_control_distance_km": 10,
     "separation_fallback_mahalanobis": False,
+    "matching_method": "optimal",
     "n_replicates": 1,
     "match_memory_gb": 30,
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
@@ -916,6 +917,7 @@ def submit_analysis_task(
     separation_fallback_mahalanobis=ANALYSIS_DEFAULTS[
         "separation_fallback_mahalanobis"
     ],
+    matching_method=ANALYSIS_DEFAULTS["matching_method"],
     n_replicates=ANALYSIS_DEFAULTS["n_replicates"],
     random_seed=None,
     match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
@@ -1078,6 +1080,7 @@ def submit_analysis_task(
                 "separation_fallback_mahalanobis": bool(
                     separation_fallback_mahalanobis
                 ),
+                "matching_method": matching_method,
                 "n_replicates": n_replicates,
                 **({"random_seed": random_seed} if random_seed is not None else {}),
                 "match_memory_mib": match_memory_mib,

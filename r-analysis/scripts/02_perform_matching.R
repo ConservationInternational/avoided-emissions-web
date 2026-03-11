@@ -23,6 +23,7 @@
 library(dplyr, warn.conflicts = FALSE)
 library(foreach)
 library(optmatch)
+library(MatchIt)
 library(arrow)
 library(jsonlite)
 
@@ -81,6 +82,15 @@ MIN_CONTROL_DISTANCE_KM <- if (is.null(config$min_control_distance_km)) {
 
 # Exact-match variables read from config (e.g. admin1, ecoregion, pa)
 EXACT_MATCH_VARS <- config$exact_match_vars
+
+# Matching method: "optimal" uses optmatch (slower, globally optimal)
+# "nearest" uses MatchIt nearest-neighbour (faster, greedy)
+MATCHING_METHOD <- if (is.null(config$matching_method)) {
+    "optimal"
+} else {
+    config$matching_method
+}
+message("Matching method: ", MATCHING_METHOD)
 
 # Load data — step 1 now outputs Parquet (from the Python rewrite)
 sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %>%
@@ -441,6 +451,130 @@ match_site <- function(d, f) {
     return(list(result = m, separation_warnings = sep_warnings))
 }
 
+
+match_site_matchit <- function(d, f) {
+    # Match treatment to control pixels using MatchIt nearest-neighbour
+    # matching.  This is a greedy (non-optimal) algorithm that is
+    # substantially faster than optmatch.
+    #
+    # Exact matching on EXACT_MATCH_VARS is handled natively by MatchIt
+    # via the `exact` parameter, so no external group loop is needed.
+    #
+    # Returns a list with:
+    #   result              : data.frame of matched rows (or NULL)
+    #   separation_warnings : list of per-group separation diagnostics
+    sep_warnings <- list()
+
+    # Check separation before fitting
+    sep <- check_separation(d, f)
+    if (sep$separated) {
+        for (d_msg in sep$details) {
+            message("    Separation detected: ", d_msg)
+        }
+        sep_warnings[["global"]] <- sep$details
+        if (!SEPARATION_FALLBACK) {
+            # Without fallback, MatchIt may still succeed since nearest-
+            # neighbour is more forgiving than GLM-based optimal matching.
+            # Log the warning but proceed.
+            message("    Proceeding with MatchIt despite separation")
+        }
+    }
+
+    # Drop rows with NA in formula variables
+    formula_vars <- all.vars(f)
+    complete <- complete.cases(d[, formula_vars, drop = FALSE])
+    n_dropped_na <- sum(!complete)
+    if (n_dropped_na > 0) {
+        na_counts <- vapply(
+            formula_vars,
+            function(v) sum(is.na(d[[v]])),
+            integer(1)
+        )
+        na_vars <- na_counts[na_counts > 0]
+        message(
+            "    Dropped ", n_dropped_na,
+            " rows with NA covariates. NA counts: ",
+            paste(names(na_vars), na_vars, sep = "=", collapse = ", ")
+        )
+        d <- d[complete, ]
+    }
+
+    n_treatment <- sum(d$treatment)
+    if (n_treatment < 1) {
+        return(list(result = NULL, separation_warnings = sep_warnings))
+    }
+
+    # Build exact-match formula from EXACT_MATCH_VARS that are present
+    exact_vars_present <- intersect(EXACT_MATCH_VARS, names(d))
+    exact_formula <- if (length(exact_vars_present) > 0) {
+        as.formula(paste("~", paste(exact_vars_present, collapse = " + ")))
+    } else {
+        NULL
+    }
+
+    # Determine distance method
+    use_mahalanobis <- n_treatment < MIN_GLM ||
+        (sep$separated && SEPARATION_FALLBACK)
+    distance_method <- if (use_mahalanobis) "mahalanobis" else "glm"
+
+    # Determine ratio
+    ratio_val <- if (MAX_CONTROLS > 0) MAX_CONTROLS else NA
+
+    # Run MatchIt
+    mi <- tryCatch({
+        matchit(
+            f, data = d,
+            method = "nearest",
+            distance = distance_method,
+            exact = exact_formula,
+            ratio = if (!is.na(ratio_val)) ratio_val else 1L,
+            caliper = if (CALIPER_WIDTH > 0 &&
+                          distance_method != "mahalanobis") {
+                CALIPER_WIDTH
+            } else {
+                NULL
+            },
+            std.caliper = TRUE,
+            replace = FALSE
+        )
+    }, error = function(e) {
+        message("    MatchIt error: ", conditionMessage(e))
+        rollbar_report_error(conditionMessage(e))
+        NULL
+    })
+
+    if (is.null(mi)) {
+        return(list(result = NULL, separation_warnings = sep_warnings))
+    }
+
+    # Extract matched data
+    md <- match.data(mi)
+    if (nrow(md) == 0) {
+        return(list(result = NULL, separation_warnings = sep_warnings))
+    }
+
+    # Map MatchIt output to the same schema as optmatch output
+    md$match_group <- as.character(md$subclass)
+    md$match_weight <- md$weights
+
+    # Add propensity scores
+    if (distance_method == "glm") {
+        md$pscore <- md$distance
+    } else {
+        md$pscore <- NA_real_
+    }
+
+    # Drop MatchIt-specific columns
+    md <- md %>% select(-any_of(c("distance", "weights", "subclass")))
+
+    n_matched <- sum(md$treatment)
+    message("    MatchIt: T=", sum(d$treatment),
+            " C=", sum(!d$treatment),
+            " -> ", n_matched, " matched")
+
+    return(list(result = md, separation_warnings = sep_warnings))
+}
+
 n_failed <- 0L
 required_match_cols <- c(
     "cell", "site_id", "id_numeric", "area_ha", "treatment",
@@ -490,40 +624,6 @@ for (this_id in site_ids) {
         )
     }
 
-    # Check if the replicates this node is responsible for already exist
-    node_reps_done <- all(file.exists(node_match_paths))
-    if (node_reps_done) {
-        existing_ok <- tryCatch({
-            existing <- readRDS(node_match_paths[1])
-            missing_cols <- setdiff(required_match_cols, names(existing))
-            if (length(missing_cols) > 0) {
-                message(
-                    "  Existing match file for site_id ", this_site_id,
-                    " is missing columns: ",
-                    paste(missing_cols, collapse = ", "),
-                    "; regenerating"
-                )
-                FALSE
-            } else {
-                TRUE
-            }
-        }, error = function(e) {
-            message(
-                "  Existing match file for site_id ", this_site_id,
-                " is unreadable (", conditionMessage(e), "); regenerating"
-            )
-            FALSE
-        })
-
-        if (existing_ok) {
-            message("  Skipping site_id ", this_site_id,
-                    " (batch_index=", this_batch_index,
-                    "): already processed")
-            next
-        }
-
-        for (rp in node_match_paths) unlink(rp, force = TRUE)
-    }
     rep_label <- if (!is.null(BATCH_REPLICATE)) {
         paste0("replicate ", BATCH_REPLICATE, "/", N_REPLICATES)
     } else {
@@ -730,7 +830,11 @@ for (this_id in site_ids) {
                 } else {
                     # Run matching
                     match_timer <- proc.time()
-                    match_result <- match_site(vals, this_f)
+                    if (MATCHING_METHOD == "nearest") {
+                        match_result <- match_site_matchit(vals, this_f)
+                    } else {
+                        match_result <- match_site(vals, this_f)
+                    }
                     match_elapsed <- (proc.time() - match_timer)["elapsed"]
                     m <- match_result$result
                     sep_warnings <- match_result$separation_warnings

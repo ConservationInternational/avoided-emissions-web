@@ -661,6 +661,7 @@ def register_callbacks(app, limiter=None):
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
         State("separation-fallback-mahalanobis", "value"),
+        State("matching-method", "value"),
         State("n-replicates", "value"),
         State("random-seed", "value"),
         State("match-memory-gb", "value"),
@@ -682,6 +683,7 @@ def register_callbacks(app, limiter=None):
         max_controls_per_treatment,
         min_control_distance_km,
         separation_fallback_mahalanobis,
+        matching_method,
         n_replicates,
         random_seed,
         match_memory_gb,
@@ -865,6 +867,12 @@ def register_callbacks(app, limiter=None):
                                     "Mahalanobis"
                                     if separation_fallback_mahalanobis
                                     else "Disabled (GLM fails)",
+                                ),
+                                _param_row(
+                                    "Matching method",
+                                    "Nearest neighbour (MatchIt)"
+                                    if matching_method == "nearest"
+                                    else "Optimal (optmatch)",
                                 ),
                                 _param_row(
                                     "Replicates",
@@ -1224,6 +1232,7 @@ def register_callbacks(app, limiter=None):
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
         State("separation-fallback-mahalanobis", "value"),
+        State("matching-method", "value"),
         State("n-replicates", "value"),
         State("random-seed", "value"),
         State("match-memory-gb", "value"),
@@ -1245,6 +1254,7 @@ def register_callbacks(app, limiter=None):
         max_controls_per_treatment,
         min_control_distance_km,
         separation_fallback_mahalanobis,
+        matching_method,
         n_replicates,
         random_seed,
         match_memory_gb,
@@ -1373,6 +1383,7 @@ def register_callbacks(app, limiter=None):
                 max_controls_per_treatment=_mcpt,
                 min_control_distance_km=_mcd,
                 separation_fallback_mahalanobis=bool(separation_fallback_mahalanobis),
+                matching_method=matching_method or ANALYSIS_DEFAULTS["matching_method"],
                 random_seed=_seed,
                 n_replicates=_nrep,
                 match_memory_mib=_mmgb * 1024,

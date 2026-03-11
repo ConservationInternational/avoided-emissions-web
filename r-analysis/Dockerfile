@@ -40,6 +40,7 @@ RUN install2.r --error --skipinstalled --ncpus -1 \
     terra \
     tidyverse \
     optmatch \
+    MatchIt \
     lubridate \
     units \
     foreach \

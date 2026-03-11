@@ -1303,7 +1303,7 @@ def dashboard_layout(user):
                                 table_id="task-list-table",
                                 column_defs=TASK_LIST_COLUMNS,
                                 row_model="clientSide",
-                                height="700px",
+                                height="calc(100vh - 280px)",
                                 style_conditions=TASK_STATUS_ROW_STYLES,
                             ),
                         ]
@@ -1316,7 +1316,8 @@ def dashboard_layout(user):
             html.Div(id="cancel-from-list-result"),
             dcc.Store(id="task-list-store"),
             dcc.Interval(id="refresh-interval", interval=30000, n_intervals=0),
-        ]
+        ],
+        fluid=True,
     )
 
 
@@ -2040,6 +2041,46 @@ def submit_layout(user, recompute_config=None):
                                                                                             ),
                                                                                         ],
                                                                                         xs=12,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "Matching method"
+                                                                                            ),
+                                                                                            dcc.Dropdown(
+                                                                                                id="matching-method",
+                                                                                                options=[
+                                                                                                    {
+                                                                                                        "label": "Optimal (optmatch)",
+                                                                                                        "value": "optimal",
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "label": "Nearest neighbour (MatchIt, faster)",
+                                                                                                        "value": "nearest",
+                                                                                                    },
+                                                                                                ],
+                                                                                                value=rc.get(
+                                                                                                    "matching_method",
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "matching_method"
+                                                                                                    ],
+                                                                                                ),
+                                                                                                clearable=False,
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Optimal uses optmatch for globally optimal matches "
+                                                                                                "(slower). Nearest uses MatchIt greedy nearest-neighbour "
+                                                                                                "(faster, comparable balance).",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        sm=6,
                                                                                     ),
                                                                                 ],
                                                                                 className="g-3 mt-1",
