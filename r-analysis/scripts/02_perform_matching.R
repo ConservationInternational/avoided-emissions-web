@@ -344,11 +344,19 @@ match_site <- function(d, f) {
         complete <- complete.cases(this_d[, formula_vars, drop = FALSE])
         n_dropped_na <- sum(!complete)
         if (n_dropped_na > 0) {
-            this_d <- this_d[complete, ]
+            na_counts <- vapply(
+                formula_vars,
+                function(v) sum(is.na(this_d[[v]])),
+                integer(1)
+            )
+            na_vars <- na_counts[na_counts > 0]
             message(
                 "    Dropped ", n_dropped_na,
-                " rows with NA covariates in group ", this_group
+                " rows with NA covariates in group ", this_group,
+                ". NA counts per variable: ",
+                paste(names(na_vars), na_vars, sep = "=", collapse = ", ")
             )
+            this_d <- this_d[complete, ]
         }
 
         n_treatment <- sum(this_d$treatment)
