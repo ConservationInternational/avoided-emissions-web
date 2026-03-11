@@ -1153,6 +1153,7 @@ def submit_analysis_task(
             "max_controls_per_treatment": max_controls_per_treatment,
             "min_control_distance_km": min_control_distance_km,
             "separation_fallback_mahalanobis": bool(separation_fallback_mahalanobis),
+            "matching_method": matching_method,
             "n_replicates": n_replicates,
             **(
                 {"sites_exclusion_buffer": sites_exclusion_buffer}
