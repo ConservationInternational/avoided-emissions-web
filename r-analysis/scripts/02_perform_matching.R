@@ -228,9 +228,13 @@ check_separation <- function(d, f) {
     #   separated    : logical — TRUE if any covariate is problematic
     #   details      : character vector describing each problem
     #
-    # Checks two things:
+    # Checks three things:
     # 1. Factor levels that appear only in treatment or only in control
     # 2. Continuous variables with zero overlap between groups
+    # 3. Low-cardinality numeric variables (e.g. binary 0/1) where
+    #    specific values appear exclusively in one group — this catches
+    #    cases like pa=1 appearing only in treatment, which causes
+    #    quasi-complete separation even though the ranges overlap at 0.
     formula_vars <- all.vars(f)
     rhs_vars <- setdiff(formula_vars, "treatment")
     problems <- character(0)
@@ -275,6 +279,38 @@ check_separation <- function(d, f) {
                     round(c_range[1], 3), ", ", round(c_range[2], 3),
                     "])"
                 ))
+            } else {
+                # For low-cardinality numeric variables (binary, ordinal),
+                # check if specific values appear exclusively in one group.
+                unique_vals <- unique(col[!is.na(col)])
+                if (length(unique_vals) <= 10) {
+                    t_vals_set <- unique(treat_vals[!is.na(treat_vals)])
+                    c_vals_set <- unique(ctrl_vals[!is.na(ctrl_vals)])
+                    only_t <- setdiff(t_vals_set, c_vals_set)
+                    only_c <- setdiff(c_vals_set, t_vals_set)
+                    if (length(only_t) > 0) {
+                        n_aff <- sum(treat_vals %in% only_t, na.rm = TRUE)
+                        pct <- round(n_aff / sum(!is.na(treat_vals)) * 100, 1)
+                        problems <- c(problems, paste0(
+                            v, ": value(s) ",
+                            paste(only_t, collapse = ", "),
+                            " found only in treatment (",
+                            n_aff, " pixels, ", pct,
+                            "% of treatment)"
+                        ))
+                    }
+                    if (length(only_c) > 0) {
+                        n_aff <- sum(ctrl_vals %in% only_c, na.rm = TRUE)
+                        pct <- round(n_aff / sum(!is.na(ctrl_vals)) * 100, 1)
+                        problems <- c(problems, paste0(
+                            v, ": value(s) ",
+                            paste(only_c, collapse = ", "),
+                            " found only in control (",
+                            n_aff, " pixels, ", pct,
+                            "% of control)"
+                        ))
+                    }
+                }
             }
         }
     }
@@ -344,7 +380,9 @@ match_site <- function(d, f) {
     # Returns a list with:
     #   result              : data.frame of matched rows (or NULL)
     #   separation_warnings : list of per-group separation diagnostics
+    #   group_diagnostics   : list of per-group match outcome summaries
     sep_warnings <- list()
+    group_diags <- list()
     fn_env <- environment()  # explicit ref for use inside foreach
 
     m <- foreach(this_group = unique(d$group), .combine = foreach_rbind) %do% {
@@ -442,13 +480,36 @@ match_site <- function(d, f) {
             message("    Group ", this_group, ": T=", n_treatment_grp,
                     " C=", n_control_grp, " -> ", n_matched, " matched")
         }
+
+        # Record per-group diagnostics for structured output
+        gd <- get("group_diags", envir = fn_env)
+        sep_cur <- get("sep_warnings", envir = fn_env)
+        gd[[length(gd) + 1L]] <- list(
+            group = as.character(this_group),
+            n_treatment = n_treatment_grp,
+            n_control = n_control_grp,
+            n_matched = n_matched,
+            separation_detected = as.character(this_group) %in%
+                names(sep_cur),
+            separation_details = sep_cur[[as.character(this_group)]]
+        )
+        assign("group_diags", gd, envir = fn_env)
+
         return(grp_result)
     }
 
     if (is.null(m) || nrow(m) == 0) {
-        return(list(result = NULL, separation_warnings = sep_warnings))
+        return(list(
+            result = NULL,
+            separation_warnings = sep_warnings,
+            group_diagnostics = group_diags
+        ))
     }
-    return(list(result = m, separation_warnings = sep_warnings))
+    return(list(
+        result = m,
+        separation_warnings = sep_warnings,
+        group_diagnostics = group_diags
+    ))
 }
 
 
@@ -500,8 +561,12 @@ match_site_matchit <- function(d, f) {
     }
 
     n_treatment <- sum(d$treatment)
+    n_control <- sum(!d$treatment)
     if (n_treatment < 1) {
-        return(list(result = NULL, separation_warnings = sep_warnings))
+        return(list(
+            result = NULL, separation_warnings = sep_warnings,
+            group_diagnostics = list()
+        ))
     }
 
     # Build exact-match formula from EXACT_MATCH_VARS that are present
@@ -544,13 +609,33 @@ match_site_matchit <- function(d, f) {
     })
 
     if (is.null(mi)) {
-        return(list(result = NULL, separation_warnings = sep_warnings))
+        return(list(
+            result = NULL, separation_warnings = sep_warnings,
+            group_diagnostics = list(list(
+                group = "__all__",
+                n_treatment = n_treatment,
+                n_control = n_control,
+                n_matched = 0L,
+                separation_detected = sep$separated,
+                separation_details = if (sep$separated) sep$details
+            ))
+        ))
     }
 
     # Extract matched data
     md <- match.data(mi)
     if (nrow(md) == 0) {
-        return(list(result = NULL, separation_warnings = sep_warnings))
+        return(list(
+            result = NULL, separation_warnings = sep_warnings,
+            group_diagnostics = list(list(
+                group = "__all__",
+                n_treatment = n_treatment,
+                n_control = n_control,
+                n_matched = 0L,
+                separation_detected = sep$separated,
+                separation_details = if (sep$separated) sep$details
+            ))
+        ))
     }
 
     # Map MatchIt output to the same schema as optmatch output
@@ -568,11 +653,51 @@ match_site_matchit <- function(d, f) {
     md <- md %>% select(-any_of(c("distance", "weights", "subclass")))
 
     n_matched <- sum(md$treatment)
-    message("    MatchIt: T=", sum(d$treatment),
-            " C=", sum(!d$treatment),
+    message("    MatchIt: T=", n_treatment,
+            " C=", n_control,
             " -> ", n_matched, " matched")
 
-    return(list(result = md, separation_warnings = sep_warnings))
+    # Build per-group diagnostics from MatchIt exact-match subgroups
+    matchit_diags <- list()
+    if (length(exact_vars_present) > 0) {
+        md_all <- d  # full data before matching
+        md_all$group <- interaction(
+            md_all[exact_vars_present], drop = TRUE
+        )
+        md_matched <- md
+        md_matched$group <- interaction(
+            md_matched[exact_vars_present], drop = TRUE
+        )
+        for (g in levels(md_all$group)) {
+            gd <- md_all[md_all$group == g, ]
+            gm <- md_matched[md_matched$group == g, ]
+            n_t <- sum(gd$treatment)
+            n_c <- sum(!gd$treatment)
+            n_m <- if (nrow(gm) > 0) sum(gm$treatment) else 0L
+            matchit_diags[[length(matchit_diags) + 1L]] <- list(
+                group = as.character(g),
+                n_treatment = n_t,
+                n_control = n_c,
+                n_matched = n_m,
+                separation_detected = sep$separated,
+                separation_details = if (sep$separated) sep$details
+            )
+        }
+    } else {
+        matchit_diags <- list(list(
+            group = "__all__",
+            n_treatment = n_treatment,
+            n_control = n_control,
+            n_matched = n_matched,
+            separation_detected = sep$separated,
+            separation_details = if (sep$separated) sep$details
+        ))
+    }
+
+    return(list(
+        result = md, separation_warnings = sep_warnings,
+        group_diagnostics = matchit_diags
+    ))
 }
 
 n_failed <- 0L
@@ -838,10 +963,23 @@ for (this_id in site_ids) {
                     match_elapsed <- (proc.time() - match_timer)["elapsed"]
                     m <- match_result$result
                     sep_warnings <- match_result$separation_warnings
+                    grp_diags <- match_result$group_diagnostics
                     message(
                         "    [TIMING] Matching: ",
                         round(match_elapsed, 1), "s"
                     )
+
+                    # Write per-group matching diagnostics to JSON
+                    if (length(grp_diags) > 0) {
+                        diag_path <- sub(
+                            "\\.rds$", "_diagnostics.json",
+                            match_path_k
+                        )
+                        write_json(
+                            grp_diags, diag_path,
+                            auto_unbox = TRUE, pretty = TRUE
+                        )
+                    }
 
                     if (is.null(m)) {
                         message("    No matches found")
@@ -864,6 +1002,7 @@ for (this_id in site_ids) {
                             replicate = rep_k,
                             error = error_msg,
                             separation_warnings = sep_warnings,
+                            group_diagnostics = grp_diags,
                             timestamp = format(
                                 Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
                             ),
@@ -888,6 +1027,10 @@ for (this_id in site_ids) {
                         if (length(sep_warnings) > 0) {
                             attr(m, "separation_warnings") <-
                                 sep_warnings
+                        }
+                        if (length(grp_diags) > 0) {
+                            attr(m, "group_diagnostics") <-
+                                grp_diags
                         }
                         saveRDS(m, match_path_k)
                         message("    Saved ", nrow(m), " matched rows")

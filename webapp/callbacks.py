@@ -3927,6 +3927,11 @@ def _build_overview(task, sites, totals, quality_warnings=None):
             )
         )
 
+    # --- Group-level matching diagnostics ------------------------------------
+    group_diags = _normalize_metadata_list(meta.get("group_diagnostics", []))
+    if group_diags:
+        cards.append(_build_group_diagnostics_card(group_diags))
+
     # --- Subsampled sites info -----------------------------------------------
     subsampled_sites = _normalize_metadata_list(meta.get("subsampled_sites", []))
     if subsampled_sites:
@@ -4753,6 +4758,191 @@ _PCT_MATCHED_CRITICAL = 5  # % matched below this → critical
 _PCT_MATCHED_WARN = 25  # % matched below this → warning
 
 
+def _build_group_diagnostics_card(group_diags):
+    """Build a card showing per-group matching outcomes and separation causes.
+
+    Parameters
+    ----------
+    group_diags : list[dict]
+        Each dict has: group, n_treatment, n_control, n_matched,
+        separation_detected, separation_details.
+    """
+    if not group_diags:
+        return html.Div()
+
+    # Deduplicate groups (replicates may produce identical diagnostics)
+    seen = {}
+    for gd in group_diags:
+        g = gd.get("group", "?")
+        if g not in seen:
+            seen[g] = gd
+
+    groups = sorted(seen.values(), key=lambda g: g.get("n_treatment", 0), reverse=True)
+    failed = [
+        g for g in groups if g.get("n_matched", 0) == 0 and g.get("n_treatment", 0) > 0
+    ]
+
+    if not failed:
+        return html.Div()
+
+    total_failed_t = sum(g.get("n_treatment", 0) for g in failed)
+    total_t = sum(
+        g.get("n_treatment", 0) for g in groups if g.get("n_treatment", 0) > 0
+    )
+
+    rows = []
+    for g in failed:
+        group_name = g.get("group", "?")
+        n_t = g.get("n_treatment", 0)
+        n_c = g.get("n_control", 0)
+        ratio = f"{n_c / n_t:.1f}x" if n_t > 0 else "N/A"
+
+        # Determine failure reason
+        sep_details = g.get("separation_details") or []
+        if sep_details:
+            reason = "; ".join(sep_details)
+        elif n_t > 0 and n_c < n_t:
+            reason = f"Insufficient controls (ratio {ratio})"
+        else:
+            reason = "No feasible matches within caliper"
+
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(group_name, style={"fontFamily": "monospace"}),
+                    html.Td(f"{n_t:,}"),
+                    html.Td(f"{n_c:,}"),
+                    html.Td(ratio),
+                    html.Td(
+                        reason,
+                        className="small",
+                        style={"maxWidth": "400px"},
+                    ),
+                ]
+            )
+        )
+
+    pct = total_failed_t / total_t * 100 if total_t > 0 else 0
+    return dbc.Card(
+        [
+            dbc.CardHeader(
+                [
+                    html.I(
+                        className="bi bi-diagram-3 text-warning me-2",
+                    ),
+                    html.Strong("Exact-Match Group Failures"),
+                    html.Span(
+                        f" \u2014 {len(failed)} of {len(groups)} group(s) "
+                        f"produced zero matches "
+                        f"({total_failed_t:,} treatment pixels, {pct:.0f}%)",
+                        className="text-muted ms-1",
+                    ),
+                ]
+            ),
+            dbc.CardBody(
+                [
+                    html.P(
+                        "Treatment and control pixels are grouped by "
+                        "exact-match variables (e.g. ecoregion, admin "
+                        "boundary). Matching only occurs within each group. "
+                        "The groups below had zero successful matches:",
+                        className="text-muted mb-2 small",
+                    ),
+                    html.Table(
+                        [
+                            html.Thead(
+                                html.Tr(
+                                    [
+                                        html.Th("Group"),
+                                        html.Th("Treatment"),
+                                        html.Th("Control"),
+                                        html.Th("Ratio"),
+                                        html.Th("Failure Reason"),
+                                    ]
+                                )
+                            ),
+                            html.Tbody(rows),
+                        ],
+                        className="table table-sm table-hover mb-0",
+                    ),
+                    html.Details(
+                        [
+                            html.Summary(
+                                "What causes group failures?",
+                                style={
+                                    "cursor": "pointer",
+                                    "fontSize": "0.9em",
+                                    "fontWeight": "600",
+                                    "marginTop": "0.75rem",
+                                },
+                            ),
+                            html.Div(
+                                [
+                                    html.P(
+                                        "Common causes of group matching failures:",
+                                        className="mb-1 mt-2",
+                                    ),
+                                    html.Ul(
+                                        [
+                                            html.Li(
+                                                [
+                                                    html.Strong("Covariate separation"),
+                                                    " \u2014 A covariate value "
+                                                    "appears exclusively in "
+                                                    "treatment or control pixels "
+                                                    "(e.g. all treatment pixels "
+                                                    "are in a protected area but "
+                                                    "no control pixels are). This "
+                                                    "makes the propensity score "
+                                                    "model predict treatment "
+                                                    "perfectly, so no control can "
+                                                    "match within the caliper.",
+                                                ]
+                                            ),
+                                            html.Li(
+                                                [
+                                                    html.Strong(
+                                                        "Insufficient controls"
+                                                    ),
+                                                    " \u2014 Too few control "
+                                                    "pixels in the group relative "
+                                                    "to treatment pixels. The "
+                                                    "matching algorithm cannot "
+                                                    "find enough similar controls.",
+                                                ]
+                                            ),
+                                            html.Li(
+                                                [
+                                                    html.Strong("Caliper rejection"),
+                                                    " \u2014 Even when controls "
+                                                    "exist, none are similar "
+                                                    "enough (within the caliper "
+                                                    "threshold) to be matched.",
+                                                ]
+                                            ),
+                                        ],
+                                        className="mb-2",
+                                    ),
+                                    html.P(
+                                        "Consider adjusting the covariates, "
+                                        "exact-match variables, or enabling "
+                                        "the Mahalanobis fallback for "
+                                        "separation.",
+                                        className="mb-0 text-muted small",
+                                    ),
+                                ],
+                                style={"fontSize": "0.88em"},
+                            ),
+                        ],
+                    ),
+                ],
+                className="p-2",
+            ),
+        ],
+        className="mb-3 border-warning",
+    )
+
+
 def _assess_match_quality(balance_df=None, totals=None):
     """Run automated quality checks and return a list of warning dicts.
 
@@ -4793,7 +4983,8 @@ def _assess_match_quality(balance_df=None, totals=None):
                         "message": (
                             f"Only ~{pct:.0f}% of treatment pixels matched "
                             f"({n_px:,} pixels), which is very low for "
-                            f"reliable results."
+                            f"reliable results. Check the exact-match group "
+                            f"diagnostics below for specific failure causes."
                         ),
                     }
                 )
@@ -4805,7 +4996,8 @@ def _assess_match_quality(balance_df=None, totals=None):
                         "message": (
                             f"Only ~{pct:.0f}% of treatment pixels matched "
                             f"({n_px:,} pixels), which may limit result "
-                            f"reliability."
+                            f"reliability. Check the exact-match group "
+                            f"diagnostics for details."
                         ),
                     }
                 )
@@ -4984,7 +5176,10 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                                     html.Li(
                                         f"Fewer than {_PCT_MATCHED_CRITICAL}% "
                                         f"of treatment pixels matched — "
-                                        f"too few for statistical confidence."
+                                        f"too few for statistical confidence. "
+                                        f"This is often caused by covariate "
+                                        f"separation (see group diagnostics "
+                                        f"below)."
                                     ),
                                     html.Li(
                                         f"One or more covariates with "

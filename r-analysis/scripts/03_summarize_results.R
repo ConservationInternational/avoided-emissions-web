@@ -1043,8 +1043,36 @@ failed_sites_summary <- lapply(failed_sites, function(fs) {
         length(fs$separation_warnings) > 0) {
         entry$separation_warnings <- fs$separation_warnings
     }
+    # Include group diagnostics when present
+    if (!is.null(fs$group_diagnostics) &&
+        length(fs$group_diagnostics) > 0) {
+        entry$group_diagnostics <- fs$group_diagnostics
+    }
     entry
 })
+
+# Aggregate per-group matching diagnostics from diagnostic JSON files
+# written alongside each match RDS by step 2.
+diag_files <- list.files(
+    config$matches_dir,
+    pattern = "_diagnostics\\.json$",
+    full.names = TRUE
+)
+all_group_diagnostics <- list()
+for (df in diag_files) {
+    tryCatch({
+        gd <- fromJSON(df, simplifyVector = FALSE)
+        all_group_diagnostics <- c(all_group_diagnostics, gd)
+    }, error = function(e) {
+        message("  Warning: could not read diagnostics file: ", df)
+    })
+}
+if (length(all_group_diagnostics) > 0) {
+    message(
+        "  Loaded ", length(all_group_diagnostics),
+        " group diagnostics from ", length(diag_files), " file(s)"
+    )
+}
 
 subsampled_sites_summary <- if (exists("sampling_by_site")) {
     sites_lookup <- sites %>%
@@ -1094,7 +1122,8 @@ summary_data <- list(
                forest_loss_avoided_ha, area_ha, n_years) %>%
         as.list(),
     failed_sites = failed_sites_summary,
-    subsampled_sites = subsampled_sites_summary
+    subsampled_sites = subsampled_sites_summary,
+    group_diagnostics = all_group_diagnostics
 )
 
 write_json(
