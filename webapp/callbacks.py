@@ -3514,6 +3514,14 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                             "Batch job names",
                             ", ".join(batch_job_names) if batch_job_names else "—",
                         ),
+                        _detail_row(
+                            "S3 output path",
+                            task.results_s3_uri or "—",
+                        ),
+                        _detail_row(
+                            "Internal task ID",
+                            str(task.id),
+                        ),
                     ]
                 ),
             ],

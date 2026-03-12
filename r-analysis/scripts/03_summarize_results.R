@@ -83,14 +83,48 @@ if (N_REPLICATES > 1L) {
 }
 
 # Load failure markers written by step 2 (tryCatch) or by the Python
-# wrapper (OOM-killed subprocess)
-failure_files <- list.files(config$matches_dir,
-                            pattern = "^failed_.*\\.json$",
-                            full.names = TRUE)
+# wrapper (OOM-killed subprocess).  When using spot instances, a job may
+# fail on one attempt but succeed after retry.  In that case we have both
+# a failure marker AND a success file — exclude failures where a
+# corresponding match file exists.
+failure_files_all <- list.files(config$matches_dir,
+                                pattern = "^failed_.*\\.json$",
+                                full.names = TRUE)
+# Get basenames of all success files (m_*.rds) for quick lookup
+success_basenames <- basename(match_files_all)
+
+# Filter out failure markers where the job succeeded on retry
+failure_files <- Filter(function(fp) {
+    # Parse failed_{id_numeric}_rep{k}.json or failed_{id_numeric}.json
+    fname <- basename(fp)
+    # Try pattern with replicate first: failed_1_rep5.json -> m_1_rep5.rds
+    m <- regmatches(fname, regexec("^failed_(\\d+)_rep(\\d+)\\.json$", fname))[[1]]
+    if (length(m) == 3) {
+        id_numeric <- m[2]
+        rep_k <- m[3]
+        success_name <- sprintf("m_%s_rep%s.rds", id_numeric, rep_k)
+        return(!success_name %in% success_basenames)
+    }
+    # Try pattern without replicate: failed_1.json -> m_1.rds
+    m <- regmatches(fname, regexec("^failed_(\\d+)\\.json$", fname))[[1]]
+    if (length(m) == 2) {
+        id_numeric <- m[2]
+        success_name <- sprintf("m_%s.rds", id_numeric)
+        return(!success_name %in% success_basenames)
+    }
+    # Unknown pattern (e.g. failed_array_5.json) - keep it as a failure
+    TRUE
+}, failure_files_all)
+
 failed_sites <- lapply(failure_files, function(fp) {
     fromJSON(fp)
 })
 n_failed <- length(failed_sites)
+n_stale_failures <- length(failure_files_all) - length(failure_files)
+if (n_stale_failures > 0) {
+    message("  INFO: Ignored ", n_stale_failures, " stale failure marker(s) ",
+            "from retried jobs that succeeded")
+}
 
 # Build and write failed-sites table (always emitted)
 failed_sites_table <- if (length(failed_sites) > 0) {
