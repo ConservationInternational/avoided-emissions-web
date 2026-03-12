@@ -388,36 +388,42 @@ def cog_layers():
 
 # Vector overlay layer configuration: maps layer name to DB table and
 # the column that contains the human-readable label for each polygon.
+# "limit" controls max features returned (lower for complex geometries).
 _VECTOR_LAYERS = {
     "admin0": {
         "table": "geoboundaries_adm0",
         "label_col": "shape_name",
         "description": "Country boundaries (ADM0)",
         "category": "boundaries",
+        "limit": 200,
     },
     "admin1": {
         "table": "geoboundaries_adm1",
         "label_col": "shape_name",
         "description": "Admin level 1 boundaries",
         "category": "boundaries",
+        "limit": 300,
     },
     "admin2": {
         "table": "geoboundaries_adm2",
         "label_col": "shape_name",
         "description": "Admin level 2 boundaries",
         "category": "boundaries",
+        "limit": 500,
     },
     "ecoregion": {
         "table": "ecoregions",
         "label_col": "eco_name",
         "description": "RESOLVE Ecoregions",
         "category": "ecological",
+        "limit": 150,  # Ecoregions have very complex geometries
     },
     "pa": {
         "table": "wdpa",
         "label_col": "name_eng",
         "description": "Protected Areas (WDPA)",
         "category": "ecological",
+        "limit": 300,
     },
 }
 
@@ -432,6 +438,7 @@ def vector_layer(layer_name):
         simplify – optional tolerance in degrees (default 0.01)
     """
     from sqlalchemy import text as sa_text
+    from sqlalchemy.exc import OperationalError
 
     from models import get_db
 
@@ -459,25 +466,49 @@ def vector_layer(layer_name):
     assert _SAFE_IDENTIFIER.match(table), f"Unsafe table name: {table}"
     assert _SAFE_IDENTIFIER.match(label_col), f"Unsafe column name: {label_col}"
 
+    # Lower limit for layers with complex geometries to reduce memory usage.
+    # Ecoregions in particular have very detailed polygons.
+    limit = cfg.get("limit", 500)
+
+    # Use ST_Simplify (faster, Douglas-Peucker) instead of
+    # ST_SimplifyPreserveTopology for better performance on large geometries.
+    # Clip geometries to bbox first to reduce data volume before simplification.
     sql = sa_text(
         f"""
         SELECT
             {label_col} AS name,
             ST_AsGeoJSON(
-                ST_SimplifyPreserveTopology(geom, :tol),
-                6
+                ST_Simplify(
+                    ST_Intersection(geom, ST_MakeEnvelope(:w, :s, :e, :n, 4326)),
+                    :tol
+                ),
+                5
             ) AS geojson
         FROM {table}
         WHERE geom && ST_MakeEnvelope(:w, :s, :e, :n, 4326)
-        LIMIT 2000
+        LIMIT :lim
         """
     )
 
     db = get_db()
     try:
+        # Set statement timeout to prevent runaway queries (15 seconds)
+        db.execute(sa_text("SET LOCAL statement_timeout = '15s'"))
         rows = db.execute(
-            sql, {"tol": simplify, "w": west, "s": south, "e": east, "n": north}
+            sql,
+            {
+                "tol": simplify,
+                "w": west,
+                "s": south,
+                "e": east,
+                "n": north,
+                "lim": limit,
+            },
         ).fetchall()
+    except OperationalError as e:
+        app.logger.warning(f"Vector layer query failed for {layer_name}: {e}")
+        db.rollback()
+        return jsonify({"error": "Query timeout or server error"}), 503
     finally:
         db.close()
 

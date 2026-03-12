@@ -174,6 +174,22 @@
     ];
 
     /**
+     * Simple debounce helper.
+     */
+    function debounce(fn, delay) {
+        var timer = null;
+        return function () {
+            var ctx = this;
+            var args = arguments;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(function () {
+                timer = null;
+                fn.apply(ctx, args);
+            }, delay);
+        };
+    }
+
+    /**
      * Compute simplification tolerance from the current map view.
      * At low zoom we simplify aggressively; at high zoom we keep detail.
      */
@@ -206,8 +222,10 @@
 
         return function (feature, resolution) {
             var name = feature.get("name") || "";
+            // Only show labels at higher zoom levels (resolution < 1500 ~ zoom 8+).
+            // OpenLayers' declutter option on the layer handles overlap automatically.
+            var showLabel = resolution < 1500 && name;
             var fontSize = resolution < 500 ? "11px" : "10px";
-            var showLabel = resolution < 5000;
 
             return new ol.style.Style({
                 stroke: new ol.style.Stroke({ color: strokeColor, width: 1.5 }),
@@ -218,7 +236,7 @@
                         font: fontSize + " sans-serif",
                         fill: new ol.style.Fill({ color: "#222" }),
                         stroke: new ol.style.Stroke({ color: "#fff", width: 3 }),
-                        overflow: true,
+                        overflow: false,
                         placement: "point",
                     })
                     : undefined,
@@ -787,6 +805,7 @@
                             source: source,
                             style: buildVectorStyle(colorIdx),
                             visible: true,
+                            declutter: true,  // Auto-hide overlapping labels
                             properties: { title: vName },
                         });
                         vecCache[vName] = { layer: vlayer, name: vName };
@@ -872,13 +891,55 @@
             }
         });
 
-        // Reload visible vector layers when map view changes.
-        map.on("moveend", function () {
+        // Reload visible vector layers when map view changes (debounced).
+        var debouncedReload = debounce(function () {
             Object.keys(vecCache).forEach(function (vn) {
                 if (vecCache[vn].layer.getVisible()) {
                     loadVectorFeatures(map, vecCache[vn].layer, vn);
                 }
             });
+        }, 300);  // 300ms debounce to avoid hammering the server
+        map.on("moveend", debouncedReload);
+
+        // ?????? Tooltip for vector features ????????????????????????????????????????????????????????????????????????????????????????????????
+        var tooltip = document.createElement("div");
+        tooltip.className = "ae-vector-tooltip";
+        tooltip.style.cssText =
+            "position:absolute;background:rgba(255,255,255,0.95);padding:4px 8px;" +
+            "border-radius:4px;font-size:12px;pointer-events:none;display:none;" +
+            "box-shadow:0 1px 4px rgba(0,0,0,0.3);z-index:1000;max-width:200px;" +
+            "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        mapEl.appendChild(tooltip);
+
+        map.on("pointermove", function (evt) {
+            if (evt.dragging) {
+                tooltip.style.display = "none";
+                return;
+            }
+            var feature = map.forEachFeatureAtPixel(evt.pixel, function (f, layer) {
+                // Only show tooltip for vector overlay layers (not site polygons)
+                if (layer && vecCache) {
+                    for (var vn in vecCache) {
+                        if (vecCache[vn].layer === layer) {
+                            return f;
+                        }
+                    }
+                }
+                return null;
+            });
+            if (feature) {
+                var name = feature.get("name");
+                if (name) {
+                    tooltip.textContent = name;
+                    tooltip.style.display = "block";
+                    tooltip.style.left = (evt.pixel[0] + 12) + "px";
+                    tooltip.style.top = (evt.pixel[1] - 12) + "px";
+                    mapEl.style.cursor = "pointer";
+                    return;
+                }
+            }
+            tooltip.style.display = "none";
+            mapEl.style.cursor = "";
         });
 
         var control = new ol.control.Control({ element: panel });
