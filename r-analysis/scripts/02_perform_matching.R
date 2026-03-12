@@ -227,6 +227,9 @@ check_separation <- function(d, f) {
     # Returns a list with:
     #   separated    : logical — TRUE if any covariate is problematic
     #   details      : character vector describing each problem
+    #   sep_vars     : character vector of variable names that caused
+    #                  separation (used to build a reduced formula for
+    #                  the Mahalanobis fallback)
     #
     # Checks three things:
     # 1. Factor levels that appear only in treatment or only in control
@@ -238,6 +241,7 @@ check_separation <- function(d, f) {
     formula_vars <- all.vars(f)
     rhs_vars <- setdiff(formula_vars, "treatment")
     problems <- character(0)
+    problem_vars <- character(0)
 
     for (v in rhs_vars) {
         if (!v %in% names(d)) next
@@ -251,6 +255,7 @@ check_separation <- function(d, f) {
             only_treat <- setdiff(treat_levels, ctrl_levels)
             only_ctrl <- setdiff(ctrl_levels, treat_levels)
             if (length(only_treat) > 0) {
+                problem_vars <- c(problem_vars, v)
                 problems <- c(problems, paste0(
                     v, ": ", length(only_treat),
                     " level(s) only in treatment (",
@@ -260,6 +265,7 @@ check_separation <- function(d, f) {
                 ))
             }
             if (length(only_ctrl) > 0) {
+                problem_vars <- c(problem_vars, v)
                 problems <- c(problems, paste0(
                     v, ": ", length(only_ctrl),
                     " level(s) only in control (",
@@ -272,6 +278,7 @@ check_separation <- function(d, f) {
             t_range <- range(treat_vals, na.rm = TRUE)
             c_range <- range(ctrl_vals, na.rm = TRUE)
             if (t_range[2] < c_range[1] || c_range[2] < t_range[1]) {
+                problem_vars <- c(problem_vars, v)
                 problems <- c(problems, paste0(
                     v, ": no overlap (treatment [",
                     round(t_range[1], 3), ", ", round(t_range[2], 3),
@@ -289,6 +296,7 @@ check_separation <- function(d, f) {
                     only_t <- setdiff(t_vals_set, c_vals_set)
                     only_c <- setdiff(c_vals_set, t_vals_set)
                     if (length(only_t) > 0) {
+                        problem_vars <- c(problem_vars, v)
                         n_aff <- sum(treat_vals %in% only_t, na.rm = TRUE)
                         pct <- round(n_aff / sum(!is.na(treat_vals)) * 100, 1)
                         problems <- c(problems, paste0(
@@ -300,6 +308,7 @@ check_separation <- function(d, f) {
                         ))
                     }
                     if (length(only_c) > 0) {
+                        problem_vars <- c(problem_vars, v)
                         n_aff <- sum(ctrl_vals %in% only_c, na.rm = TRUE)
                         pct <- round(n_aff / sum(!is.na(ctrl_vals)) * 100, 1)
                         problems <- c(problems, paste0(
@@ -315,7 +324,11 @@ check_separation <- function(d, f) {
         }
     }
 
-    list(separated = length(problems) > 0, details = problems)
+    list(
+        separated = length(problems) > 0,
+        details = problems,
+        sep_vars = unique(problem_vars)
+    )
 }
 
 
@@ -440,10 +453,26 @@ match_site <- function(d, f) {
                 if (SEPARATION_FALLBACK) {
                     message("    Falling back to Mahalanobis distance ",
                             "(separation_fallback_mahalanobis=true)")
-                    dists <- match_on(f, data = this_d)
-                    if (CALIPER_WIDTH > 0) {
-                        dists <- dists + caliper(dists, width = CALIPER_WIDTH)
+                    # Build a reduced formula excluding the variables
+                    # that caused separation so they don't dominate the
+                    # Mahalanobis distance.  If that would remove ALL
+                    # RHS variables, fall back to the full formula.
+                    rhs_vars <- setdiff(all.vars(f), "treatment")
+                    reduced_vars <- setdiff(rhs_vars, sep$sep_vars)
+                    fb_formula <- if (length(reduced_vars) > 0) {
+                        as.formula(
+                            paste("treatment ~",
+                                  paste(reduced_vars, collapse = " + "))
+                        )
+                    } else {
+                        f
                     }
+                    dists <- match_on(fb_formula, data = this_d)
+                    # Skip caliper for Mahalanobis fallback — the
+                    # separated variable is excluded from the distance
+                    # but would make a caliper unreliable. This is
+                    # consistent with the MatchIt path, which also
+                    # drops the caliper for Mahalanobis distance.
                     this_d$pscore <- NA_real_
                     grp_fb <- get_matches(this_d, dists)
                     n_fb <- if (is.data.frame(grp_fb)) {
@@ -582,13 +611,26 @@ match_site_matchit <- function(d, f) {
         (sep$separated && SEPARATION_FALLBACK)
     distance_method <- if (use_mahalanobis) "mahalanobis" else "glm"
 
+    # When falling back to Mahalanobis due to separation, exclude the
+    # separated variables so they don't dominate the distance.
+    mi_formula <- f
+    if (use_mahalanobis && sep$separated && length(sep$sep_vars) > 0) {
+        rhs_vars <- setdiff(all.vars(f), "treatment")
+        reduced_vars <- setdiff(rhs_vars, sep$sep_vars)
+        if (length(reduced_vars) > 0) {
+            mi_formula <- as.formula(
+                paste("treatment ~", paste(reduced_vars, collapse = " + "))
+            )
+        }
+    }
+
     # Determine ratio
     ratio_val <- if (MAX_CONTROLS > 0) MAX_CONTROLS else NA
 
     # Run MatchIt
     mi <- tryCatch({
         matchit(
-            f, data = d,
+            mi_formula, data = d,
             method = "nearest",
             distance = distance_method,
             exact = exact_formula,
