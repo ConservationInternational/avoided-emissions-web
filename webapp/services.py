@@ -1723,13 +1723,25 @@ def adopt_api_execution(exec_data, db):
         # Caller should check for this and log once, not per-execution
         return None
 
-    # Reconstruct n_sites from the pipeline array_size if available
+    # Reconstruct n_sites from the pipeline array_size if available,
+    # and extract match_memory_mib from the "match" pipeline step.
     n_sites = 1
     pipeline = params.get("pipeline") or []
     for step in pipeline:
-        if isinstance(step, dict) and step.get("array_size"):
-            n_sites = step["array_size"]
-            break
+        if isinstance(step, dict):
+            if step.get("array_size"):
+                n_sites = step["array_size"]
+            if step.get("name") == "match" and step.get("memory_mib"):
+                params.setdefault("match_memory_mib", step["memory_mib"])
+
+    # Extract matching_job_queue and memory from batch overrides.
+    # For non-pipeline (single-site) tasks the pipeline loop above
+    # won't find a "match" step, so fall back to batch.memory_mib.
+    batch = params.get("batch") or {}
+    if batch.get("job_queue"):
+        params.setdefault("matching_job_queue", batch["job_queue"])
+    if batch.get("memory_mib"):
+        params.setdefault("match_memory_mib", batch["memory_mib"])
 
     task = AnalysisTask(
         id=uuid.uuid4(),
@@ -1748,7 +1760,15 @@ def adopt_api_execution(exec_data, db):
         submitted_at=_parse_iso_datetime(exec_data.get("start_date")),
         started_at=_parse_iso_datetime(exec_data.get("start_date")),
         completed_at=_parse_iso_datetime(exec_data.get("end_date")),
-        extra_metadata={"discovered_from_api": True, "api_exec_id": exec_id},
+        extra_metadata={
+            "discovered_from_api": True,
+            "api_exec_id": exec_id,
+            **(
+                {"batch_jobs": (exec_data.get("results") or {}).get("batch_jobs")}
+                if isinstance((exec_data.get("results") or {}).get("batch_jobs"), dict)
+                else {}
+            ),
+        },
     )
 
     if local_status in ("failed",):

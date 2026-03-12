@@ -930,6 +930,15 @@ def poll_batch_tasks() -> dict:
                             old_status,
                         )
 
+                        # Capture batch job IDs from API results
+                        # into extra_metadata for display purposes.
+                        api_results = exec_data.get("results") or {}
+                        api_batch_jobs = api_results.get("batch_jobs")
+                        if api_batch_jobs and isinstance(api_batch_jobs, dict):
+                            meta = dict(task.extra_metadata or {})
+                            meta["batch_jobs"] = api_batch_jobs
+                            task.extra_metadata = meta
+
                         if api_status == "FINISHED":
                             task.status = "succeeded"
                             task.completed_at = now

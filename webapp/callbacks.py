@@ -3396,6 +3396,20 @@ def _build_overview(task, sites, totals, quality_warnings=None):
     mem_mib = config.get("match_memory_mib")
     mem_display = f"{mem_mib / 1024:.1f} GB" if mem_mib else "—"
 
+    # Derive API execution ID and batch job names from extract_job_id.
+    api_exec_id = None
+    batch_job_names = []
+    job_id_str = task.extract_job_id or ""
+    if job_id_str.startswith("api:"):
+        api_exec_id = job_id_str[4:]
+        pipeline = config.get("pipeline") or []
+        if pipeline:
+            for step in pipeline:
+                if isinstance(step, dict) and step.get("name"):
+                    batch_job_names.append(f"te-{step['name']}-{api_exec_id[:8]}")
+        else:
+            batch_job_names.append(f"te-{api_exec_id[:8]}")
+
     cards.append(
         dbc.Card(
             [
@@ -3485,6 +3499,20 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         _detail_row(
                             "Batch job queue",
                             config.get("matching_job_queue", "—"),
+                        ),
+                        html.Hr(className="my-2"),
+                        html.H6(
+                            "Execution Details",
+                            className="mb-2",
+                            style={"fontWeight": "600"},
+                        ),
+                        _detail_row(
+                            "API execution ID",
+                            api_exec_id or "—",
+                        ),
+                        _detail_row(
+                            "Batch job names",
+                            ", ".join(batch_job_names) if batch_job_names else "—",
                         ),
                     ]
                 ),
