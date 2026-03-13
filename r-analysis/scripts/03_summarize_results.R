@@ -625,11 +625,13 @@ if (length(match_files_all) > 0) {
                     forest_change_ha =
                         c(NA, diff(forest_at_year_end)),
                     # Protect against division by zero when baseline forest is 0
-                    forest_frac_remaining = if_else(
-                        forest_at_year_end[1] > 0,
-                        forest_at_year_end / forest_at_year_end[1],
+                    # Use base R if/else (not dplyr if_else) because condition
+                    # is scalar but result is vector; NA_real_ recycles.
+                    forest_frac_remaining = if (forest_at_year_end[1] > 0) {
+                        forest_at_year_end / forest_at_year_end[1]
+                    } else {
                         NA_real_
-                    ),
+                    },
                     biomass_at_year_end =
                         total_biomass * forest_frac_remaining,
                     C_change =
