@@ -613,29 +613,45 @@ def _safe_float(row, key, default=0.0):
 
 
 def _build_time_step_values(row):
-    """Build the values dict for an AnalysisTimeStep, including CI columns if present."""
+    """Build the values dict for an AnalysisTimeStep, including CI columns if present.
+
+    Note: The R script writes columns with 'extrapolated_' prefix. We preserve
+    that prefix so import_execution_results() can find the values correctly.
+    """
     vals = {
-        "forest_loss_avoided_ha": _safe_float(row, "forest_loss_avoided_ha"),
-        "emissions_avoided_mgco2e": _safe_float(row, "emissions_avoided_mgco2e"),
-        "treatment_defor_ha": _safe_float(row, "treatment_defor_ha"),
-        "control_defor_ha": _safe_float(row, "control_defor_ha"),
-        "treatment_emissions_mgco2e": _safe_float(row, "treatment_emissions_mgco2e"),
-        "control_emissions_mgco2e": _safe_float(row, "control_emissions_mgco2e"),
+        "extrapolated_forest_loss_avoided_ha": _safe_float(
+            row, "extrapolated_forest_loss_avoided_ha"
+        ),
+        "extrapolated_emissions_avoided_mgco2e": _safe_float(
+            row, "extrapolated_emissions_avoided_mgco2e"
+        ),
+        "extrapolated_treatment_defor_ha": _safe_float(
+            row, "extrapolated_treatment_defor_ha"
+        ),
+        "extrapolated_control_defor_ha": _safe_float(
+            row, "extrapolated_control_defor_ha"
+        ),
+        "extrapolated_treatment_emissions_mgco2e": _safe_float(
+            row, "extrapolated_treatment_emissions_mgco2e"
+        ),
+        "extrapolated_control_emissions_mgco2e": _safe_float(
+            row, "extrapolated_control_emissions_mgco2e"
+        ),
     }
     # CI columns are present only when n_replicates > 1
     ci_keys = [
-        "treatment_defor_ha_ci_lower",
-        "treatment_defor_ha_ci_upper",
-        "control_defor_ha_ci_lower",
-        "control_defor_ha_ci_upper",
-        "forest_loss_avoided_ha_ci_lower",
-        "forest_loss_avoided_ha_ci_upper",
-        "treatment_emissions_mgco2e_ci_lower",
-        "treatment_emissions_mgco2e_ci_upper",
-        "control_emissions_mgco2e_ci_lower",
-        "control_emissions_mgco2e_ci_upper",
-        "emissions_avoided_mgco2e_ci_lower",
-        "emissions_avoided_mgco2e_ci_upper",
+        "extrapolated_treatment_defor_ha_ci_lower",
+        "extrapolated_treatment_defor_ha_ci_upper",
+        "extrapolated_control_defor_ha_ci_lower",
+        "extrapolated_control_defor_ha_ci_upper",
+        "extrapolated_forest_loss_avoided_ha_ci_lower",
+        "extrapolated_forest_loss_avoided_ha_ci_upper",
+        "extrapolated_treatment_emissions_mgco2e_ci_lower",
+        "extrapolated_treatment_emissions_mgco2e_ci_upper",
+        "extrapolated_control_emissions_mgco2e_ci_lower",
+        "extrapolated_control_emissions_mgco2e_ci_upper",
+        "extrapolated_emissions_avoided_mgco2e_ci_lower",
+        "extrapolated_emissions_avoided_mgco2e_ci_upper",
     ]
     for k in ci_keys:
         val = row.get(k, "")
@@ -645,17 +661,25 @@ def _build_time_step_values(row):
 
 
 def _build_record_values(row):
-    """Build the values dict for an AnalysisRecord, including CI columns if present."""
+    """Build the values dict for an AnalysisRecord, including CI columns if present.
+
+    Note: The R script writes columns with 'extrapolated_' prefix. We preserve
+    that prefix so import_execution_results() can find the values correctly.
+    """
     vals = {
-        "forest_loss_avoided_ha": _safe_float(row, "forest_loss_avoided_ha"),
-        "emissions_avoided_mgco2e": _safe_float(row, "emissions_avoided_mgco2e"),
+        "extrapolated_forest_loss_avoided_ha": _safe_float(
+            row, "extrapolated_forest_loss_avoided_ha"
+        ),
+        "extrapolated_emissions_avoided_mgco2e": _safe_float(
+            row, "extrapolated_emissions_avoided_mgco2e"
+        ),
         "area_ha": _safe_float(row, "area_ha"),
     }
     ci_keys = [
-        "forest_loss_avoided_ha_ci_lower",
-        "forest_loss_avoided_ha_ci_upper",
-        "emissions_avoided_mgco2e_ci_lower",
-        "emissions_avoided_mgco2e_ci_upper",
+        "extrapolated_forest_loss_avoided_ha_ci_lower",
+        "extrapolated_forest_loss_avoided_ha_ci_upper",
+        "extrapolated_emissions_avoided_mgco2e_ci_lower",
+        "extrapolated_emissions_avoided_mgco2e_ci_upper",
     ]
     for k in ci_keys:
         val = row.get(k, "")
@@ -717,7 +741,7 @@ def _collect_results(output_dir, task_id, log):
                         values=_build_time_step_values(row),
                         entity_name=row.get("site_name") or None,
                         metadata={
-                            "n_matched_pixels": int(row.get("n_matched_pixels", 0)),
+                            "n_sample_pixels": int(row.get("n_sample_pixels", 0)),
                             "sampled_fraction": float(row.get("sampled_fraction", 1)),
                             "is_pre_intervention": row.get(
                                 "is_pre_intervention", ""
@@ -748,7 +772,7 @@ def _collect_results(output_dir, task_id, log):
                             int(row["last_year"]) if row.get("last_year") else None
                         ),
                         metadata={
-                            "n_matched_pixels": int(row.get("n_matched_pixels", 0)),
+                            "n_sample_pixels": int(row.get("n_sample_pixels", 0)),
                             "sampled_fraction": float(row.get("sampled_fraction", 1)),
                             "n_years": int(row.get("n_years", 0)),
                             "n_treatment_pixels": (
