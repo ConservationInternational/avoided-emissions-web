@@ -3141,8 +3141,8 @@ def settings_layout(user):
                             [
                                 "Don't have a trends.earth account yet? ",
                                 html.A(
-                                    "Register at api.trends.earth",
-                                    href="https://api.trends.earth",
+                                    "Register at api.trends.earth/register",
+                                    href="https://api.trends.earth/register",
                                     target="_blank",
                                     rel="noopener noreferrer",
                                     className="alert-link",
