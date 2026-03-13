@@ -502,6 +502,16 @@ match_site <- function(d, f) {
         } else {
             0L
         }
+        # Prefix match_group with exact-match group ID to ensure uniqueness
+        # across groups within the site.  Without this prefix, different
+        # exact-match groups can produce overlapping match_group values
+        # (e.g., "1.1", "1.2") which would be incorrectly combined in step 3
+        # when aggregating by (match_group, site_id, year).
+        if (is.data.frame(grp_result) && nrow(grp_result) > 0) {
+            grp_result$match_group <- paste(
+                this_group, grp_result$match_group, sep = "_"
+            )
+        }
         if (n_matched == 0) {
             message("    Group ", this_group, ": T=", n_treatment_grp,
                     " C=", n_control_grp, " -> 0 matches")
@@ -683,6 +693,13 @@ match_site_matchit <- function(d, f) {
     # Map MatchIt output to the same schema as optmatch output
     md$match_group <- as.character(md$subclass)
     md$match_weight <- md$weights
+
+    # Prefix match_group with exact-match stratum for consistency with optmatch
+    # path.
+    if (length(exact_vars_present) > 0) {
+        exact_group <- interaction(md[exact_vars_present], drop = TRUE)
+        md$match_group <- paste(exact_group, md$match_group, sep = "_")
+    }
 
     # Add propensity scores
     if (distance_method == "glm") {
