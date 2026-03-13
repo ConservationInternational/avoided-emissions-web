@@ -942,24 +942,48 @@ for (this_id in site_ids) {
 
                 vals <- vals_base
 
-                # Sample to manageable sizes
-                sample_sizes <- vals %>% count(treatment, group)
-                vals <- bind_rows(
-                    filter(vals, treatment) %>%
-                        group_by(group) %>%
-                        sample_n(min(MAX_TREATMENT, n())),
-                    filter(vals, !treatment) %>%
-                        group_by(this_group = group) %>%
-                        sample_n(min(
-                            CONTROL_MULTIPLIER * filter(
-                                sample_sizes, treatment == TRUE,
-                                group == this_group[1]
-                            )$n,
-                            n()
-                        ))
-                ) %>%
+                # ----------------------------------------------------------------
+                # Stratified sampling with per-group population weights
+                # ----------------------------------------------------------------
+                # Compute per-group population sizes before sampling so we can
+                # track the sampling weight for each group.  This enables proper
+                # inverse-probability weighting in step 3 when groups have
+                # different sampling rates.
+
+                # Treatment population sizes per group
+                treatment_pop <- vals %>%
+                    filter(treatment) %>%
+                    count(group, name = "pop_size")
+
+                # Sample treatment pixels: min(MAX_TREATMENT, n) per group
+                treatment_sampled <- filter(vals, treatment) %>%
+                    left_join(treatment_pop, by = "group") %>%
+                    group_by(group) %>%
+                    sample_n(min(MAX_TREATMENT, n())) %>%
+                    mutate(
+                        sample_size = n(),
+                        sampling_weight = pop_size / sample_size
+                    ) %>%
                     ungroup() %>%
-                    select(-any_of("this_group"))
+                    select(-pop_size, -sample_size)
+
+                # Build lookup of sampled treatment counts per group for control sampling
+                treatment_sample_counts <- treatment_sampled %>%
+                    count(group, name = "n_treatment_sampled")
+
+                # Sample control pixels: CONTROL_MULTIPLIER * sampled treatment per group
+                control_sampled <- filter(vals, !treatment) %>%
+                    left_join(treatment_sample_counts, by = "group") %>%
+                    filter(!is.na(n_treatment_sampled)) %>%
+                    group_by(group) %>%
+                    sample_n(min(
+                        CONTROL_MULTIPLIER * n_treatment_sampled[1],
+                        n()
+                    )) %>%
+                    ungroup() %>%
+                    select(-n_treatment_sampled)
+
+                vals <- bind_rows(treatment_sampled, control_sampled)
 
                 # Add pre-intervention deforestation for sites >= 2005
                 if (add_defor_pre) {

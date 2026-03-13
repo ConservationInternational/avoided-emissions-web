@@ -192,7 +192,8 @@ PRE_INTERVENTION_YEARS <- 5
 if (length(match_files_all) > 0) {
     required_match_cols <- c(
         "cell", "site_id", "id_numeric", "area_ha", "treatment",
-        "sampled_fraction", "total_biomass", "match_group", "match_weight"
+        "sampled_fraction", "total_biomass", "match_group", "match_weight",
+        "sampling_weight"
     )
 
     # --- Extract matched-pixel covariate data for match-quality assessment ---
@@ -590,10 +591,12 @@ if (length(match_files_all) > 0) {
             }
 
             m %>%
-                select(cell, site_id, id_numeric, area_ha, treatment,
-                       sampled_fraction, total_biomass, match_group,
-                       match_weight,
-                       all_of(fc_cols[fc_cols %in% names(m)])) %>%
+                select(
+                    cell, site_id, id_numeric, area_ha, treatment,
+                    sampled_fraction, total_biomass, match_group,
+                    match_weight, sampling_weight,
+                    all_of(fc_cols[fc_cols %in% names(m)])
+                ) %>%
                 left_join(
                     sites %>% select(site_id, start_year, end_year),
                     by = "site_id"
@@ -644,76 +647,113 @@ if (length(match_files_all) > 0) {
     }
 
     aggregate_to_site_year <- function(m_proc) {
+        # ----------------------------------------------------------------
+        # Aggregate pixel-level emissions to site-year level.
+        # Uses per-group sampling weights for proper extrapolation.
+        #
+        # Two sets of values are computed:
+        #   - "sample_*" : Raw values from matched pixels only (no extrapolation)
+        #   - Main columns : Extrapolated to full site using sampling_weight
+        # ----------------------------------------------------------------
+
         by_match <- m_proc %>%
             group_by(match_group, site_id, year) %>%
             summarise(
-                treatment_defor_ha = sum(
+                # Raw matched values (match_weight only, no sampling extrapolation)
+                sample_treatment_defor_ha = sum(
                     abs(forest_change_ha[treatment]) *
                         match_weight[treatment],
                     na.rm = TRUE
                 ),
-                control_defor_ha = sum(
+                sample_control_defor_ha = sum(
                     abs(forest_change_ha[!treatment]) *
                         match_weight[!treatment],
                     na.rm = TRUE
                 ),
-                treatment_emissions_mgco2e = sum(
+                sample_treatment_emissions = sum(
                     abs(Emissions_MgCO2e[treatment]) *
                         match_weight[treatment],
                     na.rm = TRUE
                 ),
-                control_emissions_mgco2e = sum(
+                sample_control_emissions = sum(
                     abs(Emissions_MgCO2e[!treatment]) *
                         match_weight[!treatment],
                     na.rm = TRUE
                 ),
+                # Extrapolated values: scale by treatment's sampling_weight
+                # Within a match group, all treatments share the same sampling_weight.
+                extrapolated_treatment_defor_ha = sum(
+                    abs(forest_change_ha[treatment]) *
+                        match_weight[treatment] *
+                        sampling_weight[treatment],
+                    na.rm = TRUE
+                ),
+                extrapolated_control_defor_ha = sum(
+                    abs(forest_change_ha[!treatment]) *
+                        match_weight[!treatment],
+                    na.rm = TRUE
+                ) * sampling_weight[treatment][1],
+                extrapolated_treatment_emissions_mgco2e = sum(
+                    abs(Emissions_MgCO2e[treatment]) *
+                        match_weight[treatment] *
+                        sampling_weight[treatment],
+                    na.rm = TRUE
+                ),
+                extrapolated_control_emissions_mgco2e = sum(
+                    abs(Emissions_MgCO2e[!treatment]) *
+                        match_weight[!treatment],
+                    na.rm = TRUE
+                ) * sampling_weight[treatment][1],
                 n_treated_pixels = sum(treatment),
                 .groups = "drop"
             ) %>%
             mutate(
-                forest_loss_avoided_ha =
-                    control_defor_ha - treatment_defor_ha,
-                emissions_avoided_mgco2e =
-                    control_emissions_mgco2e -
-                    treatment_emissions_mgco2e
+                sample_forest_loss_avoided_ha =
+                    sample_control_defor_ha - sample_treatment_defor_ha,
+                sample_emissions_avoided =
+                    sample_control_emissions - sample_treatment_emissions,
+                extrapolated_forest_loss_avoided_ha =
+                    extrapolated_control_defor_ha - extrapolated_treatment_defor_ha,
+                extrapolated_emissions_avoided_mgco2e =
+                    extrapolated_control_emissions_mgco2e - extrapolated_treatment_emissions_mgco2e
             )
 
         by_match %>%
             group_by(site_id, year) %>%
             summarise(
-                treatment_defor_ha =
-                    sum(treatment_defor_ha, na.rm = TRUE),
-                control_defor_ha =
-                    sum(control_defor_ha, na.rm = TRUE),
-                forest_loss_avoided_ha =
-                    sum(forest_loss_avoided_ha, na.rm = TRUE),
-                treatment_emissions_mgco2e =
-                    sum(treatment_emissions_mgco2e, na.rm = TRUE),
-                control_emissions_mgco2e =
-                    sum(control_emissions_mgco2e, na.rm = TRUE),
-                emissions_avoided_mgco2e =
-                    sum(emissions_avoided_mgco2e, na.rm = TRUE),
-                n_matched_pixels =
+                # Matched (raw) values - no extrapolation
+                sample_treatment_defor_ha =
+                    sum(sample_treatment_defor_ha, na.rm = TRUE),
+                sample_control_defor_ha =
+                    sum(sample_control_defor_ha, na.rm = TRUE),
+                sample_forest_loss_avoided_ha =
+                    sum(sample_forest_loss_avoided_ha, na.rm = TRUE),
+                sample_treatment_emissions_mgco2e =
+                    sum(sample_treatment_emissions, na.rm = TRUE),
+                sample_control_emissions_mgco2e =
+                    sum(sample_control_emissions, na.rm = TRUE),
+                sample_emissions_avoided_mgco2e =
+                    sum(sample_emissions_avoided, na.rm = TRUE),
+                # Extrapolated values - scaled to full site
+                extrapolated_treatment_defor_ha =
+                    sum(extrapolated_treatment_defor_ha, na.rm = TRUE),
+                extrapolated_control_defor_ha =
+                    sum(extrapolated_control_defor_ha, na.rm = TRUE),
+                extrapolated_forest_loss_avoided_ha =
+                    sum(extrapolated_forest_loss_avoided_ha, na.rm = TRUE),
+                extrapolated_treatment_emissions_mgco2e =
+                    sum(extrapolated_treatment_emissions_mgco2e, na.rm = TRUE),
+                extrapolated_control_emissions_mgco2e =
+                    sum(extrapolated_control_emissions_mgco2e, na.rm = TRUE),
+                extrapolated_emissions_avoided_mgco2e =
+                    sum(extrapolated_emissions_avoided_mgco2e, na.rm = TRUE),
+                n_sample_pixels =
                     sum(n_treated_pixels, na.rm = TRUE),
                 .groups = "drop"
             ) %>%
             left_join(
                 m_proc %>% distinct(site_id, sampled_fraction),
                 by = "site_id"
-            ) %>%
-            mutate(
-                treatment_defor_ha =
-                    treatment_defor_ha / sampled_fraction,
-                control_defor_ha =
-                    control_defor_ha / sampled_fraction,
-                forest_loss_avoided_ha =
-                    forest_loss_avoided_ha / sampled_fraction,
-                treatment_emissions_mgco2e =
-                    treatment_emissions_mgco2e / sampled_fraction,
-                control_emissions_mgco2e =
-                    control_emissions_mgco2e / sampled_fraction,
-                emissions_avoided_mgco2e =
-                    emissions_avoided_mgco2e / sampled_fraction
             )
     }
 
@@ -773,19 +813,25 @@ if (length(match_files_all) > 0) {
     # Save pixel-level results (rep 1 only to keep output manageable)
     m_processed %>%
         select(cell, site_id, year, treatment, sampled_fraction,
-               match_group, match_weight, forest_at_year_end,
-               forest_change_ha, Emissions_MgCO2e) %>%
+               sampling_weight, match_group, match_weight,
+               forest_at_year_end, forest_change_ha, Emissions_MgCO2e) %>%
         write_csv(file.path(
             config$output_dir, "results_pixel_year_emissions.csv"
         ))
 
     # Combine replicate results and compute CIs
+    # Include both extrapolated and matched (raw) metrics
     ci_metrics <- c(
-        "treatment_defor_ha", "control_defor_ha",
-        "forest_loss_avoided_ha",
-        "treatment_emissions_mgco2e",
-        "control_emissions_mgco2e",
-        "emissions_avoided_mgco2e"
+        "extrapolated_treatment_defor_ha", "extrapolated_control_defor_ha",
+        "extrapolated_forest_loss_avoided_ha",
+        "extrapolated_treatment_emissions_mgco2e",
+        "extrapolated_control_emissions_mgco2e",
+        "extrapolated_emissions_avoided_mgco2e",
+        "sample_treatment_defor_ha", "sample_control_defor_ha",
+        "sample_forest_loss_avoided_ha",
+        "sample_treatment_emissions_mgco2e",
+        "sample_control_emissions_mgco2e",
+        "sample_emissions_avoided_mgco2e"
     )
 
     if (length(all_rep_results) > 1) {
@@ -806,8 +852,8 @@ if (length(match_files_all) > 0) {
                     ),
                     .names = "{.col}__{.fn}"
                 ),
-                n_matched_pixels =
-                    as.integer(round(mean(n_matched_pixels,
+                n_sample_pixels =
+                    as.integer(round(mean(n_sample_pixels,
                                          na.rm = TRUE))),
                 sampled_fraction = sampled_fraction[1],
                 n_replicates_available = n(),
@@ -842,6 +888,7 @@ if (length(match_files_all) > 0) {
             nrow(results_by_year), " rows")
 
     # Summarize totals by site (intervention period only)
+    # Includes both extrapolated and matched (raw) totals for transparency
     results_total <- results_by_year %>%
         left_join(
             sites %>% select(site_id, start_year, end_year),
@@ -850,11 +897,17 @@ if (length(match_files_all) > 0) {
         filter(year >= start_year, year <= end_year) %>%
         group_by(site_id) %>%
         summarise(
-            forest_loss_avoided_ha =
-                sum(forest_loss_avoided_ha, na.rm = TRUE),
-            emissions_avoided_mgco2e =
-                sum(emissions_avoided_mgco2e, na.rm = TRUE),
-            n_matched_pixels = max(n_matched_pixels),
+            # Extrapolated totals (scaled to full site using sampling weights)
+            extrapolated_forest_loss_avoided_ha =
+                sum(extrapolated_forest_loss_avoided_ha, na.rm = TRUE),
+            extrapolated_emissions_avoided_mgco2e =
+                sum(extrapolated_emissions_avoided_mgco2e, na.rm = TRUE),
+            # Matched-only totals (no extrapolation - directly measured)
+            sample_forest_loss_avoided_ha =
+                sum(sample_forest_loss_avoided_ha, na.rm = TRUE),
+            sample_emissions_avoided_mgco2e =
+                sum(sample_emissions_avoided_mgco2e, na.rm = TRUE),
+            n_sample_pixels = max(n_sample_pixels),
             sampled_fraction = sampled_fraction[1],
             first_year = min(year),
             last_year = max(year),
@@ -884,27 +937,27 @@ if (length(match_files_all) > 0) {
             filter(year >= start_year, year <= end_year) %>%
             group_by(replicate, site_id) %>%
             summarise(
-                forest_loss_avoided_ha =
-                    sum(forest_loss_avoided_ha, na.rm = TRUE),
-                emissions_avoided_mgco2e =
-                    sum(emissions_avoided_mgco2e, na.rm = TRUE),
+                extrapolated_forest_loss_avoided_ha =
+                    sum(extrapolated_forest_loss_avoided_ha, na.rm = TRUE),
+                extrapolated_emissions_avoided_mgco2e =
+                    sum(extrapolated_emissions_avoided_mgco2e, na.rm = TRUE),
                 .groups = "drop"
             )
 
         total_cis <- rep_totals %>%
             group_by(site_id) %>%
             summarise(
-                forest_loss_avoided_ha_ci_lower =
-                    quantile(forest_loss_avoided_ha, 0.025,
+                extrapolated_forest_loss_avoided_ha_ci_lower =
+                    quantile(extrapolated_forest_loss_avoided_ha, 0.025,
                              na.rm = TRUE),
-                forest_loss_avoided_ha_ci_upper =
-                    quantile(forest_loss_avoided_ha, 0.975,
+                extrapolated_forest_loss_avoided_ha_ci_upper =
+                    quantile(extrapolated_forest_loss_avoided_ha, 0.975,
                              na.rm = TRUE),
-                emissions_avoided_mgco2e_ci_lower =
-                    quantile(emissions_avoided_mgco2e, 0.025,
+                extrapolated_emissions_avoided_mgco2e_ci_lower =
+                    quantile(extrapolated_emissions_avoided_mgco2e, 0.025,
                              na.rm = TRUE),
-                emissions_avoided_mgco2e_ci_upper =
-                    quantile(emissions_avoided_mgco2e, 0.975,
+                extrapolated_emissions_avoided_mgco2e_ci_upper =
+                    quantile(extrapolated_emissions_avoided_mgco2e, 0.975,
                              na.rm = TRUE),
                 .groups = "drop"
             )
@@ -971,13 +1024,19 @@ if (length(match_files_all) > 0) {
     results_by_year <- tibble(
         site_id = character(),
         year = integer(),
-        treatment_defor_ha = numeric(),
-        control_defor_ha = numeric(),
-        forest_loss_avoided_ha = numeric(),
-        treatment_emissions_mgco2e = numeric(),
-        control_emissions_mgco2e = numeric(),
-        emissions_avoided_mgco2e = numeric(),
-        n_matched_pixels = integer(),
+        extrapolated_treatment_defor_ha = numeric(),
+        extrapolated_control_defor_ha = numeric(),
+        extrapolated_forest_loss_avoided_ha = numeric(),
+        extrapolated_treatment_emissions_mgco2e = numeric(),
+        extrapolated_control_emissions_mgco2e = numeric(),
+        extrapolated_emissions_avoided_mgco2e = numeric(),
+        sample_treatment_defor_ha = numeric(),
+        sample_control_defor_ha = numeric(),
+        sample_forest_loss_avoided_ha = numeric(),
+        sample_treatment_emissions_mgco2e = numeric(),
+        sample_control_emissions_mgco2e = numeric(),
+        sample_emissions_avoided_mgco2e = numeric(),
+        n_sample_pixels = integer(),
         sampled_fraction = numeric(),
         site_name = character(),
         is_pre_intervention = logical()
@@ -985,9 +1044,11 @@ if (length(match_files_all) > 0) {
     results_total <- tibble(
         site_id = character(),
         site_name = character(),
-        forest_loss_avoided_ha = numeric(),
-        emissions_avoided_mgco2e = numeric(),
-        n_matched_pixels = integer(),
+        extrapolated_forest_loss_avoided_ha = numeric(),
+        extrapolated_emissions_avoided_mgco2e = numeric(),
+        sample_forest_loss_avoided_ha = numeric(),
+        sample_emissions_avoided_mgco2e = numeric(),
+        n_sample_pixels = integer(),
         sampled_fraction = numeric(),
         first_year = integer(),
         last_year = integer(),
@@ -1195,11 +1256,19 @@ summary_data <- list(
     n_failed_sites = n_failed,
     random_seed = RANDOM_SEED,
     n_replicates = N_REPLICATES,
-    total_emissions_avoided_mgco2e = sum(
-        results_total$emissions_avoided_mgco2e, na.rm = TRUE
+    # Extrapolated totals (scaled to full site using sampling weights)
+    extrapolated_total_emissions_avoided_mgco2e = sum(
+        results_total$extrapolated_emissions_avoided_mgco2e, na.rm = TRUE
     ),
-    total_forest_loss_avoided_ha = sum(
-        results_total$forest_loss_avoided_ha, na.rm = TRUE
+    extrapolated_total_forest_loss_avoided_ha = sum(
+        results_total$extrapolated_forest_loss_avoided_ha, na.rm = TRUE
+    ),
+    # Sample totals (no extrapolation - directly measured from sampled pixels)
+    sample_total_emissions_avoided_mgco2e = sum(
+        results_total$sample_emissions_avoided_mgco2e, na.rm = TRUE
+    ),
+    sample_total_forest_loss_avoided_ha = sum(
+        results_total$sample_forest_loss_avoided_ha, na.rm = TRUE
     ),
     total_area_ha = sum(results_total$area_ha, na.rm = TRUE),
     year_range = if (nrow(results_by_year) > 0) {
@@ -1211,11 +1280,15 @@ summary_data <- list(
         list(min = NA, max = NA)
     },
     sites = results_total %>%
-        select(site_id, site_name, emissions_avoided_mgco2e,
-               forest_loss_avoided_ha, area_ha, n_years) %>%
+        select(site_id, site_name, extrapolated_emissions_avoided_mgco2e,
+               sample_emissions_avoided_mgco2e,
+               extrapolated_forest_loss_avoided_ha, sample_forest_loss_avoided_ha,
+               area_ha, n_years) %>%
         as.list(),
     failed_sites = failed_sites_summary,
     subsampled_sites = subsampled_sites_summary,
+    pre_2005_sites = pre_2005_sites_summary,
+    methodology_warnings = methodology_warnings,
     group_diagnostics = all_group_diagnostics
 )
 

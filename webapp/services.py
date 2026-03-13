@@ -1562,51 +1562,67 @@ def import_execution_results(task_id, results_payload, db=None):
                     task_id=task_id,
                     site_id=ts["entity_id"],
                     year=ts["year"],
-                    forest_loss_avoided_ha=values.get("forest_loss_avoided_ha"),
-                    emissions_avoided_mgco2e=values.get("emissions_avoided_mgco2e"),
-                    treatment_defor_ha=values.get("treatment_defor_ha"),
-                    control_defor_ha=values.get("control_defor_ha"),
-                    treatment_emissions_mgco2e=values.get("treatment_emissions_mgco2e"),
-                    control_emissions_mgco2e=values.get("control_emissions_mgco2e"),
+                    extrapolated_forest_loss_avoided_ha=values.get(
+                        "extrapolated_forest_loss_avoided_ha"
+                    ),
+                    extrapolated_emissions_avoided_mgco2e=values.get(
+                        "extrapolated_emissions_avoided_mgco2e"
+                    ),
+                    extrapolated_treatment_defor_ha=values.get(
+                        "extrapolated_treatment_defor_ha"
+                    ),
+                    extrapolated_control_defor_ha=values.get(
+                        "extrapolated_control_defor_ha"
+                    ),
+                    extrapolated_treatment_emissions_mgco2e=values.get(
+                        "extrapolated_treatment_emissions_mgco2e"
+                    ),
+                    extrapolated_control_emissions_mgco2e=values.get(
+                        "extrapolated_control_emissions_mgco2e"
+                    ),
                     is_pre_intervention=bool(
                         metadata.get("is_pre_intervention", False)
                     ),
                     is_post_intervention=bool(
                         metadata.get("is_post_intervention", False)
                     ),
-                    n_matched_pixels=metadata.get("n_matched_pixels"),
+                    n_sample_pixels=metadata.get("n_sample_pixels"),
                     sampled_fraction=metadata.get("sampled_fraction"),
-                    treatment_defor_ha_ci_lower=values.get(
-                        "treatment_defor_ha_ci_lower"
+                    extrapolated_treatment_defor_ha_ci_lower=values.get(
+                        "extrapolated_treatment_defor_ha_ci_lower"
                     ),
-                    treatment_defor_ha_ci_upper=values.get(
-                        "treatment_defor_ha_ci_upper"
+                    extrapolated_treatment_defor_ha_ci_upper=values.get(
+                        "extrapolated_treatment_defor_ha_ci_upper"
                     ),
-                    control_defor_ha_ci_lower=values.get("control_defor_ha_ci_lower"),
-                    control_defor_ha_ci_upper=values.get("control_defor_ha_ci_upper"),
-                    forest_loss_avoided_ha_ci_lower=values.get(
-                        "forest_loss_avoided_ha_ci_lower"
+                    extrapolated_control_defor_ha_ci_lower=values.get(
+                        "extrapolated_control_defor_ha_ci_lower"
                     ),
-                    forest_loss_avoided_ha_ci_upper=values.get(
-                        "forest_loss_avoided_ha_ci_upper"
+                    extrapolated_control_defor_ha_ci_upper=values.get(
+                        "extrapolated_control_defor_ha_ci_upper"
                     ),
-                    treatment_emissions_mgco2e_ci_lower=values.get(
-                        "treatment_emissions_mgco2e_ci_lower"
+                    extrapolated_forest_loss_avoided_ha_ci_lower=values.get(
+                        "extrapolated_forest_loss_avoided_ha_ci_lower"
                     ),
-                    treatment_emissions_mgco2e_ci_upper=values.get(
-                        "treatment_emissions_mgco2e_ci_upper"
+                    extrapolated_forest_loss_avoided_ha_ci_upper=values.get(
+                        "extrapolated_forest_loss_avoided_ha_ci_upper"
                     ),
-                    control_emissions_mgco2e_ci_lower=values.get(
-                        "control_emissions_mgco2e_ci_lower"
+                    extrapolated_treatment_emissions_mgco2e_ci_lower=values.get(
+                        "extrapolated_treatment_emissions_mgco2e_ci_lower"
                     ),
-                    control_emissions_mgco2e_ci_upper=values.get(
-                        "control_emissions_mgco2e_ci_upper"
+                    extrapolated_treatment_emissions_mgco2e_ci_upper=values.get(
+                        "extrapolated_treatment_emissions_mgco2e_ci_upper"
                     ),
-                    emissions_avoided_mgco2e_ci_lower=values.get(
-                        "emissions_avoided_mgco2e_ci_lower"
+                    extrapolated_control_emissions_mgco2e_ci_lower=values.get(
+                        "extrapolated_control_emissions_mgco2e_ci_lower"
                     ),
-                    emissions_avoided_mgco2e_ci_upper=values.get(
-                        "emissions_avoided_mgco2e_ci_upper"
+                    extrapolated_control_emissions_mgco2e_ci_upper=values.get(
+                        "extrapolated_control_emissions_mgco2e_ci_upper"
+                    ),
+                    extrapolated_emissions_avoided_mgco2e_ci_lower=values.get(
+                        "extrapolated_emissions_avoided_mgco2e_ci_lower"
+                    ),
+                    extrapolated_emissions_avoided_mgco2e_ci_upper=values.get(
+                        "extrapolated_emissions_avoided_mgco2e_ci_upper"
                     ),
                 )
             )
@@ -1621,26 +1637,30 @@ def import_execution_results(task_id, results_payload, db=None):
                     task_id=task_id,
                     site_id=rec["entity_id"],
                     site_name=rec.get("entity_name"),
-                    forest_loss_avoided_ha=values.get("forest_loss_avoided_ha"),
-                    emissions_avoided_mgco2e=values.get("emissions_avoided_mgco2e"),
+                    extrapolated_forest_loss_avoided_ha=values.get(
+                        "extrapolated_forest_loss_avoided_ha"
+                    ),
+                    extrapolated_emissions_avoided_mgco2e=values.get(
+                        "extrapolated_emissions_avoided_mgco2e"
+                    ),
                     area_ha=values.get("area_ha"),
-                    n_matched_pixels=metadata.get("n_matched_pixels"),
+                    n_sample_pixels=metadata.get("n_sample_pixels"),
                     n_treatment_pixels=metadata.get("n_treatment_pixels"),
                     sampled_fraction=metadata.get("sampled_fraction"),
                     first_year=rec.get("period_start"),
                     last_year=rec.get("period_end"),
                     n_years=metadata.get("n_years"),
-                    forest_loss_avoided_ha_ci_lower=values.get(
-                        "forest_loss_avoided_ha_ci_lower"
+                    extrapolated_forest_loss_avoided_ha_ci_lower=values.get(
+                        "extrapolated_forest_loss_avoided_ha_ci_lower"
                     ),
-                    forest_loss_avoided_ha_ci_upper=values.get(
-                        "forest_loss_avoided_ha_ci_upper"
+                    extrapolated_forest_loss_avoided_ha_ci_upper=values.get(
+                        "extrapolated_forest_loss_avoided_ha_ci_upper"
                     ),
-                    emissions_avoided_mgco2e_ci_lower=values.get(
-                        "emissions_avoided_mgco2e_ci_lower"
+                    extrapolated_emissions_avoided_mgco2e_ci_lower=values.get(
+                        "extrapolated_emissions_avoided_mgco2e_ci_lower"
                     ),
-                    emissions_avoided_mgco2e_ci_upper=values.get(
-                        "emissions_avoided_mgco2e_ci_upper"
+                    extrapolated_emissions_avoided_mgco2e_ci_upper=values.get(
+                        "extrapolated_emissions_avoided_mgco2e_ci_upper"
                     ),
                 )
             )

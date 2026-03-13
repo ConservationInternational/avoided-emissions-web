@@ -314,8 +314,12 @@ def _attach_totals_to_geojson(sites_geojson, totals):
         site_id = str(props.get("site_id", ""))
         total = totals_by_site.get(site_id)
         if total:
-            props["emissions_avoided_mgco2e"] = total.emissions_avoided_mgco2e or 0
-            props["forest_loss_avoided_ha"] = total.forest_loss_avoided_ha or 0
+            props["emissions_avoided_mgco2e"] = (
+                total.extrapolated_emissions_avoided_mgco2e or 0
+            )
+            props["forest_loss_avoided_ha"] = (
+                total.extrapolated_forest_loss_avoided_ha or 0
+            )
             props["total_area_ha"] = total.area_ha or 0
     return json.dumps(fc)
 
@@ -3534,8 +3538,10 @@ def _build_overview(task, sites, totals, quality_warnings=None):
 
     # Summary stats if results exist
     if totals:
-        total_emissions = sum(t.emissions_avoided_mgco2e or 0 for t in totals)
-        total_forest = sum(t.forest_loss_avoided_ha or 0 for t in totals)
+        total_emissions = sum(
+            t.extrapolated_emissions_avoided_mgco2e or 0 for t in totals
+        )
+        total_forest = sum(t.extrapolated_forest_loss_avoided_ha or 0 for t in totals)
         total_area = sum(t.area_ha or 0 for t in totals)
 
         cards.append(
@@ -3692,7 +3698,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                 for t in totals:
                     name_lookup[str(t.site_id)] = t.site_name or str(t.site_id)
                     totals_lookup[str(t.site_id)] = {
-                        "n_matched": t.n_matched_pixels or 0,
+                        "n_matched": t.n_sample_pixels or 0,
                         "n_treatment": t.n_treatment_pixels,
                         "area_ha": t.area_ha,
                         "sampled_fraction": t.sampled_fraction,
@@ -4043,8 +4049,8 @@ def _build_results_content(results, totals, sites=None, quality_warnings=None):
         {
             "site_id": t.site_id,
             "site_name": t.site_name or "-",
-            "emissions_avoided_mgco2e": t.emissions_avoided_mgco2e or 0,
-            "forest_loss_avoided_ha": t.forest_loss_avoided_ha or 0,
+            "emissions_avoided_mgco2e": t.extrapolated_emissions_avoided_mgco2e or 0,
+            "forest_loss_avoided_ha": t.extrapolated_forest_loss_avoided_ha or 0,
             "area_ha": t.area_ha or 0,
             "period": (f"{t.first_year}-{t.last_year}" if t.first_year else "-"),
             "sampled_percent": ((t.sampled_fraction or 1.0) * 100),
@@ -4059,11 +4065,12 @@ def _build_results_content(results, totals, sites=None, quality_warnings=None):
             {
                 "site_id": r.site_id,
                 "year": r.year,
-                "treatment_defor_ha": r.treatment_defor_ha or 0,
-                "control_defor_ha": r.control_defor_ha or 0,
-                "emissions_avoided_mgco2e": r.emissions_avoided_mgco2e or 0,
-                "forest_loss_avoided_ha": r.forest_loss_avoided_ha or 0,
-                "n_matched_pixels": r.n_matched_pixels or 0,
+                "treatment_defor_ha": r.extrapolated_treatment_defor_ha or 0,
+                "control_defor_ha": r.extrapolated_control_defor_ha or 0,
+                "emissions_avoided_mgco2e": r.extrapolated_emissions_avoided_mgco2e
+                or 0,
+                "forest_loss_avoided_ha": r.extrapolated_forest_loss_avoided_ha or 0,
+                "n_matched_pixels": r.n_sample_pixels or 0,
             }
             for r in results
         ]
@@ -4290,37 +4297,40 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
             {
                 "site_id": r.site_id,
                 "year": r.year,
-                "emissions_avoided_mgco2e": r.emissions_avoided_mgco2e or 0,
-                "forest_loss_avoided_ha": r.forest_loss_avoided_ha or 0,
-                "treatment_defor_ha": r.treatment_defor_ha or 0,
-                "control_defor_ha": r.control_defor_ha or 0,
-                "treatment_emissions_mgco2e": r.treatment_emissions_mgco2e or 0,
-                "control_emissions_mgco2e": r.control_emissions_mgco2e or 0,
+                "emissions_avoided_mgco2e": r.extrapolated_emissions_avoided_mgco2e
+                or 0,
+                "forest_loss_avoided_ha": r.extrapolated_forest_loss_avoided_ha or 0,
+                "treatment_defor_ha": r.extrapolated_treatment_defor_ha or 0,
+                "control_defor_ha": r.extrapolated_control_defor_ha or 0,
+                "treatment_emissions_mgco2e": r.extrapolated_treatment_emissions_mgco2e
+                or 0,
+                "control_emissions_mgco2e": r.extrapolated_control_emissions_mgco2e
+                or 0,
                 "is_pre_intervention": bool(r.is_pre_intervention),
                 "is_post_intervention": bool(getattr(r, "is_post_intervention", False)),
                 "treatment_defor_ha_ci_lower": getattr(
-                    r, "treatment_defor_ha_ci_lower", None
+                    r, "extrapolated_treatment_defor_ha_ci_lower", None
                 ),
                 "treatment_defor_ha_ci_upper": getattr(
-                    r, "treatment_defor_ha_ci_upper", None
+                    r, "extrapolated_treatment_defor_ha_ci_upper", None
                 ),
                 "control_defor_ha_ci_lower": getattr(
-                    r, "control_defor_ha_ci_lower", None
+                    r, "extrapolated_control_defor_ha_ci_lower", None
                 ),
                 "control_defor_ha_ci_upper": getattr(
-                    r, "control_defor_ha_ci_upper", None
+                    r, "extrapolated_control_defor_ha_ci_upper", None
                 ),
                 "forest_loss_avoided_ha_ci_lower": getattr(
-                    r, "forest_loss_avoided_ha_ci_lower", None
+                    r, "extrapolated_forest_loss_avoided_ha_ci_lower", None
                 ),
                 "forest_loss_avoided_ha_ci_upper": getattr(
-                    r, "forest_loss_avoided_ha_ci_upper", None
+                    r, "extrapolated_forest_loss_avoided_ha_ci_upper", None
                 ),
                 "emissions_avoided_mgco2e_ci_lower": getattr(
-                    r, "emissions_avoided_mgco2e_ci_lower", None
+                    r, "extrapolated_emissions_avoided_mgco2e_ci_lower", None
                 ),
                 "emissions_avoided_mgco2e_ci_upper": getattr(
-                    r, "emissions_avoided_mgco2e_ci_upper", None
+                    r, "extrapolated_emissions_avoided_mgco2e_ci_upper", None
                 ),
             }
             for r in results
@@ -4629,8 +4639,10 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
                 {
                     "site_id": t.site_id,
                     "site_name": t.site_name or t.site_id,
-                    "emissions_avoided_mgco2e": t.emissions_avoided_mgco2e or 0,
-                    "forest_loss_avoided_ha": t.forest_loss_avoided_ha or 0,
+                    "emissions_avoided_mgco2e": t.extrapolated_emissions_avoided_mgco2e
+                    or 0,
+                    "forest_loss_avoided_ha": t.extrapolated_forest_loss_avoided_ha
+                    or 0,
                 }
                 for t in totals
             ]
@@ -4965,7 +4977,7 @@ def _assess_match_quality(balance_df=None, totals=None):
     # -- Matched-pixel percentage per site ----------------------------------
     if totals:
         for t in totals:
-            n_px = t.n_matched_pixels or 0
+            n_px = t.n_sample_pixels or 0
             n_treatment = t.n_treatment_pixels
             area_ha = t.area_ha
             sampled_frac = t.sampled_fraction or 1.0
@@ -5297,8 +5309,7 @@ def _compute_quality_warnings(task_id, task, totals):
                     elif code == "pre_2005_sites":
                         affected = mw.get("affected_sites", [])
                         site_names = [
-                            s.get("site_name") or s.get("site_id")
-                            for s in affected
+                            s.get("site_name") or s.get("site_id") for s in affected
                         ]
                         if len(site_names) <= 3:
                             sites_str = ", ".join(site_names)
@@ -5311,9 +5322,7 @@ def _compute_quality_warnings(task_id, task, totals):
                             {
                                 "level": "warning",
                                 "scope": "aggregate",
-                                "message": (
-                                    f"{message} Affected sites: {sites_str}."
-                                ),
+                                "message": (f"{message} Affected sites: {sites_str}."),
                             }
                         )
             except (json.JSONDecodeError, ValueError, TypeError):

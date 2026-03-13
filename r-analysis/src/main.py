@@ -687,10 +687,16 @@ def _collect_results(output_dir, task_id, log):
         "n_failed_sites": summary.get("n_failed_sites", 0),
         "n_replicates": summary.get("n_replicates", 1),
         "total_emissions_avoided_mgco2e": summary.get(
-            "total_emissions_avoided_mgco2e", 0.0
+            "extrapolated_total_emissions_avoided_mgco2e", 0.0
         ),
         "total_forest_loss_avoided_ha": summary.get(
-            "total_forest_loss_avoided_ha", 0.0
+            "extrapolated_total_forest_loss_avoided_ha", 0.0
+        ),
+        "sample_total_emissions_avoided_mgco2e": summary.get(
+            "sample_total_emissions_avoided_mgco2e", 0.0
+        ),
+        "sample_total_forest_loss_avoided_ha": summary.get(
+            "sample_total_forest_loss_avoided_ha", 0.0
         ),
         "total_area_ha": summary.get("total_area_ha", 0.0),
         "year_range_min": year_range.get("min"),
