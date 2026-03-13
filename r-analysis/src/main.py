@@ -298,6 +298,11 @@ def run(params, log=None):
         log.info("avoided_emissions: match step complete (task %s)", task_id)
         return None  # no final results yet
 
+    # ----- delete stale failure markers before uploading -----
+    # When using spot instances, jobs may fail on one attempt but succeed on
+    # retry, leaving orphan failure markers.  Remove them before upload.
+    _delete_stale_failure_markers(matches_dir, log)
+
     # ----- collect results (for "all" or "summarize") -----
     results = _collect_results(output_dir, task_id, log)
 
@@ -455,6 +460,59 @@ def _write_match_failure_marker(matches_dir, output_dir, error_msg, log):
     with open(path, "w") as f:
         json.dump(marker, f)
     log.info("Failure marker written to %s", path)
+
+
+def _delete_stale_failure_markers(matches_dir, log):
+    """Delete failure markers for jobs that succeeded on retry.
+
+    When using spot instances, a job may fail on one attempt (writing a
+    failure marker) but succeed after retry (writing a match file).  This
+    function is called after the
+    summarize step to remove stale markers before uploading results.
+    """
+    import re
+
+    # Get all success files (m_*.rds)
+    success_files = [
+        f for f in os.listdir(matches_dir) if f.startswith("m_") and f.endswith(".rds")
+    ]
+    success_basenames = set(success_files)
+
+    # Get all failure markers
+    failure_files = [
+        f
+        for f in os.listdir(matches_dir)
+        if f.startswith("failed_") and f.endswith(".json")
+    ]
+
+    deleted_count = 0
+    for fname in failure_files:
+        # Parse failed_{id_numeric}_rep{k}.json -> m_{id_numeric}_rep{k}.rds
+        m = re.match(r"^failed_(\d+)_rep(\d+)\.json$", fname)
+        if m:
+            success_name = f"m_{m.group(1)}_rep{m.group(2)}.rds"
+            if success_name in success_basenames:
+                os.remove(os.path.join(matches_dir, fname))
+                log.info(
+                    "Deleted stale failure marker: %s (success file exists)", fname
+                )
+                deleted_count += 1
+                continue
+
+        # Parse failed_{id_numeric}.json -> m_{id_numeric}.rds
+        m = re.match(r"^failed_(\d+)\.json$", fname)
+        if m:
+            success_name = f"m_{m.group(1)}.rds"
+            if success_name in success_basenames:
+                os.remove(os.path.join(matches_dir, fname))
+                log.info(
+                    "Deleted stale failure marker: %s (success file exists)", fname
+                )
+                deleted_count += 1
+                continue
+
+    if deleted_count > 0:
+        log.info("Deleted %d stale failure marker(s) from retried jobs", deleted_count)
 
 
 def _download_s3(s3_uri, local_path, log):
