@@ -1085,6 +1085,11 @@ def submit_analysis_task(
                 **({"random_seed": random_seed} if random_seed is not None else {}),
                 "match_memory_mib": match_memory_mib,
                 "matching_job_queue": matching_job_queue,
+                **(
+                    {"code_git_sha": Config.GIT_REVISION}
+                    if Config.GIT_REVISION
+                    else {}
+                ),
             },
             covariates=covariates,
             n_sites=len(gdf),

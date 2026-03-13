@@ -3526,6 +3526,39 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                             "Internal task ID",
                             str(task.id),
                         ),
+                        # Webapp git SHA with link to GitHub commit
+                        html.Div(
+                            [
+                                html.Span(
+                                    "Code version",
+                                    className="text-muted",
+                                    style={"minWidth": "200px"},
+                                ),
+                                (
+                                    html.A(
+                                        config.get("code_git_sha", "—")[:7],
+                                        href=(
+                                            "https://github.com/ConservationInternational"
+                                            "/avoided-emissions-web/commit/"
+                                            f"{config.get('code_git_sha', '')}"
+                                        ),
+                                        target="_blank",
+                                        rel="noopener noreferrer",
+                                        style={
+                                            "fontWeight": "500",
+                                            "fontFamily": "monospace",
+                                        },
+                                    )
+                                    if config.get("code_git_sha")
+                                    else html.Span("—", style={"fontWeight": "500"})
+                                ),
+                            ],
+                            style={
+                                "display": "flex",
+                                "gap": "0.5rem",
+                                "marginBottom": "0.25rem",
+                            },
+                        ),
                     ]
                 ),
             ],

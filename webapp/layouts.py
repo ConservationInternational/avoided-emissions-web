@@ -13,6 +13,7 @@ import dash_ag_grid as dag
 import dash_bootstrap_components as dbc
 from dash import dcc, html
 
+from config import Config
 from services import ANALYSIS_DEFAULTS, DEFAULT_MATCHING_JOB_QUEUE
 
 # Default covariates for the matching formula
@@ -744,6 +745,27 @@ def navbar(user=None, active_page=None):
 
 def footer():
     """Footer bar with legal links — shown on authenticated pages."""
+    # Build git version display with link to GitHub commit
+    git_sha = Config.GIT_REVISION
+    version_display = []
+    if git_sha:
+        short_sha = git_sha[:7]
+        github_url = (
+            f"https://github.com/ConservationInternational/avoided-emissions-web"
+            f"/commit/{git_sha}"
+        )
+        version_display = [
+            html.Span("·", className="ae-footer-separator"),
+            html.A(
+                f"Version: {short_sha}",
+                href=github_url,
+                target="_blank",
+                rel="noopener noreferrer",
+                className="ae-footer-link",
+                style={"fontFamily": "monospace"},
+            ),
+        ]
+
     return html.Footer(
         dbc.Container(
             [
@@ -784,6 +806,7 @@ def footer():
                                 rel="noopener noreferrer",
                                 className="ae-footer-link",
                             ),
+                            *version_display,
                         ],
                         className="text-center",
                     ),

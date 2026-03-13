@@ -2,6 +2,7 @@
 
 import logging
 import os
+import subprocess
 import sys
 
 _logger = logging.getLogger(__name__)
@@ -18,6 +19,91 @@ def _build_database_url() -> str:
     port = os.environ.get("POSTGRES_PORT", "5432")
     db = os.environ.get("POSTGRES_DB", "avoided_emissions")
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+
+
+def _get_git_revision() -> str:
+    """Get git revision from environment or auto-detect from .git directory.
+
+    Tries in order:
+    1. GIT_REVISION environment variable (set by CI/CD)
+    2. Running `git rev-parse HEAD` (works if git is installed)
+    3. Reading .git/HEAD file directly (fallback for containers without git)
+
+    Returns empty string if git revision cannot be determined.
+    """
+    # 1. Check environment variable first (production/CI)
+    env_revision = os.environ.get("GIT_REVISION", "").strip()
+    if env_revision:
+        return env_revision
+
+    # 2. Try running git command (development with git installed)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=os.path.dirname(__file__) or ".",
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        pass
+
+    # 3. Fallback: read .git/HEAD directly (Docker volume mount without git)
+    try:
+        # Look for .git in parent directories
+        git_dir = None
+        check_dir = os.path.dirname(os.path.abspath(__file__))
+        for _ in range(5):  # Check up to 5 levels
+            candidate = os.path.join(check_dir, ".git")
+            if os.path.isdir(candidate):
+                git_dir = candidate
+                break
+            parent = os.path.dirname(check_dir)
+            if parent == check_dir:
+                break
+            check_dir = parent
+
+        if not git_dir:
+            return ""
+
+        head_file = os.path.join(git_dir, "HEAD")
+        if not os.path.isfile(head_file):
+            return ""
+
+        with open(head_file) as f:
+            head_content = f.read().strip()
+
+        # If HEAD is a ref (e.g., "ref: refs/heads/main"), follow it
+        if head_content.startswith("ref: "):
+            ref_path = head_content[5:]  # Remove "ref: " prefix
+            ref_file = os.path.join(git_dir, ref_path)
+            if os.path.isfile(ref_file):
+                with open(ref_file) as f:
+                    return f.read().strip()
+            # Try packed-refs as fallback
+            packed_refs = os.path.join(git_dir, "packed-refs")
+            if os.path.isfile(packed_refs):
+                with open(packed_refs) as f:
+                    for line in f:
+                        if line.startswith("#"):
+                            continue
+                        parts = line.strip().split()
+                        if len(parts) >= 2 and parts[1] == ref_path:
+                            return parts[0]
+            return ""
+
+        # HEAD contains a commit SHA directly (detached HEAD)
+        if len(head_content) == 40 and all(
+            c in "0123456789abcdef" for c in head_content
+        ):
+            return head_content
+
+    except (OSError, IOError):
+        pass
+
+    return ""
 
 
 class Config:
@@ -48,7 +134,7 @@ class Config:
     ROLLBAR_ENVIRONMENT = os.environ.get(
         "ROLLBAR_ENVIRONMENT", os.environ.get("ENVIRONMENT", "development")
     )
-    GIT_REVISION = os.environ.get("GIT_REVISION", "")
+    GIT_REVISION = _get_git_revision()
     CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
     CELERY_RESULT_BACKEND = os.environ.get(
         "CELERY_RESULT_BACKEND", "redis://redis:6379/0"
