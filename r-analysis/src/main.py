@@ -467,8 +467,8 @@ def _delete_stale_failure_markers(matches_dir, log):
 
     When using spot instances, a job may fail on one attempt (writing a
     failure marker) but succeed after retry (writing a match file).  This
-    function is called after the
-    summarize step to remove stale markers before uploading results.
+    function is called after the summarize step to remove stale markers
+    before uploading results.
     """
     import re
 

@@ -5260,6 +5260,7 @@ def _compute_quality_warnings(task_id, task, totals):
         Warning dicts from :func:`_assess_match_quality`.
     """
     import io
+    import json
 
     balance_df = None
     if task.status == "succeeded":
@@ -5271,7 +5272,54 @@ def _compute_quality_warnings(task_id, task, totals):
             if balance_df.empty:
                 balance_df = None
 
-    return _assess_match_quality(balance_df=balance_df, totals=totals)
+    warnings = _assess_match_quality(balance_df=balance_df, totals=totals)
+
+    # Load methodology warnings from results_summary.json (if available)
+    if task.status == "succeeded":
+        summary_raw = download_results_csv(
+            task_id, "summary", results_s3_uri=task.results_s3_uri
+        )
+        if summary_raw:
+            try:
+                summary = json.loads(summary_raw)
+                methodology_warnings = summary.get("methodology_warnings", [])
+                for mw in methodology_warnings:
+                    code = mw.get("code", "")
+                    message = mw.get("message", "")
+                    if code == "ci_low_replicates":
+                        warnings.append(
+                            {
+                                "level": "warning",
+                                "scope": "aggregate",
+                                "message": message,
+                            }
+                        )
+                    elif code == "pre_2005_sites":
+                        affected = mw.get("affected_sites", [])
+                        site_names = [
+                            s.get("site_name") or s.get("site_id")
+                            for s in affected
+                        ]
+                        if len(site_names) <= 3:
+                            sites_str = ", ".join(site_names)
+                        else:
+                            sites_str = (
+                                f"{', '.join(site_names[:3])}, "
+                                f"and {len(site_names) - 3} more"
+                            )
+                        warnings.append(
+                            {
+                                "level": "warning",
+                                "scope": "aggregate",
+                                "message": (
+                                    f"{message} Affected sites: {sites_str}."
+                                ),
+                            }
+                        )
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass  # Summary not available or malformed
+
+    return warnings
 
 
 def _build_site_quality_table(warnings, totals=None):

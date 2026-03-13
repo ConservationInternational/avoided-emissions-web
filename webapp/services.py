@@ -2266,6 +2266,7 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         "propensity_scores": "results_propensity_scores.csv",
         "match_quality_summary": "results_match_quality_summary.json",
         "matched_pixels": "results_pixel_locations.csv",
+        "summary": "results_summary.json",
     }
     filename = filename_map.get(result_type)
     if not filename:

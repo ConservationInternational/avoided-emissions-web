@@ -965,10 +965,15 @@ for (this_id in site_ids) {
                 if (add_defor_pre) {
                     init_fc <- vals[[fc_init_name]]
                     final_fc <- vals[[fc_final_name]]
-                    vals$defor_pre_intervention <-
-                        ((final_fc - init_fc) / init_fc) * 100
-                    vals$defor_pre_intervention[init_fc == 0] <- 0
-                    vals <- filter(vals, .data[[fc_init_name]] != 0)
+                    # Set to NA when initial forest cover is 0 (undefined rate of change)
+                    # These pixels are excluded below.
+                    vals$defor_pre_intervention <- if_else(
+                        init_fc > 0,
+                        ((final_fc - init_fc) / init_fc) * 100,
+                        NA_real_
+                    )
+                    # Exclude pixels with no initial forest cover (defor rate undefined)
+                    vals <- filter(vals, .data[[fc_init_name]] > 0)
                     vals <- filter_groups(vals, EXACT_MATCH_VARS)
                 }
 

@@ -287,14 +287,22 @@ if (length(match_files_all) > 0) {
             }
             m_t <- weighted.mean(t_vals, t_wts)
             m_c <- weighted.mean(c_vals, c_wts)
-            # Weighted variance (reliability weights)
-            wvar <- function(x, w) {
-                sum(w * (x - weighted.mean(x, w))^2) / sum(w)
+            # Weighted sample variance
+            wvar_sample <- function(x, w) {
+                n_eff <- sum(w)
+                if (n_eff <= 1) return(NA_real_)
+                sum(w * (x - weighted.mean(x, w))^2) / (n_eff - 1)
             }
-            sd_t <- sqrt(wvar(t_vals, t_wts))
-            sd_c <- sqrt(wvar(c_vals, c_wts))
-            pooled <- sqrt((sd_t^2 + sd_c^2) / 2)
-            smd_val <- if (pooled > 0) (m_t - m_c) / pooled else 0
+            sd_t <- sqrt(wvar_sample(t_vals, t_wts))
+            sd_c <- sqrt(wvar_sample(c_vals, c_wts))
+            # Handle NA variances (insufficient sample size)
+            if (is.na(sd_t) || is.na(sd_c)) {
+                pooled <- NA_real_
+            } else {
+                pooled <- sqrt((sd_t^2 + sd_c^2) / 2)
+            }
+            # SMD is undefined when pooled SD is 0 or NA - return NA, not 0
+            smd_val <- if (!is.na(pooled) && pooled > 0) (m_t - m_c) / pooled else NA_real_
             tibble(
                 covariate = cov, mean_treatment = m_t,
                 mean_control = m_c, pooled_sd = pooled,
@@ -613,8 +621,12 @@ if (length(match_files_all) > 0) {
                 mutate(
                     forest_change_ha =
                         c(NA, diff(forest_at_year_end)),
-                    forest_frac_remaining =
+                    # Protect against division by zero when baseline forest is 0
+                    forest_frac_remaining = if_else(
+                        forest_at_year_end[1] > 0,
                         forest_at_year_end / forest_at_year_end[1],
+                        NA_real_
+                    ),
                     biomass_at_year_end =
                         total_biomass * forest_frac_remaining,
                     C_change =
@@ -1128,6 +1140,53 @@ subsampled_sites_summary <- if (exists("sampling_by_site")) {
     }
 } else {
     list()
+}
+
+# Identify sites with start_year < 2005 (pre-intervention deforestation
+# covariate cannot be computed for these sites)
+pre_2005_sites_summary <- if ("start_year" %in% names(sites)) {
+    pre2005 <- sites %>%
+        filter(start_year < 2005) %>%
+        select(site_id, site_name, start_year) %>%
+        as_tibble()
+    if (nrow(pre2005) == 0) {
+        list()
+    } else {
+        unname(lapply(seq_len(nrow(pre2005)), function(i) as.list(pre2005[i, ])))
+    }
+} else {
+    list()
+}
+
+# Statistical methodology warnings
+methodology_warnings <- list()
+
+# CI reliability warning: percentile-based 95% CIs require substantial
+# replicates (ideally >= 50) to reliably estimate 2.5th and 97.5th quantiles
+if (N_REPLICATES > 1L && N_REPLICATES < 50L) {
+    methodology_warnings <- c(methodology_warnings, list(list(
+        code = "ci_low_replicates",
+        message = paste0(
+            "Confidence intervals were computed using ", N_REPLICATES,
+            " replicates. For reliable 95% CIs, at least 50 replicates ",
+            "are recommended. Interpret CI bounds with caution."
+        ),
+        n_replicates = N_REPLICATES
+    )))
+}
+
+# Pre-2005 sites warning
+if (length(pre_2005_sites_summary) > 0) {
+    methodology_warnings <- c(methodology_warnings, list(list(
+        code = "pre_2005_sites",
+        message = paste0(
+            length(pre_2005_sites_summary), " site(s) have intervention ",
+            "start dates before 2005. Pre-intervention deforestation rates ",
+            "could not be computed for these sites due to limited historical ",
+            "forest cover data, which may affect matching quality."
+        ),
+        affected_sites = pre_2005_sites_summary
+    )))
 }
 
 summary_data <- list(
