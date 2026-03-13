@@ -232,3 +232,18 @@ _MIN_PIXELS_WARN = 200
 Modify these values and restart the webapp to change the sensitivity of the
 checks. No database migration or R-side changes are needed — the checks are
 purely evaluated at display time from existing result outputs.
+
+## License
+
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License v3.0** as published by the Free
+Software Foundation.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the [GNU General Public License](https://www.gnu.org/licenses/gpl-3.0.en.html)
+for more details.
+
+See the [LICENSE](LICENSE) file for the full license text.
