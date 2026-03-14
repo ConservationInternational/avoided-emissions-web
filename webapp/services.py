@@ -1086,9 +1086,7 @@ def submit_analysis_task(
                 "match_memory_mib": match_memory_mib,
                 "matching_job_queue": matching_job_queue,
                 **(
-                    {"code_git_sha": Config.GIT_REVISION}
-                    if Config.GIT_REVISION
-                    else {}
+                    {"code_git_sha": Config.GIT_REVISION} if Config.GIT_REVISION else {}
                 ),
             },
             covariates=covariates,
@@ -1551,6 +1549,8 @@ def import_execution_results(task_id, results_payload, db=None):
             meta["subsampled_sites"] = summary.get("subsampled_sites", [])
             meta["n_sites"] = summary.get("n_sites", 0)
             meta["n_replicates"] = summary.get("n_replicates", 1)
+            if summary.get("r_analysis_git_sha"):
+                meta["r_analysis_git_sha"] = summary["r_analysis_git_sha"]
             task_obj.extra_metadata = meta
 
         # Delete any existing results (idempotent re-import)

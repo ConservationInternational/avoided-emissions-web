@@ -189,6 +189,7 @@ jobs:
 
         docker buildx build \
           --platform linux/amd64 \
+          --build-arg CODE_VERSION=${{ github.sha }} \
           --cache-from=type=gha,scope=ranalysis-${ENVIRONMENT} \
           --cache-to=type=gha,mode=max,scope=ranalysis-${ENVIRONMENT} \
           $TAGS \

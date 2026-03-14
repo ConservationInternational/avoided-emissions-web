@@ -3530,7 +3530,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         html.Div(
                             [
                                 html.Span(
-                                    "Code version",
+                                    "Webapp version",
                                     className="text-muted",
                                     style={"minWidth": "200px"},
                                 ),
@@ -3550,6 +3550,43 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                         },
                                     )
                                     if config.get("code_git_sha")
+                                    else html.Span("—", style={"fontWeight": "500"})
+                                ),
+                            ],
+                            style={
+                                "display": "flex",
+                                "gap": "0.5rem",
+                                "marginBottom": "0.25rem",
+                            },
+                        ),
+                        # R analysis git SHA with link to GitHub commit
+                        html.Div(
+                            [
+                                html.Span(
+                                    "R analysis version",
+                                    className="text-muted",
+                                    style={"minWidth": "200px"},
+                                ),
+                                (
+                                    html.A(
+                                        (task.extra_metadata or {}).get(
+                                            "r_analysis_git_sha", "—"
+                                        )[:7],
+                                        href=(
+                                            "https://github.com/ConservationInternational"
+                                            "/avoided-emissions-web/commit/"
+                                            f"{(task.extra_metadata or {}).get('r_analysis_git_sha', '')}"
+                                        ),
+                                        target="_blank",
+                                        rel="noopener noreferrer",
+                                        style={
+                                            "fontWeight": "500",
+                                            "fontFamily": "monospace",
+                                        },
+                                    )
+                                    if (task.extra_metadata or {}).get(
+                                        "r_analysis_git_sha"
+                                    )
                                     else html.Span("—", style={"fontWeight": "500"})
                                 ),
                             ],

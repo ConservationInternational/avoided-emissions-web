@@ -710,6 +710,7 @@ def _collect_results(output_dir, task_id, log):
         "n_sites": summary.get("n_sites", 0),
         "n_failed_sites": summary.get("n_failed_sites", 0),
         "n_replicates": summary.get("n_replicates", 1),
+        "r_analysis_git_sha": summary.get("r_analysis_git_sha"),
         "total_emissions_avoided_mgco2e": summary.get(
             "extrapolated_total_emissions_avoided_mgco2e", 0.0
         ),

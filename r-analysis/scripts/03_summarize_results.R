@@ -1258,6 +1258,7 @@ summary_data <- list(
     n_failed_sites = n_failed,
     random_seed = RANDOM_SEED,
     n_replicates = N_REPLICATES,
+    r_analysis_git_sha = Sys.getenv("CODE_VERSION", unset = NA_character_),
     # Extrapolated totals (scaled to full site using sampling weights)
     extrapolated_total_emissions_avoided_mgco2e = sum(
         results_total$extrapolated_emissions_avoided_mgco2e, na.rm = TRUE

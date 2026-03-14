@@ -68,4 +68,8 @@ RUN python3 -m venv --system-site-packages /app/.venv \
 
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Code version for tracking/debugging — passed at build time via --build-arg
+ARG CODE_VERSION=""
+ENV CODE_VERSION=${CODE_VERSION}
+
 ENTRYPOINT ["/app/entrypoint.sh"]
