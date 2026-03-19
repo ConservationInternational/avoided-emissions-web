@@ -8,17 +8,41 @@ source "${SCRIPT_DIR}/common.sh"
 
 log_info "AfterInstall hook started"
 
+ENVIRONMENT=$(detect_environment)
+log_info "Detected environment: $ENVIRONMENT"
+
+APP_DIR=$(get_app_directory "$ENVIRONMENT")
+log_info "Application directory: $APP_DIR"
+
+# -- Install ECR credential refresh timer (ALL nodes) ------------------------
+# This must run on every node, not just the leader, because leadership can
+# move.  The script itself detects leadership at runtime: it refreshes the
+# local ECR login on every node and only pushes credentials into the Swarm
+# raft store when it runs on the current leader.
+
+SCRIPT_PATH="$APP_DIR/deploy/codedeploy/ecr-refresh-and-cleanup.sh"
+TIMER_SRC="$APP_DIR/deploy/codedeploy/ecr-refresh.timer"
+SERVICE_SRC="$APP_DIR/deploy/codedeploy/ecr-refresh.service"
+
+if [ -f "$SERVICE_SRC" ]; then
+    sed -i "s|ExecStart=.*|ExecStart=${SCRIPT_PATH}|" "$SERVICE_SRC"
+fi
+
+if [ -f "$TIMER_SRC" ] && [ -f "$SERVICE_SRC" ]; then
+    log_info "Installing ECR credential refresh systemd timer..."
+    cp "$SERVICE_SRC" /etc/systemd/system/ecr-refresh.service
+    cp "$TIMER_SRC" /etc/systemd/system/ecr-refresh.timer
+    systemctl daemon-reload
+    systemctl enable --now ecr-refresh.timer 2>/dev/null || true
+    log_success "ECR refresh timer installed and enabled"
+fi
+
 if ! is_swarm_leader; then
     log_info "Non-leader node -- skipping image pull"
     log_success "AfterInstall hook completed (non-leader node)"
     exit 0
 fi
 
-ENVIRONMENT=$(detect_environment)
-log_info "Detected environment: $ENVIRONMENT"
-
-APP_DIR=$(get_app_directory "$ENVIRONMENT")
-log_info "Application directory: $APP_DIR"
 cd "$APP_DIR"
 
 # -- Install environment file ------------------------------------------------

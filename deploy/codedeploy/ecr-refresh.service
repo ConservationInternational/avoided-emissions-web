@@ -1,0 +1,18 @@
+[Unit]
+Description=Refresh ECR credentials in Docker Swarm raft store
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/avoided-emissions-web-production/deploy/codedeploy/ecr-refresh-and-cleanup.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ecr-refresh
+
+# Run as root (needs Docker socket access)
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
