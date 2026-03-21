@@ -317,13 +317,29 @@ def _set_security_headers(response):
 @server.route("/api/cog-layers")
 @flask_login.login_required
 def cog_layers():
-    """Return merged covariate layers with pre-signed URLs and styles."""
+    """Return merged covariate layers with pre-signed URLs and styles.
+
+    Accepts an optional ``resolution`` query parameter (1000 or 250) to
+    return COGs for a specific resolution.  Defaults to 1000 (1 km).
+    """
     import importlib.util
 
     import boto3
+    from flask import request as flask_request
 
     from layer_config import get_style
     from models import Covariate, get_db
+
+    # Determine requested resolution
+    try:
+        resolution_m = int(flask_request.args.get("resolution", "1000"))
+    except (ValueError, TypeError):
+        resolution_m = 1000
+    if resolution_m not in (1000, 250):
+        resolution_m = 1000
+
+    _cog_suffixes = {1000: "_1km", 250: "_250m"}
+    cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
 
     # Load gee-export config for descriptions and categories
     gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
@@ -331,7 +347,9 @@ def cog_layers():
     gee_config = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gee_config)
 
-    cog_prefix = f"{Config.S3_PREFIX}/cog"
+    cog_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
+    # Backwards-compat: legacy COGs without a suffix are treated as 1 km.
+    legacy_cog_prefix = f"{Config.S3_PREFIX}/cog" if resolution_m == 1000 else None
 
     # Get latest merged covariates from DB
     db = get_db()
@@ -361,8 +379,21 @@ def cog_layers():
         cfg = gee_config.COVARIATES.get(name, {})
         category = cfg.get("category", "")
 
-        # Generate a 1-hour pre-signed URL for the COG
+        # Generate a 1-hour pre-signed URL for the COG.
+        # Try the resolution-specific key first; for 1 km fall back to
+        # the legacy prefix (cog/) if the new key (cog_1km/) is missing.
         s3_key = f"{cog_prefix}/{name}.tif"
+        try:
+            s3.head_object(Bucket=Config.S3_BUCKET, Key=s3_key)
+        except Exception:
+            if legacy_cog_prefix:
+                s3_key = f"{legacy_cog_prefix}/{name}.tif"
+                try:
+                    s3.head_object(Bucket=Config.S3_BUCKET, Key=s3_key)
+                except Exception:
+                    continue
+            else:
+                continue
         try:
             url = s3.generate_presigned_url(
                 "get_object",
@@ -383,7 +414,7 @@ def cog_layers():
             }
         )
 
-    return jsonify({"layers": layers})
+    return jsonify({"layers": layers, "resolution_m": resolution_m})
 
 
 # Vector overlay layer configuration: maps layer name to DB table and

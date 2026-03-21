@@ -34,9 +34,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Grid constants — must stay in sync with gee-export/config.py
 # ---------------------------------------------------------------------------
-PIXEL_SIZE_DEG = 1 / 120  # 30 arc-seconds
+PIXEL_SIZE_DEG = 1 / 120  # 30 arc-seconds (1 km default)
 XMIN, YMIN, XMAX, YMAX = -180, -90, 180, 90
 SRS = "EPSG:4326"
+
+# Resolution presets — keys are resolution in metres.
+RESOLUTIONS = {
+    1000: {"pixel_size_deg": 1 / 120, "cog_suffix": "_1km"},
+    250: {"pixel_size_deg": 1 / 480, "cog_suffix": "_250m"},
+}
 
 # ---------------------------------------------------------------------------
 # Layer definitions
@@ -152,7 +158,9 @@ def _upload_to_s3(
 # ---------------------------------------------------------------------------
 
 
-def rasterize_layer(layer_def: dict, workdir: str) -> str:
+def rasterize_layer(
+    layer_def: dict, workdir: str, pixel_size_deg: float = PIXEL_SIZE_DEG
+) -> str:
     """Rasterize a single vector layer to a COG aligned with the GEE grid.
 
     Parameters
@@ -161,6 +169,8 @@ def rasterize_layer(layer_def: dict, workdir: str) -> str:
         One of the entries from :data:`VECTOR_LAYERS`.
     workdir : str
         Temporary directory for intermediate files.
+    pixel_size_deg : float
+        Pixel size in degrees.  Defaults to :data:`PIXEL_SIZE_DEG` (1 km).
 
     Returns
     -------
@@ -189,8 +199,8 @@ def rasterize_layer(layer_def: dict, workdir: str) -> str:
         str(XMAX),
         str(YMAX),
         "-tr",
-        str(PIXEL_SIZE_DEG),
-        str(PIXEL_SIZE_DEG),
+        str(pixel_size_deg),
+        str(pixel_size_deg),
         "-a_srs",
         SRS,
         "-a_nodata",
@@ -296,6 +306,7 @@ def rasterize_and_upload(
     layer_def: dict,
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
+    pixel_size_deg: float = PIXEL_SIZE_DEG,
 ) -> dict:
     """Rasterize a vector layer, generate its CSV key, and upload both to S3.
 
@@ -307,6 +318,8 @@ def rasterize_and_upload(
         Target S3 bucket.  Defaults to ``Config.S3_BUCKET``.
     s3_prefix : str, optional
         Target S3 prefix.  Defaults to ``<Config.S3_PREFIX>/cog``.
+    pixel_size_deg : float
+        Pixel size in degrees.  Defaults to :data:`PIXEL_SIZE_DEG` (1 km).
 
     Returns
     -------
@@ -324,7 +337,7 @@ def rasterize_and_upload(
     workdir = tempfile.mkdtemp(prefix=f"rasterize_{output_name}_")
     try:
         # 1. Rasterize to COG
-        cog_path = rasterize_layer(layer_def, workdir)
+        cog_path = rasterize_layer(layer_def, workdir, pixel_size_deg=pixel_size_deg)
         size_bytes = os.path.getsize(cog_path)
 
         # 2. Upload COG
@@ -351,6 +364,7 @@ def rasterize_and_upload(
 def rasterize_all_layers(
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
+    pixel_size_deg: float = PIXEL_SIZE_DEG,
 ) -> dict[str, dict]:
     """Rasterize all vector layers and upload to S3.
 
@@ -367,7 +381,10 @@ def rasterize_all_layers(
         logger.info("=" * 60)
         try:
             results[name] = rasterize_and_upload(
-                layer_def, s3_bucket=s3_bucket, s3_prefix=s3_prefix
+                layer_def,
+                s3_bucket=s3_bucket,
+                s3_prefix=s3_prefix,
+                pixel_size_deg=pixel_size_deg,
             )
         except Exception:
             logger.exception("Failed to rasterize %s", name)

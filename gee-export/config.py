@@ -7,10 +7,42 @@ analysis.
 
 EXPORT_CRS = "EPSG:4326"
 
+# ---------------------------------------------------------------------------
+# Resolution presets
+# ---------------------------------------------------------------------------
+# Each preset defines a pixel size in degrees and a GCS sub-prefix so that
+# 1 km and 250 m covariates live side-by-side in the same bucket.  The
+# ``RESOLUTIONS`` dict is keyed by the nominal resolution in metres.
+#
+# 1 km  →  30 arc-seconds  = 1/120°  ≈  927.67 m at the equator
+# 250 m →  ~8 arc-seconds  = 1/480°  ≈  231.92 m at the equator
+
+RESOLUTIONS = {
+    1000: {
+        "pixel_size_deg": 1 / 120,  # 30 arc-seconds
+        "label": "1 km",
+        "gcs_suffix": "_1km",  # e.g. avoided-emissions/covariates_1km
+        "cog_suffix": "_1km",  # e.g. avoided-emissions/cog_1km
+    },
+    250: {
+        "pixel_size_deg": 1 / 480,  # ~8 arc-seconds
+        "label": "250 m",
+        "gcs_suffix": "_250m",  # e.g. avoided-emissions/covariates_250m
+        "cog_suffix": "_250m",  # e.g. avoided-emissions/cog_250m
+    },
+}
+
+# Legacy COG prefix (no suffix) is treated as 1 km for backwards
+# compatibility.  New exports always write to the resolution-specific
+# prefixes above.
+LEGACY_COG_SUFFIX = ""  # cog/{name}.tif → assumed 1 km
+
+DEFAULT_RESOLUTION_M = 1000
+
 # Pixel size in degrees.  30 arc-seconds = 1/120 of a degree ≈ 927.67 m at
 # the equator.  Defined in degrees (the native unit of EPSG:4326) so the
 # crsTransform can be stated exactly.
-EXPORT_PIXEL_SIZE_DEG = 1 / 120  # 30 arc-seconds
+EXPORT_PIXEL_SIZE_DEG = RESOLUTIONS[DEFAULT_RESOLUTION_M]["pixel_size_deg"]
 
 # Affine transform that locks every export to the same pixel grid.
 #   [xScale, xShearing, xTranslation, yShearing, yScale, yTranslation]
@@ -28,6 +60,24 @@ EXPORT_CRS_TRANSFORM = [
 
 # Default GCS path prefix for exported COGs
 DEFAULT_GCS_PREFIX = "avoided-emissions/covariates"
+
+
+def get_crs_transform(resolution_m=DEFAULT_RESOLUTION_M):
+    """Return the affine *crsTransform* list for a given resolution."""
+    pix = RESOLUTIONS[resolution_m]["pixel_size_deg"]
+    return [pix, 0, 0, 0, -pix, 0]
+
+
+def get_gcs_prefix(base_prefix=DEFAULT_GCS_PREFIX, resolution_m=DEFAULT_RESOLUTION_M):
+    """Return the GCS prefix for a given resolution."""
+    suffix = RESOLUTIONS[resolution_m]["gcs_suffix"]
+    return f"{base_prefix}{suffix}"
+
+
+def get_cog_suffix(resolution_m=DEFAULT_RESOLUTION_M):
+    """Return the S3 COG sub-folder suffix for a given resolution."""
+    return RESOLUTIONS[resolution_m]["cog_suffix"]
+
 
 # Maximum number of pixels allowed in a single Export.image task.
 # The GEE default is 1e8 (100 million); it can be raised up to 1e13.

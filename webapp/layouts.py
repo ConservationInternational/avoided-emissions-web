@@ -1836,6 +1836,47 @@ def submit_layout(user, recompute_config=None):
                                                                                     dbc.Col(
                                                                                         [
                                                                                             dbc.Label(
+                                                                                                "Analysis resolution"
+                                                                                            ),
+                                                                                            dbc.Select(
+                                                                                                id="resolution-m",
+                                                                                                options=[
+                                                                                                    {
+                                                                                                        "label": "1 km (default)",
+                                                                                                        "value": "1000",
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "label": "250 m",
+                                                                                                        "value": "250",
+                                                                                                    },
+                                                                                                ],
+                                                                                                value=str(
+                                                                                                    rc.get(
+                                                                                                        "resolution_m",
+                                                                                                        ANALYSIS_DEFAULTS[
+                                                                                                            "resolution_m"
+                                                                                                        ],
+                                                                                                    )
+                                                                                                ),
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Pixel resolution for covariate data "
+                                                                                                "and matching. 250 m requires separate "
+                                                                                                "covariate exports.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        sm=6,
+                                                                                    ),
+                                                                                ],
+                                                                                className="mb-3",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
                                                                                                 "Max treatment pixels"
                                                                                             ),
                                                                                             dbc.Input(

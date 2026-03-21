@@ -280,14 +280,15 @@
     // Per-map caches: mapEl ??? { name ??? { layer, def } }
     // Layers are created lazily the first time a checkbox is toggled on.
 
-    var _layerDataPromise = null;
+    var _layerDataCache = {};
 
-    function fetchLayerData() {
-        if (_layerDataPromise) {
-            return _layerDataPromise;
+    function fetchLayerData(resolution) {
+        var res = resolution || "1000";
+        if (_layerDataCache[res]) {
+            return _layerDataCache[res];
         }
-        console.debug(LOG_PREFIX + "fetching /api/cog-layers ???");
-        _layerDataPromise = fetch("/api/cog-layers", { credentials: "same-origin" })
+        console.debug(LOG_PREFIX + "fetching /api/cog-layers?resolution=" + res + " ???");
+        _layerDataCache[res] = fetch("/api/cog-layers?resolution=" + res, { credentials: "same-origin" })
             .then(function (resp) {
                 if (!resp.ok) {
                     throw new Error("HTTP " + resp.status);
@@ -296,15 +297,15 @@
             })
             .then(function (data) {
                 var layers = data.layers || [];
-                console.debug(LOG_PREFIX + layers.length + " layers available");
+                console.debug(LOG_PREFIX + layers.length + " layers available (" + res + "m)");
                 return layers;
             })
             .catch(function (err) {
                 console.warn(LOG_PREFIX + "fetch failed:", err);
-                _layerDataPromise = null; // allow retry
+                delete _layerDataCache[res]; // allow retry
                 return [];
             });
-        return _layerDataPromise;
+        return _layerDataCache[res];
     }
 
     var _vectorLayerDataPromise = null;
@@ -963,8 +964,10 @@
         }
         el._cogLayersAttached = true;
 
+        var resolution = el.getAttribute("data-resolution") || "1000";
+
         // Fetch COG and vector layer lists in parallel.
-        Promise.all([fetchLayerData(), fetchVectorLayerData()]).then(function (results) {
+        Promise.all([fetchLayerData(resolution), fetchVectorLayerData()]).then(function (results) {
             var layers = results[0];
             var vectorLayers = results[1];
 

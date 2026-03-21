@@ -60,6 +60,7 @@ ANALYSIS_DEFAULTS = {
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
     "fc_year_start": 2000,
     "fc_year_end": 2024,  # exclusive upper bound for range()
+    "resolution_m": 1000,  # nominal resolution: 1000 m (1 km) or 250 m
 }
 
 MAX_ARCHIVE_FILE_COUNT = 2_000
@@ -922,6 +923,7 @@ def submit_analysis_task(
     random_seed=None,
     match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
+    resolution_m=ANALYSIS_DEFAULTS["resolution_m"],
 ):
     """Create and submit a full analysis task via the trends.earth API.
 
@@ -1082,6 +1084,7 @@ def submit_analysis_task(
                 ),
                 "matching_method": matching_method,
                 "n_replicates": n_replicates,
+                "resolution_m": resolution_m,
                 **({"random_seed": random_seed} if random_seed is not None else {}),
                 "match_memory_mib": match_memory_mib,
                 "matching_job_queue": matching_job_queue,
@@ -1137,13 +1140,20 @@ def submit_analysis_task(
         )
 
         # Build params matching AvoidedEmissionsParams schema
+        # Resolve the COG prefix for the chosen resolution.
+        # Both resolutions have an explicit suffix (_1km / _250m).
+        _cog_suffixes = {1000: "_1km", 250: "_250m"}
+        _cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
+        cog_prefix = f"{Config.S3_COG_PREFIX}{_cog_suffix}"
+
         params = {
             "task_id": task_id,
             "task_name": task_name,
             "task_description": description,
             "sites_s3_uri": sites_uri,
             "cog_bucket": Config.S3_BUCKET,
-            "cog_prefix": Config.S3_COG_PREFIX,
+            "cog_prefix": cog_prefix,
+            "resolution_m": resolution_m,
             "covariates": covariates,
             "exact_match_vars": exact_match_vars,
             "matching_extent": matching_extent,

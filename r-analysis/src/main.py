@@ -139,12 +139,14 @@ def run(params, log=None):
 
     log.info(
         "avoided_emissions: starting task %s (step=%s, pipeline=%s, "
-        "cog_bucket=%s, cog_prefix=%s, sites=%s, n_covariates=%d)",
+        "cog_bucket=%s, cog_prefix=%s, resolution_m=%s, sites=%s, "
+        "n_covariates=%d)",
         task_id,
         step,
         pipeline_mode,
         params.get("cog_bucket", "?"),
         params.get("cog_prefix", "?"),
+        params.get("resolution_m", "?"),
         params.get("sites_s3_uri", "?"),
         len(params.get("covariates", [])),
     )
@@ -208,6 +210,8 @@ def run(params, log=None):
         config["matching_extent"] = params["matching_extent"]
     if params.get("site_id"):
         config["site_id"] = params["site_id"]
+    if params.get("resolution_m") is not None:
+        config["resolution_m"] = int(params["resolution_m"])
 
     config_path = os.path.join(data_dir, "config.json")
     with open(config_path, "w") as f:

@@ -635,6 +635,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         "width": width,
         "height": height,
         "pixel_size_deg": float(xres),
+        "resolution_m": config.get("resolution_m"),
         "transform": [
             float(transform.a),
             float(transform.b),

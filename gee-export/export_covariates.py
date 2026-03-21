@@ -14,7 +14,7 @@ import time
 import click
 import ee
 
-from config import COVARIATES, DEFAULT_GCS_PREFIX
+from config import COVARIATES, DEFAULT_GCS_PREFIX, DEFAULT_RESOLUTION_M, get_gcs_prefix
 from tasks import check_task_status, start_export_task
 
 
@@ -64,6 +64,13 @@ from tasks import check_task_status, start_export_task
     default=False,
     help="Wait for all tasks to complete (polls every 60s).",
 )
+@click.option(
+    "--resolution",
+    "resolution_m",
+    type=click.Choice(["1000", "250"]),
+    default=str(DEFAULT_RESOLUTION_M),
+    help="Nominal export resolution in metres (1000 or 250).",
+)
 def main(
     bucket,
     prefix,
@@ -72,6 +79,7 @@ def main(
     check_status,
     category,
     wait_for_completion,
+    resolution_m,
 ):
     """Export covariate layers from Google Earth Engine to GCS as COGs."""
 
@@ -107,6 +115,11 @@ def main(
         click.echo("Error: --bucket is required for exports.", err=True)
         sys.exit(1)
 
+    res = int(resolution_m)
+
+    # Adjust prefix for non-default resolutions
+    export_prefix = get_gcs_prefix(prefix, res)
+
     # Determine which covariates to export
     if covariates:
         names = list(covariates)
@@ -122,7 +135,10 @@ def main(
     else:
         names = list(COVARIATES.keys())
 
-    click.echo(f"Starting {len(names)} export task(s) to gs://{bucket}/{prefix}/")
+    click.echo(
+        f"Starting {len(names)} export task(s) to "
+        f"gs://{bucket}/{export_prefix}/ ({res}m)"
+    )
 
     tasks = []
     for name in names:
@@ -130,7 +146,8 @@ def main(
         task = start_export_task(
             covariate_name=name,
             bucket=bucket,
-            prefix=prefix,
+            prefix=export_prefix,
+            resolution_m=res,
         )
         tasks.append((name, task))
 

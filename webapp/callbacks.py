@@ -255,6 +255,7 @@ def _openlayers_map_component(
     enable_cog_layers=False,
     cog_filter_covariates=None,
     task_id=None,
+    resolution_m=None,
 ):
     attrs = {
         "data-geojson": geojson_text or "",
@@ -266,6 +267,8 @@ def _openlayers_map_component(
         attrs["data-cog-filter"] = ",".join(cog_filter_covariates)
     if task_id:
         attrs["data-task-id"] = str(task_id)
+    if resolution_m is not None:
+        attrs["data-resolution"] = str(resolution_m)
     return html.Div(
         id=map_id,
         className="ol-sites-map",
@@ -1241,6 +1244,7 @@ def register_callbacks(app, limiter=None):
         State("random-seed", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
+        State("resolution-m", "value"),
         prevent_initial_call=True,
     )
     def handle_submit(
@@ -1263,6 +1267,7 @@ def register_callbacks(app, limiter=None):
         random_seed,
         match_memory_gb,
         matching_job_queue,
+        resolution_m,
     ):
         def _error_alert(msg):
             return (
@@ -1370,6 +1375,10 @@ def register_callbacks(app, limiter=None):
             if _seed is not None and (_seed < 1 or _seed > 2_147_483_647):
                 return _error_alert("Random seed must be between 1 and 2147483647.")
 
+            _res = int(resolution_m or ANALYSIS_DEFAULTS["resolution_m"])
+            if _res not in (1000, 250):
+                return _error_alert("Resolution must be 1000 or 250.")
+
             task_id = submit_analysis_task(
                 task_name=name,
                 description=description or "",
@@ -1392,6 +1401,7 @@ def register_callbacks(app, limiter=None):
                 n_replicates=_nrep,
                 match_memory_mib=_mmgb * 1024,
                 matching_job_queue=matching_job_queue,
+                resolution_m=_res,
             )
 
             return None, dbc.Alert(
@@ -1618,12 +1628,14 @@ def register_callbacks(app, limiter=None):
         elif active_tab == "tab-match-quality":
             match_quality = _build_match_quality(task_id, task, sites, totals)
         elif active_tab == "tab-map":
+            task_cfg = task.config or {}
             map_content = _build_map(
                 detail.get("sites_geojson"),
                 totals,
                 covariates=task.covariates,
                 task_id=task_id,
                 sites=sites,
+                resolution_m=task_cfg.get("resolution_m"),
             )
         elif active_tab == "tab-raw-results":
             raw_results = _build_raw_results(task)
@@ -6347,7 +6359,9 @@ def _build_match_quality_plots(df, covariate_cols):
     return plots
 
 
-def _build_map(sites_geojson, totals, covariates=None, task_id=None, sites=None):
+def _build_map(
+    sites_geojson, totals, covariates=None, task_id=None, sites=None, resolution_m=None
+):
     """Build an OpenLayers map for task sites and summary values."""
     enriched_geojson = _attach_totals_to_geojson(sites_geojson, totals)
     if not enriched_geojson:
@@ -6385,6 +6399,7 @@ def _build_map(sites_geojson, totals, covariates=None, task_id=None, sites=None)
         enable_cog_layers=True,
         cog_filter_covariates=covariates,
         task_id=task_id,
+        resolution_m=resolution_m,
     )
 
     controls = html.Div(

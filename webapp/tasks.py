@@ -68,115 +68,167 @@ def rasterize_vectors_task(self) -> dict:
 
     from config import Config
     from models import Covariate, get_db
-    from rasterize_vectors import VECTOR_LAYERS, rasterize_and_upload
+    from rasterize_vectors import RESOLUTIONS, VECTOR_LAYERS, rasterize_and_upload
 
-    bucket = Config.S3_BUCKET
-    prefix = f"{Config.S3_PREFIX}/cog".strip("/")
+    all_results = {}
+    # Only the default (1 km) resolution creates/updates Covariate DB
+    # records so the layer dashboard stays resolution-agnostic.
+    is_default = None  # set per iteration
 
-    # Build set of layer names whose COG already exists on S3.
-    existing_on_s3: set[str] = set()
-    if bucket:
-        try:
-            from botocore.exceptions import ClientError
-
-            s3 = boto3.client("s3", region_name=Config.AWS_REGION)
-            for layer_def in VECTOR_LAYERS:
-                name = layer_def["output_name"]
-                key = f"{prefix}/{name}.tif"
-                try:
-                    s3.head_object(Bucket=bucket, Key=key)
-                    existing_on_s3.add(name)
-                except ClientError:
-                    pass
-        except Exception:
-            logger.warning(
-                "Failed to check S3 for existing rasterized layers — "
-                "will rasterize all layers.",
-                exc_info=True,
-            )
-
-    db = get_db()
     try:
-        results = {}
-        for layer_def in VECTOR_LAYERS:
-            name = layer_def["output_name"]
+        for resolution_m, res_cfg in RESOLUTIONS.items():
+            cog_suffix = res_cfg["cog_suffix"]
+            pixel_size_deg = res_cfg["pixel_size_deg"]
+            is_default = resolution_m == 1000
+            bucket = Config.S3_BUCKET
+            prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}".strip("/")
 
-            # Skip layers that already have a COG on S3 and a
-            # corresponding "merged" Covariate record in the DB.
-            if name in existing_on_s3:
-                existing = (
-                    db.query(Covariate)
-                    .filter(
-                        Covariate.covariate_name == name,
-                        Covariate.status == "merged",
-                    )
-                    .first()
-                )
-                if existing:
-                    logger.info(
-                        "Skipping %s — COG already exists on S3 (%s)",
-                        name,
-                        existing.merged_url,
-                    )
-                    results[name] = {"cog_url": existing.merged_url, "skipped": True}
-                    continue
-
-            logger.info("Rasterizing vector layer: %s", name)
-
-            # Create (or update) a Covariate record so the layer shows
-            # up in the dashboard alongside GEE-exported covariates.
-            existing = (
-                db.query(Covariate)
-                .filter(Covariate.covariate_name == name)
-                .order_by(Covariate.started_at.desc())
-                .first()
+            logger.info(
+                "Rasterizing vectors at %dm (pixel_size=%.6f°, prefix=%s)",
+                resolution_m,
+                pixel_size_deg,
+                prefix,
             )
-            if existing:
-                layer = existing
-            else:
-                layer = Covariate(
-                    covariate_name=name,
-                    output_bucket=Config.S3_BUCKET,
-                    output_prefix=f"{Config.S3_PREFIX}/cog",
-                    started_at=datetime.now(timezone.utc),
-                )
-                db.add(layer)
-                db.flush()
 
-            layer.status = "rasterizing"
-            db.commit()
+            # Build set of layer names whose COG already exists on S3.
+            existing_on_s3: set[str] = set()
+            if bucket:
+                try:
+                    from botocore.exceptions import ClientError
 
+                    s3 = boto3.client("s3", region_name=Config.AWS_REGION)
+                    for layer_def in VECTOR_LAYERS:
+                        name = layer_def["output_name"]
+                        key = f"{prefix}/{name}.tif"
+                        try:
+                            s3.head_object(Bucket=bucket, Key=key)
+                            existing_on_s3.add(name)
+                        except ClientError:
+                            pass
+                except Exception:
+                    logger.warning(
+                        "Failed to check S3 for existing rasterized layers — "
+                        "will rasterize all layers.",
+                        exc_info=True,
+                    )
+
+            db = get_db()
             try:
-                result = rasterize_and_upload(layer_def)
-                layer.status = "merged"
-                layer.merged_url = result["cog_url"]
-                layer.size_bytes = result["size_bytes"]
-                layer.completed_at = datetime.now(timezone.utc)
-                meta = dict(layer.extra_metadata or {})
-                if result.get("csv_url"):
-                    meta["csv_key_url"] = result["csv_url"]
-                meta["source"] = "postgis_rasterize"
-                layer.extra_metadata = meta
-                db.commit()
-                results[name] = result
-                logger.info("Rasterized %s -> %s", name, result["cog_url"])
-            except Exception as exc:
-                logger.exception("Failed to rasterize %s", name)
-                layer.status = "failed"
-                layer.error_message = str(exc)[:2000]
-                layer.completed_at = datetime.now(timezone.utc)
-                db.commit()
-                results[name] = {"error": str(exc)[:500]}
+                results = {}
+                for layer_def in VECTOR_LAYERS:
+                    name = layer_def["output_name"]
+                    result_key = f"{name}{cog_suffix}"
 
-        return {"status": "complete", "layers": results}
+                    # Skip layers that already have a COG on S3.
+                    # For the default (1km) resolution, also check the
+                    # Covariate record.  For other resolutions, just check
+                    # S3 presence.
+                    if name in existing_on_s3:
+                        if is_default:
+                            existing = (
+                                db.query(Covariate)
+                                .filter(
+                                    Covariate.covariate_name == name,
+                                    Covariate.status == "merged",
+                                )
+                                .first()
+                            )
+                            if existing:
+                                logger.info(
+                                    "Skipping %s (%dm) — already on S3 (%s)",
+                                    name,
+                                    resolution_m,
+                                    existing.merged_url,
+                                )
+                                results[result_key] = {
+                                    "cog_url": existing.merged_url,
+                                    "skipped": True,
+                                }
+                                continue
+                        else:
+                            logger.info(
+                                "Skipping %s (%dm) — already on S3",
+                                name,
+                                resolution_m,
+                            )
+                            results[result_key] = {"skipped": True}
+                            continue
+
+                    logger.info(
+                        "Rasterizing vector layer: %s (%dm)",
+                        name,
+                        resolution_m,
+                    )
+
+                    # For the default resolution, manage Covariate records.
+                    if is_default:
+                        existing = (
+                            db.query(Covariate)
+                            .filter(Covariate.covariate_name == name)
+                            .order_by(Covariate.started_at.desc())
+                            .first()
+                        )
+                        if existing:
+                            layer = existing
+                        else:
+                            layer = Covariate(
+                                covariate_name=name,
+                                output_bucket=Config.S3_BUCKET,
+                                output_prefix=prefix,
+                                started_at=datetime.now(timezone.utc),
+                            )
+                            db.add(layer)
+                            db.flush()
+                        layer.status = "rasterizing"
+                        db.commit()
+
+                    try:
+                        result = rasterize_and_upload(
+                            layer_def,
+                            s3_prefix=prefix,
+                            pixel_size_deg=pixel_size_deg,
+                        )
+                        if is_default:
+                            layer.status = "merged"
+                            layer.merged_url = result["cog_url"]
+                            layer.size_bytes = result["size_bytes"]
+                            layer.completed_at = datetime.now(timezone.utc)
+                            meta = dict(layer.extra_metadata or {})
+                            if result.get("csv_url"):
+                                meta["csv_key_url"] = result["csv_url"]
+                            meta["source"] = "postgis_rasterize"
+                            layer.extra_metadata = meta
+                            db.commit()
+                        results[result_key] = result
+                        logger.info(
+                            "Rasterized %s (%dm) -> %s",
+                            name,
+                            resolution_m,
+                            result["cog_url"],
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "Failed to rasterize %s (%dm)",
+                            name,
+                            resolution_m,
+                        )
+                        if is_default:
+                            layer.status = "failed"
+                            layer.error_message = str(exc)[:2000]
+                            layer.completed_at = datetime.now(timezone.utc)
+                            db.commit()
+                        results[result_key] = {"error": str(exc)[:500]}
+
+                all_results.update(results)
+            finally:
+                db.close()
+
+        return {"status": "complete", "layers": all_results}
 
     except Exception as exc:
         logger.exception("Vector rasterization failed")
         report_exception()
-        db.rollback()
         raise self.retry(exc=exc, countdown=120)
-    finally:
-        db.close()
 
 
 class _MergeSuperseded(Exception):

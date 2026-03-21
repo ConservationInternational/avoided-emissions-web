@@ -1254,6 +1254,7 @@ if (length(pre_2005_sites_summary) > 0) {
 
 summary_data <- list(
     task_id = config$task_id,
+    resolution_m = config$resolution_m,
     n_sites = nrow(results_total),
     n_failed_sites = n_failed,
     random_seed = RANDOM_SEED,

@@ -8,9 +8,10 @@ import ee
 
 from config import (
     COVARIATES,
+    DEFAULT_RESOLUTION_M,
     EXPORT_CRS,
-    EXPORT_CRS_TRANSFORM,
     MAX_PIXELS_PER_TASK,
+    get_crs_transform,
 )
 from derived_layers import get_derived_image
 
@@ -97,13 +98,19 @@ def _apply_resampling(image, covariate_name, crs, crs_transform):
 
 
 def start_export_task(
-    covariate_name, bucket, prefix, region=None, description_prefix="ae_cov"
+    covariate_name,
+    bucket,
+    prefix,
+    region=None,
+    description_prefix="ae_cov",
+    resolution_m=DEFAULT_RESOLUTION_M,
 ):
     """Start a GEE batch export task for a single covariate.
 
     Exports the covariate as a Cloud-Optimized GeoTIFF to GCS.
     Applies appropriate resampling (mean, sum, or mode) based on
-    the covariate's configuration before exporting at ~1km resolution.
+    the covariate's configuration before exporting at the target
+    resolution.
 
     All exports use an explicit ``crsTransform`` (rather than ``scale``)
     so that every covariate lands on exactly the same pixel grid.
@@ -114,6 +121,7 @@ def start_export_task(
         prefix: GCS path prefix (no trailing slash).
         region: ee.Geometry for the export region; defaults to global.
         description_prefix: Prefix for the GEE task description.
+        resolution_m: Nominal resolution in metres (1000 or 250).
 
     Returns:
         The started ee.batch.Task object.
@@ -123,8 +131,10 @@ def start_export_task(
         [-180, -90, 180, 90], proj=None, geodesic=False
     )
 
+    crs_transform = get_crs_transform(resolution_m)
+
     # Apply appropriate resampling for the target resolution
-    image = _apply_resampling(image, covariate_name, EXPORT_CRS, EXPORT_CRS_TRANSFORM)
+    image = _apply_resampling(image, covariate_name, EXPORT_CRS, crs_transform)
 
     file_prefix = f"{prefix}/{covariate_name}".strip("/")
     task_description = f"{description_prefix}_{covariate_name}"
@@ -136,7 +146,7 @@ def start_export_task(
         fileNamePrefix=file_prefix,
         region=export_region,
         crs=EXPORT_CRS,
-        crsTransform=EXPORT_CRS_TRANSFORM,
+        crsTransform=crs_transform,
         maxPixels=MAX_PIXELS_PER_TASK,
         fileFormat="GeoTIFF",
         formatOptions={"cloudOptimized": True},
