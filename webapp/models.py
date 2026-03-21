@@ -76,6 +76,7 @@ class Covariate(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     covariate_name = Column(String(100), nullable=False)
+    resolution_m = Column(Integer, nullable=False, default=1000)
 
     # GEE export fields
     gee_task_id = Column(String(255))

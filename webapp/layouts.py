@@ -240,6 +240,13 @@ COVARIATE_COLUMNS = [
         "filter": "agTextColumnFilter",
     },
     {
+        "headerName": "Resolution",
+        "field": "resolution",
+        "flex": 0.7,
+        "minWidth": 80,
+        "filter": "agTextColumnFilter",
+    },
+    {
         "headerName": "Status",
         "field": "status",
         "flex": 1,
@@ -1705,6 +1712,48 @@ def submit_layout(user, recompute_config=None):
                                                     dbc.Col(
                                                         [
                                                             dbc.Label(
+                                                                "Analysis Resolution"
+                                                            ),
+                                                            dbc.Select(
+                                                                id="resolution-m",
+                                                                options=[
+                                                                    {
+                                                                        "label": "1 km (default)",
+                                                                        "value": "1000",
+                                                                    },
+                                                                    {
+                                                                        "label": "250 m",
+                                                                        "value": "250",
+                                                                    },
+                                                                ],
+                                                                value=str(
+                                                                    rc.get(
+                                                                        "resolution_m",
+                                                                        ANALYSIS_DEFAULTS[
+                                                                            "resolution_m"
+                                                                        ],
+                                                                    )
+                                                                ),
+                                                            ),
+                                                            html.Small(
+                                                                "Pixel resolution for covariate data "
+                                                                "and matching. Only covariates "
+                                                                "available at this resolution are "
+                                                                "shown below.",
+                                                                className="text-muted",
+                                                            ),
+                                                        ],
+                                                        xs=12,
+                                                        sm=4,
+                                                    ),
+                                                ],
+                                                className="mb-3",
+                                            ),
+                                            dbc.Row(
+                                                [
+                                                    dbc.Col(
+                                                        [
+                                                            dbc.Label(
                                                                 "Matching Covariates"
                                                             ),
                                                             dbc.Card(
@@ -1831,47 +1880,6 @@ def submit_layout(user, recompute_config=None):
                                                                     ),
                                                                     dbc.CardBody(
                                                                         [
-                                                                            dbc.Row(
-                                                                                [
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Label(
-                                                                                                "Analysis resolution"
-                                                                                            ),
-                                                                                            dbc.Select(
-                                                                                                id="resolution-m",
-                                                                                                options=[
-                                                                                                    {
-                                                                                                        "label": "1 km (default)",
-                                                                                                        "value": "1000",
-                                                                                                    },
-                                                                                                    {
-                                                                                                        "label": "250 m",
-                                                                                                        "value": "250",
-                                                                                                    },
-                                                                                                ],
-                                                                                                value=str(
-                                                                                                    rc.get(
-                                                                                                        "resolution_m",
-                                                                                                        ANALYSIS_DEFAULTS[
-                                                                                                            "resolution_m"
-                                                                                                        ],
-                                                                                                    )
-                                                                                                ),
-                                                                                            ),
-                                                                                            html.Small(
-                                                                                                "Pixel resolution for covariate data "
-                                                                                                "and matching. 250 m requires separate "
-                                                                                                "covariate exports.",
-                                                                                                className="text-muted",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs=12,
-                                                                                        sm=6,
-                                                                                    ),
-                                                                                ],
-                                                                                className="mb-3",
-                                                                            ),
                                                                             dbc.Row(
                                                                                 [
                                                                                     dbc.Col(
@@ -2786,6 +2794,29 @@ def admin_layout(user):
                                                                 ],
                                                                 xs=12,
                                                                 sm=6,
+                                                            ),
+                                                            dbc.Col(
+                                                                [
+                                                                    dbc.Label(
+                                                                        "Resolution"
+                                                                    ),
+                                                                    dbc.Select(
+                                                                        id="gee-export-resolution",
+                                                                        options=[
+                                                                            {
+                                                                                "label": "1 km",
+                                                                                "value": "1000",
+                                                                            },
+                                                                            {
+                                                                                "label": "250 m",
+                                                                                "value": "250",
+                                                                            },
+                                                                        ],
+                                                                        value="1000",
+                                                                    ),
+                                                                ],
+                                                                xs=12,
+                                                                sm=3,
                                                             ),
                                                             dbc.Col(
                                                                 [

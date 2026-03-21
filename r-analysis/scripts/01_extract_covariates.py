@@ -466,6 +466,12 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     cog_bucket = config["cog_bucket"]
     cog_prefix = config["cog_prefix"]
 
+    # Nominal resolution from task config (default 1 km for backwards compat)
+    resolution_m = config.get("resolution_m", 1000)
+    _expected_pixel_sizes = {1000: 1 / 120, 250: 1 / 480}
+    expected_pix = _expected_pixel_sizes.get(resolution_m)
+    log.info("Extraction resolution: %d m (cog_prefix=%s)", resolution_m, cog_prefix)
+
     # Layer names to load
     all_layers = list(
         dict.fromkeys(
@@ -515,6 +521,15 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     height, width = len(ys), len(ds.coords["x"].values)
 
     log.info("Grid: %d x %d (xres=%.6f, yres=%.6f)", width, height, xres, yres)
+
+    # Validate that the actual COG pixel size matches the requested resolution.
+    if expected_pix is not None and abs(xres - expected_pix) > 1e-6:
+        raise RuntimeError(
+            f"COG pixel size ({xres:.8f}°) does not match the requested "
+            f"resolution_m={resolution_m} (expected {expected_pix:.8f}°). "
+            f"Check that cog_prefix '{cog_prefix}' points to the correct "
+            f"resolution COGs."
+        )
 
     # --- 4. rasterize sites ---
     site_mask = _rasterize_sites(sites, transform, width, height)

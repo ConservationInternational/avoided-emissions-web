@@ -53,6 +53,7 @@ from services import (
     get_covariate_inventory,
     get_covariate_presets,
     get_ready_covariate_names,
+    get_ready_exact_match_names,
     get_task_detail,
     get_task_list,
     get_user_site_set_detail,
@@ -622,30 +623,76 @@ def register_callbacks(app, limiter=None):
 
     @app.callback(
         Output("covariate-selection", "options"),
+        Input("resolution-m", "value"),
         Input("url", "pathname"),
     )
-    def refresh_submit_covariate_options(pathname):
+    def refresh_submit_covariate_options(resolution_m_str, pathname):
         if pathname != "/submit":
             raise PreventUpdate
 
-        ready_covariates = get_ready_covariate_names()
+        resolution_m = int(resolution_m_str) if resolution_m_str else 1000
+        ready_covariates = get_ready_covariate_names(resolution_m=resolution_m)
         return [{"label": cov, "value": cov} for cov in ready_covariates]
+
+    @app.callback(
+        Output("exact-match-selection", "options"),
+        Input("resolution-m", "value"),
+        Input("url", "pathname"),
+    )
+    def refresh_exact_match_options(resolution_m_str, pathname):
+        if pathname != "/submit":
+            raise PreventUpdate
+
+        resolution_m = int(resolution_m_str) if resolution_m_str else 1000
+        ready_names = set(get_ready_exact_match_names(resolution_m=resolution_m))
+        return [
+            {**opt, "disabled": opt["value"] not in ready_names}
+            for opt in EXACT_MATCH_OPTIONS
+        ]
+
+    @app.callback(
+        Output("exact-match-selection", "value", allow_duplicate=True),
+        Input("exact-match-selection", "options"),
+        State("exact-match-selection", "value"),
+        prevent_initial_call=True,
+    )
+    def filter_exact_match_values(options, current_values):
+        """Remove selected exact-match vars that are disabled (unavailable)."""
+        if not options or not current_values:
+            raise PreventUpdate
+        enabled = {o["value"] for o in options if not o.get("disabled")}
+        filtered = [v for v in current_values if v in enabled]
+        if filtered == current_values:
+            raise PreventUpdate
+        return filtered
 
     @app.callback(
         Output("covariate-selection", "value", allow_duplicate=True),
         Input("covariate-selection", "options"),
         State("recompute-config-store", "data"),
+        State("covariate-selection", "value"),
         prevent_initial_call=True,
     )
-    def prefill_covariates_from_recompute(options, recompute_config):
-        """Set covariate checkboxes from the recompute config once options load."""
-        if not recompute_config or not options:
+    def sync_covariate_values(options, recompute_config, current_values):
+        """Prefill from recompute config, or prune unavailable selections."""
+        if not options:
             raise PreventUpdate
         available = {opt["value"] for opt in options}
-        covs = [c for c in recompute_config.get("covariates", []) if c in available]
-        if not covs:
-            raise PreventUpdate
-        return covs
+
+        # If there is a recompute config, use it as the source of truth.
+        if recompute_config:
+            covs = [c for c in recompute_config.get("covariates", []) if c in available]
+            if covs:
+                return covs
+
+        # Otherwise, prune any currently selected covariates that are no
+        # longer available (e.g. user switched resolution).
+        if current_values:
+            filtered = [v for v in current_values if v in available]
+            if filtered != current_values:
+                return filtered
+
+        raise PreventUpdate
 
     # ------------------------------------------------------------------
     # Review summary — rendered when the user switches to the Review tab
@@ -2114,9 +2161,10 @@ def register_callbacks(app, limiter=None):
         Output("gee-export-result", "children"),
         Input("start-gee-export", "n_clicks"),
         State("gee-export-category", "value"),
+        State("gee-export-resolution", "value"),
         prevent_initial_call=True,
     )
-    def handle_gee_export(n_clicks, category):
+    def handle_gee_export(n_clicks, category, resolution_m_str):
         user = get_current_user()
         if not user or not user.is_admin:
             return dbc.Alert("Admin access required.", color="danger")
@@ -2143,8 +2191,12 @@ def register_callbacks(app, limiter=None):
                 f"No covariates found for category: {category}", color="warning"
             )
 
+        resolution_m = int(resolution_m_str) if resolution_m_str else 1000
+        if resolution_m not in (1000, 250):
+            return dbc.Alert("Invalid resolution.", color="danger")
+
         try:
-            export_ids = start_gee_export(names, user.id)
+            export_ids = start_gee_export(names, user.id, resolution_m=resolution_m)
             return dbc.Alert(
                 f"Started {len(export_ids)} GEE export task(s).",
                 color="success",
@@ -2166,9 +2218,12 @@ def register_callbacks(app, limiter=None):
             Input("admin-refresh-interval", "n_intervals"),
             Input("gee-export-result", "children"),
             Input("covariate-action-result", "children"),
+            Input("gee-export-resolution", "value"),
         ],
     )
-    def refresh_covariate_inventory(n, _export_result, _action_result):
+    def refresh_covariate_inventory(
+        n, _export_result, _action_result, resolution_filter
+    ):
         user = get_current_user()
         if not user or not user.is_admin:
             raise PreventUpdate
@@ -2181,6 +2236,12 @@ def register_callbacks(app, limiter=None):
             logger.exception("Failed to build covariate inventory")
             report_exception()
             rows = []
+
+        # Filter rows to the resolution selected in the export dropdown.
+        if resolution_filter:
+            res_label = {"1000": "1 km", "250": "250 m"}.get(resolution_filter)
+            if res_label:
+                rows = [r for r in rows if r.get("resolution") == res_label]
 
         gcs_count = sum(1 for r in rows if r.get("gcs_tiles", 0) > 0)
         s3_count = sum(1 for r in rows if r.get("on_s3"))

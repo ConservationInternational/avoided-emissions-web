@@ -71,15 +71,11 @@ def rasterize_vectors_task(self) -> dict:
     from rasterize_vectors import RESOLUTIONS, VECTOR_LAYERS, rasterize_and_upload
 
     all_results = {}
-    # Only the default (1 km) resolution creates/updates Covariate DB
-    # records so the layer dashboard stays resolution-agnostic.
-    is_default = None  # set per iteration
 
     try:
         for resolution_m, res_cfg in RESOLUTIONS.items():
             cog_suffix = res_cfg["cog_suffix"]
             pixel_size_deg = res_cfg["pixel_size_deg"]
-            is_default = resolution_m == 1000
             bucket = Config.S3_BUCKET
             prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}".strip("/")
 
@@ -90,8 +86,9 @@ def rasterize_vectors_task(self) -> dict:
                 prefix,
             )
 
-            # Build set of layer names whose COG already exists on S3.
-            existing_on_s3: set[str] = set()
+            # Build map of layer names whose COG already exists on S3,
+            # storing the S3 URL and file size for each.
+            existing_on_s3: dict[str, dict] = {}
             if bucket:
                 try:
                     from botocore.exceptions import ClientError
@@ -101,8 +98,11 @@ def rasterize_vectors_task(self) -> dict:
                         name = layer_def["output_name"]
                         key = f"{prefix}/{name}.tif"
                         try:
-                            s3.head_object(Bucket=bucket, Key=key)
-                            existing_on_s3.add(name)
+                            resp = s3.head_object(Bucket=bucket, Key=key)
+                            existing_on_s3[name] = {
+                                "url": (f"https://{bucket}.s3.amazonaws.com/{key}"),
+                                "size_bytes": resp.get("ContentLength", 0),
+                            }
                         except ClientError:
                             pass
                 except Exception:
@@ -119,40 +119,69 @@ def rasterize_vectors_task(self) -> dict:
                     name = layer_def["output_name"]
                     result_key = f"{name}{cog_suffix}"
 
-                    # Skip layers that already have a COG on S3.
-                    # For the default (1km) resolution, also check the
-                    # Covariate record.  For other resolutions, just check
-                    # S3 presence.
+                    # Skip layers that already have a COG on S3.  If the
+                    # DB record is missing or not in "merged" state,
+                    # adopt the existing S3 object so it becomes visible
+                    # to downstream code (analysis UI, R extraction).
                     if name in existing_on_s3:
-                        if is_default:
-                            existing = (
-                                db.query(Covariate)
-                                .filter(
-                                    Covariate.covariate_name == name,
-                                    Covariate.status == "merged",
-                                )
-                                .first()
+                        s3_info = existing_on_s3[name]
+                        existing = (
+                            db.query(Covariate)
+                            .filter(
+                                Covariate.covariate_name == name,
+                                Covariate.resolution_m == resolution_m,
                             )
-                            if existing:
-                                logger.info(
-                                    "Skipping %s (%dm) — already on S3 (%s)",
-                                    name,
-                                    resolution_m,
-                                    existing.merged_url,
-                                )
-                                results[result_key] = {
-                                    "cog_url": existing.merged_url,
-                                    "skipped": True,
-                                }
-                                continue
-                        else:
+                            .order_by(Covariate.started_at.desc())
+                            .first()
+                        )
+                        if existing and existing.status == "merged":
                             logger.info(
-                                "Skipping %s (%dm) — already on S3",
+                                "Skipping %s (%dm) — already on S3 (%s)",
                                 name,
                                 resolution_m,
+                                existing.merged_url,
                             )
-                            results[result_key] = {"skipped": True}
+                            results[result_key] = {
+                                "cog_url": existing.merged_url,
+                                "skipped": True,
+                            }
                             continue
+
+                        # COG exists on S3 but DB is out of sync —
+                        # adopt the existing S3 object.
+                        if existing:
+                            layer = existing
+                        else:
+                            layer = Covariate(
+                                covariate_name=name,
+                                resolution_m=resolution_m,
+                                output_bucket=bucket,
+                                output_prefix=prefix,
+                                started_at=datetime.now(timezone.utc),
+                            )
+                            db.add(layer)
+                            db.flush()
+                        layer.status = "merged"
+                        layer.merged_url = s3_info["url"]
+                        layer.size_bytes = s3_info["size_bytes"]
+                        layer.completed_at = datetime.now(timezone.utc)
+                        meta = dict(layer.extra_metadata or {})
+                        meta["source"] = "postgis_rasterize"
+                        meta["adopted_from_s3"] = True
+                        layer.extra_metadata = meta
+                        db.commit()
+                        logger.info(
+                            "Adopted existing S3 COG for %s (%dm) — %s",
+                            name,
+                            resolution_m,
+                            s3_info["url"],
+                        )
+                        results[result_key] = {
+                            "cog_url": s3_info["url"],
+                            "skipped": True,
+                            "adopted": True,
+                        }
+                        continue
 
                     logger.info(
                         "Rasterizing vector layer: %s (%dm)",
@@ -160,27 +189,31 @@ def rasterize_vectors_task(self) -> dict:
                         resolution_m,
                     )
 
-                    # For the default resolution, manage Covariate records.
-                    if is_default:
-                        existing = (
-                            db.query(Covariate)
-                            .filter(Covariate.covariate_name == name)
-                            .order_by(Covariate.started_at.desc())
-                            .first()
+                    # Create or update a Covariate record for this
+                    # layer+resolution combination.
+                    existing = (
+                        db.query(Covariate)
+                        .filter(
+                            Covariate.covariate_name == name,
+                            Covariate.resolution_m == resolution_m,
                         )
-                        if existing:
-                            layer = existing
-                        else:
-                            layer = Covariate(
-                                covariate_name=name,
-                                output_bucket=Config.S3_BUCKET,
-                                output_prefix=prefix,
-                                started_at=datetime.now(timezone.utc),
-                            )
-                            db.add(layer)
-                            db.flush()
-                        layer.status = "rasterizing"
-                        db.commit()
+                        .order_by(Covariate.started_at.desc())
+                        .first()
+                    )
+                    if existing:
+                        layer = existing
+                    else:
+                        layer = Covariate(
+                            covariate_name=name,
+                            resolution_m=resolution_m,
+                            output_bucket=Config.S3_BUCKET,
+                            output_prefix=prefix,
+                            started_at=datetime.now(timezone.utc),
+                        )
+                        db.add(layer)
+                        db.flush()
+                    layer.status = "rasterizing"
+                    db.commit()
 
                     try:
                         result = rasterize_and_upload(
@@ -188,17 +221,16 @@ def rasterize_vectors_task(self) -> dict:
                             s3_prefix=prefix,
                             pixel_size_deg=pixel_size_deg,
                         )
-                        if is_default:
-                            layer.status = "merged"
-                            layer.merged_url = result["cog_url"]
-                            layer.size_bytes = result["size_bytes"]
-                            layer.completed_at = datetime.now(timezone.utc)
-                            meta = dict(layer.extra_metadata or {})
-                            if result.get("csv_url"):
-                                meta["csv_key_url"] = result["csv_url"]
-                            meta["source"] = "postgis_rasterize"
-                            layer.extra_metadata = meta
-                            db.commit()
+                        layer.status = "merged"
+                        layer.merged_url = result["cog_url"]
+                        layer.size_bytes = result["size_bytes"]
+                        layer.completed_at = datetime.now(timezone.utc)
+                        meta = dict(layer.extra_metadata or {})
+                        if result.get("csv_url"):
+                            meta["csv_key_url"] = result["csv_url"]
+                        meta["source"] = "postgis_rasterize"
+                        layer.extra_metadata = meta
+                        db.commit()
                         results[result_key] = result
                         logger.info(
                             "Rasterized %s (%dm) -> %s",
@@ -212,11 +244,10 @@ def rasterize_vectors_task(self) -> dict:
                             name,
                             resolution_m,
                         )
-                        if is_default:
-                            layer.status = "failed"
-                            layer.error_message = str(exc)[:2000]
-                            layer.completed_at = datetime.now(timezone.utc)
-                            db.commit()
+                        layer.status = "failed"
+                        layer.error_message = str(exc)[:2000]
+                        layer.completed_at = datetime.now(timezone.utc)
+                        db.commit()
                         results[result_key] = {"error": str(exc)[:500]}
 
                 all_results.update(results)
@@ -541,7 +572,12 @@ def poll_gee_exports() -> dict:
                         # Auto-trigger COG merge now that tiles are ready
                         export.status = "pending_merge"
                         export.output_bucket = Config.S3_BUCKET
-                        export.output_prefix = f"{Config.S3_PREFIX}/cog"
+                        if not export.output_prefix:
+                            _cog_suffixes = {1000: "_1km", 250: "_250m"}
+                            _cog_suffix = _cog_suffixes.get(export.resolution_m, "_1km")
+                            export.output_prefix = (
+                                f"{Config.S3_PREFIX}/cog{_cog_suffix}"
+                            )
                         _auto_merge_ids.append(str(export.id))
 
                         # Create a GeeExportMetadata record that links
@@ -637,6 +673,7 @@ def auto_merge_unmerged() -> dict:
     gee_config = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gee_config)
     known_covariates = list(gee_config.COVARIATES.keys())
+    resolutions = gee_config.RESOLUTIONS  # {1000: {...}, 250: {...}}
 
     # Scan GCS for tile details (ETags, sizes, md5 hashes)
     from cog_merge import (
@@ -645,18 +682,29 @@ def auto_merge_unmerged() -> dict:
         scan_gcs_tile_details,
     )
 
-    try:
-        gcs_details = scan_gcs_tile_details(
-            Config.GCS_BUCKET,
-            Config.GCS_PREFIX,
-            known_covariates,
-        )
-    except Exception:
-        logger.exception("Failed to scan GCS tiles for auto-merge")
-        report_exception()
-        return {"scanned": 0, "dispatched": 0, "discovered": 0}
+    # Scan all resolution-specific GCS prefixes for tiles.
+    # Each entry is keyed by (covariate_name, resolution_m).
+    gcs_details: dict[tuple[str, int], list[dict]] = {}
+    for res_m, res_cfg in resolutions.items():
+        gcs_prefix = gee_config.get_gcs_prefix(Config.GCS_PREFIX, res_m)
+        try:
+            for name, tiles in scan_gcs_tile_details(
+                Config.GCS_BUCKET,
+                gcs_prefix,
+                known_covariates,
+            ).items():
+                gcs_details[(name, res_m)] = tiles
+        except Exception:
+            logger.warning(
+                "Failed to scan GCS tiles at prefix %s",
+                gcs_prefix,
+                exc_info=True,
+            )
 
-    with_tiles = {name for name, tiles in gcs_details.items() if tiles}
+    if not gcs_details:
+        return {"scanned": len(known_covariates), "dispatched": 0, "discovered": 0}
+
+    with_tiles = {key for key, tiles in gcs_details.items() if tiles}
     if not with_tiles:
         return {"scanned": len(known_covariates), "dispatched": 0, "discovered": 0}
 
@@ -669,53 +717,60 @@ def auto_merge_unmerged() -> dict:
         # ---- Discover pre-existing S3 COGs without DB records ----
         # Handles the fresh-database scenario: COGs from a prior
         # deployment are already on S3 but the new DB has no rows.
-        s3_cog_map: dict[str, dict] = {}
+        # Scan each resolution's S3 prefix.
+        _cog_suffixes = {1000: "_1km", 250: "_250m"}
+        s3_cog_map: dict[tuple[str, int], dict] = {}
         try:
             if Config.S3_BUCKET:
-                cog_prefix = f"{Config.S3_PREFIX}/cog"
-                for obj in list_s3_cog_objects(
-                    Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
-                ):
-                    s3_cog_map[obj["covariate"]] = obj
+                for res_m, cog_suffix in _cog_suffixes.items():
+                    cog_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
+                    for obj in list_s3_cog_objects(
+                        Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
+                    ):
+                        s3_cog_map[(obj["covariate"], res_m)] = obj
         except Exception:
             logger.warning("Failed to scan S3 for existing COGs")
             report_exception()
 
-        existing_covariate_names = {
-            row.covariate_name
-            for row in db.query(Covariate.covariate_name)
+        existing_covariate_keys = {
+            (row.covariate_name, row.resolution_m)
+            for row in db.query(Covariate.covariate_name, Covariate.resolution_m)
             .filter(Covariate.status.in_(["pending_merge", "merging", "merged"]))
             .all()
         }
 
-        for cov_name, s3_obj in s3_cog_map.items():
-            if cov_name in existing_covariate_names:
+        for (cov_name, res_m), s3_obj in s3_cog_map.items():
+            if (cov_name, res_m) in existing_covariate_keys:
                 continue
+
+            cog_suffix = _cog_suffixes.get(res_m, "_1km")
+            gcs_prefix = gee_config.get_gcs_prefix(Config.GCS_PREFIX, res_m)
 
             # Create a Covariate record so the UI shows the COG
             layer = Covariate(
                 covariate_name=cov_name,
+                resolution_m=res_m,
                 status="merged",
                 gcs_bucket=Config.GCS_BUCKET,
-                gcs_prefix=Config.GCS_PREFIX,
+                gcs_prefix=gcs_prefix,
                 output_bucket=Config.S3_BUCKET,
-                output_prefix=f"{Config.S3_PREFIX}/cog",
+                output_prefix=f"{Config.S3_PREFIX}/cog{cog_suffix}",
                 merged_url=s3_obj["url"],
                 size_bytes=s3_obj["size"],
                 completed_at=now,
             )
             db.add(layer)
             db.flush()
-            existing_covariate_names.add(cov_name)
+            existing_covariate_keys.add((cov_name, res_m))
 
             # Create an export metadata snapshot for the discovered COG
-            tiles = gcs_details.get(cov_name, [])
+            tiles = gcs_details.get((cov_name, res_m), [])
             tile_hash = compute_tile_etag_hash(tiles) if tiles else None
             meta = GeeExportMetadata(
                 covariate_id=layer.id,
                 covariate_name=cov_name,
                 gcs_bucket=Config.GCS_BUCKET,
-                gcs_prefix=Config.GCS_PREFIX,
+                gcs_prefix=gcs_prefix,
                 tile_count=len(tiles),
                 tile_total_bytes=sum(t["size_bytes"] for t in tiles),
                 tile_details=tiles or None,
@@ -813,20 +868,20 @@ def auto_merge_unmerged() -> dict:
 
         # Skip covariates with an in-progress merge (fresh ones only)
         in_progress = {
-            row.covariate_name
-            for row in db.query(Covariate.covariate_name)
+            (row.covariate_name, row.resolution_m)
+            for row in db.query(Covariate.covariate_name, Covariate.resolution_m)
             .filter(Covariate.status.in_(["pending_merge", "merging"]))
             .all()
         }
 
-        need_merge: list[str] = []
-        for name in sorted(with_tiles):
-            if name in in_progress:
+        need_merge: list[tuple[str, int]] = []
+        for name, res_m in sorted(with_tiles):
+            if (name, res_m) in in_progress:
                 continue
-            current_hash = compute_tile_etag_hash(gcs_details[name])
+            current_hash = compute_tile_etag_hash(gcs_details[(name, res_m)])
             if latest_hashes.get(name) == current_hash:
                 continue  # tiles unchanged since last merge
-            need_merge.append(name)
+            need_merge.append((name, res_m))
 
         if not need_merge:
             db.commit()
@@ -836,15 +891,20 @@ def auto_merge_unmerged() -> dict:
                 "discovered": discovered,
             }
 
-        for name in need_merge:
-            tiles = gcs_details[name]
+        for name, res_m in need_merge:
+            tiles = gcs_details[(name, res_m)]
             tile_hash = compute_tile_etag_hash(tiles)
+
+            cog_suffix = _cog_suffixes.get(res_m, "_1km")
+            gcs_prefix = gee_config.get_gcs_prefix(Config.GCS_PREFIX, res_m)
+            s3_output_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
 
             # Create or update Covariate record
             existing = (
                 db.query(Covariate)
                 .filter(
                     Covariate.covariate_name == name,
+                    Covariate.resolution_m == res_m,
                     Covariate.status.in_(["exported", "merged", "failed"]),
                 )
                 .order_by(Covariate.started_at.desc())
@@ -855,17 +915,18 @@ def auto_merge_unmerged() -> dict:
                 existing.started_at = now
                 existing.error_message = None
                 existing.output_bucket = Config.S3_BUCKET
-                existing.output_prefix = f"{Config.S3_PREFIX}/cog"
+                existing.output_prefix = s3_output_prefix
                 cov_id = existing.id
                 dispatched_ids.append(str(existing.id))
             else:
                 layer = Covariate(
                     covariate_name=name,
+                    resolution_m=res_m,
                     status="pending_merge",
                     gcs_bucket=Config.GCS_BUCKET,
-                    gcs_prefix=Config.GCS_PREFIX,
+                    gcs_prefix=gcs_prefix,
                     output_bucket=Config.S3_BUCKET,
-                    output_prefix=f"{Config.S3_PREFIX}/cog",
+                    output_prefix=s3_output_prefix,
                     started_at=now,
                 )
                 db.add(layer)
@@ -878,7 +939,7 @@ def auto_merge_unmerged() -> dict:
                 covariate_id=cov_id,
                 covariate_name=name,
                 gcs_bucket=Config.GCS_BUCKET,
-                gcs_prefix=Config.GCS_PREFIX,
+                gcs_prefix=gcs_prefix,
                 tile_count=len(tiles),
                 tile_total_bytes=sum(t["size_bytes"] for t in tiles),
                 tile_details=tiles,

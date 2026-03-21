@@ -1881,7 +1881,7 @@ def _cleanup_covariate_downstream(covariate_name, db):
     db.flush()
 
 
-def start_gee_export(covariate_names, user_id):
+def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
     """Start GEE export tasks for the specified covariates.
 
     Any existing downstream artefacts (GCS tiles, S3 COGs, DB records)
@@ -1953,6 +1953,14 @@ def start_gee_export(covariate_names, user_id):
 
     db = get_db()
     export_ids = []
+
+    # Resolution-aware GCS prefix (e.g. covariates_1km / covariates_250m)
+    gcs_prefix = gee_cfg.get_gcs_prefix(Config.GCS_PREFIX, resolution_m)
+    # Resolution-aware S3 output prefix for the eventual merge
+    _cog_suffixes = {1000: "_1km", 250: "_250m"}
+    _cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
+    s3_output_prefix = f"{Config.S3_PREFIX}/cog{_cog_suffix}"
+
     try:
         for name in covariate_names:
             # Clean up any existing downstream artefacts before re-export
@@ -1961,14 +1969,18 @@ def start_gee_export(covariate_names, user_id):
             task = start_export_task(
                 covariate_name=name,
                 bucket=Config.GCS_BUCKET,
-                prefix=Config.GCS_PREFIX,
+                prefix=gcs_prefix,
+                resolution_m=resolution_m,
             )
 
             export = Covariate(
                 covariate_name=name,
+                resolution_m=resolution_m,
                 gee_task_id=task.id,
                 gcs_bucket=Config.GCS_BUCKET,
-                gcs_prefix=Config.GCS_PREFIX,
+                gcs_prefix=gcs_prefix,
+                output_bucket=Config.S3_BUCKET,
+                output_prefix=s3_output_prefix,
                 status="exporting",
                 started_by=user_id,
             )
@@ -2763,15 +2775,16 @@ def get_covariate_inventory():
     """Build a comprehensive inventory of all covariates with GCS/S3 status.
 
     Scans GCS for exported tiles, S3 for merged COGs, and the database
-    for export/merge status.  Returns one row per covariate defined in
-    the GEE export config.
+    for export/merge status.  Returns one row per (covariate, resolution)
+    pair that has at least a DB record or tiles on GCS/S3.  Covariates
+    with no data at any resolution get a single placeholder row at 1 km.
 
     Returns
     -------
     list[dict]
         Each dict has keys: covariate_name, category, description,
-        gcs_tiles, on_s3, s3_url, status, gee_task_id, size_mb,
-        merged_url, started_at, completed_at, error_message.
+        resolution, gcs_tiles, on_s3, s3_url, status, gee_task_id,
+        size_mb, merged_url, started_at, completed_at, error_message.
     """
     import importlib.util
 
@@ -2783,6 +2796,7 @@ def get_covariate_inventory():
     gee_config = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gee_config)
     covariates = gee_config.COVARIATES
+    cov_resolutions = gee_config.RESOLUTIONS  # {1000: {...}, 250: {...}}
 
     cat_labels = {
         "climate": "Climate",
@@ -2796,43 +2810,49 @@ def get_covariate_inventory():
         "administrative": "Administrative",
     }
 
-    # 1. Scan GCS for tiles (single paginated API call)
-    gcs_counts: dict[str, int] = {}
+    # 1. Scan GCS for tiles per resolution
+    # Keyed by (covariate_name, resolution_m)
+    gcs_counts: dict[tuple[str, int], int] = {}
+    cov_names = list(covariates.keys())
     try:
         if Config.GCS_BUCKET:
-            gcs_counts = list_all_gcs_tiles(
-                Config.GCS_BUCKET,
-                Config.GCS_PREFIX,
-                list(covariates.keys()),
-            )
+            for res_m in cov_resolutions:
+                gcs_prefix = gee_config.get_gcs_prefix(Config.GCS_PREFIX, res_m)
+                for name, count in list_all_gcs_tiles(
+                    Config.GCS_BUCKET, gcs_prefix, cov_names
+                ).items():
+                    gcs_counts[(name, res_m)] = count
     except Exception:
         logger.exception("Failed to scan GCS for tiles")
 
-    # 2. Scan S3 for merged COGs
-    s3_cogs: dict[str, dict] = {}
+    # 2. Scan S3 for merged COGs per resolution
+    _cog_suffixes = {1000: "_1km", 250: "_250m"}
+    s3_cogs: dict[tuple[str, int], dict] = {}
     try:
         if Config.S3_BUCKET:
-            cog_prefix = Config.S3_COG_PREFIX
-            for obj in list_s3_cog_objects(
-                Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
-            ):
-                s3_cogs[obj["covariate"]] = obj
+            for res_m, cog_suffix in _cog_suffixes.items():
+                cog_prefix = f"{Config.S3_COG_PREFIX}{cog_suffix}"
+                for obj in list_s3_cog_objects(
+                    Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
+                ):
+                    s3_cogs[(obj["covariate"], res_m)] = obj
     except Exception:
         logger.exception("Failed to scan S3 for COGs")
 
-    # 3. Get most recent DB record per covariate
-    db_records: dict[str, Covariate] = {}
+    # 3. Get most recent DB record per (covariate, resolution)
+    db_records: dict[tuple[str, int], Covariate] = {}
     db = get_db()
     try:
         for rec in db.query(Covariate).all():
-            existing = db_records.get(rec.covariate_name)
+            key = (rec.covariate_name, rec.resolution_m)
+            existing = db_records.get(key)
             if existing is None or (
                 rec.started_at
                 and (
                     existing.started_at is None or rec.started_at > existing.started_at
                 )
             ):
-                db_records[rec.covariate_name] = rec
+                db_records[key] = rec
     finally:
         db.close()
 
@@ -2840,49 +2860,66 @@ def get_covariate_inventory():
     def _fmt(dt):
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else ""
 
+    res_labels = {r: cfg["label"] for r, cfg in cov_resolutions.items()}
+
     rows = []
     for name, cfg in covariates.items():
         raw_cat = cfg.get("category", "other")
-        gcs_tiles = gcs_counts.get(name, 0)
-        s3_obj = s3_cogs.get(name)
-        db_rec = db_records.get(name)
 
-        row = {
-            "covariate_name": name,
-            "category": cat_labels.get(raw_cat, raw_cat),
-            "description": cfg.get("description", ""),
-            "gcs_tiles": gcs_tiles,
-            "on_s3": bool(s3_obj),
-            "status": db_rec.status if db_rec else "",
-            "gee_task_id": (
-                db_rec.gee_task_id if db_rec and db_rec.gee_task_id else ""
-            ),
-            "size_mb": (
-                round(db_rec.size_bytes / (1024 * 1024), 1)
-                if db_rec and db_rec.size_bytes
-                else (round(s3_obj["size"] / (1024 * 1024), 1) if s3_obj else None)
-            ),
-            "merged_url": (
-                db_rec.merged_url
-                if db_rec and db_rec.merged_url
-                else (s3_obj["url"] if s3_obj else "")
-            ),
-            "started_at": _fmt(db_rec.started_at) if db_rec else "",
-            "completed_at": _fmt(db_rec.completed_at) if db_rec else "",
-            "error_message": (
-                db_rec.error_message if db_rec and db_rec.error_message else ""
-            ),
-        }
-        rows.append(row)
+        # Determine which resolutions to show for this covariate.
+        seen_resolutions = (
+            {r for (n, r) in db_records if n == name}
+            | {r for (n, r) in gcs_counts if n == name}
+            | {r for (n, r) in s3_cogs if n == name}
+        )
+        if not seen_resolutions:
+            seen_resolutions = {1000}  # default placeholder
+
+        for res_m in sorted(seen_resolutions):
+            key = (name, res_m)
+            gcs_tile_count = gcs_counts.get(key, 0)
+            s3_obj = s3_cogs.get(key)
+            db_rec = db_records.get(key)
+
+            row = {
+                "covariate_name": name,
+                "category": cat_labels.get(raw_cat, raw_cat),
+                "description": cfg.get("description", ""),
+                "resolution": res_labels.get(res_m, f"{res_m} m"),
+                "gcs_tiles": gcs_tile_count,
+                "on_s3": bool(s3_obj),
+                "status": db_rec.status if db_rec else "",
+                "gee_task_id": (
+                    db_rec.gee_task_id if db_rec and db_rec.gee_task_id else ""
+                ),
+                "size_mb": (
+                    round(db_rec.size_bytes / (1024 * 1024), 1)
+                    if db_rec and db_rec.size_bytes
+                    else (round(s3_obj["size"] / (1024 * 1024), 1) if s3_obj else None)
+                ),
+                "merged_url": (
+                    db_rec.merged_url
+                    if db_rec and db_rec.merged_url
+                    else (s3_obj["url"] if s3_obj else "")
+                ),
+                "started_at": _fmt(db_rec.started_at) if db_rec else "",
+                "completed_at": _fmt(db_rec.completed_at) if db_rec else "",
+                "error_message": (
+                    db_rec.error_message if db_rec and db_rec.error_message else ""
+                ),
+            }
+            rows.append(row)
 
     return rows
 
 
-def get_ready_covariate_names():
-    """Return covariate names that are fully merged and ready for submission.
+def get_ready_covariate_names(resolution_m=1000):
+    """Return covariate names that are fully merged at *resolution_m*.
 
-    A covariate is considered ready when its most recent record in
-    ``covariates`` has status ``merged`` and a non-empty ``merged_url``.
+    A covariate is considered ready when it has a ``Covariate`` record
+    with ``status='merged'``, a non-empty ``merged_url``, **and**
+    ``resolution_m`` matching the requested resolution.
+
     Forest-cover year layers (``fc_*``) are excluded because they are
     handled automatically by the analysis pipeline via ``fc_years``.
     The returned order follows the GEE export config definition.
@@ -2895,18 +2932,20 @@ def get_ready_covariate_names():
     spec.loader.exec_module(gee_config)
     covariate_order = list(gee_config.COVARIATES.keys())
 
-    latest_records: dict[str, Covariate] = {}
+    # Build a set of covariate names that are merged at the desired resolution.
+    merged_at_res: set[str] = set()
     db = get_db()
     try:
-        for rec in db.query(Covariate).all():
-            existing = latest_records.get(rec.covariate_name)
-            if existing is None or (
-                rec.started_at
-                and (
-                    existing.started_at is None or rec.started_at > existing.started_at
-                )
-            ):
-                latest_records[rec.covariate_name] = rec
+        for rec in (
+            db.query(Covariate)
+            .filter(
+                Covariate.resolution_m == resolution_m,
+                Covariate.status == "merged",
+                Covariate.merged_url.isnot(None),
+            )
+            .all()
+        ):
+            merged_at_res.add(rec.covariate_name)
     finally:
         db.close()
 
@@ -2914,20 +2953,51 @@ def get_ready_covariate_names():
     for covariate_name in covariate_order:
         if covariate_name.startswith("fc_"):
             continue
-        record = latest_records.get(covariate_name)
-        if record and record.status == "merged" and record.merged_url:
+        if covariate_name in merged_at_res:
             ready_names.append(covariate_name)
 
     # Dual-purpose variables (ecoregion, pa) are rasterized from vector
-    # data and uploaded to S3 on startup.  They are always available as
-    # covariates once the rasterize-vectors task has completed.
+    # data and uploaded to S3 on startup.  Include them only if they
+    # actually have a merged COG at this resolution.
     from layouts import DUAL_PURPOSE_VARS
 
     for var_name in DUAL_PURPOSE_VARS:
-        if var_name not in ready_names:
+        if var_name not in ready_names and var_name in merged_at_res:
             ready_names.append(var_name)
 
     return ready_names
+
+
+def get_ready_exact_match_names(resolution_m=1000):
+    """Return exact-match variable names available at *resolution_m*.
+
+    Exact-match layers (admin0, admin1, admin2, ecoregion, pa) are
+    produced by the rasterize-vectors task.  A layer is considered
+    available when it has a ``Covariate`` record with ``status='merged'``
+    and ``resolution_m`` matching the requested resolution.
+    """
+    from layouts import EXACT_MATCH_OPTIONS
+
+    all_names = [opt["value"] for opt in EXACT_MATCH_OPTIONS]
+
+    merged_at_res: set[str] = set()
+    db = get_db()
+    try:
+        for rec in (
+            db.query(Covariate.covariate_name)
+            .filter(
+                Covariate.covariate_name.in_(all_names),
+                Covariate.resolution_m == resolution_m,
+                Covariate.status == "merged",
+                Covariate.merged_url.isnot(None),
+            )
+            .all()
+        ):
+            merged_at_res.add(rec.covariate_name)
+    finally:
+        db.close()
+
+    return [n for n in all_names if n in merged_at_res]
 
 
 # -- Covariate presets -------------------------------------------------------
