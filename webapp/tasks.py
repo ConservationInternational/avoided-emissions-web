@@ -43,7 +43,13 @@ def import_vector_data_task(self) -> dict:
         raise self.retry(exc=exc, countdown=60)
 
 
-@celery_app.task(name="tasks.rasterize_vectors", bind=True, max_retries=1)
+@celery_app.task(
+    name="tasks.rasterize_vectors",
+    bind=True,
+    max_retries=1,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
 def rasterize_vectors_task(self) -> dict:
     """Rasterize vector reference layers to COGs aligned with the GEE grid.
 
