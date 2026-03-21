@@ -18,7 +18,6 @@ from services import ANALYSIS_DEFAULTS, DEFAULT_MATCHING_JOB_QUEUE
 
 # Default covariates for the matching formula
 DEFAULT_COVARIATES = [
-    "lc_2015_agriculture",
     "precip",
     "temp",
     "elev",
@@ -32,12 +31,9 @@ DEFAULT_COVARIATES = [
 
 # All available covariates (matching + additional options)
 ALL_COVARIATES = DEFAULT_COVARIATES + [
-    "lc_2015_forest",
-    "lc_2015_grassland",
-    "lc_2015_wetlands",
-    "lc_2015_artificial",
-    "lc_2015_other",
-    "lc_2015_water",
+    "sdg_baseline",
+    "sdg_status_2019",
+    "sdg_status_2023",
     "pop_2000",
     "pop_2005",
     "pop_2010",

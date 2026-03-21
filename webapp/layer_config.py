@@ -400,21 +400,33 @@ COVARIATE_STYLES["pop_growth"] = {
     "nodata_value": None,
 }
 
-# ── Land cover hectare layers ────────────────────────────────────────────────
-for _lc in (
-    "forest",
-    "grassland",
-    "agriculture",
-    "wetlands",
-    "artificial",
-    "other",
-    "water",
-):
-    COVARIATE_STYLES[f"lc_2015_{_lc}"] = {
-        "type": "continuous",
-        "min_value": 0,
-        "max_value": 100,
-        "nodata_value": None,
+# ── SDG 15.3.1 Indicator layers ──────────────────────────────────────────────
+# Baseline indicator: -1 = Degradation, 0 = No change, 1 = Improvement
+COVARIATE_STYLES["sdg_baseline"] = {
+    "type": "categorical",
+    "color_stops": [
+        [-1, 155, 39, 121, 1],  # Degradation – #9b2779
+        [0, 255, 255, 224, 1],  # No change – #ffffe0
+        [1, 0, 101, 0, 1],  # Improvement – #006500
+    ],
+    "nodata_value": -32768,
+}
+
+# Status layers: 7-class assessment vs baseline
+_SDG_STATUS_STOPS = [
+    [1, 118, 42, 131, 1],  # Degradation (persistent) – #762a83
+    [2, 175, 141, 195, 1],  # Degradation (recent) – #af8dc3
+    [3, 231, 212, 232, 1],  # Degradation (baseline) – #e7d4e8
+    [4, 247, 247, 247, 1],  # Stability – #f7f7f7
+    [5, 217, 240, 211, 1],  # Improvement (baseline) – #d9f0d3
+    [6, 127, 191, 123, 1],  # Improvement (recent) – #7fbf7b
+    [7, 27, 120, 55, 1],  # Improvement (persistent) – #1b7837
+]
+for _sdg in ("sdg_status_2019", "sdg_status_2023"):
+    COVARIATE_STYLES[_sdg] = {
+        "type": "categorical",
+        "color_stops": _SDG_STATUS_STOPS,
+        "nodata_value": -32768,
     }
 
 

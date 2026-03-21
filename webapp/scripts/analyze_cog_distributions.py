@@ -256,7 +256,6 @@ def main():
     series_patterns = [
         (re.compile(r"^fc_\d{4}$"), "fc_2020"),
         (re.compile(r"^pop_\d{4}$"), "pop_2020"),
-        (re.compile(r"^lc_2015_"), None),  # each lc subtype is different
     ]
 
     def pick_representative(name):

@@ -218,55 +218,29 @@ COVARIATES = {
         "category": "biomass",
         "resample": "mean",
     },
-    # Land cover (Copernicus 2015, reclassed to 7 categories, in hectares)
-    "lc_2015_forest": {
-        "derived": "lc_class",
-        "lc_class": "forest",
-        "description": "Forest land cover area (ha), Copernicus 2015",
-        "category": "land_cover",
-        "resample": "sum",
+    # SDG 15.3.1 Indicator layers (Trends.Earth global assessment)
+    # Source: multi-band COG on GCS, loaded via ee.Image.loadGeoTIFF().
+    # Band descriptions: https://zenodo.org/records/17514520
+    "sdg_baseline": {
+        "derived": "sdg_indicator",
+        "band_number": 1,
+        "description": "SDG 15.3.1 indicator for baseline period (2000-2015)",
+        "category": "sdg",
+        "resample": "mode",
     },
-    "lc_2015_grassland": {
-        "derived": "lc_class",
-        "lc_class": "grassland",
-        "description": "Grassland land cover area (ha), Copernicus 2015",
-        "category": "land_cover",
-        "resample": "sum",
+    "sdg_status_2019": {
+        "derived": "sdg_indicator",
+        "band_number": 9,
+        "description": "SDG 15.3.1 status in 2019 (vs 2000-2015 baseline)",
+        "category": "sdg",
+        "resample": "mode",
     },
-    "lc_2015_agriculture": {
-        "derived": "lc_class",
-        "lc_class": "agriculture",
-        "description": "Agriculture land cover area (ha), Copernicus 2015",
-        "category": "land_cover",
-        "resample": "sum",
-    },
-    "lc_2015_wetlands": {
-        "derived": "lc_class",
-        "lc_class": "wetlands",
-        "description": "Wetlands land cover area (ha), Copernicus 2015",
-        "category": "land_cover",
-        "resample": "sum",
-    },
-    "lc_2015_artificial": {
-        "derived": "lc_class",
-        "lc_class": "artificial",
-        "description": "Artificial surfaces area (ha), Copernicus 2015",
-        "category": "land_cover",
-        "resample": "sum",
-    },
-    "lc_2015_other": {
-        "derived": "lc_class",
-        "lc_class": "other",
-        "description": "Other land cover area (ha), Copernicus 2015",
-        "category": "land_cover",
-        "resample": "sum",
-    },
-    "lc_2015_water": {
-        "derived": "lc_class",
-        "lc_class": "water",
-        "description": "Water bodies area (ha), Copernicus 2015",
-        "category": "land_cover",
-        "resample": "sum",
+    "sdg_status_2023": {
+        "derived": "sdg_indicator",
+        "band_number": 14,
+        "description": "SDG 15.3.1 status in 2023 (vs 2000-2015 baseline)",
+        "category": "sdg",
+        "resample": "mode",
     },
 }
 
@@ -307,7 +281,6 @@ for year in (2003, 2007, 2011, 2015, 2019):
 # the covariate list when submitting analysis tasks.
 
 DEFAULT_MATCHING_COVARIATES = [
-    "lc_2015_agriculture",
     "precip",
     "temp",
     "elev",
@@ -322,14 +295,3 @@ DEFAULT_MATCHING_COVARIATES = [
 # These are used for exact matching (stratification), not propensity scores.
 # Names must match the output_name values in webapp/rasterize_vectors.py.
 EXACT_MATCHING_VARIABLES = ["admin0", "admin1", "admin2", "ecoregion", "pa"]
-
-# ESA CCI land cover class mapping (raw value -> category)
-ESA_LC_REMAP = {
-    "forest": [50, 60, 61, 62, 70, 71, 72, 80, 81, 82, 90, 100, 160, 170],
-    "grassland": [110, 120, 121, 122, 130, 140],
-    "agriculture": [10, 11, 12, 20, 30, 40],
-    "wetlands": [180],
-    "artificial": [190],
-    "other": [150, 151, 152, 153, 200, 201, 202],
-    "water": [210],
-}

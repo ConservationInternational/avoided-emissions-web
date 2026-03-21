@@ -97,54 +97,29 @@ def build_hansen_fc(year):
     return fc.rename(f"fc_{year}").toFloat()
 
 
-def build_lc_class(lc_class):
-    """Build a land cover class area layer from Copernicus Global LC 2015.
+# GCS path to the Trends.Earth SDG 15.3.1 global assessment COG.
+# Multi-band 16-bit integer file; band descriptions at
+# https://zenodo.org/records/17514520
+SDG_COG_URI = (
+    "gs://trendsearth-public/unccd_reporting/2016-2023/"
+    "TrendsEarth_SDG15.3.1_2000-2023_Trends.Earth.tif"
+)
 
-    Reclassifies the Copernicus 100m land cover map (discrete_classification)
-    to the target class, then computes the area of the class within each
-    ~1km pixel. Returns area in hectares.
+
+def build_sdg_indicator(band_number, output_name):
+    """Load an SDG 15.3.1 band from the Trends.Earth global COG on GCS.
+
+    The COG contains 14 bands covering baseline (2000-2015), two UNCCD
+    reporting periods (2004-2019, 2008-2023), and status assessments.
+    Band numbering is 1-indexed to match the Zenodo metadata.
+
+    Args:
+        band_number: 1-indexed band number in the COG.
+        output_name: Name for the output ee.Image band.
     """
-    lc = ee.Image("COPERNICUS/Landcover/100m/Proba-V-C3/Global/2015").select(
-        "discrete_classification"
-    )
-
-    # Copernicus discrete classification values:
-    #   0=Unknown, 20=Shrubs, 30=Herbaceous, 40=Cultivated,
-    #   50=Urban, 60=Bare/sparse, 70=Snow/ice, 80=Water,
-    #   90=Herbaceous wetland, 100=Moss/lichen,
-    #   111=Closed forest evergreen needle, 112=Closed forest evergreen broad,
-    #   113=Closed forest deciduous needle, 114=Closed forest deciduous broad,
-    #   115=Closed forest mixed, 116=Closed forest unknown,
-    #   121=Open forest evergreen needle, 122=Open forest evergreen broad,
-    #   123=Open forest deciduous needle, 124=Open forest deciduous broad,
-    #   125=Open forest mixed, 126=Open forest unknown, 200=Oceans
-    COPERNICUS_LC_REMAP = {
-        "forest": [111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126],
-        "grassland": [20, 30],
-        "agriculture": [40],
-        "wetlands": [90],
-        "artificial": [50],
-        "other": [60, 70, 100],
-        "water": [80, 200],
-    }
-
-    class_values = COPERNICUS_LC_REMAP.get(lc_class, [])
-    if not class_values:
-        raise ValueError(f"Unknown land cover class: {lc_class}")
-
-    # Create binary mask for this class
-    mask = lc.eq(class_values[0])
-    for val in class_values[1:]:
-        mask = mask.Or(lc.eq(val))
-
-    # Compute area fraction at target resolution. Each source pixel is 300m,
-    # so within a ~1km target pixel there are roughly 9-12 source pixels.
-    # We use reduceResolution to get the mean (fraction), then multiply
-    # by the pixel area in hectares.
-    pixel_area_ha = ee.Image.pixelArea().divide(10000)
-    class_area = mask.multiply(pixel_area_ha)
-
-    return class_area.rename(f"lc_2015_{lc_class}").toFloat()
+    img = ee.Image.loadGeoTIFF(SDG_COG_URI)
+    # loadGeoTIFF returns bands indexed from 0; select by 0-based index.
+    return img.select([band_number - 1]).rename(output_name).toInt16()
 
 
 def build_glad_cropland(year):
@@ -235,8 +210,8 @@ def get_derived_image(covariate_name, covariate_config):
         return build_total_biomass()
     elif derived_type == "hansen_fc":
         return build_hansen_fc(covariate_config["year"])
-    elif derived_type == "lc_class":
-        return build_lc_class(covariate_config["lc_class"])
+    elif derived_type == "sdg_indicator":
+        return build_sdg_indicator(covariate_config["band_number"], covariate_name)
     elif derived_type == "friction_surface":
         return build_friction_surface()
     elif derived_type == "glad_cropland":

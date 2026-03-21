@@ -36,7 +36,7 @@ All scripts read a JSON configuration file specifying:
    "cog_prefix": "avoided-emissions/covariates",
     "sites_file": "/data/input/sites.gpkg",
     "covariates": [
-        "lc_2015_agriculture", "precip", "temp", "elev", "slope",
+        "precip", "temp", "elev", "slope",
       "dist_cities", "friction_surface",
         "pop_2015", "pop_growth", "total_biomass"
     ],
