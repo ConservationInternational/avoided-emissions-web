@@ -86,7 +86,10 @@ def get_cog_suffix(resolution_m=DEFAULT_RESOLUTION_M):
 # enforces a hard 32,768-pixel limit per dimension.  At 30 arc-seconds
 # the global width is ~43,200 px, which exceeds that limit, so GEE will
 # always split the export into at least 2 tiles regardless of maxPixels.
-MAX_PIXELS_PER_TASK = 1e10
+#
+# At 250 m (1/480°) the global grid is ~172,800 × 86,400 = ~14.93 billion
+# pixels, so the limit must be ≥ 15e9.  GEE allows up to 1e13.
+MAX_PIXELS_PER_TASK = 2e10
 
 # Full-globe export region
 GLOBAL_REGION = {
