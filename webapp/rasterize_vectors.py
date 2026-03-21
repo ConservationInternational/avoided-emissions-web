@@ -117,10 +117,15 @@ def _pg_connection_string() -> str:
     return "PG:" + " ".join(parts)
 
 
+_GDAL_ENV = {**os.environ, "GDAL_CACHEMAX": "512"}
+
+
 def _run_cmd(cmd: list[str]) -> None:
     """Run a shell command, raising on failure."""
     logger.info("Running: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, check=False, env=_GDAL_ENV
+    )
     if result.returncode != 0:
         logger.error("STDOUT: %s", result.stdout)
         logger.error("STDERR: %s", result.stderr)
@@ -207,6 +212,8 @@ def rasterize_layer(
         "0",
         "-co",
         "COMPRESS=DEFLATE",
+        "-co",
+        "TILED=YES",
         "-co",
         "BIGTIFF=YES",
     ]
