@@ -425,6 +425,18 @@ def run_cog_merge(self, layer_id: str) -> dict:
             db.close()
             return {"status": "superseded", "error": "record deleted"}
 
+        # Guard against duplicate merges: if another task already
+        # transitioned this covariate to 'merging', skip this one.
+        if layer.status == "merging":
+            logger.info(
+                "Covariate %s (%s) is already being merged by another "
+                "task — skipping duplicate",
+                layer.covariate_name,
+                layer_id,
+            )
+            db.close()
+            return {"status": "skipped", "reason": "already merging"}
+
         # Look for an existing metadata snapshot (created by auto_merge
         # or poll_gee_exports).
         meta = (
@@ -942,10 +954,12 @@ def auto_merge_unmerged() -> dict:
             if row.tile_etag_hash:
                 latest_hashes[row.covariate_name] = row.tile_etag_hash
 
-        # Reset covariates stuck in "merging" for more than 15 minutes.
+        # Reset covariates stuck in "merging" for too long.
         # This happens when a worker is killed mid-merge (e.g. during a
         # Docker Swarm rolling update) and the task message is lost.
-        stale_cutoff = now - timedelta(minutes=15)
+        # Use a generous cutoff: large covariates (fc_YYYY ~8 GB) can
+        # legitimately take 30+ min to download, merge and upload.
+        stale_cutoff = now - timedelta(minutes=120)
         stale_merging = (
             db.query(Covariate)
             .filter(
