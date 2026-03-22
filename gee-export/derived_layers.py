@@ -97,31 +97,6 @@ def build_hansen_fc(year):
     return fc.rename(f"fc_{year}").toFloat()
 
 
-# GCS path to the Trends.Earth SDG 15.3.1 global assessment COG.
-# Multi-band 16-bit integer file; band descriptions at
-# https://zenodo.org/records/17514520
-SDG_COG_URI = (
-    "gs://trendsearth-public/unccd_reporting/2016-2023/"
-    "TrendsEarth_SDG15.3.1_2000-2023_Trends.Earth.tif"
-)
-
-
-def build_sdg_indicator(band_number, output_name):
-    """Load an SDG 15.3.1 band from the Trends.Earth global COG on GCS.
-
-    The COG contains 14 bands covering baseline (2000-2015), two UNCCD
-    reporting periods (2004-2019, 2008-2023), and status assessments.
-    Band numbering is 1-indexed to match the Zenodo metadata.
-
-    Args:
-        band_number: 1-indexed band number in the COG.
-        output_name: Name for the output ee.Image band.
-    """
-    img = ee.Image.loadGeoTIFF(SDG_COG_URI)
-    # loadGeoTIFF returns bands indexed from 0; select by 0-based index.
-    return img.select([band_number - 1]).rename(output_name).toInt16()
-
-
 def build_glad_cropland(year):
     """Build a GLAD cropland extent layer for a given epoch year.
 
@@ -210,8 +185,6 @@ def get_derived_image(covariate_name, covariate_config):
         return build_total_biomass()
     elif derived_type == "hansen_fc":
         return build_hansen_fc(covariate_config["year"])
-    elif derived_type == "sdg_indicator":
-        return build_sdg_indicator(covariate_config["band_number"], covariate_name)
     elif derived_type == "friction_surface":
         return build_friction_surface()
     elif derived_type == "glad_cropland":

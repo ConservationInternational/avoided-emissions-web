@@ -260,10 +260,123 @@ def rasterize_vectors_task(self) -> dict:
             finally:
                 db.close()
 
+        # Chain SDG COG ingestion after vectors are rasterized.
+        ingest_sdg_cog_task.delay()
+        logger.info("Dispatched ingest_sdg_cog_task after vector rasterization")
+
         return {"status": "complete", "layers": all_results}
 
     except Exception as exc:
         logger.exception("Vector rasterization failed")
+        report_exception()
+        raise self.retry(exc=exc, countdown=120)
+
+
+@celery_app.task(
+    name="tasks.ingest_sdg_cog",
+    bind=True,
+    max_retries=1,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def ingest_sdg_cog_task(self) -> dict:
+    """Download the Trends.Earth SDG 15.3.1 COG, extract bands, and upload to S3.
+
+    The source is a pre-computed multi-band COG on Google Cloud Storage.
+    Individual bands are extracted, resampled to each resolution grid,
+    and uploaded as single-band COGs.  Layers already present on S3 are
+    skipped.
+
+    Typically dispatched after :func:`rasterize_vectors_task` completes.
+
+    Returns
+    -------
+    dict
+        ``{"status": "complete", "layers": {...}}`` on success.
+    """
+    from datetime import datetime, timezone
+
+    from config import Config
+    from ingest_sdg_cog import RESOLUTIONS, SDG_LAYERS, ingest_sdg_layers
+    from models import Covariate, get_db
+
+    try:
+        upload_results = ingest_sdg_layers()
+
+        # Create or update Covariate DB records for each uploaded layer
+        db = get_db()
+        try:
+            for resolution_m, res_cfg in RESOLUTIONS.items():
+                cog_suffix = res_cfg["cog_suffix"]
+                bucket = Config.S3_BUCKET
+                prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}".strip("/")
+
+                for name, layer_info in SDG_LAYERS.items():
+                    result_key = f"{name}{cog_suffix}"
+                    result = upload_results.get(result_key)
+                    if not result:
+                        continue
+
+                    existing = (
+                        db.query(Covariate)
+                        .filter(
+                            Covariate.covariate_name == name,
+                            Covariate.resolution_m == resolution_m,
+                        )
+                        .order_by(Covariate.started_at.desc())
+                        .first()
+                    )
+
+                    if (
+                        existing
+                        and existing.status == "merged"
+                        and result.get("skipped")
+                    ):
+                        logger.info(
+                            "SDG layer %s (%dm) already tracked — skipping DB update",
+                            name,
+                            resolution_m,
+                        )
+                        continue
+
+                    if existing:
+                        layer = existing
+                    else:
+                        layer = Covariate(
+                            covariate_name=name,
+                            resolution_m=resolution_m,
+                            output_bucket=bucket,
+                            output_prefix=prefix,
+                            started_at=datetime.now(timezone.utc),
+                        )
+                        db.add(layer)
+                        db.flush()
+
+                    layer.status = "merged"
+                    layer.merged_url = result["cog_url"]
+                    layer.size_bytes = result["size_bytes"]
+                    layer.completed_at = datetime.now(timezone.utc)
+                    meta = dict(layer.extra_metadata or {})
+                    meta["source"] = "sdg_cog_ingest"
+                    meta["band"] = layer_info["band"]
+                    meta["description"] = layer_info["description"]
+                    if result.get("skipped"):
+                        meta["adopted_from_s3"] = True
+                    layer.extra_metadata = meta
+                    db.commit()
+                    logger.info(
+                        "SDG layer %s (%dm) -> %s",
+                        name,
+                        resolution_m,
+                        result["cog_url"],
+                    )
+        finally:
+            db.close()
+
+        return {"status": "complete", "layers": upload_results}
+
+    except Exception as exc:
+        logger.exception("SDG COG ingestion failed")
         report_exception()
         raise self.retry(exc=exc, countdown=120)
 

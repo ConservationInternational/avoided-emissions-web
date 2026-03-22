@@ -218,30 +218,6 @@ COVARIATES = {
         "category": "biomass",
         "resample": "mean",
     },
-    # SDG 15.3.1 Indicator layers (Trends.Earth global assessment)
-    # Source: multi-band COG on GCS, loaded via ee.Image.loadGeoTIFF().
-    # Band descriptions: https://zenodo.org/records/17514520
-    "sdg_baseline": {
-        "derived": "sdg_indicator",
-        "band_number": 1,
-        "description": "SDG 15.3.1 indicator for baseline period (2000-2015)",
-        "category": "sdg",
-        "resample": "mode",
-    },
-    "sdg_status_2019": {
-        "derived": "sdg_indicator",
-        "band_number": 9,
-        "description": "SDG 15.3.1 status in 2019 (vs 2000-2015 baseline)",
-        "category": "sdg",
-        "resample": "mode",
-    },
-    "sdg_status_2023": {
-        "derived": "sdg_indicator",
-        "band_number": 14,
-        "description": "SDG 15.3.1 status in 2023 (vs 2000-2015 baseline)",
-        "category": "sdg",
-        "resample": "mode",
-    },
 }
 
 # Agro-ecological zones
