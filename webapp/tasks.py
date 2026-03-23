@@ -998,7 +998,7 @@ def auto_merge_unmerged() -> dict:
             )
             stale.status = "failed"
             stale.error_message = (
-                "Reset by auto_merge: stuck in merge for >15 min "
+                "Reset by auto_merge: stuck in merge for >120 min "
                 "(likely killed during deploy)"
             )
             stale.completed_at = now
