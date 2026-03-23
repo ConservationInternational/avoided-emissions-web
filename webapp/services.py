@@ -2821,7 +2821,28 @@ def get_covariate_inventory():
         "forest_cover": "Forest Cover",
         "ecological": "Ecological",
         "administrative": "Administrative",
+        "sdg": "SDG",
+        "cropland": "Cropland",
     }
+
+    # Non-GEE covariates: layers produced by vector rasterization or SDG
+    # ingestion.  They live on S3 and in the DB but aren't in the GEE
+    # COVARIATES dict.  We define category/description here so they show
+    # up in the admin inventory.
+    from ingest_sdg_cog import SDG_LAYERS
+    from rasterize_vectors import VECTOR_LAYERS
+
+    _non_gee_covariates: dict[str, dict] = {}
+    for _vl in VECTOR_LAYERS:
+        _non_gee_covariates[_vl["output_name"]] = {
+            "category": "administrative",
+            "description": _vl["description"],
+        }
+    for _sdg_name, _sdg_info in SDG_LAYERS.items():
+        _non_gee_covariates[_sdg_name] = {
+            "category": "sdg",
+            "description": _sdg_info["description"],
+        }
 
     # 1. Scan GCS for tiles per resolution
     # Keyed by (covariate_name, resolution_m)
@@ -2918,6 +2939,50 @@ def get_covariate_inventory():
                 ),
             }
             rows.append(row)
+
+    # 5. Include non-GEE covariates (vector/SDG layers) that have DB
+    #    records or S3 COGs but aren't in the GEE COVARIATES dict.
+    gee_names = set(covariates.keys())
+    extra_keys = {k for k in db_records if k[0] not in gee_names} | {
+        k for k in s3_cogs if k[0] not in gee_names
+    }
+    for name, res_m in sorted(extra_keys):
+        key = (name, res_m)
+        gcs_tile_count = gcs_counts.get(key, 0)
+        s3_obj = s3_cogs.get(key)
+        db_rec = db_records.get(key)
+        non_gee_cfg = _non_gee_covariates.get(name, {})
+        raw_cat = non_gee_cfg.get("category", "other")
+
+        row = {
+            "covariate_name": name,
+            "category": cat_labels.get(raw_cat, raw_cat),
+            "description": non_gee_cfg.get("description", ""),
+            "resolution": res_labels.get(res_m, f"{res_m} m"),
+            "resolution_m": res_m,
+            "gcs_tiles": gcs_tile_count,
+            "on_s3": bool(s3_obj),
+            "status": db_rec.status if db_rec else "",
+            "gee_task_id": (
+                db_rec.gee_task_id if db_rec and db_rec.gee_task_id else ""
+            ),
+            "size_mb": (
+                round(db_rec.size_bytes / (1024 * 1024), 1)
+                if db_rec and db_rec.size_bytes
+                else (round(s3_obj["size"] / (1024 * 1024), 1) if s3_obj else None)
+            ),
+            "merged_url": (
+                db_rec.merged_url
+                if db_rec and db_rec.merged_url
+                else (s3_obj["url"] if s3_obj else "")
+            ),
+            "started_at": _fmt(db_rec.started_at) if db_rec else "",
+            "completed_at": _fmt(db_rec.completed_at) if db_rec else "",
+            "error_message": (
+                db_rec.error_message if db_rec and db_rec.error_message else ""
+            ),
+        }
+        rows.append(row)
 
     return rows
 
