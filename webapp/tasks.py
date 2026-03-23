@@ -561,6 +561,19 @@ def run_cog_merge(self, layer_id: str) -> dict:
             meta.merged_cog_url = result["url"]
             meta.merged_cog_bytes = result["size_bytes"]
             meta.merged_cog_etag = result.get("s3_etag")
+            logger.info(
+                "run_cog_merge: stored hash=%s gcs_prefix=%s for '%s'",
+                meta.tile_etag_hash,
+                meta.gcs_prefix,
+                layer.covariate_name,
+            )
+        else:
+            logger.warning(
+                "run_cog_merge: no metadata snapshot found for '%s' "
+                "(covariate_id=%s) — hash will not be recorded!",
+                layer.covariate_name,
+                layer_id,
+            )
 
         db.commit()
         logger.info("COG merge completed for '%s'", layer.covariate_name)
@@ -930,47 +943,46 @@ def auto_merge_unmerged() -> dict:
         # (covariate_name, gcs_prefix) so that different resolutions
         # (e.g. 250 m vs 1 km) are tracked independently and don't
         # cause an infinite ping-pong of re-merges.
-        from sqlalchemy import func
-
+        #
+        # We query all merged snapshots ordered newest-first and
+        # deduplicate in Python.  This avoids a correlated subquery
+        # JOIN whose NULL-equality semantics (SQL NULL=NULL → FALSE)
+        # silently dropped rows with NULL gcs_prefix, causing every
+        # covariate to appear "never merged" on every cycle.
         latest_hashes: dict[tuple[str, str], str] = {}
-        subq = (
+        all_merged = (
             db.query(
                 GeeExportMetadata.covariate_name,
                 GeeExportMetadata.gcs_prefix,
-                func.max(GeeExportMetadata.created_at).label("max_created"),
+                GeeExportMetadata.tile_etag_hash,
             )
             .filter(
                 GeeExportMetadata.status.in_(["merged", "skipped_existing"]),
                 GeeExportMetadata.tile_etag_hash.isnot(None),
             )
-            .group_by(GeeExportMetadata.covariate_name, GeeExportMetadata.gcs_prefix)
-            .subquery()
-        )
-        for row in (
-            db.query(GeeExportMetadata)
-            .join(
-                subq,
-                (GeeExportMetadata.covariate_name == subq.c.covariate_name)
-                & (GeeExportMetadata.gcs_prefix == subq.c.gcs_prefix)
-                & (GeeExportMetadata.created_at == subq.c.max_created),
-            )
+            .order_by(GeeExportMetadata.created_at.desc())
             .all()
-        ):
-            if row.tile_etag_hash:
-                latest_hashes[(row.covariate_name, row.gcs_prefix or "")] = (
-                    row.tile_etag_hash
-                )
+        )
+        for row in all_merged:
+            key = (row.covariate_name, row.gcs_prefix or "")
+            if key not in latest_hashes:
+                latest_hashes[key] = row.tile_etag_hash
 
         # Reset covariates stuck in "merging" for too long.
         # This happens when a worker is killed mid-merge (e.g. during a
         # Docker Swarm rolling update) and the task message is lost.
         # Use a generous cutoff: large covariates (fc_YYYY ~8 GB) can
         # legitimately take 30+ min to download, merge and upload.
+        # Only consider covariates where started_at is set (i.e. the
+        # merge actually started); queued covariates with NULL
+        # started_at are just waiting for a worker and should not be
+        # marked stale.
         stale_cutoff = now - timedelta(minutes=120)
         stale_merging = (
             db.query(Covariate)
             .filter(
                 Covariate.status.in_(["pending_merge", "merging"]),
+                Covariate.started_at.isnot(None),
                 Covariate.started_at < stale_cutoff,
             )
             .all()
@@ -1014,15 +1026,33 @@ def auto_merge_unmerged() -> dict:
             .all()
         }
 
+        logger.info(
+            "auto_merge: %d covariate(s) with tiles, %d in-progress, "
+            "%d latest hashes loaded",
+            len(with_tiles),
+            len(in_progress),
+            len(latest_hashes),
+        )
+
         need_merge: list[tuple[str, int]] = []
         for name, res_m in sorted(with_tiles):
             if (name, res_m) in in_progress:
                 continue
             current_hash = compute_tile_etag_hash(gcs_details[(name, res_m)])
             gcs_pfx = gee_config.get_gcs_prefix(Config.GCS_PREFIX, res_m)
-            if latest_hashes.get((name, gcs_pfx)) == current_hash:
+            stored_hash = latest_hashes.get((name, gcs_pfx))
+            if stored_hash == current_hash:
                 continue  # tiles unchanged since last merge
             need_merge.append((name, res_m))
+            logger.info(
+                "auto_merge: %s@%dm needs merge — "
+                "stored_hash=%s current_hash=%s gcs_pfx=%s",
+                name,
+                res_m,
+                stored_hash,
+                current_hash,
+                gcs_pfx,
+            )
 
         if not need_merge:
             db.commit()
@@ -1053,10 +1083,11 @@ def auto_merge_unmerged() -> dict:
             )
             if existing:
                 existing.status = "pending_merge"
-                existing.started_at = now
+                existing.started_at = None
                 existing.error_message = None
                 existing.output_bucket = Config.S3_BUCKET
                 existing.output_prefix = s3_output_prefix
+                existing.gcs_prefix = gcs_prefix
                 cov_id = existing.id
                 dispatched_ids.append(str(existing.id))
             else:
@@ -1068,7 +1099,7 @@ def auto_merge_unmerged() -> dict:
                     gcs_prefix=gcs_prefix,
                     output_bucket=Config.S3_BUCKET,
                     output_prefix=s3_output_prefix,
-                    started_at=now,
+                    started_at=None,
                 )
                 db.add(layer)
                 db.flush()
