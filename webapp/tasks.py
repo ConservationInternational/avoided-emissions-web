@@ -926,20 +926,24 @@ def auto_merge_unmerged() -> dict:
 
         # ---- Determine which covariates need a (re-)merge ----
         # Compare the current tile fingerprint against the most recent
-        # successfully merged snapshot.
+        # successfully merged snapshot.  The hash is keyed by
+        # (covariate_name, gcs_prefix) so that different resolutions
+        # (e.g. 250 m vs 1 km) are tracked independently and don't
+        # cause an infinite ping-pong of re-merges.
         from sqlalchemy import func
 
-        latest_hashes: dict[str, str] = {}
+        latest_hashes: dict[tuple[str, str], str] = {}
         subq = (
             db.query(
                 GeeExportMetadata.covariate_name,
+                GeeExportMetadata.gcs_prefix,
                 func.max(GeeExportMetadata.created_at).label("max_created"),
             )
             .filter(
                 GeeExportMetadata.status.in_(["merged", "skipped_existing"]),
                 GeeExportMetadata.tile_etag_hash.isnot(None),
             )
-            .group_by(GeeExportMetadata.covariate_name)
+            .group_by(GeeExportMetadata.covariate_name, GeeExportMetadata.gcs_prefix)
             .subquery()
         )
         for row in (
@@ -947,12 +951,15 @@ def auto_merge_unmerged() -> dict:
             .join(
                 subq,
                 (GeeExportMetadata.covariate_name == subq.c.covariate_name)
+                & (GeeExportMetadata.gcs_prefix == subq.c.gcs_prefix)
                 & (GeeExportMetadata.created_at == subq.c.max_created),
             )
             .all()
         ):
             if row.tile_etag_hash:
-                latest_hashes[row.covariate_name] = row.tile_etag_hash
+                latest_hashes[(row.covariate_name, row.gcs_prefix or "")] = (
+                    row.tile_etag_hash
+                )
 
         # Reset covariates stuck in "merging" for too long.
         # This happens when a worker is killed mid-merge (e.g. during a
@@ -1012,7 +1019,8 @@ def auto_merge_unmerged() -> dict:
             if (name, res_m) in in_progress:
                 continue
             current_hash = compute_tile_etag_hash(gcs_details[(name, res_m)])
-            if latest_hashes.get(name) == current_hash:
+            gcs_pfx = gee_config.get_gcs_prefix(Config.GCS_PREFIX, res_m)
+            if latest_hashes.get((name, gcs_pfx)) == current_hash:
                 continue  # tiles unchanged since last merge
             need_merge.append((name, res_m))
 
