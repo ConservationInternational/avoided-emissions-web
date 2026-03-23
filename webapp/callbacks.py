@@ -216,7 +216,9 @@ def _fmt_dt(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _record_covariate_action_failure(covariate_name, action, user_id):
+def _record_covariate_action_failure(
+    covariate_name, action, user_id, resolution_m=1000
+):
     """Create a ``failed`` Covariate record so the table shows the error.
 
     Called when a reexport/remerge action raises before the GEE task is
@@ -236,6 +238,7 @@ def _record_covariate_action_failure(covariate_name, action, user_id):
     try:
         rec = Covariate(
             covariate_name=covariate_name,
+            resolution_m=resolution_m,
             status="failed",
             error_message=error_msg,
             started_by=user_id,
@@ -2267,13 +2270,14 @@ def register_callbacks(app, limiter=None):
         data = renderer_data.get("value", {})
         action = data.get("_action")
         covariate_name = data.get("covariate_name")
+        resolution_m = data.get("resolution_m", 1000)
 
         if not action or not covariate_name:
             raise PreventUpdate
 
         try:
             if action == "reexport":
-                force_reexport(covariate_name, user.id)
+                force_reexport(covariate_name, user.id, resolution_m=resolution_m)
                 return dbc.Alert(
                     f"Re-export started for '{covariate_name}'. "
                     "Existing GCS tiles and S3 COG have been deleted.",
@@ -2281,7 +2285,7 @@ def register_callbacks(app, limiter=None):
                     duration=6000,
                 )
             elif action == "remerge":
-                force_remerge(covariate_name, user.id)
+                force_remerge(covariate_name, user.id, resolution_m=resolution_m)
                 return dbc.Alert(
                     f"Re-merge queued for '{covariate_name}'. "
                     "Existing S3 COG has been deleted.",
@@ -2301,6 +2305,7 @@ def register_callbacks(app, limiter=None):
                     covariate_name,
                     action,
                     user.id,
+                    resolution_m=resolution_m,
                 )
             except Exception:
                 logger.exception(

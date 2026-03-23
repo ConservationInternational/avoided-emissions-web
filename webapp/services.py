@@ -1830,7 +1830,7 @@ def _parse_iso_datetime(value):
         return None
 
 
-def _cleanup_covariate_downstream(covariate_name, db):
+def _cleanup_covariate_downstream(covariate_name, db, *, resolution_m=None):
     """Delete downstream artefacts for a covariate before re-export.
 
     Removes the S3 COG, GCS tiles, and existing DB records so that a
@@ -1843,6 +1843,9 @@ def _cleanup_covariate_downstream(covariate_name, db):
         Covariate key from config.COVARIATES.
     db : sqlalchemy.orm.Session
         An open database session (caller manages commit/close).
+    resolution_m : int | None
+        If provided, only clean up artefacts at this resolution.
+        If ``None``, clean up all resolutions (legacy behaviour).
     """
     from cog_merge import delete_gcs_tiles, delete_s3_cog
 
@@ -1870,12 +1873,14 @@ def _cleanup_covariate_downstream(covariate_name, db):
         except Exception:
             logger.warning("Failed to delete GCS tiles for %s", covariate_name)
 
-    # 3. Remove old DB records for this covariate.
-    #    Flush + commit-worthy so that a concurrent merge worker sees
-    #    the deletion immediately and can bail out.
-    old_records = (
-        db.query(Covariate).filter(Covariate.covariate_name == covariate_name).all()
-    )
+    # 3. Remove old DB records for this covariate (at the target resolution
+    #    only, or all resolutions when resolution_m is None).
+    #    Flush so that a concurrent merge worker sees the deletion
+    #    immediately and can bail out.
+    q = db.query(Covariate).filter(Covariate.covariate_name == covariate_name)
+    if resolution_m is not None:
+        q = q.filter(Covariate.resolution_m == resolution_m)
+    old_records = q.all()
     for rec in old_records:
         db.delete(rec)
     db.flush()
@@ -1964,7 +1969,7 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
     try:
         for name in covariate_names:
             # Clean up any existing downstream artefacts before re-export
-            _cleanup_covariate_downstream(name, db)
+            _cleanup_covariate_downstream(name, db, resolution_m=resolution_m)
 
             task = start_export_task(
                 covariate_name=name,
@@ -2670,7 +2675,7 @@ def generate_match_quality_summary(task_id, results_s3_uri=None):
 # ---------------------------------------------------------------------------
 
 
-def force_reexport(covariate_name, user_id):
+def force_reexport(covariate_name, user_id, *, resolution_m=1000):
     """Force re-export a covariate from GEE.
 
     Delegates to :func:`start_gee_export`, which cleans up any existing
@@ -2683,17 +2688,19 @@ def force_reexport(covariate_name, user_id):
         Covariate key from config.COVARIATES.
     user_id : uuid.UUID
         Admin user who triggered the action.
+    resolution_m : int
+        Target resolution in metres (default 1000).
 
     Returns
     -------
     dict
         ``{"status": "ok", "export_id": …}`` on success.
     """
-    export_ids = start_gee_export([covariate_name], user_id)
+    export_ids = start_gee_export([covariate_name], user_id, resolution_m=resolution_m)
     return {"status": "ok", "export_id": export_ids[0] if export_ids else None}
 
 
-def force_remerge(covariate_name, user_id):
+def force_remerge(covariate_name, user_id, *, resolution_m=1000):
     """Force re-merge GCS tiles to a new S3 COG.
 
     Deletes the existing S3 COG (if any), resets the DB record to
@@ -2705,6 +2712,8 @@ def force_remerge(covariate_name, user_id):
         Covariate key from config.COVARIATES.
     user_id : uuid.UUID
         Admin user who triggered the action.
+    resolution_m : int
+        Target resolution in metres (default 1000).
 
     Returns
     -------
@@ -2733,7 +2742,10 @@ def force_remerge(covariate_name, user_id):
     try:
         existing = (
             db.query(Covariate)
-            .filter(Covariate.covariate_name == covariate_name)
+            .filter(
+                Covariate.covariate_name == covariate_name,
+                Covariate.resolution_m == resolution_m,
+            )
             .order_by(Covariate.started_at.desc())
             .first()
         )
@@ -2749,6 +2761,7 @@ def force_remerge(covariate_name, user_id):
         else:
             layer = Covariate(
                 covariate_name=covariate_name,
+                resolution_m=resolution_m,
                 status="pending_merge",
                 gcs_bucket=Config.GCS_BUCKET,
                 gcs_prefix=Config.GCS_PREFIX,
@@ -2866,14 +2879,9 @@ def get_covariate_inventory():
     for name, cfg in covariates.items():
         raw_cat = cfg.get("category", "other")
 
-        # Determine which resolutions to show for this covariate.
-        seen_resolutions = (
-            {r for (n, r) in db_records if n == name}
-            | {r for (n, r) in gcs_counts if n == name}
-            | {r for (n, r) in s3_cogs if n == name}
-        )
-        if not seen_resolutions:
-            seen_resolutions = {1000}  # default placeholder
+        # Show a row for every configured resolution so that
+        # covariates are always visible even before their first export.
+        seen_resolutions = set(cov_resolutions.keys())
 
         for res_m in sorted(seen_resolutions):
             key = (name, res_m)
@@ -2886,6 +2894,7 @@ def get_covariate_inventory():
                 "category": cat_labels.get(raw_cat, raw_cat),
                 "description": cfg.get("description", ""),
                 "resolution": res_labels.get(res_m, f"{res_m} m"),
+                "resolution_m": res_m,
                 "gcs_tiles": gcs_tile_count,
                 "on_s3": bool(s3_obj),
                 "status": db_rec.status if db_rec else "",
