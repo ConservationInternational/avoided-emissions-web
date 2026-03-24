@@ -544,7 +544,13 @@ def run_cog_merge(self, layer_id: str) -> dict:
         if tile_hash:
             md = dict(layer.extra_metadata or {})
             md["tile_etag_hash"] = tile_hash
+            md.pop("merge_retry_count", None)  # reset on success
             layer.extra_metadata = md
+            # Ensure SQLAlchemy detects the JSON column change even if
+            # the new dict happens to compare equal to the old one.
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(layer, "extra_metadata")
             logger.info(
                 "run_cog_merge: wrote tile_etag_hash=%s on Covariate "
                 "extra_metadata for '%s'",
@@ -616,6 +622,18 @@ def run_cog_merge(self, layer_id: str) -> dict:
                 layer.status = "failed"
                 layer.error_message = str(exc)[:2000]
                 layer.completed_at = datetime.now(timezone.utc)
+                # Track retry count so auto_merge can retry up to 3 times
+                md = dict(layer.extra_metadata or {})
+                md["merge_retry_count"] = md.get("merge_retry_count", 0) + 1
+                layer.extra_metadata = md
+                from sqlalchemy.orm.attributes import flag_modified
+
+                flag_modified(layer, "extra_metadata")
+                logger.info(
+                    "run_cog_merge: failure #%d for '%s' (max 3 retries)",
+                    md["merge_retry_count"],
+                    layer.covariate_name,
+                )
             # Also mark the metadata snapshot as failed
             meta = (
                 db.query(GeeExportMetadata)
@@ -928,6 +946,9 @@ def auto_merge_unmerged() -> dict:
                 md = dict(layer.extra_metadata or {})
                 md["tile_etag_hash"] = tile_hash
                 layer.extra_metadata = md
+                from sqlalchemy.orm.attributes import flag_modified
+
+                flag_modified(layer, "extra_metadata")
 
             # Create an export metadata snapshot for the discovered COG
             meta = GeeExportMetadata(
@@ -957,41 +978,9 @@ def auto_merge_unmerged() -> dict:
 
         db.flush()
 
-        # ---- Determine which covariates need a (re-)merge ----
-        # Compare the current tile fingerprint against the hash stored
-        # directly on the Covariate record (in extra_metadata JSON).
-        # This is keyed by (covariate_name, resolution_m) — both are
-        # NOT NULL columns — eliminating the fragile cross-table
-        # GeeExportMetadata lookup that suffered from NULL gcs_prefix
-        # mismatches, status-filtering gaps, and session/isolation
-        # edge cases across multiple prior fix attempts.
-        latest_hashes: dict[tuple[str, int], str] = {}
-        merged_covariates = (
-            db.query(
-                Covariate.covariate_name,
-                Covariate.resolution_m,
-                Covariate.extra_metadata,
-            )
-            .filter(Covariate.status == "merged")
-            .order_by(Covariate.completed_at.desc().nulls_last())
-            .all()
-        )
-        for row in merged_covariates:
-            key = (row.covariate_name, row.resolution_m)
-            if key not in latest_hashes:
-                tile_hash = (row.extra_metadata or {}).get("tile_etag_hash")
-                if tile_hash:
-                    latest_hashes[key] = tile_hash
-
-        # Reset covariates stuck in "merging" for too long.
-        # This happens when a worker is killed mid-merge (e.g. during a
-        # Docker Swarm rolling update) and the task message is lost.
-        # Use a generous cutoff: large covariates (fc_YYYY ~8 GB) can
-        # legitimately take 30+ min to download, merge and upload.
-        # Only consider covariates where started_at is set (i.e. the
-        # merge actually started); queued covariates with NULL
-        # started_at are just waiting for a worker and should not be
-        # marked stale.
+        # ---- Reset stale merges FIRST ----
+        # Must run before the snapshot query so that stale records
+        # show as "failed" (not "merging") in the snapshot.
         stale_cutoff = now - timedelta(minutes=120)
         stale_merging = (
             db.query(Covariate)
@@ -1017,7 +1006,13 @@ def auto_merge_unmerged() -> dict:
                 "(likely killed during deploy)"
             )
             stale.completed_at = now
-            # Also mark any associated metadata snapshots as failed
+            # Count stale resets as a failed attempt for auto-retry
+            md = dict(stale.extra_metadata or {})
+            md["merge_retry_count"] = md.get("merge_retry_count", 0) + 1
+            stale.extra_metadata = md
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(stale, "extra_metadata")
             stale_metas = (
                 db.query(GeeExportMetadata)
                 .filter(
@@ -1033,20 +1028,68 @@ def auto_merge_unmerged() -> dict:
         if stale_merging:
             db.flush()
 
-        # Skip covariates with an in-progress merge (fresh ones only)
-        in_progress = {
-            (row.covariate_name, row.resolution_m)
-            for row in db.query(Covariate.covariate_name, Covariate.resolution_m)
-            .filter(Covariate.status.in_(["pending_merge", "merging"]))
+        # ---- Determine which covariates need a (re-)merge ----
+        # CRITICAL: derive both `latest_hashes` and `in_progress`
+        # from a SINGLE query to avoid a TOCTOU race.
+        #
+        # Previously, hashes were fetched with one SELECT (status =
+        # "merged") and the in-progress set with a second SELECT
+        # (status IN ("pending_merge", "merging")).  Under PostgreSQL
+        # READ COMMITTED, each statement sees the latest committed
+        # data at the instant it runs.  If the merge worker committed
+        # a status change from "merging" → "merged" between the two
+        # queries, the record was excluded from BOTH checks:
+        #   • hash lookup: missed it (status was still "merging")
+        #   • in_progress: missed it (status was now "merged")
+        # → covariate fell through and was re-dispatched every cycle.
+        #
+        # The fix: one query fetches all Covariate records, and Python
+        # derives both sets from the same snapshot.
+        all_covariates = (
+            db.query(
+                Covariate.id,
+                Covariate.covariate_name,
+                Covariate.resolution_m,
+                Covariate.status,
+                Covariate.extra_metadata,
+                Covariate.completed_at,
+            )
+            .order_by(Covariate.completed_at.desc().nulls_last())
             .all()
-        }
+        )
+
+        latest_hashes: dict[tuple[str, int], str] = {}
+        in_progress: set[tuple[str, int]] = set()
+        # Track the most recent failed covariate per (name, res_m) that
+        # is eligible for an automatic retry (merge_retry_count < 3).
+        _max_merge_retries = 3
+        retryable_failed: dict[tuple[str, int], str] = {}  # key → covariate id
+        for row in all_covariates:
+            key = (row.covariate_name, row.resolution_m)
+            if row.status in ("pending_merge", "merging"):
+                in_progress.add(key)
+            elif row.status == "merged" and key not in latest_hashes:
+                tile_hash = (row.extra_metadata or {}).get("tile_etag_hash")
+                if tile_hash:
+                    latest_hashes[key] = tile_hash
+            elif (
+                row.status == "failed"
+                and key not in retryable_failed
+                and key not in in_progress
+                and key not in latest_hashes
+                and key in with_tiles
+            ):
+                retry_count = (row.extra_metadata or {}).get("merge_retry_count", 0)
+                if retry_count < _max_merge_retries:
+                    retryable_failed[key] = str(row.id)
 
         logger.info(
             "auto_merge: %d covariate(s) with tiles, %d in-progress, "
-            "%d latest hashes loaded",
+            "%d latest hashes loaded, %d retryable failures",
             len(with_tiles),
             len(in_progress),
             len(latest_hashes),
+            len(retryable_failed),
         )
 
         need_merge: list[tuple[str, int]] = []
@@ -1066,13 +1109,18 @@ def auto_merge_unmerged() -> dict:
                 current_hash,
             )
 
-        if not need_merge:
+        if not need_merge and not retryable_failed:
             db.commit()
             return {
                 "scanned": len(known_covariates),
                 "dispatched": 0,
                 "discovered": discovered,
             }
+
+        # Remove retryable keys that will already be handled by need_merge
+        dispatched_keys = set(need_merge)
+        for key in dispatched_keys:
+            retryable_failed.pop(key, None)
 
         for name, res_m in need_merge:
             tiles = gcs_details[(name, res_m)]
@@ -1134,6 +1182,30 @@ def auto_merge_unmerged() -> dict:
             )
             db.add(meta)
 
+        # ---- Auto-retry failed merges (up to 3 attempts) ----
+        # Only retry covariates that failed, still have GCS tiles, and
+        # haven't already been picked up by the need_merge loop above
+        # (which covers tile-hash changes).  Overlapping keys were
+        # already pruned above.
+        retry_ids: list[str] = []
+        for key, cov_id in retryable_failed.items():
+            cov = db.query(Covariate).filter(Covariate.id == cov_id).first()
+            if not cov or cov.status != "failed":
+                continue
+            retry_count = (cov.extra_metadata or {}).get("merge_retry_count", 0)
+            logger.info(
+                "auto_merge: retrying failed covariate '%s'@%dm (attempt %d/%d, id=%s)",
+                cov.covariate_name,
+                cov.resolution_m,
+                retry_count + 1,
+                _max_merge_retries,
+                cov_id,
+            )
+            cov.status = "pending_merge"
+            cov.started_at = None
+            cov.error_message = None
+            retry_ids.append(cov_id)
+
         db.commit()
     except Exception:
         db.rollback()
@@ -1146,9 +1218,14 @@ def auto_merge_unmerged() -> dict:
         run_cog_merge.delay(layer_id)
         logger.info("Auto-merge dispatched for covariate %s", layer_id)
 
+    for layer_id in retry_ids:
+        run_cog_merge.delay(layer_id)
+        logger.info("Auto-merge retry dispatched for covariate %s", layer_id)
+
     return {
         "scanned": len(known_covariates),
-        "dispatched": len(dispatched_ids),
+        "dispatched": len(dispatched_ids) + len(retry_ids),
+        "retried": len(retry_ids),
         "discovered": discovered,
     }
 
