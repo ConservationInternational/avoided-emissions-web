@@ -1093,7 +1093,9 @@ def auto_merge_unmerged() -> dict:
         )
 
         need_merge: list[tuple[str, int]] = []
-        for name, res_m in sorted(with_tiles):
+        # Sort coarsest-first (1000m before 250m) so low-res COGs are
+        # available sooner; within the same resolution, sort by name.
+        for name, res_m in sorted(with_tiles, key=lambda k: (-k[1], k[0])):
             if (name, res_m) in in_progress:
                 continue
             current_hash = compute_tile_etag_hash(gcs_details[(name, res_m)])
