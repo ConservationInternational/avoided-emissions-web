@@ -538,6 +538,20 @@ def run_cog_merge(self, layer_id: str) -> dict:
         layer.n_tiles = result["n_tiles"]
         layer.completed_at = merge_end
 
+        # Store the tile fingerprint directly on the Covariate record
+        # so that auto_merge_unmerged can compare hashes without any
+        # cross-table lookup (which has historically been fragile).
+        if tile_hash:
+            md = dict(layer.extra_metadata or {})
+            md["tile_etag_hash"] = tile_hash
+            layer.extra_metadata = md
+            logger.info(
+                "run_cog_merge: wrote tile_etag_hash=%s on Covariate "
+                "extra_metadata for '%s'",
+                tile_hash,
+                layer.covariate_name,
+            )
+
         # Update metadata snapshot with merge results.  The stale-
         # detection code in auto_merge_unmerged may have flipped the
         # snapshot to 'failed' while the merge was running, so also
@@ -907,9 +921,15 @@ def auto_merge_unmerged() -> dict:
             db.flush()
             existing_covariate_keys.add((cov_name, res_m))
 
-            # Create an export metadata snapshot for the discovered COG
+            # Store tile hash on Covariate for hash comparison
             tiles = gcs_details.get((cov_name, res_m), [])
             tile_hash = compute_tile_etag_hash(tiles) if tiles else None
+            if tile_hash:
+                md = dict(layer.extra_metadata or {})
+                md["tile_etag_hash"] = tile_hash
+                layer.extra_metadata = md
+
+            # Create an export metadata snapshot for the discovered COG
             meta = GeeExportMetadata(
                 covariate_id=layer.id,
                 covariate_name=cov_name,
@@ -938,35 +958,30 @@ def auto_merge_unmerged() -> dict:
         db.flush()
 
         # ---- Determine which covariates need a (re-)merge ----
-        # Compare the current tile fingerprint against the most recent
-        # successfully merged snapshot.  The hash is keyed by
-        # (covariate_name, gcs_prefix) so that different resolutions
-        # (e.g. 250 m vs 1 km) are tracked independently and don't
-        # cause an infinite ping-pong of re-merges.
-        #
-        # We query all merged snapshots ordered newest-first and
-        # deduplicate in Python.  This avoids a correlated subquery
-        # JOIN whose NULL-equality semantics (SQL NULL=NULL → FALSE)
-        # silently dropped rows with NULL gcs_prefix, causing every
-        # covariate to appear "never merged" on every cycle.
-        latest_hashes: dict[tuple[str, str], str] = {}
-        all_merged = (
+        # Compare the current tile fingerprint against the hash stored
+        # directly on the Covariate record (in extra_metadata JSON).
+        # This is keyed by (covariate_name, resolution_m) — both are
+        # NOT NULL columns — eliminating the fragile cross-table
+        # GeeExportMetadata lookup that suffered from NULL gcs_prefix
+        # mismatches, status-filtering gaps, and session/isolation
+        # edge cases across multiple prior fix attempts.
+        latest_hashes: dict[tuple[str, int], str] = {}
+        merged_covariates = (
             db.query(
-                GeeExportMetadata.covariate_name,
-                GeeExportMetadata.gcs_prefix,
-                GeeExportMetadata.tile_etag_hash,
+                Covariate.covariate_name,
+                Covariate.resolution_m,
+                Covariate.extra_metadata,
             )
-            .filter(
-                GeeExportMetadata.status.in_(["merged", "skipped_existing"]),
-                GeeExportMetadata.tile_etag_hash.isnot(None),
-            )
-            .order_by(GeeExportMetadata.created_at.desc())
+            .filter(Covariate.status == "merged")
+            .order_by(Covariate.completed_at.desc().nulls_last())
             .all()
         )
-        for row in all_merged:
-            key = (row.covariate_name, row.gcs_prefix or "")
+        for row in merged_covariates:
+            key = (row.covariate_name, row.resolution_m)
             if key not in latest_hashes:
-                latest_hashes[key] = row.tile_etag_hash
+                tile_hash = (row.extra_metadata or {}).get("tile_etag_hash")
+                if tile_hash:
+                    latest_hashes[key] = tile_hash
 
         # Reset covariates stuck in "merging" for too long.
         # This happens when a worker is killed mid-merge (e.g. during a
@@ -1039,19 +1054,16 @@ def auto_merge_unmerged() -> dict:
             if (name, res_m) in in_progress:
                 continue
             current_hash = compute_tile_etag_hash(gcs_details[(name, res_m)])
-            gcs_pfx = gee_config.get_gcs_prefix(Config.GCS_PREFIX, res_m)
-            stored_hash = latest_hashes.get((name, gcs_pfx))
+            stored_hash = latest_hashes.get((name, res_m))
             if stored_hash == current_hash:
                 continue  # tiles unchanged since last merge
             need_merge.append((name, res_m))
             logger.info(
-                "auto_merge: %s@%dm needs merge — "
-                "stored_hash=%s current_hash=%s gcs_pfx=%s",
+                "auto_merge: %s@%dm needs merge — stored_hash=%s current_hash=%s",
                 name,
                 res_m,
                 stored_hash,
                 current_hash,
-                gcs_pfx,
             )
 
         if not need_merge:
