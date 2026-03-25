@@ -425,8 +425,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
             db.close()
             return {"status": "superseded", "error": "record deleted"}
 
-        # Guard against duplicate merges: if another task already
-        # transitioned this covariate to 'merging', skip this one.
+        # Guard against duplicate merges.
         if layer.status == "merging":
             logger.info(
                 "Covariate %s (%s) is already being merged by another "
@@ -436,6 +435,18 @@ def run_cog_merge(self, layer_id: str) -> dict:
             )
             db.close()
             return {"status": "skipped", "reason": "already merging"}
+
+        # If another duplicate task already completed the merge, skip.
+        # The auto_merge scheduler will dispatch a fresh task if tiles
+        # change again.
+        if layer.status == "merged":
+            logger.info(
+                "Covariate %s (%s) is already merged — skipping duplicate merge task",
+                layer.covariate_name,
+                layer_id,
+            )
+            db.close()
+            return {"status": "skipped", "reason": "already merged"}
 
         # Look for an existing metadata snapshot (created by auto_merge
         # or poll_gee_exports).
@@ -1014,28 +1025,50 @@ def _auto_merge_unmerged_inner() -> dict:
         # ---- Reset stale merges FIRST ----
         # Must run before the snapshot query so that stale records
         # show as "failed" (not "merging") in the snapshot.
-        stale_cutoff = now - timedelta(minutes=45)
+        #
+        # Use different timeouts for queue-waiting vs actively-merging:
+        #  - pending_merge: task is sitting in the Redis queue — use a
+        #    long timeout (6 h) because the single-concurrency merge
+        #    worker may have a deep backlog.
+        #  - merging: worker has started processing — 2 h is generous
+        #    even for the largest 250 m COGs (~25 min typical).
+        stale_pending_cutoff = now - timedelta(hours=6)
+        stale_merging_cutoff = now - timedelta(hours=2)
         stale_merging = (
             db.query(Covariate)
             .filter(
-                Covariate.status.in_(["pending_merge", "merging"]),
                 sa.or_(
                     sa.and_(
+                        Covariate.status == "pending_merge",
                         Covariate.started_at.isnot(None),
-                        Covariate.started_at < stale_cutoff,
+                        Covariate.started_at < stale_pending_cutoff,
+                    ),
+                    sa.and_(
+                        Covariate.status == "merging",
+                        Covariate.started_at.isnot(None),
+                        Covariate.started_at < stale_merging_cutoff,
                     ),
                     # Catch orphaned pending_merge records whose Redis
                     # task was lost before the worker picked them up
-                    # (started_at is still NULL).
+                    # (started_at is still NULL).  Apply the same long
+                    # timeout via completed_at as a fallback timestamp.
                     sa.and_(
-                        Covariate.started_at.is_(None),
                         Covariate.status == "pending_merge",
+                        Covariate.started_at.is_(None),
+                        sa.or_(
+                            sa.and_(
+                                Covariate.completed_at.isnot(None),
+                                Covariate.completed_at < stale_pending_cutoff,
+                            ),
+                            Covariate.completed_at.is_(None),
+                        ),
                     ),
                 ),
             )
             .all()
         )
         for stale in stale_merging:
+            was_merging = stale.status == "merging"
             logger.warning(
                 "Resetting stale covariate %s (%s) from '%s' to 'failed' "
                 "(stuck since %s)",
@@ -1045,14 +1078,20 @@ def _auto_merge_unmerged_inner() -> dict:
                 stale.started_at,
             )
             stale.status = "failed"
-            stale.error_message = (
-                "Reset by auto_merge: stuck in merge for >45 min "
-                "(likely killed during deploy)"
-            )
+            if was_merging:
+                stale.error_message = "Reset by auto_merge: stuck in merging for >2 h"
+            else:
+                stale.error_message = (
+                    "Reset by auto_merge: stuck in pending_merge for >6 h "
+                    "(Redis task likely lost)"
+                )
             stale.completed_at = now
-            # Count stale resets as a failed attempt for auto-retry
+            # Only count actively-merging resets against the retry
+            # limit.  A pending_merge reset means the task was queued
+            # too long, not that the merge itself failed.
             md = dict(stale.extra_metadata or {})
-            md["merge_retry_count"] = md.get("merge_retry_count", 0) + 1
+            if was_merging:
+                md["merge_retry_count"] = md.get("merge_retry_count", 0) + 1
             stale.extra_metadata = md
             from sqlalchemy.orm.attributes import flag_modified
 
@@ -1248,7 +1287,7 @@ def _auto_merge_unmerged_inner() -> dict:
                 cov_id,
             )
             cov.status = "pending_merge"
-            cov.started_at = None
+            cov.started_at = now
             cov.error_message = None
             retry_ids.append(cov_id)
 
