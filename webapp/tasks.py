@@ -824,11 +824,47 @@ def auto_merge_unmerged() -> dict:
 
     Called periodically by Celery Beat (every 120 s).
 
+    A Redis lock prevents concurrent invocations (caused by beat
+    firing while a previous scan is still running) from piling up
+    duplicate merge tasks in the queue.
+
     Returns
     -------
     dict
         ``{"scanned": N, "dispatched": N, "discovered": N}``
     """
+    import importlib.util
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    import redis as _redis
+
+    from config import Config
+    from models import Covariate, GeeExportMetadata, get_db
+
+    if not Config.GCS_BUCKET:
+        return {"scanned": 0, "dispatched": 0, "discovered": 0}
+
+    # Acquire a non-blocking Redis lock so only one invocation runs at
+    # a time.  The 10-minute timeout is a safety net in case the task
+    # crashes without releasing the lock.
+    _rconn = _redis.from_url(Config.CELERY_BROKER_URL)
+    _lock = _rconn.lock("auto_merge_unmerged_lock", timeout=600, blocking=False)
+    if not _lock.acquire(blocking=False):
+        logger.info("auto_merge: another instance is already running — skipping")
+        return {"skipped": True}
+
+    try:
+        return _auto_merge_unmerged_inner()
+    finally:
+        try:
+            _lock.release()
+        except Exception:
+            pass  # lock may have expired; safe to ignore
+
+
+def _auto_merge_unmerged_inner() -> dict:
+    """Actual logic for auto_merge_unmerged, called under a Redis lock."""
     import importlib.util
     import os
     from datetime import datetime, timedelta, timezone
