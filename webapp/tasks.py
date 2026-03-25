@@ -864,6 +864,8 @@ def _auto_merge_unmerged_inner() -> dict:
     import os
     from datetime import datetime, timedelta, timezone
 
+    import sqlalchemy as sa
+
     from config import Config
     from models import Covariate, GeeExportMetadata, get_db
 
@@ -1012,13 +1014,24 @@ def _auto_merge_unmerged_inner() -> dict:
         # ---- Reset stale merges FIRST ----
         # Must run before the snapshot query so that stale records
         # show as "failed" (not "merging") in the snapshot.
-        stale_cutoff = now - timedelta(minutes=120)
+        stale_cutoff = now - timedelta(minutes=45)
         stale_merging = (
             db.query(Covariate)
             .filter(
                 Covariate.status.in_(["pending_merge", "merging"]),
-                Covariate.started_at.isnot(None),
-                Covariate.started_at < stale_cutoff,
+                sa.or_(
+                    sa.and_(
+                        Covariate.started_at.isnot(None),
+                        Covariate.started_at < stale_cutoff,
+                    ),
+                    # Catch orphaned pending_merge records whose Redis
+                    # task was lost before the worker picked them up
+                    # (started_at is still NULL).
+                    sa.and_(
+                        Covariate.started_at.is_(None),
+                        Covariate.status == "pending_merge",
+                    ),
+                ),
             )
             .all()
         )
@@ -1033,7 +1046,7 @@ def _auto_merge_unmerged_inner() -> dict:
             )
             stale.status = "failed"
             stale.error_message = (
-                "Reset by auto_merge: stuck in merge for >120 min "
+                "Reset by auto_merge: stuck in merge for >45 min "
                 "(likely killed during deploy)"
             )
             stale.completed_at = now
@@ -1176,7 +1189,7 @@ def _auto_merge_unmerged_inner() -> dict:
             )
             if existing:
                 existing.status = "pending_merge"
-                existing.started_at = None
+                existing.started_at = now
                 existing.error_message = None
                 existing.output_bucket = Config.S3_BUCKET
                 existing.output_prefix = s3_output_prefix
@@ -1192,7 +1205,7 @@ def _auto_merge_unmerged_inner() -> dict:
                     gcs_prefix=gcs_prefix,
                     output_bucket=Config.S3_BUCKET,
                     output_prefix=s3_output_prefix,
-                    started_at=None,
+                    started_at=now,
                 )
                 db.add(layer)
                 db.flush()
