@@ -833,14 +833,9 @@ def auto_merge_unmerged() -> dict:
     dict
         ``{"scanned": N, "dispatched": N, "discovered": N}``
     """
-    import importlib.util
-    import os
-    from datetime import datetime, timedelta, timezone
-
     import redis as _redis
 
     from config import Config
-    from models import Covariate, GeeExportMetadata, get_db
 
     if not Config.GCS_BUCKET:
         return {"scanned": 0, "dispatched": 0, "discovered": 0}
