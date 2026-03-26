@@ -15,7 +15,13 @@ from config import report_exception, report_message
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(name="tasks.import_vector_data", bind=True, max_retries=2)
+@celery_app.task(
+    name="tasks.import_vector_data",
+    bind=True,
+    max_retries=2,
+    soft_time_limit=7200,
+    time_limit=7500,
+)
 def import_vector_data_task(self) -> dict:
     """Import vector reference data (geoboundaries, ecoregions, wdpa).
 
@@ -49,6 +55,8 @@ def import_vector_data_task(self) -> dict:
     max_retries=1,
     acks_late=True,
     reject_on_worker_lost=True,
+    soft_time_limit=7200,
+    time_limit=7500,
 )
 def rasterize_vectors_task(self) -> dict:
     """Rasterize vector reference layers to COGs aligned with the GEE grid.
@@ -278,6 +286,8 @@ def rasterize_vectors_task(self) -> dict:
     max_retries=1,
     acks_late=True,
     reject_on_worker_lost=True,
+    soft_time_limit=7200,
+    time_limit=7500,
 )
 def ingest_sdg_cog_task(self) -> dict:
     """Download the Trends.Earth SDG 15.3.1 COG, extract bands, and upload to S3.
@@ -385,7 +395,13 @@ class _MergeSuperseded(Exception):
     """Raised when a merge is aborted because the covariate was re-exported."""
 
 
-@celery_app.task(name="tasks.run_cog_merge", bind=True, max_retries=1)
+@celery_app.task(
+    name="tasks.run_cog_merge",
+    bind=True,
+    max_retries=1,
+    soft_time_limit=7200,  # 2 h — raises SoftTimeLimitExceeded
+    time_limit=7500,  # 2 h 5 m — SIGKILL fallback
+)
 def run_cog_merge(self, layer_id: str) -> dict:
     """Merge GCS tiles into a single COG and upload to S3.
 
@@ -1086,12 +1102,12 @@ def _auto_merge_unmerged_inner() -> dict:
                     "(Redis task likely lost)"
                 )
             stale.completed_at = now
-            # Only count actively-merging resets against the retry
-            # limit.  A pending_merge reset means the task was queued
-            # too long, not that the merge itself failed.
+            # Count ALL stale resets (both pending_merge and merging)
+            # against the retry limit.  If the merge worker is down,
+            # pending_merge records would otherwise loop indefinitely:
+            #   pending_merge → (6 h) → failed → retry → pending_merge → …
             md = dict(stale.extra_metadata or {})
-            if was_merging:
-                md["merge_retry_count"] = md.get("merge_retry_count", 0) + 1
+            md["merge_retry_count"] = md.get("merge_retry_count", 0) + 1
             stale.extra_metadata = md
             from sqlalchemy.orm.attributes import flag_modified
 
@@ -1166,6 +1182,14 @@ def _auto_merge_unmerged_inner() -> dict:
                 if retry_count < _max_merge_retries:
                     retryable_failed[key] = str(row.id)
 
+        if in_progress:
+            in_progress_names = sorted(
+                f"{name}@{res_m}m" for name, res_m in in_progress
+            )
+            logger.info(
+                "auto_merge: in-progress covariates: %s",
+                ", ".join(in_progress_names),
+            )
         logger.info(
             "auto_merge: %d covariate(s) with tiles, %d in-progress, "
             "%d latest hashes loaded, %d retryable failures",
@@ -1552,7 +1576,11 @@ def poll_batch_tasks() -> dict:
         db.close()
 
 
-@celery_app.task(name="tasks.generate_match_quality_summary")
+@celery_app.task(
+    name="tasks.generate_match_quality_summary",
+    soft_time_limit=3600,
+    time_limit=3900,
+)
 def generate_match_quality_summary_task(
     task_id: str, results_s3_uri: str | None = None
 ) -> dict:
