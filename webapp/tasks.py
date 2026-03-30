@@ -1163,6 +1163,12 @@ def _auto_merge_unmerged_inner() -> dict:
         # is eligible for an automatic retry (merge_retry_count < 3).
         _max_merge_retries = 3
         retryable_failed: dict[tuple[str, int], str] = {}  # key → covariate id
+        # Track covariates that have exhausted all retry attempts so
+        # the need_merge loop can skip them when there is no stored
+        # hash (i.e. never successfully merged).  Without this, the
+        # need_merge path (stored_hash=None != current_hash) bypasses
+        # the retry limit and redispatches every 6 h stale cycle.
+        exhausted_retries: set[tuple[str, int]] = set()
         for row in all_covariates:
             key = (row.covariate_name, row.resolution_m)
             if row.status in ("pending_merge", "merging"):
@@ -1181,6 +1187,18 @@ def _auto_merge_unmerged_inner() -> dict:
                 retry_count = (row.extra_metadata or {}).get("merge_retry_count", 0)
                 if retry_count < _max_merge_retries:
                     retryable_failed[key] = str(row.id)
+                elif key not in exhausted_retries:
+                    exhausted_retries.add(key)
+
+        # Prune retryable_failed of keys that also have an active
+        # pending_merge/merging record.  Due to query ordering
+        # (completed_at DESC NULLS LAST) a failed record can be
+        # iterated *before* a pending_merge record for the same key,
+        # causing the key to appear in both sets.  Dispatching a retry
+        # for a covariate that already has a pending task would create
+        # duplicate merge jobs.
+        for key in in_progress:
+            retryable_failed.pop(key, None)
 
         if in_progress:
             in_progress_names = sorted(
@@ -1192,11 +1210,13 @@ def _auto_merge_unmerged_inner() -> dict:
             )
         logger.info(
             "auto_merge: %d covariate(s) with tiles, %d in-progress, "
-            "%d latest hashes loaded, %d retryable failures",
+            "%d latest hashes loaded, %d retryable failures, "
+            "%d exhausted retries",
             len(with_tiles),
             len(in_progress),
             len(latest_hashes),
             len(retryable_failed),
+            len(exhausted_retries),
         )
 
         need_merge: list[tuple[str, int]] = []
@@ -1209,6 +1229,24 @@ def _auto_merge_unmerged_inner() -> dict:
             stored_hash = latest_hashes.get((name, res_m))
             if stored_hash == current_hash:
                 continue  # tiles unchanged since last merge
+            # When there is no stored hash (covariate was never
+            # successfully merged), respect the retry limit.  Without
+            # this guard the need_merge path bypasses
+            # merge_retry_count and redispatches the covariate on
+            # every 6 h stale-reset cycle, creating an infinite loop
+            # when the merge-worker is down or the merge keeps
+            # failing.  If stored_hash is not None the tiles have
+            # genuinely changed since the last successful merge, so a
+            # fresh attempt is always warranted.
+            if stored_hash is None and (name, res_m) in exhausted_retries:
+                logger.info(
+                    "auto_merge: %s@%dm needs merge but retry limit "
+                    "(%d) exhausted — skipping",
+                    name,
+                    res_m,
+                    _max_merge_retries,
+                )
+                continue
             need_merge.append((name, res_m))
             logger.info(
                 "auto_merge: %s@%dm needs merge — stored_hash=%s current_hash=%s",
