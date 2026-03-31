@@ -74,7 +74,7 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     if docker stack deploy \
         -c "$COMPOSE_FILE" \
         --with-registry-auth \
-        --resolve-image always \
+        --resolve-image changed \
         "$STACK_NAME"; then
         log_success "Stack deploy command succeeded"
         break
@@ -92,7 +92,7 @@ done
 # -- Wait for services -------------------------------------------------------
 
 log_info "Waiting for services to initialize..."
-sleep 15
+sleep 5
 
 log_info "Current service status:"
 docker service ls --filter "name=${STACK_NAME}_" --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}"
@@ -111,9 +111,7 @@ is_service_ready() {
     fi
 }
 
-# Must exceed the longest stop_grace_period in the compose file (merge-worker
-# has 10m) to avoid false-negative timeouts during rolling updates.
-MAX_WAIT=360
+MAX_WAIT=120
 WAIT_TIME=0
 
 while [ $WAIT_TIME -lt $MAX_WAIT ]; do
@@ -164,7 +162,7 @@ docker service ls --filter "name=${STACK_NAME}_" --format "table {{.Name}}\t{{.R
 # Wait for it to reach "Complete" state before declaring success.
 
 log_info "Checking migration service status..."
-MAX_MIGRATE_WAIT=300
+MAX_MIGRATE_WAIT=60
 MIGRATE_WAIT=0
 
 while [ $MIGRATE_WAIT -lt $MAX_MIGRATE_WAIT ]; do

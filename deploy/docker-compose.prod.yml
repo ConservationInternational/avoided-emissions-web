@@ -178,10 +178,9 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       TMPDIR: /scratch
     command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=1", "-Q", "merge"]
-    # COG merges can take several minutes for large covariates — give the
-    # worker enough time to finish the in-flight GDAL operation before Docker
-    # sends SIGKILL during deploys / rolling updates.
-    stop_grace_period: 10m
+    # Kill fast — acks_late=True means Celery re-delivers unfinished
+    # tasks to the replacement worker automatically.
+    stop_grace_period: 5s
     tmpfs:
       - /scratch:size=4G
     depends_on:

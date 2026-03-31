@@ -148,7 +148,8 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
     command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=1", "-Q", "merge"]
-    stop_grace_period: 10m
+    # Kill fast — acks_late=True means Celery re-delivers unfinished tasks.
+    stop_grace_period: 5s
     depends_on:
       - postgres
       - redis
