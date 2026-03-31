@@ -111,7 +111,9 @@ is_service_ready() {
     fi
 }
 
-MAX_WAIT=180
+# Must exceed the longest stop_grace_period in the compose file (merge-worker
+# has 10m) to avoid false-negative timeouts during rolling updates.
+MAX_WAIT=360
 WAIT_TIME=0
 
 while [ $WAIT_TIME -lt $MAX_WAIT ]; do

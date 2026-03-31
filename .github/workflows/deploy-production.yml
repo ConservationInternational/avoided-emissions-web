@@ -270,7 +270,6 @@ jobs:
           appspec.yml \
           prod.env \
           deploy/ \
-          database/ \
           -x "*.pyc" "__pycache__/*" ".git/*"
 
     - name: Upload deployment package to S3
