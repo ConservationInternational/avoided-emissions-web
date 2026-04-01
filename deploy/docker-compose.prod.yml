@@ -118,7 +118,7 @@ services:
       replicas: 2
       update_config:
         parallelism: 1
-        delay: 30s
+        delay: 10s
         order: start-first
         failure_action: rollback
       rollback_config:
@@ -156,6 +156,8 @@ services:
       - backend
     deploy:
       replicas: 1
+      update_config:
+        order: start-first
       restart_policy:
         condition: on-failure
         delay: 10s
@@ -196,9 +198,6 @@ services:
     deploy:
       replicas: 1
       update_config:
-        # Start the new task before stopping the old one so a stuck
-        # merge-worker (which can take up to stop_grace_period=10m to
-        # drain) does not block the new container from starting.
         order: start-first
       restart_policy:
         condition: on-failure
@@ -232,6 +231,8 @@ services:
       - backend
     deploy:
       replicas: 1
+      update_config:
+        order: start-first
       restart_policy:
         condition: on-failure
         delay: 10s

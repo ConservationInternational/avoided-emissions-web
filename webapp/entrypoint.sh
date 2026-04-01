@@ -17,7 +17,7 @@ mkdir -p /app/celerybeat
 wait_for_postgres() {
     echo "Waiting for Postgres to become reachable..."
     attempts=0
-    max_attempts=90
+    max_attempts=15
     while [ $attempts -lt $max_attempts ]; do
         # Use Python+psycopg2 (already installed) for a lightweight probe.
         if python -c "
