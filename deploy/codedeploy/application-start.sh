@@ -71,7 +71,7 @@ ATTEMPT=1
 
 while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     log_info "Stack deploy attempt $ATTEMPT/$MAX_ATTEMPTS..."
-    if docker stack deploy \
+    if timeout 60 docker stack deploy \
         -c "$COMPOSE_FILE" \
         --with-registry-auth \
         --resolve-image changed \
@@ -146,7 +146,7 @@ if [ $WAIT_TIME -ge $MAX_WAIT ]; then
         REPLICAS=$(docker service ls --filter "name=$service" --format "{{.Replicas}}" 2>/dev/null)
         if ! is_service_ready "$REPLICAS"; then
             log_error "Service $service stuck (Replicas: $REPLICAS)"
-            docker service logs --tail 20 "$service" 2>&1 || true
+            timeout 5 docker service logs --tail 20 "$service" 2>&1 || true
         fi
     done
     exit 1
@@ -174,7 +174,7 @@ while [ $MIGRATE_WAIT -lt $MAX_MIGRATE_WAIT ]; do
         break
     elif echo "$MIGRATE_STATUS" | grep -q "Failed\|Rejected"; then
         log_error "Database migration failed!"
-        docker service logs --tail 50 "${STACK_NAME}_migrate" 2>/dev/null || true
+        timeout 5 docker service logs --tail 50 "${STACK_NAME}_migrate" 2>/dev/null || true
         exit 1
     else
         log_info "Waiting for migrations... ($MIGRATE_WAIT/$MAX_MIGRATE_WAIT seconds) — status: $MIGRATE_STATUS"
@@ -185,7 +185,7 @@ done
 
 if [ $MIGRATE_WAIT -ge $MAX_MIGRATE_WAIT ]; then
     log_error "Migration did not complete within $MAX_MIGRATE_WAIT seconds"
-    docker service logs --tail 50 "${STACK_NAME}_migrate" 2>/dev/null || true
+    timeout 5 docker service logs --tail 50 "${STACK_NAME}_migrate" 2>/dev/null || true
     exit 1
 fi
 
