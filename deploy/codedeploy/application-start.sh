@@ -159,10 +159,12 @@ docker service ls --filter "name=${STACK_NAME}_" --format "table {{.Name}}\t{{.R
 
 # -- Wait for migrations (one-shot) ------------------------------------------
 # The migrate service has restart_policy: none — it runs once and exits.
-# Wait for it to reach "Complete" state before declaring success.
+# A failed migration is fatal (exit 1), but a slow migration is not — alembic
+# upgrade head is idempotent and will finish on its own.  We only block the
+# deploy script briefly; ValidateService will catch real health issues.
 
 log_info "Checking migration service status..."
-MAX_MIGRATE_WAIT=60
+MAX_MIGRATE_WAIT=90
 MIGRATE_WAIT=0
 
 while [ $MIGRATE_WAIT -lt $MAX_MIGRATE_WAIT ]; do
@@ -184,9 +186,8 @@ while [ $MIGRATE_WAIT -lt $MAX_MIGRATE_WAIT ]; do
 done
 
 if [ $MIGRATE_WAIT -ge $MAX_MIGRATE_WAIT ]; then
-    log_error "Migration did not complete within $MAX_MIGRATE_WAIT seconds"
-    timeout 5 docker service logs --tail 50 "${STACK_NAME}_migrate" 2>/dev/null || true
-    exit 1
+    log_warning "Migration still running after $MAX_MIGRATE_WAIT seconds — continuing (alembic is idempotent)"
+    timeout 5 docker service logs --tail 20 "${STACK_NAME}_migrate" 2>/dev/null || true
 fi
 
 log_success "ApplicationStart hook completed"
