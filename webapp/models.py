@@ -17,6 +17,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSON, UUID
@@ -248,6 +249,9 @@ class AnalysisTask(Base):
 
 class TaskSite(Base):
     __tablename__ = "task_sites"
+    __table_args__ = (
+        UniqueConstraint("task_id", "site_id", "sub_site_index", name="task_sites_task_id_site_id_sub_site_index_key"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id = Column(
