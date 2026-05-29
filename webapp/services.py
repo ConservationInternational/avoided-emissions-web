@@ -987,7 +987,7 @@ def compute_exact_match_groups_with_splitting(
                 # Return the intersection geometry and the region identifier
                 # Use shapely_name or region_id column depending on table
                 id_col = (
-                    "shapename" if table.startswith("geoboundaries") else "eco_name"
+                    "shape_name" if table.startswith("geoboundaries") else "eco_name"
                 )
 
                 result = db.execute(
