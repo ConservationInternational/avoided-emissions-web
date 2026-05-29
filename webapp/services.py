@@ -2181,36 +2181,8 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
     of export record IDs.
     """
     import ee
-    import sys
-    from pathlib import Path
-
-    gee_dir = Path(__file__).parent / "gee-export"
-
-    # Load gee-export/config.py as its own module, then temporarily
-    # inject it into sys.modules["config"] so that gee-export/tasks.py
-    # (which does "from config import COVARIATES") picks it up instead
-    # of the webapp's config.py.
-    path_inserted = str(gee_dir) not in sys.path
-    if path_inserted:
-        sys.path.insert(0, str(gee_dir))
-
-    import config as gee_cfg
-
-    original_config = sys.modules.get("config")
-    sys.modules["config"] = gee_cfg
-
-    try:
-        import tasks as gee_tasks
-
-        start_export_task = gee_tasks.start_export_task
-    finally:
-        # Restore the webapp config module
-        if original_config is not None:
-            sys.modules["config"] = original_config
-        else:
-            sys.modules.pop("config", None)
-        if path_inserted:
-            sys.path.remove(str(gee_dir))
+    # Import GEE export tasks (gee-export is already in sys.path from module init)
+    import tasks as gee_tasks
 
     project = Config.GEE_PROJECT_ID or None
     opt_url = Config.GEE_ENDPOINT or None
@@ -2237,7 +2209,7 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
     export_ids = []
 
     # Resolution-aware GCS prefix (e.g. covariates_1km / covariates_250m)
-    gcs_prefix = gee_cfg.get_gcs_prefix(Config.GCS_PREFIX, resolution_m)
+    gcs_prefix = gee_config.get_gcs_prefix(Config.GCS_PREFIX, resolution_m)
     # Resolution-aware S3 output prefix for the eventual merge
     _cog_suffixes = {1000: "_1km", 250: "_250m"}
     _cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
@@ -2248,7 +2220,7 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
             # Clean up any existing downstream artefacts before re-export
             _cleanup_covariate_downstream(name, db, resolution_m=resolution_m)
 
-            task = start_export_task(
+            task = gee_tasks.start_export_task(
                 covariate_name=name,
                 bucket=Config.GCS_BUCKET,
                 prefix=gcs_prefix,
