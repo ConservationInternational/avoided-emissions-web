@@ -14,7 +14,12 @@ import time
 import click
 import ee
 
-from config import COVARIATES, DEFAULT_GCS_PREFIX, DEFAULT_RESOLUTION_M, get_gcs_prefix
+from gee_config import (
+    COVARIATES,
+    DEFAULT_GCS_PREFIX,
+    DEFAULT_RESOLUTION_M,
+    get_gcs_prefix,
+)
 from tasks import check_task_status, start_export_task
 
 

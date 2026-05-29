@@ -6,7 +6,7 @@ single covariate, returning the task object for status tracking.
 
 import ee
 
-from config import (
+from gee_config import (
     COVARIATES,
     DEFAULT_RESOLUTION_M,
     EXPORT_CRS,

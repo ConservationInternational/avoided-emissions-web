@@ -1449,18 +1449,14 @@ def _auto_merge_unmerged_inner() -> dict:
 
             if not already_running:
                 ingest_sdg_cog_task.delay()
-                logger.info(
-                    "All COG merges complete — dispatched SDG ingestion task"
-                )
+                logger.info("All COG merges complete — dispatched SDG ingestion task")
                 sdg_dispatched = True
             else:
                 logger.info(
                     "All COG merges complete but SDG ingestion already queued/running"
                 )
         except Exception:
-            logger.warning(
-                "Failed to check/dispatch SDG ingestion", exc_info=True
-            )
+            logger.warning("Failed to check/dispatch SDG ingestion", exc_info=True)
 
     return {
         "scanned": len(known_covariates),
