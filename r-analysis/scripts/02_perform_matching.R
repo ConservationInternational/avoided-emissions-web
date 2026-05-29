@@ -217,8 +217,19 @@ if (!is.null(config$site_id)) {
                 group_idx_0 <- ai %/% N_REPLICATES  # 0-based
                 rep_idx_0 <- ai %% N_REPLICATES
                 BATCH_REPLICATE <- rep_idx_0 + 1L
+                # Validate array index is within bounds
+                if (group_idx_0 >= n_groups) {
+                    stop("AWS Batch array index ", ai, " out of bounds for ",
+                         n_groups, " groups × ", N_REPLICATES, " replicates ",
+                         "(valid range: 0-", (n_groups * N_REPLICATES - 1), ")")
+                }
                 group_id <- group_ids[group_idx_0 + 1L]
             } else {
+                # Validate array index is within bounds
+                if (ai >= n_groups) {
+                    stop("AWS Batch array index ", ai, " out of bounds for ",
+                         n_groups, " groups (valid range: 0-", (n_groups - 1), ")")
+                }
                 group_id <- group_ids[ai + 1L]
             }
 
@@ -249,6 +260,12 @@ if (!is.null(config$site_id)) {
                 site_idx_0 <- ai %/% N_REPLICATES  # 0-based site index
                 rep_idx_0 <- ai %% N_REPLICATES    # 0-based replicate index
                 BATCH_REPLICATE <- rep_idx_0 + 1L   # 1-based
+                # Validate array index is within bounds
+                if (site_idx_0 >= n_sites) {
+                    stop("AWS Batch array index ", ai, " out of bounds for ",
+                         n_sites, " sites × ", N_REPLICATES, " replicates ",
+                         "(valid range: 0-", (n_sites * N_REPLICATES - 1), ")")
+                }
                 site_ids <- all_site_ids[site_idx_0 + 1L]
                 batch_site_id <- filter(
                     sites, id_numeric == site_ids
@@ -259,6 +276,11 @@ if (!is.null(config$site_id)) {
                     ", replicate ", BATCH_REPLICATE, "/", N_REPLICATES
                 )
             } else {
+                # Validate array index is within bounds
+                if (ai >= n_sites) {
+                    stop("AWS Batch array index ", ai, " out of bounds for ",
+                         n_sites, " sites (valid range: 0-", (n_sites - 1), ")")
+                }
                 site_ids <- all_site_ids[ai + 1L]
                 batch_site_id <- filter(
                     sites, id_numeric == site_ids
@@ -457,28 +479,8 @@ match_site <- function(d, f) {
         n_treatment_grp <- sum(this_d$treatment)
         n_control_grp <- sum(!this_d$treatment)
 
-        # Drop rows with NA in any formula variable so that glm() and
-        # predict() operate on the same set of rows (glm uses na.omit
-        # by default, which silently drops incomplete cases and causes
-        # a length mismatch when assigning predictions back).
-        formula_vars <- all.vars(f)
-        complete <- complete.cases(this_d[, formula_vars, drop = FALSE])
-        n_dropped_na <- sum(!complete)
-        if (n_dropped_na > 0) {
-            na_counts <- vapply(
-                formula_vars,
-                function(v) sum(is.na(this_d[[v]])),
-                integer(1)
-            )
-            na_vars <- na_counts[na_counts > 0]
-            message(
-                "    Dropped ", n_dropped_na,
-                " rows with NA covariates in group ", this_group,
-                ". NA counts per variable: ",
-                paste(names(na_vars), na_vars, sep = "=", collapse = ", ")
-            )
-            this_d <- this_d[complete, ]
-        }
+        # NA removal now happens before sampling (upstream) to preserve
+        # sampling weight accuracy. This function assumes clean data.
 
         n_treatment <- sum(this_d$treatment)
 
@@ -634,24 +636,8 @@ match_site_matchit <- function(d, f) {
         }
     }
 
-    # Drop rows with NA in formula variables
-    formula_vars <- all.vars(f)
-    complete <- complete.cases(d[, formula_vars, drop = FALSE])
-    n_dropped_na <- sum(!complete)
-    if (n_dropped_na > 0) {
-        na_counts <- vapply(
-            formula_vars,
-            function(v) sum(is.na(d[[v]])),
-            integer(1)
-        )
-        na_vars <- na_counts[na_counts > 0]
-        message(
-            "    Dropped ", n_dropped_na,
-            " rows with NA covariates. NA counts: ",
-            paste(names(na_vars), na_vars, sep = "=", collapse = ", ")
-        )
-        d <- d[complete, ]
-    }
+    # NA removal now happens before sampling (upstream) to preserve
+    # sampling weight accuracy. This function assumes clean data.
 
     n_treatment <- sum(d$treatment)
     n_control <- sum(!d$treatment)
@@ -748,8 +734,9 @@ match_site_matchit <- function(d, f) {
     md$match_group <- as.character(md$subclass)
     md$match_weight <- md$weights
 
-    # Prefix match_group with exact-match stratum for consistency with optmatch
-    # path.
+    # Prefix match_group with exact-match stratum for consistency with optmatch.
+    # Both paths create prefixes from interaction(exact_vars), ensuring unique
+    # match_group IDs across different strata.
     if (length(exact_vars_present) > 0) {
         exact_group <- interaction(md[exact_vars_present], drop = TRUE)
         md$match_group <- paste(exact_group, md$match_group, sep = "_")
@@ -952,12 +939,18 @@ for (this_id in site_ids) {
             # All candidate pixels (treatment + controls) are spatially
             # constrained to the matching extent computed in the webapp.
             # Filter in Arrow to avoid materialising the full parquet.
+            arrow_timer <- proc.time()
             site_treatment_cells <- treatment_cells$cell
             vals <- base_dataset %>%
                 filter(cell %in% group_treatment_cells |
                        !(cell %in% all_treatment_cells)) %>%
                 collect() %>%
                 mutate(treatment = cell %in% group_treatment_cells)
+            arrow_elapsed <- (proc.time() - arrow_timer)["elapsed"]
+            message(
+                "    [TIMING] Arrow dataset filter & collect: ",
+                round(arrow_elapsed, 2), "s (", nrow(vals), " rows)"
+            )
 
             # Remove pixels with NA in exact-match grouping variables
             n_before <- nrow(vals)
@@ -977,6 +970,8 @@ for (this_id in site_ids) {
                 control_mask <- !vals$treatment
                 n_ctrl_before <- sum(control_mask)
                 if (n_ctrl_before > 0) {
+                    # Coordinate conversion
+                    coord_timer <- proc.time()
                     coords <- cell_to_lonlat(
                         vals$cell[control_mask], grid_meta
                     )
@@ -984,9 +979,20 @@ for (this_id in site_ids) {
                         coords,
                         coords = c("lon", "lat"), crs = 4326
                     )
+                    coord_elapsed <- (proc.time() - coord_timer)["elapsed"]
+                    message(
+                        "    [TIMING] Coordinate conversion: ",
+                        round(coord_elapsed, 2), "s for ", n_ctrl_before,
+                        " pixels"
+                    )
+
+                    # Spatial intersection - likely bottleneck
+                    intersect_timer <- proc.time()
                     too_close <- lengths(
                         st_intersects(ctrl_pts, all_sites_buffer)
                     ) > 0
+                    intersect_elapsed <- (proc.time() - intersect_timer)["elapsed"]
+
                     n_excluded <- sum(too_close)
                     if (n_excluded > 0) {
                         exclude_rows <- which(control_mask)[too_close]
@@ -998,9 +1004,21 @@ for (this_id in site_ids) {
                             " km of treatment polygons"
                         )
                     }
+                    message(
+                        "    [TIMING] Spatial intersection: ",
+                        round(intersect_elapsed, 2), "s (",
+                        round(n_ctrl_before / intersect_elapsed, 0),
+                        " pixels/sec)"
+                    )
                 }
                 # Re-filter groups after distance exclusion
+                refilter_timer <- proc.time()
                 vals <- filter_groups(vals, EXACT_MATCH_VARS)
+                refilter_elapsed <- (proc.time() - refilter_timer)["elapsed"]
+                message(
+                    "    [TIMING] Group re-filtering: ",
+                    round(refilter_elapsed, 2), "s"
+                )
             }
 
             # Record control pool size before subsampling
@@ -1046,14 +1064,21 @@ for (this_id in site_ids) {
                     next
                 }
 
-                # Deterministic per-site, per-replicate seed
+                # Deterministic per-site, per-replicate seed using bitwise XOR
+                # to avoid collision risks from simple addition
                 if (!is.null(RANDOM_SEED)) {
                     if (N_REPLICATES > 1L) {
-                        set.seed(
-                            RANDOM_SEED + as.integer(this_id) * 1000L + rep_k
+                        # Use bit shifting to pack site and replicate IDs
+                        combined_seed <- bitwXor(
+                            RANDOM_SEED,
+                            bitwXor(
+                                bitwShiftL(as.integer(this_id) %% 65536L, 10L),
+                                as.integer(rep_k)
+                            )
                         )
+                        set.seed(combined_seed)
                     } else {
-                        set.seed(RANDOM_SEED + as.integer(this_id))
+                        set.seed(bitwXor(RANDOM_SEED, as.integer(this_id)))
                     }
                 }
 
@@ -1064,12 +1089,125 @@ for (this_id in site_ids) {
                 vals <- vals_base
 
                 # ----------------------------------------------------------------
+                # Drop NA covariates BEFORE sampling to preserve weight accuracy
+                # ----------------------------------------------------------------
+                # Sampling weights become inaccurate if NAs are dropped after
+                # sampling. Remove incomplete cases first, then calculate weights.
+                formula_vars <- all.vars(this_f)
+                complete <- complete.cases(vals[, formula_vars, drop = FALSE])
+                n_dropped_na <- sum(!complete)
+                n_before_na_drop <- nrow(vals)
+                n_treatment_before_na <- sum(vals$treatment)
+                n_control_before_na <- sum(!vals$treatment)
+
+                if (n_dropped_na > 0) {
+                    na_counts <- vapply(
+                        formula_vars,
+                        function(v) sum(is.na(vals[[v]])),
+                        integer(1)
+                    )
+                    na_vars <- na_counts[na_counts > 0]
+
+                    # Calculate exclusion percentages
+                    pct_excluded_overall <- (n_dropped_na / n_before_na_drop) * 100
+                    n_treatment_dropped <- sum(vals$treatment[!complete])
+                    n_control_dropped <- sum(!vals$treatment[!complete])
+                    pct_treatment_excluded <- (n_treatment_dropped / n_treatment_before_na) * 100
+                    pct_control_excluded <- (n_control_dropped / n_control_before_na) * 100
+
+                    message(
+                        "    Dropped ", n_dropped_na,
+                        " rows with NA covariates before sampling (",
+                        sprintf("%.1f%%", pct_excluded_overall),
+                        "). NA counts: ",
+                        paste(names(na_vars), na_vars, sep = "=", collapse = ", ")
+                    )
+
+                    # Flag substantial exclusions
+                    if (pct_excluded_overall > 10 || pct_treatment_excluded > 10) {
+                        message(
+                            "    WARNING: Substantial NA exclusion detected! ",
+                            "Treatment: ", sprintf("%.1f%%", pct_treatment_excluded),
+                            ", Control: ", sprintf("%.1f%%", pct_control_excluded),
+                            ". Results may not be representative of full population."
+                        )
+                    }
+
+                    # Write NA exclusion metrics to JSON
+                    na_exclusion_metrics <- list(
+                        id_numeric = this_id,
+                        site_id = this_site_id,
+                        site_name = this_site_name,
+                        sub_site_index = this_sub_site_index,
+                        replicate = rep_k,
+                        n_before_exclusion = n_before_na_drop,
+                        n_dropped = n_dropped_na,
+                        pct_excluded_overall = round(pct_excluded_overall, 2),
+                        n_treatment_before = n_treatment_before_na,
+                        n_treatment_dropped = n_treatment_dropped,
+                        pct_treatment_excluded = round(pct_treatment_excluded, 2),
+                        n_control_before = n_control_before_na,
+                        n_control_dropped = n_control_dropped,
+                        pct_control_excluded = round(pct_control_excluded, 2),
+                        variables_with_na = as.list(na_vars),
+                        substantial_exclusion = pct_excluded_overall > 10 || pct_treatment_excluded > 10,
+                        timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
+                        array_index = this_batch_index
+                    )
+
+                    na_exclusion_path <- file.path(
+                        config$matches_dir,
+                        paste0(base_filename, "_rep", rep_k, "_na_exclusion.json")
+                    )
+                    write_json(
+                        na_exclusion_metrics, na_exclusion_path,
+                        auto_unbox = TRUE, pretty = TRUE
+                    )
+
+                    vals <- vals[complete, ]
+                    # Re-filter groups after NA removal
+                    vals <- filter_groups(vals, EXACT_MATCH_VARS)
+                } else {
+                    # No NAs dropped - still write metrics file for consistency
+                    na_exclusion_metrics <- list(
+                        id_numeric = this_id,
+                        site_id = this_site_id,
+                        site_name = this_site_name,
+                        sub_site_index = this_sub_site_index,
+                        replicate = rep_k,
+                        n_before_exclusion = n_before_na_drop,
+                        n_dropped = 0,
+                        pct_excluded_overall = 0,
+                        n_treatment_before = n_treatment_before_na,
+                        n_treatment_dropped = 0,
+                        pct_treatment_excluded = 0,
+                        n_control_before = n_control_before_na,
+                        n_control_dropped = 0,
+                        pct_control_excluded = 0,
+                        variables_with_na = list(),
+                        substantial_exclusion = FALSE,
+                        timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
+                        array_index = this_batch_index
+                    )
+
+                    na_exclusion_path <- file.path(
+                        config$matches_dir,
+                        paste0(base_filename, "_rep", rep_k, "_na_exclusion.json")
+                    )
+                    write_json(
+                        na_exclusion_metrics, na_exclusion_path,
+                        auto_unbox = TRUE, pretty = TRUE
+                    )
+                }
+
+                # ----------------------------------------------------------------
                 # Stratified sampling with per-group population weights
                 # ----------------------------------------------------------------
                 # Compute per-group population sizes before sampling so we can
                 # track the sampling weight for each group.  This enables proper
                 # inverse-probability weighting in step 3 when groups have
                 # different sampling rates.
+                sampling_timer <- proc.time()
 
                 # Treatment population sizes per group
                 treatment_pop <- vals %>%
@@ -1106,8 +1244,15 @@ for (this_id in site_ids) {
 
                 vals <- bind_rows(treatment_sampled, control_sampled)
 
+                sampling_elapsed <- (proc.time() - sampling_timer)["elapsed"]
+                message(
+                    "    [TIMING] Stratified sampling: ",
+                    round(sampling_elapsed, 2), "s"
+                )
+
                 # Add pre-intervention deforestation for sites >= 2005
                 if (add_defor_pre) {
+                    defor_timer <- proc.time()
                     init_fc <- vals[[fc_init_name]]
                     final_fc <- vals[[fc_final_name]]
                     # Set to NA when initial forest cover is 0 (undefined rate of change)
@@ -1118,8 +1263,14 @@ for (this_id in site_ids) {
                         NA_real_
                     )
                     # Exclude pixels with no initial forest cover (defor rate undefined)
-                    vals <- filter(vals, .data[[fc_init_name]] > 0)
+                    # Use extracted vector for consistency
+                    vals <- vals[init_fc > 0, ]
                     vals <- filter_groups(vals, EXACT_MATCH_VARS)
+                    defor_elapsed <- (proc.time() - defor_timer)["elapsed"]
+                    message(
+                        "    [TIMING] Pre-intervention defor calculation: ",
+                        round(defor_elapsed, 2), "s"
+                    )
                 }
 
                 n_treatment_final <- sum(vals$treatment)
@@ -1291,6 +1442,11 @@ for (this_id in site_ids) {
         ls()
     ))
     gc()
+}
+
+if (n_failed > 0L) {
+    message("WARNING: ", n_failed, " site(s) failed matching ",
+            "(failure markers written)")
 }
 
 if (n_failed > 0L) {

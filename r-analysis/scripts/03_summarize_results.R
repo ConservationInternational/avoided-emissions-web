@@ -20,6 +20,7 @@
 #   - {output_dir}/results_covariate_balance.csv         : SMD balance statistics (Love plot)
 #   - {output_dir}/results_propensity_scores.csv         : Propensity scores (QQ plot)
 #   - {output_dir}/results_pixel_locations.csv           : Matched pixel lon/lat for map
+#   - {output_dir}/na_exclusion_summary.csv              : NA exclusion diagnostics by site/replicate
 
 library(tidyverse)
 library(foreach)
@@ -1252,6 +1253,95 @@ if (length(pre_2005_sites_summary) > 0) {
     )))
 }
 
+# ----------------------------------------------------------------
+# Aggregate NA exclusion metrics across all sites and replicates
+# ----------------------------------------------------------------
+message("Aggregating NA exclusion metrics...")
+na_exclusion_files <- list.files(
+    config$matches_dir,
+    pattern = "_na_exclusion\\.json$",
+    full.names = TRUE
+)
+
+na_exclusion_summary <- NULL
+if (length(na_exclusion_files) > 0) {
+    na_metrics_list <- lapply(na_exclusion_files, function(f) {
+        m <- fromJSON(f)
+        # Convert variables_with_na list to a string for CSV export
+        if (length(m$variables_with_na) > 0) {
+            var_str <- paste(
+                names(m$variables_with_na),
+                unlist(m$variables_with_na),
+                sep = "=", collapse = "; "
+            )
+        } else {
+            var_str <- ""
+        }
+        data.frame(
+            id_numeric = m$id_numeric,
+            site_id = m$site_id,
+            site_name = m$site_name,
+            sub_site_index = m$sub_site_index,
+            replicate = m$replicate,
+            n_before_exclusion = m$n_before_exclusion,
+            n_dropped = m$n_dropped,
+            pct_excluded_overall = m$pct_excluded_overall,
+            n_treatment_before = m$n_treatment_before,
+            n_treatment_dropped = m$n_treatment_dropped,
+            pct_treatment_excluded = m$pct_treatment_excluded,
+            n_control_before = m$n_control_before,
+            n_control_dropped = m$n_control_dropped,
+            pct_control_excluded = m$pct_control_excluded,
+            variables_with_na = var_str,
+            substantial_exclusion = m$substantial_exclusion,
+            timestamp = m$timestamp,
+            stringsAsFactors = FALSE
+        )
+    })
+
+    na_metrics_df <- bind_rows(na_metrics_list)
+
+    # Write aggregated CSV
+    na_metrics_csv <- file.path(config$output_dir, "na_exclusion_summary.csv")
+    write.csv(na_metrics_df, na_metrics_csv, row.names = FALSE)
+    message("  NA exclusion summary written to ", na_metrics_csv)
+
+    # Report summary statistics
+    n_substantial <- sum(na_metrics_df$substantial_exclusion)
+    if (n_substantial > 0) {
+        message(
+            "  WARNING: ", n_substantial, " site-replicate(s) had substantial NA exclusion (>10%).",
+            " See ", basename(na_metrics_csv), " for details."
+        )
+    }
+    avg_pct_excluded <- mean(na_metrics_df$pct_excluded_overall)
+    message(
+        "  Average NA exclusion across all sites: ",
+        sprintf("%.2f%%", avg_pct_excluded)
+    )
+
+    # Build summary for inclusion in results_summary.json
+    na_exclusion_summary <- list(
+        n_sites_with_exclusions = sum(na_metrics_df$n_dropped > 0),
+        n_sites_with_substantial_exclusions = n_substantial,
+        avg_pct_excluded_overall = round(avg_pct_excluded, 2),
+        avg_pct_treatment_excluded = round(mean(na_metrics_df$pct_treatment_excluded), 2),
+        avg_pct_control_excluded = round(mean(na_metrics_df$pct_control_excluded), 2),
+        max_pct_excluded_overall = round(max(na_metrics_df$pct_excluded_overall), 2),
+        sites_with_substantial_exclusions = if (n_substantial > 0) {
+            na_metrics_df %>%
+                filter(substantial_exclusion) %>%
+                select(site_id, site_name, replicate, pct_excluded_overall,
+                       pct_treatment_excluded, pct_control_excluded) %>%
+                as.list()
+        } else {
+            list()
+        }
+    )
+} else {
+    message("  No NA exclusion metrics files found.")
+}
+
 summary_data <- list(
     task_id = config$task_id,
     resolution_m = config$resolution_m,
@@ -1292,6 +1382,7 @@ summary_data <- list(
     failed_sites = failed_sites_summary,
     subsampled_sites = subsampled_sites_summary,
     pre_2005_sites = pre_2005_sites_summary,
+    na_exclusion_summary = na_exclusion_summary,
     methodology_warnings = methodology_warnings,
     group_diagnostics = all_group_diagnostics
 )
