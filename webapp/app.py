@@ -345,7 +345,7 @@ def cog_layers():
 
     gee_export_dir = Path(__file__).parent / "gee-export"
     sys.path.insert(0, str(gee_export_dir))
-    import config as gee_config
+    import gee_config
 
     cog_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
     # Backwards-compat: legacy COGs without a suffix are treated as 1 km.

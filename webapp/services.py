@@ -9,13 +9,11 @@ import io
 import json
 import logging
 import os
-import sys as _sys
 import tarfile
 import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
-from pathlib import Path as _Path
 
 import boto3
 import geopandas as gpd
@@ -36,11 +34,14 @@ from models import (
 )
 
 # Import forest cover year boundaries from gee-export config
-_sys.path.insert(0, str(_Path(__file__).parent / "gee-export"))
-import config as _gee_config
+import sys
+from pathlib import Path
 
-FC_YEAR_MIN = _gee_config.FC_YEAR_MIN
-FC_YEAR_MAX = _gee_config.FC_YEAR_MAX
+sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
+import gee_config
+
+FC_YEAR_MIN = gee_config.FC_YEAR_MIN
+FC_YEAR_MAX = gee_config.FC_YEAR_MAX
 
 logger = logging.getLogger(__name__)
 

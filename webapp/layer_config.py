@@ -33,15 +33,16 @@ nodata_value : float | None
     GeoTIFF has no explicit nodata, or when zero is a valid data value.
 """
 
-import sys
 from pathlib import Path
 
 # Import forest cover year range from GEE export config
-sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
-import config as _gee_config
+import sys
 
-FC_YEAR_MIN = _gee_config.FC_YEAR_MIN
-FC_YEAR_MAX = _gee_config.FC_YEAR_MAX
+sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
+import gee_config
+
+FC_YEAR_MIN = gee_config.FC_YEAR_MIN
+FC_YEAR_MAX = gee_config.FC_YEAR_MAX
 
 # ── Fallback ────────────────────────────────────────────────────────────────
 
