@@ -1280,9 +1280,17 @@ def _auto_merge_unmerged_inner() -> dict:
         )
 
         need_merge: list[tuple[str, int]] = []
-        # Sort coarsest-first (1000m before 250m) so low-res COGs are
-        # available sooner; within the same resolution, sort by name.
-        for name, res_m in sorted(with_tiles, key=lambda k: (-k[1], k[0])):
+        # Sort by total tile size (smallest first) so that quick merges
+        # complete early, reducing queue depth and providing faster
+        # feedback that the system is working.  This also reduces the
+        # risk of OOM on the merge-worker by deferring the largest
+        # (250m, many-tile) covariates until last.
+        def get_total_tile_size(key: tuple[str, int]) -> int:
+            """Return total size in bytes for all tiles of this covariate."""
+            tiles = gcs_details.get(key, [])
+            return sum(t.get("size_bytes", 0) for t in tiles)
+
+        for name, res_m in sorted(with_tiles, key=get_total_tile_size):
             if (name, res_m) in in_progress:
                 continue
             current_hash = compute_tile_etag_hash(gcs_details[(name, res_m)])
