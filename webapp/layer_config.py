@@ -33,6 +33,13 @@ nodata_value : float | None
     GeoTIFF has no explicit nodata, or when zero is a valid data value.
 """
 
+import sys
+from pathlib import Path
+
+# Import forest cover year range from GEE export config
+sys.path.insert(0, str(Path(__file__).parent.parent / "gee-export"))
+from config import FC_YEAR_MIN, FC_YEAR_MAX
+
 # ── Fallback ────────────────────────────────────────────────────────────────
 
 DEFAULT_STYLE = {
@@ -353,13 +360,6 @@ _fc_style = {
     "opacity": 1.0,
     "nodata_value": None,
 }
-# Import forest cover year range from GEE export config
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "gee-export"))
-from config import FC_YEAR_MIN, FC_YEAR_MAX
-
 for _yr in range(FC_YEAR_MIN, FC_YEAR_MAX + 1):
     COVARIATE_STYLES[f"fc_{_yr}"] = _fc_style
 

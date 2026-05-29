@@ -947,8 +947,6 @@ def auto_merge_unmerged() -> dict:
 
 def _auto_merge_unmerged_inner() -> dict:
     """Actual logic for auto_merge_unmerged, called under a Redis lock."""
-    import importlib.util
-    import os
     from datetime import datetime, timedelta, timezone
 
     import sqlalchemy as sa
@@ -960,14 +958,17 @@ def _auto_merge_unmerged_inner() -> dict:
         return {"scanned": 0, "dispatched": 0, "discovered": 0}
 
     # Load covariate names from GEE export config
-    gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
-    if not os.path.exists(gee_config_path):
-        logger.warning("GEE config not found at %s", gee_config_path)
+    import sys
+    from pathlib import Path
+
+    gee_export_dir = Path(__file__).parent.parent / "gee-export"
+    if not gee_export_dir.exists():
+        logger.warning("GEE export directory not found at %s", gee_export_dir)
         return {"scanned": 0, "dispatched": 0, "discovered": 0}
 
-    spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
-    gee_config = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gee_config)
+    sys.path.insert(0, str(gee_export_dir))
+    import config as gee_config
+
     known_covariates = list(gee_config.COVARIATES.keys())
     resolutions = gee_config.RESOLUTIONS  # {1000: {...}, 250: {...}}
 
@@ -1280,6 +1281,7 @@ def _auto_merge_unmerged_inner() -> dict:
         )
 
         need_merge: list[tuple[str, int]] = []
+
         # Sort by total tile size (smallest first) so that quick merges
         # complete early, reducing queue depth and providing faster
         # feedback that the system is working.  This also reduces the

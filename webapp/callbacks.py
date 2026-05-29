@@ -8,7 +8,6 @@ visualization, and admin panel actions.
 import base64
 import json
 import logging
-import os
 import random
 import uuid as _uuid
 
@@ -2175,16 +2174,13 @@ def register_callbacks(app, limiter=None):
         if not user or not user.is_admin:
             return dbc.Alert("Admin access required.", color="danger")
 
-        import importlib.util
+        import sys
+        from pathlib import Path
 
-        gee_config_path = os.path.join(
-            os.path.dirname(__file__), "gee-export", "config.py"
-        )
-        spec = importlib.util.spec_from_file_location(
-            "gee_export_config", gee_config_path
-        )
-        gee_config = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(gee_config)
+        gee_export_dir = Path(__file__).parent.parent / "gee-export"
+        sys.path.insert(0, str(gee_export_dir))
+        import config as gee_config
+
         COVARIATES = gee_config.COVARIATES
 
         if category == "all":

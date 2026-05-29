@@ -9,11 +9,13 @@ import io
 import json
 import logging
 import os
+import sys as _sys
 import tarfile
 import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path as _Path
 
 import boto3
 import geopandas as gpd
@@ -33,6 +35,10 @@ from models import (
     get_db,
 )
 
+# Import forest cover year boundaries from gee-export config
+_sys.path.insert(0, str(_Path(__file__).parent.parent / "gee-export"))
+from config import FC_YEAR_MIN, FC_YEAR_MAX
+
 logger = logging.getLogger(__name__)
 
 ALLOWED_MATCHING_JOB_QUEUES = {
@@ -45,12 +51,7 @@ DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-gp3"
 # -- Analysis task default settings ------------------------------------------
 # Single source of truth for matching parameter defaults.  Imported by
 # layouts.py (UI form pre-fill) and callbacks.py (server-side fallbacks).
-# Forest cover year boundaries are imported from gee-export config.
-import sys as _sys
-from pathlib import Path as _Path
-
-_sys.path.insert(0, str(_Path(__file__).parent.parent / "gee-export"))
-from config import FC_YEAR_MIN, FC_YEAR_MAX
+# Forest cover year boundaries are imported from gee-export config at top.
 
 ANALYSIS_DEFAULTS = {
     "max_treatment_pixels": 1000,
@@ -2176,34 +2177,27 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
     of export record IDs.
     """
     import ee
-    import importlib.util
     import sys
+    from pathlib import Path
 
-    gee_dir = os.path.join(os.path.dirname(__file__), "gee-export")
+    gee_dir = Path(__file__).parent.parent / "gee-export"
 
     # Load gee-export/config.py as its own module, then temporarily
     # inject it into sys.modules["config"] so that gee-export/tasks.py
     # (which does "from config import COVARIATES") picks it up instead
     # of the webapp's config.py.
-    gee_cfg_spec = importlib.util.spec_from_file_location(
-        "gee_export_config", os.path.join(gee_dir, "config.py")
-    )
-    gee_cfg = importlib.util.module_from_spec(gee_cfg_spec)
-    gee_cfg_spec.loader.exec_module(gee_cfg)
+    path_inserted = str(gee_dir) not in sys.path
+    if path_inserted:
+        sys.path.insert(0, str(gee_dir))
+
+    import config as gee_cfg
 
     original_config = sys.modules.get("config")
     sys.modules["config"] = gee_cfg
-    # Also add gee-export dir to sys.path so tasks.py can find
-    # sibling modules like derived_layers
-    path_inserted = gee_dir not in sys.path
-    if path_inserted:
-        sys.path.insert(0, gee_dir)
+
     try:
-        gee_tasks_spec = importlib.util.spec_from_file_location(
-            "gee_export_tasks", os.path.join(gee_dir, "tasks.py")
-        )
-        gee_tasks = importlib.util.module_from_spec(gee_tasks_spec)
-        gee_tasks_spec.loader.exec_module(gee_tasks)
+        import tasks as gee_tasks
+
         start_export_task = gee_tasks.start_export_task
     finally:
         # Restore the webapp config module
@@ -2212,7 +2206,7 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
         else:
             sys.modules.pop("config", None)
         if path_inserted:
-            sys.path.remove(gee_dir)
+            sys.path.remove(str(gee_dir))
 
     project = Config.GEE_PROJECT_ID or None
     opt_url = Config.GEE_ENDPOINT or None
@@ -3078,15 +3072,16 @@ def get_covariate_inventory():
         resolution, gcs_tiles, on_s3, s3_url, status, gee_task_id,
         size_mb, merged_url, started_at, completed_at, error_message.
     """
-    import importlib.util
-
     from cog_merge import list_all_gcs_tiles, list_s3_cog_objects
 
     # Load covariate definitions from GEE export config
-    gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
-    spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
-    gee_config = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gee_config)
+    import sys
+    from pathlib import Path
+
+    gee_export_dir = Path(__file__).parent.parent / "gee-export"
+    sys.path.insert(0, str(gee_export_dir))
+    import config as gee_config
+
     covariates = gee_config.COVARIATES
     cov_resolutions = gee_config.RESOLUTIONS  # {1000: {...}, 250: {...}}
 
@@ -3277,12 +3272,13 @@ def get_ready_covariate_names(resolution_m=1000):
     handled automatically by the analysis pipeline via ``fc_years``.
     The returned order follows the GEE export config definition.
     """
-    import importlib.util
+    import sys
+    from pathlib import Path
 
-    gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
-    spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
-    gee_config = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gee_config)
+    gee_export_dir = Path(__file__).parent.parent / "gee-export"
+    sys.path.insert(0, str(gee_export_dir))
+    import config as gee_config
+
     covariate_order = list(gee_config.COVARIATES.keys())
 
     # Build a set of covariate names that are merged at the desired resolution.

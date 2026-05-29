@@ -5,8 +5,6 @@ admin panel, and navigation components. Uses AG Grid for sortable/filterable
 tables following the same patterns as the trends.earth-api-ui.
 """
 
-import importlib.util
-import os
 import random
 
 import dash_ag_grid as dag
@@ -2717,10 +2715,13 @@ def task_detail_layout(user, task_id, shared_token=None):
 
 def _build_category_options():
     """Build dropdown options with variable names per category from config."""
-    gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
-    spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
-    gee_config = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gee_config)
+    import sys
+    from pathlib import Path
+
+    gee_export_dir = Path(__file__).parent.parent / "gee-export"
+    sys.path.insert(0, str(gee_export_dir))
+    import config as gee_config
+
     covariates = gee_config.COVARIATES
 
     # Group variable names by category

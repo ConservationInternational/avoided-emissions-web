@@ -322,8 +322,6 @@ def cog_layers():
     Accepts an optional ``resolution`` query parameter (1000 or 250) to
     return COGs for a specific resolution.  Defaults to 1000 (1 km).
     """
-    import importlib.util
-
     import boto3
     from flask import request as flask_request
 
@@ -342,10 +340,12 @@ def cog_layers():
     cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
 
     # Load gee-export config for descriptions and categories
-    gee_config_path = os.path.join(os.path.dirname(__file__), "gee-export", "config.py")
-    spec = importlib.util.spec_from_file_location("gee_export_config", gee_config_path)
-    gee_config = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gee_config)
+    import sys
+    from pathlib import Path
+
+    gee_export_dir = Path(__file__).parent.parent / "gee-export"
+    sys.path.insert(0, str(gee_export_dir))
+    import config as gee_config
 
     cog_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
     # Backwards-compat: legacy COGs without a suffix are treated as 1 km.
