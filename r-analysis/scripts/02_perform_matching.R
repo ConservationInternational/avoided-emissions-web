@@ -173,6 +173,23 @@ if (MIN_CONTROL_DISTANCE_KM > 0) {
 formula_json <- fromJSON(file.path(config$output_dir, "formula.json"))
 f <- as.formula(formula_json$formula_str)
 
+# Check for cross-site grouping mode
+GROUP_BY_EXACT_MATCHES <- isTRUE(config$group_by_exact_matches)
+GROUP_MAPPING <- NULL
+if (GROUP_BY_EXACT_MATCHES) {
+    group_file <- file.path(config$output_dir, "exact_match_groups.json")
+    if (file.exists(group_file)) {
+        GROUP_MAPPING <- fromJSON(group_file, simplifyVector = FALSE)
+        message(
+            "  Cross-site grouping enabled: ",
+            length(GROUP_MAPPING), " exact-match groups"
+        )
+    } else {
+        warning("group_by_exact_matches=true but exact_match_groups.json not found")
+        GROUP_BY_EXACT_MATCHES <- FALSE
+    }
+}
+
 # Determine which site(s) and replicate(s) to process.
 # BATCH_REPLICATE will be set to a single integer when the array index
 # specifies a specific replicate; NULL means "run all replicates".
@@ -190,30 +207,67 @@ if (!is.null(config$site_id)) {
     array_index <- Sys.getenv("AWS_BATCH_JOB_ARRAY_INDEX", "")
     if (array_index != "") {
         ai <- as.integer(array_index)
-        n_sites <- length(all_site_ids)
-        if (N_REPLICATES > 1L) {
-            # Composite index: site_index * N_REPLICATES + replicate_index
-            site_idx_0 <- ai %/% N_REPLICATES  # 0-based site index
-            rep_idx_0 <- ai %% N_REPLICATES    # 0-based replicate index
-            BATCH_REPLICATE <- rep_idx_0 + 1L   # 1-based
-            site_ids <- all_site_ids[site_idx_0 + 1L]
-            batch_site_id <- filter(
-                sites, id_numeric == site_ids
-            )$site_id[1]
+
+        if (GROUP_BY_EXACT_MATCHES && !is.null(GROUP_MAPPING)) {
+            # Cross-site grouping: array index maps to (group_id, replicate)
+            group_ids <- as.integer(names(GROUP_MAPPING))
+            n_groups <- length(group_ids)
+
+            if (N_REPLICATES > 1L) {
+                group_idx_0 <- ai %/% N_REPLICATES  # 0-based
+                rep_idx_0 <- ai %% N_REPLICATES
+                BATCH_REPLICATE <- rep_idx_0 + 1L
+                group_id <- group_ids[group_idx_0 + 1L]
+            } else {
+                group_id <- group_ids[ai + 1L]
+            }
+
+            # Load all sites in this group
+            group_members <- GROUP_MAPPING[[as.character(group_id)]]
+            # group_members is list of [site_id, sub_site_index]
+            group_site_ids <- sapply(group_members, function(x) x[[1]])
+            group_sub_indices <- sapply(group_members, function(x) x[[2]])
+
+            # Get numeric IDs for all sites in group
+            site_ids <- sites %>%
+                filter(site_id %in% group_site_ids) %>%
+                pull(id_numeric) %>%
+                unique()
+
             message(
                 "  AWS Batch array index: ", array_index,
-                " -> site_id ", batch_site_id,
-                ", replicate ", BATCH_REPLICATE, "/", N_REPLICATES
+                " -> group ", group_id,
+                " (", length(site_ids), " sites",
+                if (!is.null(BATCH_REPLICATE)) paste0(", replicate ", BATCH_REPLICATE, "/", N_REPLICATES) else "",
+                ")"
             )
         } else {
-            site_ids <- all_site_ids[ai + 1L]
-            batch_site_id <- filter(
-                sites, id_numeric == site_ids
-            )$site_id[1]
-            message(
-                "  AWS Batch array index: ", array_index,
-                " -> site_id ", batch_site_id
-            )
+            # Standard per-site mode
+            n_sites <- length(all_site_ids)
+            if (N_REPLICATES > 1L) {
+                # Composite index: site_index * N_REPLICATES + replicate_index
+                site_idx_0 <- ai %/% N_REPLICATES  # 0-based site index
+                rep_idx_0 <- ai %% N_REPLICATES    # 0-based replicate index
+                BATCH_REPLICATE <- rep_idx_0 + 1L   # 1-based
+                site_ids <- all_site_ids[site_idx_0 + 1L]
+                batch_site_id <- filter(
+                    sites, id_numeric == site_ids
+                )$site_id[1]
+                message(
+                    "  AWS Batch array index: ", array_index,
+                    " -> site_id ", batch_site_id,
+                    ", replicate ", BATCH_REPLICATE, "/", N_REPLICATES
+                )
+            } else {
+                site_ids <- all_site_ids[ai + 1L]
+                batch_site_id <- filter(
+                    sites, id_numeric == site_ids
+                )$site_id[1]
+                message(
+                    "  AWS Batch array index: ", array_index,
+                    " -> site_id ", batch_site_id
+                )
+            }
         }
     } else {
         # Process all sites sequentially
@@ -770,6 +824,23 @@ for (this_id in site_ids) {
     this_site_id <- site$site_id[1]
     this_site_name <- if ("site_name" %in% names(site)) site$site_name[1] else NA_character_
     this_batch_index <- match(this_id, all_site_ids) - 1L
+
+    # Determine sub_site_index if in cross-site grouping mode
+    this_sub_site_index <- 0L
+    if (GROUP_BY_EXACT_MATCHES && !is.null(GROUP_MAPPING)) {
+        # Find this site in the group mapping
+        for (gid in names(GROUP_MAPPING)) {
+            group_members <- GROUP_MAPPING[[gid]]
+            for (member in group_members) {
+                if (member[[1]] == this_site_id) {
+                    this_sub_site_index <- as.integer(member[[2]])
+                    break
+                }
+            }
+            if (this_sub_site_index > 0L) break
+        }
+    }
+
     # Which replicates should this node process?
     replicate_range <- if (!is.null(BATCH_REPLICATE)) {
         BATCH_REPLICATE  # single replicate when parallelised
@@ -778,20 +849,27 @@ for (this_id in site_ids) {
     }
 
     # Build replicate-specific match file paths.
+    # Include sub_site_index when cross-site grouping is enabled.
     # When N_REPLICATES == 1, use the original naming for backward compat.
+    base_filename <- if (this_sub_site_index > 0L) {
+        paste0("m_", this_id, "_", this_sub_site_index)
+    } else {
+        paste0("m_", this_id)
+    }
+
     if (N_REPLICATES > 1L) {
         rep_match_paths <- file.path(
             config$matches_dir,
-            paste0("m_", this_id, "_rep", seq_len(N_REPLICATES), ".rds")
+            paste0(base_filename, "_rep", seq_len(N_REPLICATES), ".rds")
         )
         # Paths for only the replicates this node will process
         node_match_paths <- file.path(
             config$matches_dir,
-            paste0("m_", this_id, "_rep", replicate_range, ".rds")
+            paste0(base_filename, "_rep", replicate_range, ".rds")
         )
     } else {
         rep_match_paths <- file.path(
-            config$matches_dir, paste0("m_", this_id, ".rds")
+            config$matches_dir, paste0(base_filename, ".rds")
         )
         node_match_paths <- rep_match_paths
     }
@@ -800,11 +878,11 @@ for (this_id in site_ids) {
     if (!is.null(BATCH_REPLICATE)) {
         failure_path <- file.path(
             config$matches_dir,
-            paste0("failed_", this_id, "_rep", BATCH_REPLICATE, ".json")
+            paste0("failed_", base_filename, "_rep", BATCH_REPLICATE, ".json")
         )
     } else {
         failure_path <- file.path(
-            config$matches_dir, paste0("failed_", this_id, ".json")
+            config$matches_dir, paste0("failed_", base_filename, ".json")
         )
     }
 
@@ -813,7 +891,14 @@ for (this_id in site_ids) {
     } else {
         paste0("replicates=", N_REPLICATES)
     }
-    message("  Processing site_id ", this_site_id,
+
+    site_label <- if (this_sub_site_index > 0L) {
+        paste0(this_site_id, " (sub-site ", this_sub_site_index, ")")
+    } else {
+        this_site_id
+    }
+
+    message("  Processing site_id ", site_label,
             " (batch_index=", this_batch_index,
             ", ", rep_label, ")")
 
@@ -833,6 +918,7 @@ for (this_id in site_ids) {
                 id_numeric = this_id,
                 site_id = this_site_id,
                 site_name = this_site_name,
+                sub_site_index = this_sub_site_index,
                 error = "No treatment cells found for site",
                 timestamp = format(
                     Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
@@ -845,15 +931,33 @@ for (this_id in site_ids) {
             )
             TRUE
         } else {
+            # Load treatment and control pixels for matching.
+            # In cross-site grouping mode, load treatment pixels from ALL
+            # sites in the group to build a shared propensity score model.
+            if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
+                # Load treatment cells for ALL sites in this group
+                group_treatment_cells <- filter(
+                    treatment_key, id_numeric %in% site_ids
+                )$cell
+                message(
+                    "    Cross-site grouping: loading ",
+                    length(group_treatment_cells),
+                    " treatment pixels from ", length(site_ids), " sites"
+                )
+            } else {
+                # Standard per-site mode
+                group_treatment_cells <- treatment_cells$cell
+            }
+
             # All candidate pixels (treatment + controls) are spatially
             # constrained to the matching extent computed in the webapp.
             # Filter in Arrow to avoid materialising the full parquet.
             site_treatment_cells <- treatment_cells$cell
             vals <- base_dataset %>%
-                filter(cell %in% site_treatment_cells |
+                filter(cell %in% group_treatment_cells |
                        !(cell %in% all_treatment_cells)) %>%
                 collect() %>%
-                mutate(treatment = cell %in% site_treatment_cells)
+                mutate(treatment = cell %in% group_treatment_cells)
 
             # Remove pixels with NA in exact-match grouping variables
             n_before <- nrow(vals)
@@ -1087,6 +1191,7 @@ for (this_id in site_ids) {
                             id_numeric = this_id,
                             site_id = this_site_id,
                             site_name = this_site_name,
+                            sub_site_index = this_sub_site_index,
                             replicate = rep_k,
                             error = error_msg,
                             separation_warnings = sep_warnings,
@@ -1105,8 +1210,27 @@ for (this_id in site_ids) {
                             failure_path
                         )
                     } else {
+                        # In cross-site grouping mode, the match result contains
+                        # matches for ALL sites in the group.  Filter to keep only
+                        # matches for THIS site's treatment pixels.
+                        if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
+                            n_before_filter <- nrow(m)
+                            m <- m %>% filter(
+                                !treatment | cell %in% site_treatment_cells
+                            )
+                            n_after_filter <- nrow(m)
+                            if (n_before_filter != n_after_filter) {
+                                message(
+                                    "    Filtered group matches: ",
+                                    n_before_filter, " -> ", n_after_filter,
+                                    " rows (keeping only this site's pixels)"
+                                )
+                            }
+                        }
+
                         m$id_numeric <- this_id
                         m$site_id <- site$site_id
+                        m$sub_site_index <- this_sub_site_index
                         m$sampled_fraction <-
                             n_treatment_final / n_treatment_total
                         m$n_control_sampled <- n_control_final
