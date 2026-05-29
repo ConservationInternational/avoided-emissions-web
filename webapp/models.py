@@ -261,6 +261,10 @@ class TaskSite(Base):
     start_date = Column(DateTime)
     end_date = Column(DateTime)
     area_ha = Column(Float)
+    # Sub-site support for sites spanning multiple exact-match groups
+    sub_site_index = Column(Integer, default=0, nullable=False)
+    is_sub_site = Column(Boolean, default=False, nullable=False)
+    original_area_ha = Column(Float, nullable=True)
 
     task = relationship("AnalysisTask", back_populates="sites")
 

@@ -2164,6 +2164,34 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
+                                                                                            dbc.Checkbox(
+                                                                                                id="group-by-exact-matches",
+                                                                                                label="Group sites by exact-match regions (cross-site grouping)",
+                                                                                                value=rc.get(
+                                                                                                    "group_by_exact_matches",
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "group_by_exact_matches"
+                                                                                                    ],
+                                                                                                ),
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Build a separate propensity score model for each unique combination "
+                                                                                                "of exact-match values across all sites. Sites spanning multiple "
+                                                                                                "exact-match regions are automatically split into sub-polygons. "
+                                                                                                "Useful when sites share exact-match regions and have few pixels — "
+                                                                                                "pooling improves model quality and reduces computation time.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
                                                                                             dbc.Label(
                                                                                                 "Number of replicates"
                                                                                             ),
