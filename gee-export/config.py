@@ -229,7 +229,7 @@ COVARIATES["aez"] = {
     "resample": "mode",
 }
 
-# Forest cover layers: Hansen GFC annual cover by year (2000-2024)
+# Forest cover layers: Hansen GFC annual cover by year (2000-2025)
 for year in range(2000, 2025):
     COVARIATES[f"fc_{year}"] = {
         "derived": "hansen_fc",
