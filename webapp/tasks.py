@@ -961,7 +961,7 @@ def _auto_merge_unmerged_inner() -> dict:
     import sys
     from pathlib import Path
 
-    gee_export_dir = Path(__file__).parent.parent / "gee-export"
+    gee_export_dir = Path(__file__).parent / "gee-export"
     if not gee_export_dir.exists():
         logger.warning("GEE export directory not found at %s", gee_export_dir)
         return {"scanned": 0, "dispatched": 0, "discovered": 0}

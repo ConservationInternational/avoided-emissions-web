@@ -36,7 +36,7 @@ from models import (
 )
 
 # Import forest cover year boundaries from gee-export config
-_sys.path.insert(0, str(_Path(__file__).parent.parent / "gee-export"))
+_sys.path.insert(0, str(_Path(__file__).parent / "gee-export"))
 from config import FC_YEAR_MIN, FC_YEAR_MAX
 
 logger = logging.getLogger(__name__)
@@ -2180,7 +2180,7 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
     import sys
     from pathlib import Path
 
-    gee_dir = Path(__file__).parent.parent / "gee-export"
+    gee_dir = Path(__file__).parent / "gee-export"
 
     # Load gee-export/config.py as its own module, then temporarily
     # inject it into sys.modules["config"] so that gee-export/tasks.py
@@ -3078,7 +3078,7 @@ def get_covariate_inventory():
     import sys
     from pathlib import Path
 
-    gee_export_dir = Path(__file__).parent.parent / "gee-export"
+    gee_export_dir = Path(__file__).parent / "gee-export"
     sys.path.insert(0, str(gee_export_dir))
     import config as gee_config
 
@@ -3275,7 +3275,7 @@ def get_ready_covariate_names(resolution_m=1000):
     import sys
     from pathlib import Path
 
-    gee_export_dir = Path(__file__).parent.parent / "gee-export"
+    gee_export_dir = Path(__file__).parent / "gee-export"
     sys.path.insert(0, str(gee_export_dir))
     import config as gee_config
 

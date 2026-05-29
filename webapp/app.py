@@ -343,7 +343,7 @@ def cog_layers():
     import sys
     from pathlib import Path
 
-    gee_export_dir = Path(__file__).parent.parent / "gee-export"
+    gee_export_dir = Path(__file__).parent / "gee-export"
     sys.path.insert(0, str(gee_export_dir))
     import config as gee_config
 
