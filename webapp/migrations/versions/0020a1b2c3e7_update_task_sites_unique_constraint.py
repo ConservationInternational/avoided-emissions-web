@@ -8,7 +8,6 @@ Updates the unique constraint on task_sites to include sub_site_index,
 allowing multiple sub-sites with the same site_id within a task.
 """
 
-import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -20,32 +19,24 @@ depends_on = None
 
 def upgrade():
     # Drop the old unique constraint (task_id, site_id)
-    op.drop_constraint(
-        "task_sites_task_id_site_id_key",
-        "task_sites",
-        type_="unique"
-    )
-    
+    op.drop_constraint("task_sites_task_id_site_id_key", "task_sites", type_="unique")
+
     # Create new unique constraint (task_id, site_id, sub_site_index)
     op.create_unique_constraint(
         "task_sites_task_id_site_id_sub_site_index_key",
         "task_sites",
-        ["task_id", "site_id", "sub_site_index"]
+        ["task_id", "site_id", "sub_site_index"],
     )
 
 
 def downgrade():
     # Drop the new unique constraint
     op.drop_constraint(
-        "task_sites_task_id_site_id_sub_site_index_key",
-        "task_sites",
-        type_="unique"
+        "task_sites_task_id_site_id_sub_site_index_key", "task_sites", type_="unique"
     )
-    
+
     # Recreate the old unique constraint
     # Note: This will fail if there are multiple sub-sites with the same site_id
     op.create_unique_constraint(
-        "task_sites_task_id_site_id_key",
-        "task_sites",
-        ["task_id", "site_id"]
+        "task_sites_task_id_site_id_key", "task_sites", ["task_id", "site_id"]
     )

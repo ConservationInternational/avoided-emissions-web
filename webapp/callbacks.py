@@ -1377,7 +1377,7 @@ def register_callbacks(app, limiter=None):
             # Always pull all available FC years so post-end-date
             # deforestation data is available for comparison plots.
             fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
-            fc_years = list(range(fc_min, fc_max + 1))
+            fc_years = list(range(fc_min, fc_max))
 
             # Server-side bounds validation (mirrors the HTML input
             # min/max attributes so tampered requests are rejected).

@@ -45,6 +45,13 @@ DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-gp3"
 # -- Analysis task default settings ------------------------------------------
 # Single source of truth for matching parameter defaults.  Imported by
 # layouts.py (UI form pre-fill) and callbacks.py (server-side fallbacks).
+# Forest cover year boundaries are imported from gee-export config.
+import sys as _sys
+from pathlib import Path as _Path
+
+_sys.path.insert(0, str(_Path(__file__).parent.parent / "gee-export"))
+from config import FC_YEAR_MIN, FC_YEAR_MAX
+
 ANALYSIS_DEFAULTS = {
     "max_treatment_pixels": 1000,
     "control_multiplier": 50,
@@ -59,8 +66,8 @@ ANALYSIS_DEFAULTS = {
     "n_replicates": 1,
     "match_memory_gb": 30,
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
-    "fc_year_start": 2000,
-    "fc_year_end": 2025,  # exclusive upper bound for range()
+    "fc_year_start": FC_YEAR_MIN,
+    "fc_year_end": FC_YEAR_MAX + 1,  # exclusive upper bound for range()
     "resolution_m": 1000,  # nominal resolution: 1000 m (1 km) or 250 m
 }
 
@@ -3797,8 +3804,8 @@ def resubmit_analysis_task(task_id, user_id):
         fc_min = max(2000, int(start_dates.dt.year.min()) - 5)
         # Always pull all available FC years so post-end-date
         # deforestation data is available for comparison plots.
-        fc_max = 2025
-        fc_years = list(range(fc_min, fc_max + 1))
+        fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
+        fc_years = list(range(fc_min, fc_max))
 
         # Memory is stored in MiB in config
         match_memory_mib = config.get("match_memory_mib", 30720)

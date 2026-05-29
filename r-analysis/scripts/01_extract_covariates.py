@@ -740,14 +740,16 @@ def main(argv: list[str] | None = None) -> None:
         log.info("  Formula: %s", formula["formula_str"])
 
         # Save exact-match group mapping if cross-site grouping is enabled
-        if config.get("group_by_exact_matches") and config.get("exact_match_group_mapping"):
+        if config.get("group_by_exact_matches") and config.get(
+            "exact_match_group_mapping"
+        ):
             group_mapping = config["exact_match_group_mapping"]
             # Convert tuple keys to strings for JSON serialization
             # group_mapping is {group_id: [(site_id, sub_site_index), ...]}
-            group_mapping_json = {
-                int(k): v for k, v in group_mapping.items()
-            }
-            with open(os.path.join(config["output_dir"], "exact_match_groups.json"), "w") as f:
+            group_mapping_json = {int(k): v for k, v in group_mapping.items()}
+            with open(
+                os.path.join(config["output_dir"], "exact_match_groups.json"), "w"
+            ) as f:
                 json.dump(group_mapping_json, f)
             log.info("  Saved exact-match group mapping: %d groups", len(group_mapping))
 

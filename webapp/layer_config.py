@@ -353,7 +353,14 @@ _fc_style = {
     "opacity": 1.0,
     "nodata_value": None,
 }
-for _yr in range(2000, 2025):
+# Import forest cover year range from GEE export config
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "gee-export"))
+from config import FC_YEAR_MIN, FC_YEAR_MAX
+
+for _yr in range(FC_YEAR_MIN, FC_YEAR_MAX + 1):
     COVARIATE_STYLES[f"fc_{_yr}"] = _fc_style
 
 # ── Population (pop_YYYY) ───────────────────────────────────────────────────

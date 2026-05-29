@@ -8,6 +8,16 @@ analysis.
 EXPORT_CRS = "EPSG:4326"
 
 # ---------------------------------------------------------------------------
+# Forest cover year range (Hansen GFC)
+# ---------------------------------------------------------------------------
+# Single source of truth for forest cover year boundaries.
+# FC_YEAR_MIN: First year of available Hansen forest cover data
+# FC_YEAR_MAX: Last year of available Hansen forest cover data
+# These determine which fc_YYYY covariates are defined and exported.
+FC_YEAR_MIN = 2000
+FC_YEAR_MAX = 2025  # Updated to match Hansen GFC 2025 v1.13
+
+# ---------------------------------------------------------------------------
 # Resolution presets
 # ---------------------------------------------------------------------------
 # Each preset defines a pixel size in degrees and a GCS sub-prefix so that
@@ -229,8 +239,9 @@ COVARIATES["aez"] = {
     "resample": "mode",
 }
 
-# Forest cover layers: Hansen GFC annual cover by year (2000-2025)
-for year in range(2000, 2025):
+# Forest cover layers: Hansen GFC annual cover by year
+# Uses FC_YEAR_MIN and FC_YEAR_MAX constants defined at top of file.
+for year in range(FC_YEAR_MIN, FC_YEAR_MAX + 1):
     COVARIATES[f"fc_{year}"] = {
         "derived": "hansen_fc",
         "year": year,
