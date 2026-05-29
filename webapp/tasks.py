@@ -6,11 +6,17 @@ Celery worker process.  The web application dispatches work by calling
 """
 
 import logging
+import sys
+from pathlib import Path
 
 import boto3
 
 from celery_app import celery_app
 from config import report_exception, report_message
+
+# Import GEE export config
+sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
+import gee_config
 
 logger = logging.getLogger(__name__)
 
@@ -936,7 +942,6 @@ def _auto_merge_unmerged_inner() -> dict:
         return {"scanned": 0, "dispatched": 0, "discovered": 0}
 
     # Load covariate names from GEE export config
-    import sys
     from pathlib import Path
 
     gee_export_dir = Path(__file__).parent / "gee-export"
@@ -944,9 +949,7 @@ def _auto_merge_unmerged_inner() -> dict:
         logger.warning("GEE export directory not found at %s", gee_export_dir)
         return {"scanned": 0, "dispatched": 0, "discovered": 0}
 
-    sys.path.insert(0, str(gee_export_dir))
-    import gee_config
-
+    # gee_config already imported at module level
     known_covariates = list(gee_config.COVARIATES.keys())
     resolutions = gee_config.RESOLUTIONS  # {1000: {...}, 250: {...}}
 

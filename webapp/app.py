@@ -32,6 +32,12 @@ from auth import (
 )
 from callbacks import register_callbacks
 from config import Config
+
+# Import GEE export config
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
+import gee_config
 from layouts import (
     admin_layout,
     dashboard_layout,
@@ -340,13 +346,7 @@ def cog_layers():
     cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
 
     # Load gee-export config for descriptions and categories
-    import sys
-    from pathlib import Path
-
-    gee_export_dir = Path(__file__).parent / "gee-export"
-    sys.path.insert(0, str(gee_export_dir))
-    import gee_config
-
+    # gee_config already imported at module level
     cog_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
     # Backwards-compat: legacy COGs without a suffix are treated as 1 km.
     legacy_cog_prefix = f"{Config.S3_PREFIX}/cog" if resolution_m == 1000 else None

@@ -12,6 +12,13 @@ import dash_bootstrap_components as dbc
 from dash import dcc, html
 
 from config import Config
+
+# Import GEE export config
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
+import gee_config
 from services import ANALYSIS_DEFAULTS, DEFAULT_MATCHING_JOB_QUEUE
 
 # Default covariates for the matching formula
@@ -2715,13 +2722,7 @@ def task_detail_layout(user, task_id, shared_token=None):
 
 def _build_category_options():
     """Build dropdown options with variable names per category from config."""
-    import sys
-    from pathlib import Path
-
-    gee_export_dir = Path(__file__).parent / "gee-export"
-    sys.path.insert(0, str(gee_export_dir))
-    import gee_config
-
+    # gee_config already imported at module level
     covariates = gee_config.COVARIATES
 
     # Group variable names by category

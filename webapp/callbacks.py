@@ -31,6 +31,13 @@ from auth import (
     revoke_refresh_token,
 )
 from config import report_exception
+
+# Import GEE export config
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
+import gee_config
 from layouts import (
     EXACT_MATCH_OPTIONS,
     RESULTS_TOTAL_COLUMNS,
@@ -2174,13 +2181,7 @@ def register_callbacks(app, limiter=None):
         if not user or not user.is_admin:
             return dbc.Alert("Admin access required.", color="danger")
 
-        import sys
-        from pathlib import Path
-
-        gee_export_dir = Path(__file__).parent / "gee-export"
-        sys.path.insert(0, str(gee_export_dir))
-        import gee_config
-
+        # gee_config already imported at module level
         COVARIATES = gee_config.COVARIATES
 
         if category == "all":

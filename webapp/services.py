@@ -2181,6 +2181,7 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
     of export record IDs.
     """
     import ee
+
     # Import GEE export tasks (gee-export is already in sys.path from module init)
     import tasks as gee_tasks
 
@@ -3051,13 +3052,7 @@ def get_covariate_inventory():
     from cog_merge import list_all_gcs_tiles, list_s3_cog_objects
 
     # Load covariate definitions from GEE export config
-    import sys
-    from pathlib import Path
-
-    gee_export_dir = Path(__file__).parent / "gee-export"
-    sys.path.insert(0, str(gee_export_dir))
-    import gee_config
-
+    # gee_config already imported at module level
     covariates = gee_config.COVARIATES
     cov_resolutions = gee_config.RESOLUTIONS  # {1000: {...}, 250: {...}}
 
@@ -3248,13 +3243,7 @@ def get_ready_covariate_names(resolution_m=1000):
     handled automatically by the analysis pipeline via ``fc_years``.
     The returned order follows the GEE export config definition.
     """
-    import sys
-    from pathlib import Path
-
-    gee_export_dir = Path(__file__).parent / "gee-export"
-    sys.path.insert(0, str(gee_export_dir))
-    import gee_config
-
+    # gee_config already imported at module level
     covariate_order = list(gee_config.COVARIATES.keys())
 
     # Build a set of covariate names that are merged at the desired resolution.
