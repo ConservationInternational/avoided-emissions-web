@@ -37,7 +37,10 @@ from models import (
 
 # Import forest cover year boundaries from gee-export config
 _sys.path.insert(0, str(_Path(__file__).parent / "gee-export"))
-from config import FC_YEAR_MIN, FC_YEAR_MAX
+import config as _gee_config
+
+FC_YEAR_MIN = _gee_config.FC_YEAR_MIN
+FC_YEAR_MAX = _gee_config.FC_YEAR_MAX
 
 logger = logging.getLogger(__name__)
 

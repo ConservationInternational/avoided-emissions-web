@@ -38,7 +38,10 @@ from pathlib import Path
 
 # Import forest cover year range from GEE export config
 sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
-from config import FC_YEAR_MIN, FC_YEAR_MAX
+import config as _gee_config
+
+FC_YEAR_MIN = _gee_config.FC_YEAR_MIN
+FC_YEAR_MAX = _gee_config.FC_YEAR_MAX
 
 # ── Fallback ────────────────────────────────────────────────────────────────
 
