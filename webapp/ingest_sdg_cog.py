@@ -72,10 +72,21 @@ RESOLUTIONS = {
 # ---------------------------------------------------------------------------
 
 
-def _run_cmd(cmd: list[str]) -> None:
-    """Run a shell command, raising on failure."""
+def _run_cmd(cmd: list[str], env_override: dict | None = None) -> None:
+    """Run a shell command, raising on failure.
+
+    Parameters
+    ----------
+    cmd : list[str]
+        Command and arguments to run.
+    env_override : dict | None
+        Additional environment variables to set for this command.
+    """
     logger.info("Running: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    env = os.environ.copy()
+    if env_override:
+        env.update(env_override)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
     if result.returncode != 0:
         logger.error("STDOUT: %s", result.stdout)
         logger.error("STDERR: %s", result.stderr)
@@ -146,6 +157,15 @@ def extract_and_resample(
     warped_tif = os.path.join(workdir, f"{output_name}_warped.tif")
     cog_tif = os.path.join(workdir, f"{output_name}.tif")
 
+    # GDAL memory constraints to prevent OOM on global 250m rasters
+    # merge-worker container has 4GB limit, so keep GDAL under 1.5GB total
+    # to leave headroom for Python, OS, and intermediate file buffers
+    gdal_env = {
+        "GDAL_CACHEMAX": "1024",  # 1GB cache maximum
+        "GDAL_NUM_THREADS": "ALL_CPUS",
+        "GDAL_SWATH_SIZE": "256000000",  # 256MB swath for warp
+    }
+
     # Step 1: Extract single band
     _run_cmd(
         [
@@ -160,13 +180,21 @@ def extract_and_resample(
             "BIGTIFF=YES",
             source_path,
             band_tif,
-        ]
+        ],
+        env_override=gdal_env,
     )
 
     # Step 2: Resample to target grid (mode for categorical data)
+    # Use -wm (working memory) and -multi for chunked processing
+    # Keep working memory low to stay within container's 4GB limit
     _run_cmd(
         [
             "gdalwarp",
+            "-wm",
+            "256",  # 256MB working memory (conservative for 4GB container)
+            "-multi",  # Multi-threaded processing
+            "-wo",
+            "NUM_THREADS=ALL_CPUS",
             "-t_srs",
             SRS,
             "-te",
@@ -192,7 +220,8 @@ def extract_and_resample(
             "-overwrite",
             band_tif,
             warped_tif,
-        ]
+        ],
+        env_override=gdal_env,
     )
 
     # Step 3: Convert to Cloud-Optimized GeoTIFF
@@ -209,13 +238,18 @@ def extract_and_resample(
             "BIGTIFF=IF_SAFER",
             warped_tif,
             cog_tif,
-        ]
+        ],
+        env_override=gdal_env,
     )
 
-    # Clean up intermediates
+    # Clean up intermediates immediately to free memory
     for tmp in (band_tif, warped_tif):
         if os.path.exists(tmp):
-            os.remove(tmp)
+            try:
+                os.remove(tmp)
+                logger.debug("Removed intermediate file: %s", tmp)
+            except OSError as e:
+                logger.warning("Failed to remove %s: %s", tmp, e)
 
     size_mb = os.path.getsize(cog_tif) / (1024 * 1024)
     logger.info("Created COG: %s (%.1f MB)", cog_tif, size_mb)
@@ -251,10 +285,18 @@ def ingest_sdg_layers() -> dict[str, dict]:
 
         s3 = boto3.client("s3", region_name=Config.AWS_REGION)
 
+        # Process resolutions sequentially to avoid memory spikes
+        # (processing all layers at 250m resolution requires ~30GB+ memory)
         for resolution_m, res_cfg in RESOLUTIONS.items():
             cog_suffix = res_cfg["cog_suffix"]
             pixel_size_deg = res_cfg["pixel_size_deg"]
             prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}".strip("/")
+
+            logger.info(
+                "Processing SDG layers at %dm resolution (pixel size: %.8f deg)",
+                resolution_m,
+                pixel_size_deg,
+            )
 
             for name, layer_info in SDG_LAYERS.items():
                 result_key = f"{name}{cog_suffix}"
@@ -284,27 +326,47 @@ def ingest_sdg_layers() -> dict[str, dict]:
                     resolution_m,
                 )
 
-                cog_path = extract_and_resample(
-                    source_path=SDG_COG_VSICURL,
-                    band=layer_info["band"],
-                    output_name=f"{name}{cog_suffix}",
-                    workdir=workdir,
-                    pixel_size_deg=pixel_size_deg,
-                )
-                size_bytes = os.path.getsize(cog_path)
-                cog_url = _upload_to_s3(cog_path, bucket, s3_key)
-                results[result_key] = {
-                    "cog_url": cog_url,
-                    "size_bytes": size_bytes,
-                    "skipped": False,
-                }
-                logger.info(
-                    "Uploaded SDG layer %s (%dm) -> %s",
-                    name,
-                    resolution_m,
-                    cog_url,
-                )
+                try:
+                    cog_path = extract_and_resample(
+                        source_path=SDG_COG_VSICURL,
+                        band=layer_info["band"],
+                        output_name=f"{name}{cog_suffix}",
+                        workdir=workdir,
+                        pixel_size_deg=pixel_size_deg,
+                    )
+                    size_bytes = os.path.getsize(cog_path)
+                    cog_url = _upload_to_s3(cog_path, bucket, s3_key)
+                    results[result_key] = {
+                        "cog_url": cog_url,
+                        "size_bytes": size_bytes,
+                        "skipped": False,
+                    }
+                    logger.info(
+                        "Uploaded SDG layer %s (%dm) -> %s",
+                        name,
+                        resolution_m,
+                        cog_url,
+                    )
+                    # Clean up COG file immediately after upload
+                    try:
+                        os.remove(cog_path)
+                        logger.debug("Removed uploaded COG: %s", cog_path)
+                    except OSError as e:
+                        logger.warning("Failed to remove %s: %s", cog_path, e)
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to process SDG layer %s (%dm)",
+                        name,
+                        resolution_m,
+                    )
+                    results[result_key] = {
+                        "error": str(exc)[:500],
+                        "skipped": False,
+                    }
+                    # Continue processing other layers even if one fails
+                    continue
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+        logger.info("Cleaned up temporary directory: %s", workdir)
 
     return results

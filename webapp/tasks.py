@@ -269,8 +269,33 @@ def rasterize_vectors_task(self) -> dict:
                 db.close()
 
         # Chain SDG COG ingestion after vectors are rasterized.
-        ingest_sdg_cog_task.delay()
-        logger.info("Dispatched ingest_sdg_cog_task after vector rasterization")
+        # Only dispatch if not already running/completed (idempotent task will skip if done)
+        from celery_app import celery_app as app
+
+        # Check if task is already queued or running
+        inspector = app.control.inspect()
+        active_tasks = inspector.active() or {}
+        scheduled_tasks = inspector.scheduled() or {}
+
+        task_name = "tasks.ingest_sdg_cog"
+        already_running = False
+
+        for worker_tasks in active_tasks.values():
+            if any(t.get("name") == task_name for t in worker_tasks):
+                already_running = True
+                break
+
+        if not already_running:
+            for worker_tasks in scheduled_tasks.values():
+                if any(t.get("name") == task_name for t in worker_tasks):
+                    already_running = True
+                    break
+
+        if already_running:
+            logger.info("SDG ingestion task already queued/running — skipping dispatch")
+        else:
+            ingest_sdg_cog_task.delay()
+            logger.info("Dispatched ingest_sdg_cog_task after vector rasterization")
 
         return {"status": "complete", "layers": all_results}
 
@@ -283,11 +308,11 @@ def rasterize_vectors_task(self) -> dict:
 @celery_app.task(
     name="tasks.ingest_sdg_cog",
     bind=True,
-    max_retries=1,
+    max_retries=0,  # No retries - task is idempotent and memory-intensive
     acks_late=True,
     reject_on_worker_lost=True,
-    soft_time_limit=7200,
-    time_limit=7500,
+    soft_time_limit=10800,  # 3 hours (250m global rasters are very slow)
+    time_limit=11100,
 )
 def ingest_sdg_cog_task(self) -> dict:
     """Download the Trends.Earth SDG 15.3.1 COG, extract bands, and upload to S3.
@@ -298,6 +323,12 @@ def ingest_sdg_cog_task(self) -> dict:
     skipped.
 
     Typically dispatched after :func:`rasterize_vectors_task` completes.
+
+    **Memory constraints**: Processing 250m global rasters requires significant
+    memory (~10-15GB). GDAL memory limits are configured to prevent OOM.
+
+    **Idempotency**: Task checks S3 before processing each layer. Safe to
+    dispatch multiple times — already-uploaded layers are skipped.
 
     Returns
     -------
@@ -310,7 +341,36 @@ def ingest_sdg_cog_task(self) -> dict:
     from ingest_sdg_cog import RESOLUTIONS, SDG_LAYERS, ingest_sdg_layers
     from models import Covariate, get_db
 
+    # Idempotency guard: check if ALL layers already exist on S3
+    logger.info("Checking if SDG ingestion has already completed...")
     try:
+        import boto3
+        from botocore.exceptions import ClientError
+
+        s3 = boto3.client("s3", region_name=Config.AWS_REGION)
+        all_exist = True
+        for resolution_m, res_cfg in RESOLUTIONS.items():
+            cog_suffix = res_cfg["cog_suffix"]
+            prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}".strip("/")
+            for name in SDG_LAYERS.keys():
+                s3_key = f"{prefix}/{name}.tif"
+                try:
+                    s3.head_object(Bucket=Config.S3_BUCKET, Key=s3_key)
+                except ClientError:
+                    all_exist = False
+                    break
+            if not all_exist:
+                break
+
+        if all_exist:
+            logger.info("All SDG layers already exist on S3 — skipping ingestion")
+            return {"status": "skipped", "message": "All layers already exist"}
+    except Exception as exc:
+        logger.warning("Failed to check S3 for existing layers: %s", exc)
+        # Continue with ingestion if check fails
+
+    try:
+        logger.info("Starting SDG COG ingestion (this may take 1-3 hours for 250m)...")
         upload_results = ingest_sdg_layers()
 
         # Create or update Covariate DB records for each uploaded layer
