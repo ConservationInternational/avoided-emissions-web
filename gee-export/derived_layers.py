@@ -81,7 +81,7 @@ def build_hansen_fc(year):
 
     Returns forest cover as a percentage (0-100).
     """
-    gfc = ee.Image("UMD/hansen/global_forest_change_2024_v1_12")
+    gfc = ee.Image("UMD/hansen/global_forest_change_2025_v1_13")
     tree_cover_2000 = gfc.select("treecover2000")
 
     if year == 2000:
