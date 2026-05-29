@@ -1426,40 +1426,52 @@ def _auto_merge_unmerged_inner() -> dict:
     # Check if all merges are complete and dispatch SDG ingestion if needed
     sdg_dispatched = False
     if not dispatched_ids and not retry_ids and not in_progress:
-        # All known covariates have been processed (merged or failed with exhausted retries)
-        # Check if SDG ingestion should be dispatched
-        try:
-            from celery_app import celery_app as app
+        # Check if there are any covariates with tiles on GCS that haven't
+        # been merged to S3 yet. Only dispatch SDG when all GCS tiles have
+        # been successfully merged.
+        unmerged = with_tiles - set(latest_hashes.keys())
+        if unmerged:
+            logger.info(
+                "Not dispatching SDG: %d covariates with GCS tiles not yet merged: %s",
+                len(unmerged),
+                sorted(f"{name}@{res}m" for name, res in unmerged),
+            )
+        else:
+            # All covariates with GCS tiles have been merged
+            # Check if SDG ingestion is already queued or running
+            try:
+                from celery_app import celery_app as app
 
-            # Check if task is already queued or running
-            inspector = app.control.inspect()
-            active_tasks = inspector.active() or {}
-            scheduled_tasks = inspector.scheduled() or {}
+                inspector = app.control.inspect()
+                active_tasks = inspector.active() or {}
+                scheduled_tasks = inspector.scheduled() or {}
 
-            task_name = "tasks.ingest_sdg_cog"
-            already_running = False
+                task_name = "tasks.ingest_sdg_cog"
+                already_running = False
 
-            for worker_tasks in active_tasks.values():
-                if any(t.get("name") == task_name for t in worker_tasks):
-                    already_running = True
-                    break
-
-            if not already_running:
-                for worker_tasks in scheduled_tasks.values():
+                for worker_tasks in active_tasks.values():
                     if any(t.get("name") == task_name for t in worker_tasks):
                         already_running = True
                         break
 
-            if not already_running:
-                ingest_sdg_cog_task.delay()
-                logger.info("All COG merges complete — dispatched SDG ingestion task")
-                sdg_dispatched = True
-            else:
-                logger.info(
-                    "All COG merges complete but SDG ingestion already queued/running"
-                )
-        except Exception:
-            logger.warning("Failed to check/dispatch SDG ingestion", exc_info=True)
+                if not already_running:
+                    for worker_tasks in scheduled_tasks.values():
+                        if any(t.get("name") == task_name for t in worker_tasks):
+                            already_running = True
+                            break
+
+                if not already_running:
+                    ingest_sdg_cog_task.delay()
+                    logger.info(
+                        "All COG merges complete — dispatched SDG ingestion task"
+                    )
+                    sdg_dispatched = True
+                else:
+                    logger.info(
+                        "All COG merges complete but SDG ingestion already queued/running"
+                    )
+            except Exception:
+                logger.warning("Failed to check/dispatch SDG ingestion", exc_info=True)
 
     return {
         "scanned": len(known_covariates),
