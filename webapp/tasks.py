@@ -268,34 +268,12 @@ def rasterize_vectors_task(self) -> dict:
             finally:
                 db.close()
 
-        # Chain SDG COG ingestion after vectors are rasterized.
-        # Only dispatch if not already running/completed (idempotent task will skip if done)
-        from celery_app import celery_app as app
-
-        # Check if task is already queued or running
-        inspector = app.control.inspect()
-        active_tasks = inspector.active() or {}
-        scheduled_tasks = inspector.scheduled() or {}
-
-        task_name = "tasks.ingest_sdg_cog"
-        already_running = False
-
-        for worker_tasks in active_tasks.values():
-            if any(t.get("name") == task_name for t in worker_tasks):
-                already_running = True
-                break
-
-        if not already_running:
-            for worker_tasks in scheduled_tasks.values():
-                if any(t.get("name") == task_name for t in worker_tasks):
-                    already_running = True
-                    break
-
-        if already_running:
-            logger.info("SDG ingestion task already queued/running — skipping dispatch")
-        else:
-            ingest_sdg_cog_task.delay()
-            logger.info("Dispatched ingest_sdg_cog_task after vector rasterization")
+        # SDG ingestion is now dispatched by auto_merge_unmerged after
+        # all COG merges complete, not immediately after rasterization.
+        logger.info(
+            "Vector rasterization complete. SDG ingestion will be dispatched "
+            "by auto_merge_unmerged once all COG merges finish."
+        )
 
         return {"status": "complete", "layers": all_results}
 
@@ -967,7 +945,7 @@ def _auto_merge_unmerged_inner() -> dict:
         return {"scanned": 0, "dispatched": 0, "discovered": 0}
 
     sys.path.insert(0, str(gee_export_dir))
-    import config as gee_config
+    import gee_config
 
     known_covariates = list(gee_config.COVARIATES.keys())
     resolutions = gee_config.RESOLUTIONS  # {1000: {...}, 250: {...}}
@@ -1442,11 +1420,54 @@ def _auto_merge_unmerged_inner() -> dict:
         run_cog_merge.delay(layer_id)
         logger.info("Auto-merge retry dispatched for covariate %s", layer_id)
 
+    # Check if all merges are complete and dispatch SDG ingestion if needed
+    sdg_dispatched = False
+    if not dispatched_ids and not retry_ids and not in_progress:
+        # All known covariates have been processed (merged or failed with exhausted retries)
+        # Check if SDG ingestion should be dispatched
+        try:
+            from celery_app import celery_app as app
+
+            # Check if task is already queued or running
+            inspector = app.control.inspect()
+            active_tasks = inspector.active() or {}
+            scheduled_tasks = inspector.scheduled() or {}
+
+            task_name = "tasks.ingest_sdg_cog"
+            already_running = False
+
+            for worker_tasks in active_tasks.values():
+                if any(t.get("name") == task_name for t in worker_tasks):
+                    already_running = True
+                    break
+
+            if not already_running:
+                for worker_tasks in scheduled_tasks.values():
+                    if any(t.get("name") == task_name for t in worker_tasks):
+                        already_running = True
+                        break
+
+            if not already_running:
+                ingest_sdg_cog_task.delay()
+                logger.info(
+                    "All COG merges complete — dispatched SDG ingestion task"
+                )
+                sdg_dispatched = True
+            else:
+                logger.info(
+                    "All COG merges complete but SDG ingestion already queued/running"
+                )
+        except Exception:
+            logger.warning(
+                "Failed to check/dispatch SDG ingestion", exc_info=True
+            )
+
     return {
         "scanned": len(known_covariates),
         "dispatched": len(dispatched_ids) + len(retry_ids),
         "retried": len(retry_ids),
         "discovered": discovered,
+        "sdg_dispatched": sdg_dispatched,
     }
 
 

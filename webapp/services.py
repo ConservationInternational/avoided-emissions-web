@@ -3084,7 +3084,7 @@ def get_covariate_inventory():
 
     gee_export_dir = Path(__file__).parent / "gee-export"
     sys.path.insert(0, str(gee_export_dir))
-    import config as gee_config
+    import gee_config
 
     covariates = gee_config.COVARIATES
     cov_resolutions = gee_config.RESOLUTIONS  # {1000: {...}, 250: {...}}
@@ -3281,7 +3281,7 @@ def get_ready_covariate_names(resolution_m=1000):
 
     gee_export_dir = Path(__file__).parent / "gee-export"
     sys.path.insert(0, str(gee_export_dir))
-    import config as gee_config
+    import gee_config
 
     covariate_order = list(gee_config.COVARIATES.keys())
 

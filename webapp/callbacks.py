@@ -2179,7 +2179,7 @@ def register_callbacks(app, limiter=None):
 
         gee_export_dir = Path(__file__).parent / "gee-export"
         sys.path.insert(0, str(gee_export_dir))
-        import config as gee_config
+        import gee_config
 
         COVARIATES = gee_config.COVARIATES
 

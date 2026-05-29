@@ -2720,7 +2720,7 @@ def _build_category_options():
 
     gee_export_dir = Path(__file__).parent / "gee-export"
     sys.path.insert(0, str(gee_export_dir))
-    import config as gee_config
+    import gee_config
 
     covariates = gee_config.COVARIATES
 
