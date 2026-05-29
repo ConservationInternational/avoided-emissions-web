@@ -585,7 +585,7 @@ COVARIATE_STATUS_ROW_STYLES = [
         "style": {"backgroundColor": "#D1E7DD", "color": "#0F5132"},
     },
     {
-        "condition": "params.data.status === 'merged'",
+        "condition": "params.data.status === 'merged' && params.data.on_s3",
         "style": {"backgroundColor": "#D1E7DD", "color": "#0F5132"},
     },
     # Failed / cancelled

@@ -1080,6 +1080,59 @@ def _auto_merge_unmerged_inner() -> dict:
 
         db.flush()
 
+        # ---- Reconcile orphaned "merged" records without S3 files ----
+        # If a DB record claims status='merged' but the S3 scan shows
+        # the file is missing, reset it to 'failed' with an error
+        # message. This can happen if:
+        #   - S3 file was manually deleted
+        #   - Merge task set status='merged' but S3 upload failed
+        #   - Historical data from before proper validation
+        orphaned_count = 0
+        orphaned_merged = (
+            db.query(Covariate)
+            .filter(
+                Covariate.status == "merged",
+                Covariate.merged_url.isnot(None),
+            )
+            .all()
+        )
+        for rec in orphaned_merged:
+            key = (rec.covariate_name, rec.resolution_m)
+            if key not in s3_cog_map:
+                # DB says merged, but S3 file is missing
+                logger.warning(
+                    "Orphaned merged record for %s (id=%s) — "
+                    "S3 file missing, resetting to failed",
+                    rec.covariate_name,
+                    rec.id,
+                )
+                rec.status = "failed"
+                rec.error_message = (
+                    "Reset by auto_merge: DB claimed 'merged' but S3 file not found. "
+                    "File may have been deleted or upload may have failed."
+                )
+                rec.completed_at = now
+                orphaned_count += 1
+
+                # Also update any metadata snapshots
+                orphaned_metas = (
+                    db.query(GeeExportMetadata)
+                    .filter(
+                        GeeExportMetadata.covariate_id == rec.id,
+                        GeeExportMetadata.status == "merged",
+                    )
+                    .all()
+                )
+                for om in orphaned_metas:
+                    om.status = "failed"
+                    om.error_message = "S3 file missing (orphaned record)"
+
+        if orphaned_count > 0:
+            db.flush()
+            logger.info(
+                "Reset %d orphaned 'merged' records without S3 files", orphaned_count
+            )
+
         # ---- Reset stale merges FIRST ----
         # Must run before the snapshot query so that stale records
         # show as "failed" (not "merging") in the snapshot.
