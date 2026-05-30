@@ -909,11 +909,38 @@ for (this_id in site_ids) {
             # Filter in Arrow to avoid materialising the full parquet.
             arrow_timer <- proc.time()
             site_treatment_cells <- treatment_cells$cell
-            vals <- base_dataset %>%
-                filter(cell %in% group_treatment_cells |
-                       !(cell %in% all_treatment_cells)) %>%
-                collect() %>%
-                mutate(treatment = cell %in% group_treatment_cells)
+
+            if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
+                # Load only current-site treatment + true controls.
+                # Other sites' treatment pixels are loaded separately to
+                # prevent them from contaminating filter_groups() logic;
+                # they are added back after filtering for propensity modeling.
+                vals <- base_dataset %>%
+                    filter(cell %in% site_treatment_cells |
+                           !(cell %in% all_treatment_cells)) %>%
+                    collect() %>%
+                    mutate(treatment = cell %in% site_treatment_cells)
+
+                other_sites_treatment <- base_dataset %>%
+                    filter(cell %in% group_treatment_cells &
+                           !(cell %in% site_treatment_cells)) %>%
+                    collect() %>%
+                    mutate(treatment = TRUE)
+
+                message(
+                    "    Cross-site grouping: loaded ",
+                    nrow(other_sites_treatment),
+                    " treatment pixels from other sites for propensity modeling"
+                )
+            } else {
+                vals <- base_dataset %>%
+                    filter(cell %in% group_treatment_cells |
+                           !(cell %in% all_treatment_cells)) %>%
+                    collect() %>%
+                    mutate(treatment = cell %in% site_treatment_cells)
+                other_sites_treatment <- NULL
+            }
+            
             arrow_elapsed <- (proc.time() - arrow_timer)["elapsed"]
             message(
                 "    [TIMING] Arrow dataset filter & collect: ",
@@ -930,7 +957,9 @@ for (this_id in site_ids) {
                         " pixels with missing group data")
             }
 
-            # Filter to groups present in both treatment and control
+            # Filter to groups present in both treatment and control.
+            # In cross-site mode, we've excluded other sites' treatment pixels,
+            # so this only drops controls that conflict with CURRENT site.
             vals <- filter_groups(vals, EXACT_MATCH_VARS)
 
             # Exclude control pixels too close to ANY treatment polygon
@@ -1016,6 +1045,20 @@ for (this_id in site_ids) {
                     add_defor_pre <- TRUE
                     this_f <- update(this_f, ~ . + defor_pre_intervention)
                 }
+            }
+
+            # Pre-compute defor_pre_intervention for cross-site treatment pixels
+            # so they can contribute to the propensity model when that term is used.
+            if (!is.null(other_sites_treatment) && add_defor_pre) {
+                other_sites_treatment <- other_sites_treatment %>%
+                    mutate(
+                        defor_pre_intervention = if_else(
+                            .data[[fc_init_name]] > 0,
+                            (.data[[fc_final_name]] - .data[[fc_init_name]]) /
+                                .data[[fc_init_name]] * 100,
+                            NA_real_
+                        )
+                    )
             }
 
             # Save unsampled data for replicate re-use
@@ -1265,6 +1308,27 @@ for (this_id in site_ids) {
                         auto_unbox = TRUE, pretty = TRUE
                     )
                 } else {
+                    # Add cross-site treatment pixels for propensity modeling.
+                    # Restrict to groups that survived the full filtering pipeline.
+                    if (!is.null(other_sites_treatment) &&
+                        nrow(other_sites_treatment) > 0) {
+                        valid_groups <- as.character(unique(vals$group))
+                        other_filtered <- other_sites_treatment %>%
+                            filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.))) %>%
+                            mutate(group = as.character(
+                                interaction(across(all_of(EXACT_MATCH_VARS)), drop = TRUE)
+                            )) %>%
+                            filter(group %in% valid_groups)
+
+                        if (nrow(other_filtered) > 0) {
+                            vals <- bind_rows(vals, other_filtered)
+                            message(
+                                "    Added ", nrow(other_filtered),
+                                " cross-site treatment pixels for propensity modeling"
+                            )
+                        }
+                    }
+
                     # Run matching
                     match_timer <- proc.time()
                     if (MATCHING_METHOD == "nearest") {
