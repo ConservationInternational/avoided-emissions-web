@@ -1395,10 +1395,14 @@ def submit_analysis_task(
             "[SUBMIT] Task %s: DB record created, uploading sites to S3", task_id
         )
 
-        # Upload sites to S3 (prefer PostGIS-exported GeoJSON from a persisted set)
-        # If sites were split, upload the split_gdf instead of original gdf
+        # Upload sites to S3.
+        # When cross-site grouping is enabled, the split GeoDataFrame must be
+        # uploaded so Batch uses the same site/sub-site geometry used to build
+        # exact_match_group_mapping.
         _s3_t0 = _time.perf_counter()
-        if site_set_id:
+        if group_by_exact_matches:
+            sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
+        elif site_set_id:
             sites_uri = upload_user_site_set_geojson_to_s3(site_set_id, task_id)
         else:
             sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
