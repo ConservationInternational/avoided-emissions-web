@@ -47,12 +47,18 @@ def get_merged_covariates():
         db.close()
 
 
-def presign(s3, name):
-    """Generate a presigned URL for a COG."""
-    key = f"{Config.S3_PREFIX}/cog/{name}.tif"
+def presign_from_url(s3, s3_url):
+    """Generate a presigned URL from an s3:// URL."""
+    # Parse s3://bucket/key format
+    if not s3_url.startswith("s3://"):
+        raise ValueError(f"Invalid S3 URL: {s3_url}")
+    parts = s3_url[5:].split("/", 1)
+    if len(parts) != 2:
+        raise ValueError(f"Invalid S3 URL format: {s3_url}")
+    bucket, key = parts
     return s3.generate_presigned_url(
         "get_object",
-        Params={"Bucket": Config.S3_BUCKET, "Key": key},
+        Params={"Bucket": bucket, "Key": key},
         ExpiresIn=3600,
     )
 
@@ -287,7 +293,11 @@ def main():
 
     for name in to_analyze:
         try:
-            url = presign(s3, name)
+            rec = covariates[name]
+            if not rec.merged_url:
+                print(f"  {name}: no merged_url in database, skipping")
+                continue
+            url = presign_from_url(s3, rec.merged_url)
             info = analyze_layer(name, url)
             if info:
                 results[name] = info

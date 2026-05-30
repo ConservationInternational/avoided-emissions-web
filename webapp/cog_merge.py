@@ -568,7 +568,7 @@ def merge_covariate_tiles(
     source_bucket: str,
     source_prefix: str,
     output_bucket: str,
-    output_prefix: str = "avoided-emissions/cog",
+    output_prefix: str = "avoided-emissions/cog_1km",
     aws_region: str = "us-east-1",
     layer_id: str | None = None,
     tile_urls: list[str] | None = None,

@@ -572,12 +572,19 @@ def run_cog_merge(self, layer_id: str) -> dict:
         meta.merge_started_at = merge_start
         db.commit()
 
+        # Determine resolution-specific path if output_prefix not set
+        if not layer.output_prefix:
+            cog_suffix = "_1km" if layer.resolution_m == 1000 else "_250m"
+            fallback_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
+        else:
+            fallback_prefix = layer.output_prefix
+
         result = merge_covariate_tiles(
             covariate_name=layer.covariate_name,
             source_bucket=source_bucket,
             source_prefix=source_prefix,
             output_bucket=layer.output_bucket,
-            output_prefix=layer.output_prefix or f"{Config.S3_PREFIX}/cog",
+            output_prefix=fallback_prefix,
             aws_region=Config.AWS_REGION,
             layer_id=layer_id,
             tile_urls=tile_urls,

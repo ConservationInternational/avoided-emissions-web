@@ -1414,7 +1414,7 @@ def submit_analysis_task(
         # Both resolutions have an explicit suffix (_1km / _250m).
         _cog_suffixes = {1000: "_1km", 250: "_250m"}
         _cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
-        cog_prefix = f"{Config.S3_COG_PREFIX}{_cog_suffix}"
+        cog_prefix = f"{Config.S3_PREFIX}/cog{_cog_suffix}"
 
         params = {
             "task_id": task_id,
@@ -2133,9 +2133,10 @@ def _cleanup_covariate_downstream(covariate_name, db, *, resolution_m=None):
     """
     from cog_merge import delete_gcs_tiles, delete_s3_cog
 
-    # 1. Delete S3 COG (if exists)
-    if Config.S3_BUCKET:
-        cog_prefix = Config.S3_COG_PREFIX
+    # 1. Delete S3 COG (if exists) - use resolution-specific path
+    if Config.S3_BUCKET and resolution_m is not None:
+        cog_suffix = "_1km" if resolution_m == 1000 else "_250m"
+        cog_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
         try:
             delete_s3_cog(
                 Config.S3_BUCKET,
@@ -2144,7 +2145,11 @@ def _cleanup_covariate_downstream(covariate_name, db, *, resolution_m=None):
                 region=Config.AWS_REGION,
             )
         except Exception:
-            logger.warning("Failed to delete S3 COG for %s", covariate_name)
+            logger.warning(
+                "Failed to delete S3 COG for %s at %sm resolution",
+                covariate_name,
+                resolution_m,
+            )
 
     # 2. Delete GCS tiles (if exists)
     if Config.GCS_BUCKET:
@@ -2973,9 +2978,10 @@ def force_remerge(covariate_name, user_id, *, resolution_m=1000):
     from cog_merge import delete_s3_cog
     from tasks import run_cog_merge
 
-    # 1. Delete existing S3 COG
+    # 1. Delete existing S3 COG - use resolution-specific path
+    cog_suffix = "_1km" if resolution_m == 1000 else "_250m"
     if Config.S3_BUCKET:
-        cog_prefix = Config.S3_COG_PREFIX
+        cog_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
         try:
             delete_s3_cog(
                 Config.S3_BUCKET,
@@ -2984,7 +2990,11 @@ def force_remerge(covariate_name, user_id, *, resolution_m=1000):
                 region=Config.AWS_REGION,
             )
         except Exception:
-            logger.warning("Failed to delete S3 COG for %s", covariate_name)
+            logger.warning(
+                "Failed to delete S3 COG for %s at %sm resolution",
+                covariate_name,
+                resolution_m,
+            )
 
     # 2. Update or create DB record
     db = get_db()
@@ -3006,7 +3016,7 @@ def force_remerge(covariate_name, user_id, *, resolution_m=1000):
             existing.error_message = None
             existing.completed_at = None
             existing.output_bucket = Config.S3_BUCKET
-            existing.output_prefix = f"{Config.S3_PREFIX}/cog"
+            existing.output_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
             layer_id = str(existing.id)
         else:
             layer = Covariate(
@@ -3016,7 +3026,7 @@ def force_remerge(covariate_name, user_id, *, resolution_m=1000):
                 gcs_bucket=Config.GCS_BUCKET,
                 gcs_prefix=Config.GCS_PREFIX,
                 output_bucket=Config.S3_BUCKET,
-                output_prefix=f"{Config.S3_PREFIX}/cog",
+                output_prefix=f"{Config.S3_PREFIX}/cog{cog_suffix}",
                 started_by=user_id,
             )
             db.add(layer)
@@ -3110,7 +3120,7 @@ def get_covariate_inventory():
     try:
         if Config.S3_BUCKET:
             for res_m, cog_suffix in _cog_suffixes.items():
-                cog_prefix = f"{Config.S3_COG_PREFIX}{cog_suffix}"
+                cog_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
                 for obj in list_s3_cog_objects(
                     Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
                 ):
