@@ -51,33 +51,50 @@ N_REPLICATES <- if (is.null(config$n_replicates)) {
 sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %>%
     as_tibble()
 
+# When cross-site grouping with site splitting is enabled, sites may have
+# duplicate site_id entries (one per sub-site polygon).  For result aggregation,
+# we need unique site metadata. Sum area_ha across sub-sites to get the total
+# original area, and take the first value for other shared metadata.
+sites <- sites %>%
+    group_by(site_id) %>%
+    summarise(
+        site_name = first(site_name),
+        start_year = first(start_year),
+        end_year = first(end_year),
+        area_ha = sum(area_ha, na.rm = TRUE),
+        id_numeric = first(id_numeric),
+        .groups = "drop"
+    )
+
 # Load match files.
-# When N_REPLICATES > 1 files are named m_{id}_rep{k}.rds;
-# when N_REPLICATES == 1 files use the original m_{id}.rds naming.
+# When N_REPLICATES > 1 files are named m_{id}[_{sub_idx}]_rep{k}.rds;
+# when N_REPLICATES == 1 files use m_{id}[_{sub_idx}].rds naming.
+# The optional _{sub_idx} suffix is present when cross-site grouping with
+# site splitting is enabled (group_by_exact_matches=True).
 if (N_REPLICATES > 1L) {
     match_files_all <- list.files(
         config$matches_dir,
-        pattern = "^m_[0-9]+(_rep[0-9]+)?\\.rds$",
+        pattern = "^m_[0-9]+(_[0-9]+)?(_rep[0-9]+)?\\.rds$",
         full.names = TRUE
     )
     # Use replicate-1 files for match-quality assessment
     match_files <- list.files(
         config$matches_dir,
-        pattern = "^m_[0-9]+_rep1\\.rds$",
+        pattern = "^m_[0-9]+(_[0-9]+)?_rep1\\.rds$",
         full.names = TRUE
     )
     # Backward compat: if old-style files exist, treat them as rep 1
     if (length(match_files) == 0) {
         match_files <- list.files(
             config$matches_dir,
-            pattern = "^m_[0-9]+\\.rds$",
+            pattern = "^m_[0-9]+(_[0-9]+)?\\.rds$",
             full.names = TRUE
         )
     }
 } else {
     match_files_all <- list.files(
         config$matches_dir,
-        pattern = "^m_[0-9]+\\.rds$",
+        pattern = "^m_[0-9]+(_[0-9]+)?\\.rds$",
         full.names = TRUE
     )
     match_files <- match_files_all
@@ -96,9 +113,35 @@ success_basenames <- basename(match_files_all)
 
 # Filter out failure markers where the job succeeded on retry
 failure_files <- Filter(function(fp) {
-    # Parse failed_{id_numeric}_rep{k}.json or failed_{id_numeric}.json
+    # Parse failure file name and check if a corresponding success file exists.
+    # Patterns with sub_site_index (cross-site grouping):
+    #   failed_{id}_{sub_idx}_rep{k}.json -> m_{id}_{sub_idx}_rep{k}.rds
+    #   failed_{id}_{sub_idx}.json -> m_{id}_{sub_idx}.rds
+    # Old patterns (per-site only):
+    #   failed_{id}_rep{k}.json -> m_{id}_rep{k}.rds
+    #   failed_{id}.json -> m_{id}.rds
     fname <- basename(fp)
-    # Try pattern with replicate first: failed_1_rep5.json -> m_1_rep5.rds
+
+    # Try pattern with sub_idx and replicate: failed_1_2_rep5.json
+    m <- regmatches(fname, regexec("^failed_(\\d+)_(\\d+)_rep(\\d+)\\.json$", fname))[[1]]
+    if (length(m) == 4) {
+        id_numeric <- m[2]
+        sub_idx <- m[3]
+        rep_k <- m[4]
+        success_name <- sprintf("m_%s_%s_rep%s.rds", id_numeric, sub_idx, rep_k)
+        return(!success_name %in% success_basenames)
+    }
+
+    # Try pattern with sub_idx only: failed_1_2.json
+    m <- regmatches(fname, regexec("^failed_(\\d+)_(\\d+)\\.json$", fname))[[1]]
+    if (length(m) == 3) {
+        id_numeric <- m[2]
+        sub_idx <- m[3]
+        success_name <- sprintf("m_%s_%s.rds", id_numeric, sub_idx)
+        return(!success_name %in% success_basenames)
+    }
+
+    # Try pattern with replicate only: failed_1_rep5.json
     m <- regmatches(fname, regexec("^failed_(\\d+)_rep(\\d+)\\.json$", fname))[[1]]
     if (length(m) == 3) {
         id_numeric <- m[2]
@@ -106,13 +149,15 @@ failure_files <- Filter(function(fp) {
         success_name <- sprintf("m_%s_rep%s.rds", id_numeric, rep_k)
         return(!success_name %in% success_basenames)
     }
-    # Try pattern without replicate: failed_1.json -> m_1.rds
+
+    # Try pattern without replicate or sub_idx: failed_1.json
     m <- regmatches(fname, regexec("^failed_(\\d+)\\.json$", fname))[[1]]
     if (length(m) == 2) {
         id_numeric <- m[2]
         success_name <- sprintf("m_%s.rds", id_numeric)
         return(!success_name %in% success_basenames)
     }
+
     # Unknown pattern (e.g. failed_array_5.json) - keep it as a failure
     TRUE
 }, failure_files_all)
