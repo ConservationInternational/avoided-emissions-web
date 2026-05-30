@@ -5251,8 +5251,9 @@ def _check_balance_warnings(balance_df, warnings, scope, site_filter):
         worst_idx = smds.abs().idxmax()
         worst_cov = rows.loc[worst_idx, "covariate"]
         # List all covariates exceeding the critical threshold
+        critical_mask = smds.abs() >= _SMD_CRITICAL
         critical_covs = sorted(
-            rows.loc[smds.abs() >= _SMD_CRITICAL, "covariate"].tolist(),
+            rows.loc[smds[critical_mask].index, "covariate"].tolist(),
             key=lambda c: abs(
                 smds[rows["covariate"] == c].values[0]
                 if len(rows[rows["covariate"] == c]) > 0
