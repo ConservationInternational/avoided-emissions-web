@@ -2866,6 +2866,36 @@ def admin_layout(user):
                                                         id="gee-export-result",
                                                         className="mt-2",
                                                     ),
+                                                    dbc.Modal(
+                                                        [
+                                                            dbc.ModalHeader(
+                                                                dbc.ModalTitle(
+                                                                    "Confirm Covariate Export"
+                                                                )
+                                                            ),
+                                                            dbc.ModalBody(
+                                                                "Start export will launch export tasks for all covariates in the selected category and resolution. Continue?"
+                                                            ),
+                                                            dbc.ModalFooter(
+                                                                [
+                                                                    dbc.Button(
+                                                                        "Cancel",
+                                                                        id="gee-export-cancel",
+                                                                        color="secondary",
+                                                                        className="me-2",
+                                                                    ),
+                                                                    dbc.Button(
+                                                                        "Start Export",
+                                                                        id="gee-export-confirm",
+                                                                        color="warning",
+                                                                    ),
+                                                                ]
+                                                            ),
+                                                        ],
+                                                        id="gee-export-confirm-modal",
+                                                        is_open=False,
+                                                        centered=True,
+                                                    ),
                                                 ]
                                             ),
                                         ],

@@ -2189,8 +2189,29 @@ def register_callbacks(app, limiter=None):
     # -- Admin: Covariates (unified export + merge) ---------------------------
 
     @app.callback(
+        Output("gee-export-confirm-modal", "is_open"),
+        [
+            Input("start-gee-export", "n_clicks"),
+            Input("gee-export-cancel", "n_clicks"),
+            Input("gee-export-confirm", "n_clicks"),
+        ],
+        State("gee-export-confirm-modal", "is_open"),
+        prevent_initial_call=True,
+    )
+    def toggle_gee_export_confirm_modal(
+        open_clicks, cancel_clicks, confirm_clicks, is_open
+    ):
+        ctx = callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+        if trigger == "start-gee-export":
+            return True
+        return False
+
+    @app.callback(
         Output("gee-export-result", "children"),
-        Input("start-gee-export", "n_clicks"),
+        Input("gee-export-confirm", "n_clicks"),
         State("gee-export-category", "value"),
         State("gee-export-resolution", "value"),
         prevent_initial_call=True,
