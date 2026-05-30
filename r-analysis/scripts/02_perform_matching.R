@@ -1089,6 +1089,27 @@ for (this_id in site_ids) {
                 vals <- vals_base
 
                 # ----------------------------------------------------------------
+                # Add pre-intervention deforestation
+                # ----------------------------------------------------------------
+                if (add_defor_pre) {
+                    defor_timer <- proc.time()
+                    init_fc <- vals[[fc_init_name]]
+                    final_fc <- vals[[fc_final_name]]
+                    # Set to NA when initial forest cover is 0 (undefined rate of change)
+                    # These pixels are excluded in the NA removal step below.
+                    vals$defor_pre_intervention <- if_else(
+                        init_fc > 0,
+                        ((final_fc - init_fc) / init_fc) * 100,
+                        NA_real_
+                    )
+                    defor_elapsed <- (proc.time() - defor_timer)["elapsed"]
+                    message(
+                        "    [TIMING] Pre-intervention defor calculation: ",
+                        round(defor_elapsed, 2), "s"
+                    )
+                }
+
+                # ----------------------------------------------------------------
                 # Drop NA covariates BEFORE sampling to preserve weight accuracy
                 # ----------------------------------------------------------------
                 # Sampling weights become inaccurate if NAs are dropped after
@@ -1250,28 +1271,8 @@ for (this_id in site_ids) {
                     round(sampling_elapsed, 2), "s"
                 )
 
-                # Add pre-intervention deforestation for sites >= 2005
-                if (add_defor_pre) {
-                    defor_timer <- proc.time()
-                    init_fc <- vals[[fc_init_name]]
-                    final_fc <- vals[[fc_final_name]]
-                    # Set to NA when initial forest cover is 0 (undefined rate of change)
-                    # These pixels are excluded below.
-                    vals$defor_pre_intervention <- if_else(
-                        init_fc > 0,
-                        ((final_fc - init_fc) / init_fc) * 100,
-                        NA_real_
-                    )
-                    # Exclude pixels with no initial forest cover (defor rate undefined)
-                    # Use extracted vector for consistency
-                    vals <- vals[init_fc > 0, ]
-                    vals <- filter_groups(vals, EXACT_MATCH_VARS)
-                    defor_elapsed <- (proc.time() - defor_timer)["elapsed"]
-                    message(
-                        "    [TIMING] Pre-intervention defor calculation: ",
-                        round(defor_elapsed, 2), "s"
-                    )
-                }
+                # Note: pre-intervention deforestation was calculated earlier
+                # (before NA filtering) to ensure it's available for complete.cases()
 
                 n_treatment_final <- sum(vals$treatment)
                 n_control_final <- sum(!vals$treatment)
