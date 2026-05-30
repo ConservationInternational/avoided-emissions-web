@@ -716,6 +716,7 @@ def register_callbacks(app, limiter=None):
         State("parsed-sites-store", "data"),
         State("covariate-selection", "value"),
         State("exact-match-selection", "value"),
+        State("resolution-m", "value"),
         State("max-treatment-pixels", "value"),
         State("control-multiplier", "value"),
         State("min-site-area-ha", "value"),
@@ -724,6 +725,7 @@ def register_callbacks(app, limiter=None):
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
         State("separation-fallback-mahalanobis", "value"),
+        State("group-by-exact-matches", "value"),
         State("matching-method", "value"),
         State("n-replicates", "value"),
         State("random-seed", "value"),
@@ -738,6 +740,7 @@ def register_callbacks(app, limiter=None):
         sites_data,
         covariates,
         exact_match_vars,
+        resolution_m,
         max_treatment_pixels,
         control_multiplier,
         min_site_area_ha,
@@ -746,6 +749,7 @@ def register_callbacks(app, limiter=None):
         max_controls_per_treatment,
         min_control_distance_km,
         separation_fallback_mahalanobis,
+        group_by_exact_matches,
         matching_method,
         n_replicates,
         random_seed,
@@ -789,6 +793,13 @@ def register_callbacks(app, limiter=None):
             )
 
         em_labels = [_EXACT_MATCH_LABELS.get(v, v) for v in em_list]
+
+        # --- Resolution ---
+        # Convert from string to int (form returns string)
+        try:
+            resolution_m = int(resolution_m) if resolution_m else 1000
+        except (ValueError, TypeError):
+            resolution_m = 1000
 
         # --- Matching params ---
         mcpt = max_controls_per_treatment
@@ -898,6 +909,10 @@ def register_callbacks(app, limiter=None):
                         html.Tbody(
                             [
                                 _param_row(
+                                    "Resolution",
+                                    "1 km" if resolution_m == 1000 else "250 m",
+                                ),
+                                _param_row(
                                     "Max treatment pixels",
                                     str(max_treatment_pixels),
                                 ),
@@ -930,6 +945,10 @@ def register_callbacks(app, limiter=None):
                                     "Mahalanobis"
                                     if separation_fallback_mahalanobis
                                     else "Disabled (GLM fails)",
+                                ),
+                                _param_row(
+                                    "Group by exact-match regions",
+                                    "Enabled" if group_by_exact_matches else "Disabled",
                                 ),
                                 _param_row(
                                     "Matching method",
@@ -3536,6 +3555,10 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                             ", ".join(config.get("exact_match_vars", [])) or "—",
                         ),
                         _detail_row(
+                            "Resolution",
+                            "1 km" if config.get("resolution_m") == 1000 else "250 m",
+                        ),
+                        _detail_row(
                             "Max treatment pixels",
                             config.get("max_treatment_pixels", "—"),
                         ),
@@ -3561,6 +3584,12 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                             "Separation fallback",
                             "Mahalanobis"
                             if config.get("separation_fallback_mahalanobis")
+                            else "Disabled",
+                        ),
+                        _detail_row(
+                            "Group by exact-match regions",
+                            "Enabled"
+                            if config.get("group_by_exact_matches")
                             else "Disabled",
                         ),
                         _detail_row(
