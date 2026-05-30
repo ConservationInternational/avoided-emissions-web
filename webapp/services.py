@@ -33,6 +33,10 @@ from models import (
     get_db,
 )
 
+# Import webapp's tasks module BEFORE modifying sys.path to avoid conflicts
+# with gee-export/tasks.py
+import tasks as webapp_tasks
+
 # Import forest cover year boundaries from gee-export config
 import sys
 from pathlib import Path
@@ -2980,7 +2984,6 @@ def force_remerge(covariate_name, user_id, *, resolution_m=1000):
         ``{"status": "ok", "layer_id": …}`` on success.
     """
     from cog_merge import delete_s3_cog
-    from tasks import run_cog_merge
 
     # 1. Delete existing S3 COG - use resolution-specific path
     cog_suffix = "_1km" if resolution_m == 1000 else "_250m"
@@ -3044,7 +3047,7 @@ def force_remerge(covariate_name, user_id, *, resolution_m=1000):
         db.close()
 
     # 3. Dispatch Celery merge task
-    run_cog_merge.delay(layer_id)
+    webapp_tasks.run_cog_merge.delay(layer_id)
     return {"status": "ok", "layer_id": layer_id}
 
 

@@ -25,6 +25,10 @@ import tempfile
 import boto3
 import requests
 
+# Import webapp's tasks module early to avoid import conflicts
+# (services.py adds gee-export to sys.path, which can interfere)
+import tasks as webapp_tasks
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -634,9 +638,7 @@ def merge_covariate_tiles(
         try:
             row = db.query(Covariate.id).filter(Covariate.id == layer_id).first()
             if row is None:
-                from tasks import _MergeSuperseded
-
-                raise _MergeSuperseded(layer_id)
+                raise webapp_tasks._MergeSuperseded(layer_id)
         finally:
             db.close()
 
