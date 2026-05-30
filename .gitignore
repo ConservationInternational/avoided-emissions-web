@@ -65,3 +65,4 @@ node_modules/
 webapp/celerybeat/celerybeat-schedule
 webapp/celerybeat/celerybeat-schedule-shm
 webapp/celerybeat/celerybeat-schedule-wal
+temp/*
