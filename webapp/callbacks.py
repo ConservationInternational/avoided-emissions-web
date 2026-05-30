@@ -910,7 +910,13 @@ def register_callbacks(app, limiter=None):
                             [
                                 _param_row(
                                     "Resolution",
-                                    "1 km" if resolution_m == 1000 else "250 m",
+                                    (
+                                        "250 m"
+                                        if resolution_m == 250
+                                        else "1 km"
+                                        if resolution_m == 1000 or resolution_m is None
+                                        else f"{resolution_m} m"
+                                    ),
                                 ),
                                 _param_row(
                                     "Max treatment pixels",
@@ -3577,7 +3583,13 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         ),
                         _detail_row(
                             "Resolution",
-                            "1 km" if config.get("resolution_m") == 1000 else "250 m",
+                            (
+                                "250 m"
+                                if config.get("resolution_m") == 250
+                                else "1 km"
+                                if config.get("resolution_m") in (1000, None)
+                                else f"{config.get('resolution_m')} m"
+                            ),
                         ),
                         _detail_row(
                             "Max treatment pixels",
