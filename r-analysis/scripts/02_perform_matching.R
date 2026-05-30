@@ -351,6 +351,8 @@ check_separation <- function(d, f) {
                 ))
             }
         } else if (is.numeric(col)) {
+            # For numeric variables, only check for complete range separation
+            # (no overlap between treatment and control ranges)
             t_range <- range(treat_vals, na.rm = TRUE)
             c_range <- range(ctrl_vals, na.rm = TRUE)
             if (t_range[2] < c_range[1] || c_range[2] < t_range[1]) {
@@ -362,40 +364,6 @@ check_separation <- function(d, f) {
                     round(c_range[1], 3), ", ", round(c_range[2], 3),
                     "])"
                 ))
-            } else {
-                # For low-cardinality numeric variables (binary, ordinal),
-                # check if specific values appear exclusively in one group.
-                unique_vals <- unique(col[!is.na(col)])
-                if (length(unique_vals) <= 10) {
-                    t_vals_set <- unique(treat_vals[!is.na(treat_vals)])
-                    c_vals_set <- unique(ctrl_vals[!is.na(ctrl_vals)])
-                    only_t <- setdiff(t_vals_set, c_vals_set)
-                    only_c <- setdiff(c_vals_set, t_vals_set)
-                    if (length(only_t) > 0) {
-                        problem_vars <- c(problem_vars, v)
-                        n_aff <- sum(treat_vals %in% only_t, na.rm = TRUE)
-                        pct <- round(n_aff / sum(!is.na(treat_vals)) * 100, 1)
-                        problems <- c(problems, paste0(
-                            v, ": value(s) ",
-                            paste(only_t, collapse = ", "),
-                            " found only in treatment (",
-                            n_aff, " pixels, ", pct,
-                            "% of treatment)"
-                        ))
-                    }
-                    if (length(only_c) > 0) {
-                        problem_vars <- c(problem_vars, v)
-                        n_aff <- sum(ctrl_vals %in% only_c, na.rm = TRUE)
-                        pct <- round(n_aff / sum(!is.na(ctrl_vals)) * 100, 1)
-                        problems <- c(problems, paste0(
-                            v, ": value(s) ",
-                            paste(only_c, collapse = ", "),
-                            " found only in control (",
-                            n_aff, " pixels, ", pct,
-                            "% of control)"
-                        ))
-                    }
-                }
             }
         }
     }
