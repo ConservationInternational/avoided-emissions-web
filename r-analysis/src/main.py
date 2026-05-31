@@ -756,6 +756,7 @@ def _collect_results(output_dir, task_id, log):
                                 "is_post_intervention", ""
                             ).upper()
                             == "TRUE",
+                            "sub_site_index": int(row.get("sub_site_index", 0) or 0),
                         },
                     )
                 )

@@ -33,16 +33,8 @@ from models import (
     get_db,
 )
 
-# Import webapp's tasks module BEFORE modifying sys.path to avoid conflicts
-# with gee-export/tasks.py
 import tasks as webapp_tasks
-
-# Import forest cover year boundaries from gee-export config
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
-import gee_config
+from gee_export import gee_config
 
 FC_YEAR_MIN = gee_config.FC_YEAR_MIN
 FC_YEAR_MAX = gee_config.FC_YEAR_MAX
@@ -1860,6 +1852,11 @@ def import_execution_results(task_id, results_payload, db=None):
         db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).delete()
 
         # --- per-site-year time series → TaskResult ---
+        # Each entry may carry a sub_site_index in its metadata (0 when the
+        # site was not split into sub-sites; 1+ for cross-site grouping
+        # fragments).  The unique constraint is now on
+        # (task_id, site_id, sub_site_index, year) so sub-site rows are
+        # stored and distinguished correctly.
         time_series = results_payload.get("time_series") or []
 
         for ts in time_series:
@@ -1869,6 +1866,7 @@ def import_execution_results(task_id, results_payload, db=None):
                 TaskResult(
                     task_id=task_id,
                     site_id=ts["entity_id"],
+                    sub_site_index=int(metadata.get("sub_site_index", 0)),
                     year=ts["year"],
                     extrapolated_forest_loss_avoided_ha=values.get(
                         "extrapolated_forest_loss_avoided_ha"
@@ -2196,8 +2194,7 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
     """
     import ee
 
-    # Import GEE export tasks (gee-export is already in sys.path from module init)
-    import tasks as gee_tasks
+    from gee_export import gee_tasks
 
     project = Config.GEE_PROJECT_ID or None
     opt_url = Config.GEE_ENDPOINT or None
@@ -3080,6 +3077,7 @@ def get_covariate_inventory():
         "accessibility": "Accessibility",
         "demographics": "Demographics",
         "biomass": "Biomass",
+        "soil": "Soil",
         "land_cover": "Land Cover",
         "forest_cover": "Forest Cover",
         "ecological": "Ecological",

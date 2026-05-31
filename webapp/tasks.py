@@ -6,17 +6,13 @@ Celery worker process.  The web application dispatches work by calling
 """
 
 import logging
-import sys
 from pathlib import Path
 
 import boto3
 
 from celery_app import celery_app
 from config import report_exception, report_message
-
-# Import GEE export config
-sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
-import gee_config
+from gee_export import gee_config
 
 logger = logging.getLogger(__name__)
 
@@ -949,9 +945,8 @@ def _auto_merge_unmerged_inner() -> dict:
         return {"scanned": 0, "dispatched": 0, "discovered": 0}
 
     # Load covariate names from GEE export config
-    from pathlib import Path
 
-    gee_export_dir = Path(__file__).parent / "gee-export"
+    gee_export_dir = Path(__file__).parent / "gee_export"
     if not gee_export_dir.exists():
         logger.warning("GEE export directory not found at %s", gee_export_dir)
         return {"scanned": 0, "dispatched": 0, "discovered": 0}
@@ -1600,6 +1595,10 @@ def poll_batch_tasks() -> dict:
                     client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
                 )
                 for task in api_tasks:
+                    # Capture the task ID as a plain string now, while the
+                    # session is healthy, so exception handlers can reference
+                    # it even if the session later enters PendingRollbackError.
+                    task_id_str = str(task.id)
                     try:
                         exec_id = task.extract_job_id[4:]  # strip "api:"
                         execution = client.get_execution(exec_id)
@@ -1644,19 +1643,20 @@ def poll_batch_tasks() -> dict:
                                         task.id,
                                     )
                             except Exception as results_exc:
+                                # Roll back the session FIRST.  If import_execution_results
+                                # raised a SQLAlchemy exception (e.g. IntegrityError from
+                                # an autoflush) the session is in PendingRollbackError state
+                                # and any further ORM attribute access — including task.id —
+                                # will raise another exception before we can recover.
+                                db.rollback()
                                 logger.warning(
                                     "Task %s finished but failed to import results: %s",
-                                    task.id,
+                                    task_id_str,
                                     results_exc,
                                 )
-                                report_exception(task_id=str(task.id))
-                                # If import_execution_results raised a SQLAlchemy
-                                # exception, the session is now in a "needs rollback"
-                                # state.  Rolling back here restores session integrity
-                                # so the status update can still be committed.
+                                report_exception(task_id=task_id_str)
                                 # Re-apply the status after the rollback (which expires
                                 # all ORM-tracked attributes).
-                                db.rollback()
                                 task.status = "succeeded"
                                 task.completed_at = now
                         elif api_status == "FAILED":
@@ -1679,10 +1679,10 @@ def poll_batch_tasks() -> dict:
                     except Exception as exc:
                         logger.warning(
                             "Failed to poll API status for task %s: %s",
-                            task.id,
+                            task_id_str,
                             exc,
                         )
-                        report_exception(task_id=str(task.id))
+                        report_exception(task_id=task_id_str)
 
         db.commit()
 

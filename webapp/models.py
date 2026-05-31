@@ -332,6 +332,15 @@ class UserSiteFeature(Base):
 
 class TaskResult(Base):
     __tablename__ = "task_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id",
+            "site_id",
+            "sub_site_index",
+            "year",
+            name="task_results_task_id_site_id_sub_site_index_year_key",
+        ),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id = Column(
@@ -341,6 +350,9 @@ class TaskResult(Base):
         index=True,
     )
     site_id = Column(String(100), nullable=False)
+    # 0 = no sub-site (ordinary site); 1+ = sub-site index within a
+    # cross-site grouping group (set by step 2 of the R analysis).
+    sub_site_index = Column(Integer, nullable=False, default=0)
     year = Column(Integer, nullable=False)
     extrapolated_forest_loss_avoided_ha = Column(Float)
     extrapolated_emissions_avoided_mgco2e = Column(Float)

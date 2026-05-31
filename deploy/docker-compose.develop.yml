@@ -47,7 +47,7 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
     volumes:
       - ../webapp:/app
-      - ../gee-export:/app/gee-export
+      - ../gee_export:/app/gee_export
       - ../r-analysis:/app/r-analysis
     depends_on:
       postgres:
@@ -73,7 +73,7 @@ services:
       - "8050:8050"
     volumes:
       - ../webapp:/app
-      - ../gee-export:/app/gee-export
+      - ../gee_export:/app/gee_export
       - ../r-analysis:/app/r-analysis
     depends_on:
       migrate:
@@ -102,7 +102,7 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
     volumes:
       - ../webapp:/app
-      - ../gee-export:/app/gee-export
+      - ../gee_export:/app/gee_export
       - ../r-analysis:/app/r-analysis
     depends_on:
       migrate:
@@ -125,7 +125,7 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
     volumes:
       - ../webapp:/app
-      - ../gee-export:/app/gee-export
+      - ../gee_export:/app/gee_export
       - ../r-analysis:/app/r-analysis
     depends_on:
       migrate:

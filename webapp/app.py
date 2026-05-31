@@ -31,23 +31,14 @@ from auth import (
     validate_and_refresh,
 )
 
-# Import webapp's tasks module here — before callbacks/layouts/services are
-# imported — so that sys.modules['tasks'] is populated with webapp/tasks.py
-# *before* any of those modules inserts gee-export/ at position 0 of
-# sys.path.  Without this early import, callbacks.py → layouts.py →
-# services.py would run `import tasks` after sys.path is already contaminated
-# and would bind webapp_tasks to gee-export/tasks.py (which has no
-# run_cog_merge), causing AttributeError at runtime.
-import tasks as _webapp_tasks  # noqa: F401 — side-effect: caches correct module
+# Import webapp's tasks module before other local modules are imported so that
+# sys.modules['tasks'] is populated with the Celery task registry before any
+# other import has a chance to bind a different module to that name.
+import tasks as _webapp_tasks  # noqa: F401 — side-effect: registers Celery tasks
 
 from callbacks import register_callbacks
 from config import Config
-
-# Import GEE export config
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
-import gee_config
+from gee_export import gee_config
 from layouts import (
     admin_layout,
     dashboard_layout,

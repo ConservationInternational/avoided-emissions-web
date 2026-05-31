@@ -636,10 +636,17 @@ if (length(match_files_all) > 0) {
                 )
             }
 
+            # sub_site_index is written by step 2 for all match files
+            # (0 for ordinary sites, 1+ for cross-site grouping sub-sites).
+            # Add a default of 0L for any older files that pre-date the column.
+            if (!"sub_site_index" %in% names(m)) {
+                m <- m %>% mutate(sub_site_index = 0L)
+            }
+
             m %>%
                 select(
-                    cell, site_id, id_numeric, area_ha, treatment,
-                    sampled_fraction, total_biomass, match_group,
+                    cell, site_id, id_numeric, sub_site_index, area_ha,
+                    treatment, sampled_fraction, total_biomass, match_group,
                     match_weight, sampling_weight,
                     all_of(fc_cols[fc_cols %in% names(m)])
                 ) %>%
@@ -702,10 +709,14 @@ if (length(match_files_all) > 0) {
         # Two sets of values are computed:
         #   - "sample_*" : Raw values from matched pixels only (no extrapolation)
         #   - Main columns : Extrapolated to full site using sampling_weight
+        #
+        # When cross-site grouping splits a site into sub-sites, each
+        # (site_id, sub_site_index) pair is kept as a separate row so that
+        # sub-site-level data is preserved in the output.
         # ----------------------------------------------------------------
 
         by_match <- m_proc %>%
-            group_by(match_group, site_id, year) %>%
+            group_by(match_group, site_id, sub_site_index, year) %>%
             summarise(
                 # Raw matched values (match_weight only, no sampling extrapolation)
                 sample_treatment_defor_ha = sum(
@@ -767,7 +778,7 @@ if (length(match_files_all) > 0) {
             )
 
         by_match %>%
-            group_by(site_id, year) %>%
+            group_by(site_id, sub_site_index, year) %>%
             summarise(
                 # Matched (raw) values - no extrapolation
                 sample_treatment_defor_ha =
@@ -800,28 +811,25 @@ if (length(match_files_all) > 0) {
                 .groups = "drop"
             ) %>%
             left_join(
-                # When group_by_exact_match_regions splits a site into
-                # sub-sites, each sub-site gets its own sampled_fraction
-                # (n_treatment_final / n_treatment_total for that sub-site).
-                # Reconstruct the combined fraction as:
+                # Reconstruct sampled_fraction per (site_id, sub_site_index):
                 #   sum(n_treatment_sampled) / sum(n_treatment_total)
-                # where, per (site_id, match_group):
+                # where, per (site_id, sub_site_index, match_group):
                 #   n_treatment_sampled = sum(treatment rows)
                 #   n_treatment_total   = n_treatment_sampled / sampled_fraction
                 m_proc %>%
-                    group_by(site_id, match_group) %>%
+                    group_by(site_id, sub_site_index, match_group) %>%
                     summarise(
                         n_sampled = sum(treatment, na.rm = TRUE),
                         sampled_fraction = sampled_fraction[1],
                         .groups = "drop"
                     ) %>%
                     mutate(n_total = n_sampled / sampled_fraction) %>%
-                    group_by(site_id) %>%
+                    group_by(site_id, sub_site_index) %>%
                     summarise(
                         sampled_fraction = sum(n_sampled) / sum(n_total),
                         .groups = "drop"
                     ),
-                by = "site_id"
+                by = c("site_id", "sub_site_index")
             )
     }
 
@@ -955,14 +963,42 @@ if (length(match_files_all) > 0) {
     message("  Per-site per-year results: ",
             nrow(results_by_year), " rows")
 
-    # Summarize totals by site (intervention period only)
-    # Includes both extrapolated and matched (raw) totals for transparency
-    results_total <- results_by_year %>%
+    # Summarize totals by site (intervention period only).
+    # When a site has sub-sites (sub_site_index > 0) we aggregate in two steps:
+    #   1. Sum each sub-site's contribution over its intervention years
+    #      (n_years is the count of distinct years, sampled_fraction is
+    #       constant within a sub-site so we take the first value).
+    #   2. Aggregate sub-sites to a single site-level total, using a
+    #      pixel-count-weighted mean for sampled_fraction.
+    # For ordinary sites (all sub_site_index == 0) the two-step collapse is
+    # algebraically equivalent to the previous single group_by(site_id).
+    results_by_year_filtered <- results_by_year %>%
         left_join(
             sites %>% select(site_id, start_year, end_year),
             by = "site_id"
         ) %>%
-        filter(year >= start_year, year <= end_year) %>%
+        filter(year >= start_year, year <= end_year)
+
+    results_total_by_subsite <- results_by_year_filtered %>%
+        group_by(site_id, sub_site_index) %>%
+        summarise(
+            extrapolated_forest_loss_avoided_ha =
+                sum(extrapolated_forest_loss_avoided_ha, na.rm = TRUE),
+            extrapolated_emissions_avoided_mgco2e =
+                sum(extrapolated_emissions_avoided_mgco2e, na.rm = TRUE),
+            sample_forest_loss_avoided_ha =
+                sum(sample_forest_loss_avoided_ha, na.rm = TRUE),
+            sample_emissions_avoided_mgco2e =
+                sum(sample_emissions_avoided_mgco2e, na.rm = TRUE),
+            n_sample_pixels = max(n_sample_pixels, na.rm = TRUE),
+            sampled_fraction = sampled_fraction[1],
+            first_year = min(year),
+            last_year = max(year),
+            n_years = n(),
+            .groups = "drop"
+        )
+
+    results_total <- results_total_by_subsite %>%
         group_by(site_id) %>%
         summarise(
             # Extrapolated totals (scaled to full site using sampling weights)
@@ -975,11 +1011,24 @@ if (length(match_files_all) > 0) {
                 sum(sample_forest_loss_avoided_ha, na.rm = TRUE),
             sample_emissions_avoided_mgco2e =
                 sum(sample_emissions_avoided_mgco2e, na.rm = TRUE),
-            n_sample_pixels = max(n_sample_pixels),
-            sampled_fraction = sampled_fraction[1],
-            first_year = min(year),
-            last_year = max(year),
-            n_years = n(),
+            # Aggregate pixel counts and sampling fraction across sub-sites.
+            # n_sample_pixels is summed (each sub-site has distinct pixels).
+            # sampled_fraction is the pixel-count-weighted mean so that
+            # larger sub-sites contribute proportionally more.
+            n_sample_pixels = sum(n_sample_pixels, na.rm = TRUE),
+            sampled_fraction = {
+                total_px <- sum(n_sample_pixels, na.rm = TRUE)
+                if (total_px > 0) {
+                    sum(n_sample_pixels * sampled_fraction, na.rm = TRUE) / total_px
+                } else {
+                    sampled_fraction[1]
+                }
+            },
+            first_year = min(first_year),
+            last_year = max(last_year),
+            # n_years is the number of distinct analysis years for the site;
+            # it is the same across sub-sites so we take the first value.
+            n_years = first(n_years),
             .groups = "drop"
         ) %>%
         left_join(

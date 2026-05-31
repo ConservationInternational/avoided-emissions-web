@@ -31,13 +31,7 @@ from auth import (
     revoke_refresh_token,
 )
 from config import report_exception
-
-# Import GEE export config
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent / "gee-export"))
-import gee_config
+from gee_export import gee_config
 from layouts import (
     EXACT_MATCH_OPTIONS,
     RESULTS_TOTAL_COLUMNS,
