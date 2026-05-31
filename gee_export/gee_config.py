@@ -235,6 +235,7 @@ COVARIATES = {
         "description": "Soil organic carbon stock, 0-30 cm (t/ha)",
         "category": "soil",
         "resample": "mean",
+        "unmask_nodata": True,
     },
     # Carbon
     "irr_carbon_2024": {
@@ -243,6 +244,7 @@ COVARIATES = {
         "description": "Irrecoverable carbon total, 2024 (Mg C/ha)",
         "category": "biomass",
         "resample": "mean",
+        "unmask_nodata": True,
     },
 }
 

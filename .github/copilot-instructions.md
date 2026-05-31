@@ -138,6 +138,38 @@ docker compose -f deploy/docker-compose.develop.yml exec webapp \
 ```
 Migrations run automatically on webapp startup via `entrypoint.sh`.
 
+### Accessing the Production Database
+
+The production stack runs as a Docker Swarm service on an AWS EC2 host. The postgres container does **not** expose port 5432 externally — connect via `docker exec`.
+
+**Step 1 — SSH to the production host** (replace with the actual hostname/IP):
+```bash
+ssh ec2-user@ip-172-40-1-210
+```
+
+**Step 2 — Find the postgres container ID**:
+```bash
+docker ps --filter name=postgres --format '{{.ID}} {{.Names}}'
+```
+The container is part of the `avoided-emissions-production` stack and will be named something like `avoided-emissions-production_postgres.1.<hash>`.
+
+**Step 3 — Open a psql session** (credentials come from env vars set inside the container):
+```bash
+docker exec -it <container_id> psql -U $(docker exec <container_id> printenv POSTGRES_USER) -d $(docker exec <container_id> printenv POSTGRES_DB)
+```
+
+Or as a one-liner using the container name filter:
+```bash
+CID=$(docker ps --filter name=avoided-emissions-production_postgres --format '{{.ID}}' | head -1)
+docker exec -it "$CID" psql \
+  -U "$(docker exec "$CID" printenv POSTGRES_USER)" \
+  -d "$(docker exec "$CID" printenv POSTGRES_DB)"
+```
+
+**Notes:**
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` are injected from the stack's `.env` file at deploy time — they are not hardcoded in any compose file.
+- The database password is not needed when connecting via `docker exec` because `psql` inside the Alpine container trusts local Unix socket connections by default.
+
 ### Testing
 There is **no test suite** in this repository. Validate changes by:
 1. Ensuring `ruff check` and `ruff format --check` pass (see above)

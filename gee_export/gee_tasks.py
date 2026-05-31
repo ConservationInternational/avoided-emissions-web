@@ -92,6 +92,15 @@ def _apply_resampling(image, covariate_name, crs, crs_transform):
     }
     reducer = reducers.get(method, ee.Reducer.mean())
 
+    # Some layers (e.g. soil OC, irrecoverable carbon) have sparse nodata
+    # at sub-pixel scale that causes blocky edge artifacts when mean-
+    # resampling: boundary 1 km pixels average over only the unmasked
+    # sub-pixels, producing inflated values.  Unmasking to 0 before
+    # aggregation treats absent sub-pixels as zero so the full pixel grid
+    # is used as the denominator.
+    if cfg.get("unmask_nodata"):
+        image = image.unmask(0)
+
     return image.reduceResolution(reducer=reducer, maxPixels=65536).reproject(
         crs=crs, crsTransform=crs_transform
     )

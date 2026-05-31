@@ -332,41 +332,44 @@ COVARIATE_STYLES = {
     },
     # ── Carbon ────────────────────────────────────────────────────────────
     # irr_carbon: CI Irrecoverable Carbon Total 2024 (Mg C/ha).
-    # Extremely right-skewed: most land has 0; dense forest, peatland, mangrove
-    # pixels push the tail to ~800+ Mg C/ha. Non-linear stops concentrate colour
-    # in the 0-150 Mg C/ha range where differentiation matters most.
+    # RdPu/pink-magenta-purple ramp matching the published irrecoverable
+    # carbon legend (0 → transparent, then pink → magenta → dark purple).
+    # max_value=150 clips the extreme tail; >125 t/ha is displayed as max colour.
     "irr_carbon_2024": {
         "type": "continuous",
         "min_value": 0,
-        "max_value": 300,
+        "max_value": 150,
         "color_stops": [
-            [0.0, 255, 255, 240, 0],
-            [0.005, 255, 255, 204, 1],
-            [0.02, 199, 233, 180, 1],
-            [0.07, 127, 205, 187, 1],
-            [0.18, 65, 182, 196, 1],
-            [0.40, 29, 145, 192, 1],
-            [0.70, 34, 94, 168, 1],
-            [1.0, 12, 44, 132, 1],
+            [0.0, 255, 247, 243, 0],
+            [0.005, 253, 224, 221, 1],
+            [0.03, 252, 197, 192, 1],
+            [0.08, 250, 159, 181, 1],
+            [0.18, 247, 104, 161, 1],
+            [0.35, 221, 52, 151, 1],
+            [0.55, 174, 1, 126, 1],
+            [0.75, 122, 1, 119, 1],
+            [1.0, 73, 0, 106, 1],
         ],
         "opacity": 1.0,
         "nodata_value": None,
     },
     # ── Soil ─────────────────────────────────────────────────────────────
-    # soil_oc: SoilGrids OCS 0-30 cm (t/ha); range [0, ~500+], p50≈45, p98≈180.
-    # Right-skewed: arid soils are low; boreal/peatland soils push the tail high.
+    # Viridis ramp matching the published SoilGrids OCS legend
+    # (yellow → green → teal → blue → dark purple). max_value=212 from legend.
     "soil_oc": {
         "type": "continuous",
         "min_value": 0,
-        "max_value": 200,
+        "max_value": 212,
         "color_stops": [
-            [0.0, 255, 250, 220, 1],
-            [0.05, 230, 205, 160, 1],
-            [0.15, 200, 155, 95, 1],
-            [0.30, 155, 110, 55, 1],
-            [0.55, 110, 70, 25, 1],
-            [0.80, 70, 40, 10, 1],
-            [1.0, 35, 18, 5, 1],
+            [0.0, 253, 231, 37, 1],
+            [0.10, 181, 222, 43, 1],
+            [0.22, 110, 206, 88, 1],
+            [0.36, 53, 183, 121, 1],
+            [0.50, 31, 158, 137, 1],
+            [0.64, 38, 130, 142, 1],
+            [0.76, 49, 104, 142, 1],
+            [0.87, 62, 74, 137, 1],
+            [1.0, 68, 1, 84, 1],
         ],
         "opacity": 1.0,
         "nodata_value": None,
