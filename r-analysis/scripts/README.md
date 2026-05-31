@@ -50,6 +50,79 @@ All scripts read a JSON configuration file specifying:
 }
 ```
 
+## Matching Methodology (`02_perform_matching.R`)
+
+### Algorithm
+
+Matching uses the [MatchIt](https://cran.r-project.org/package=MatchIt) package
+with 1:1 nearest-neighbour matching (`replace = FALSE`). Exact matching is
+enforced on the variables listed in `exact_match_vars` (typically
+`admin0 + ecoregion + pa`), meaning treatment and control pixels must share the
+same value for every exact-match variable before distance is considered.
+
+### Distance metric selection
+
+For each site the script selects one of three distance metrics in order of
+preference:
+
+| Priority | Condition | Distance metric used |
+|----------|-----------|----------------------|
+| 1 | Fewer than `min_glm_treatment_pixels` treatment pixels **and** no pre-computed group scores available | Mahalanobis (no caliper) |
+| 2 | `separation_fallback_mahalanobis = true` **and** quasi-complete separation detected in the site's data | Mahalanobis (no caliper) |
+| 3 | T:C ratio > `IMBALANCE_RATIO_THRESHOLD` (= 2.0) within the site's exact-match stratum | Mahalanobis (no caliper) |
+| 4 | Pre-computed group scores available (conditions 2–3 not triggered) | Propensity score — pre-computed from the group GLM |
+| 5 | Otherwise | Propensity score — per-site logistic GLM |
+
+Propensity-score matching uses a caliper of `caliper_width` standard deviations
+(default 0.75). Mahalanobis matching uses no caliper so that a match is always
+attempted when the other methods fail.
+
+**Important:** Conditions 2 and 3 always override pre-computed group scores.
+Group GLM scores can become degenerate when the combined treatment from many
+co-batched sites creates severe class imbalance within a stratum, or when the
+per-site data is perfectly separated — in both cases the pre-computed scores are
+discarded and Mahalanobis distance is used instead.
+
+### Group cache and shared GLM (`group_by_exact_matches`)
+
+When `group_by_exact_matches = true` (the default) and the job is processing
+more than one site, sites that share the same exact-match stratum (same
+`admin0 + ecoregion + pa`) are batched together. A single group-level logistic
+GLM is fitted on the pooled treatment and control pixels for the group, and the
+resulting propensity scores are reused for every site in the group. This avoids
+fitting N separate GLMs and reduces Arrow I/O and spatial distance filtering to
+one operation per group instead of one per site.
+
+The group GLM is skipped (each site falls back to its own per-site GLM or
+Mahalanobis) when:
+
+- The group has fewer than `min_glm_treatment_pixels` treatment pixels.
+- Quasi-complete separation is detected in the pooled group data.
+- The group GLM throws an error.
+
+### Quasi-complete separation detection (`separation_fallback_mahalanobis`)
+
+Before fitting any propensity model the script calls `check_separation()`, which
+checks for:
+
+- **Factor variables**: any level present exclusively in treatment or control.
+- **Numeric variables**: non-overlapping ranges between treatment and control.
+
+If separation is found and `separation_fallback_mahalanobis = true`, Mahalanobis
+distance is used and the offending variables are dropped from the distance
+formula (so they do not dominate the metric). If
+`separation_fallback_mahalanobis = false` the site is marked as failed.
+
+### T:C imbalance fallback (`IMBALANCE_RATIO_THRESHOLD`)
+
+When the number of treatment pixels in a site's exact-match stratum exceeds the
+number of control pixels by a factor of more than `IMBALANCE_RATIO_THRESHOLD`
+(hard-coded to 2.0), the propensity-score approach is abandoned regardless of
+whether pre-computed group scores are available. The caliper on a propensity
+model fitted under severe class imbalance compresses treatment scores toward 1
+and control scores toward 0, leaving no overlap for the caliper to match.
+Mahalanobis distance has no caliper and is therefore robust to this condition.
+
 ## Current Step Outputs
 
 ### Step 1 (`01_extract_covariates.py`)

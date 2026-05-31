@@ -71,6 +71,14 @@ SEPARATION_FALLBACK <- isTRUE(
     config$separation_fallback_mahalanobis
 )
 
+# When the treatment-to-control pixel ratio exceeds this value, the
+# logistic GLM produces unreliable propensity scores (intercept bias
+# pushes all predictions away from 0.5, collapsing score overlap).
+# Fall back to Mahalanobis distance matching unconditionally.
+# This typically occurs when the control pool is exhausted in a sparse
+# exact-match stratum (e.g. T=503 vs C=50 in a small ecoregion unit).
+IMBALANCE_RATIO_THRESHOLD <- 2.0
+
 # Minimum distance (km) from treatment polygons for control pixels.
 # Controls whose centroids fall within this buffer are excluded.
 # 0 disables the distance exclusion.
@@ -639,10 +647,30 @@ match_site_matchit <- function(d, f, precomputed_scores = NULL) {
             use_precomputed <- FALSE
         }
     }
-    use_mahalanobis <- !use_precomputed && (
-        n_treatment < MIN_GLM ||
-        (sep$separated && SEPARATION_FALLBACK)
+    use_mahalanobis <- (
+        (!use_precomputed && n_treatment < MIN_GLM) ||
+        (sep$separated && SEPARATION_FALLBACK) ||
+        (n_control > 0 && n_treatment / n_control > IMBALANCE_RATIO_THRESHOLD)
     )
+    # Separation and imbalance fallbacks must override pre-computed group
+    # scores: the group GLM may be unreliable in those edge cases
+    # (degenerate scores from T >> C cause the caliper to reject all matches;
+    # perfect separation means the group model didn't fit a valid GLM anyway).
+    if (use_mahalanobis && use_precomputed) {
+        reason <- if (sep$separated && SEPARATION_FALLBACK) {
+            "separation detected"
+        } else {
+            paste0(
+                "T/C ratio ", round(n_treatment / n_control, 1),
+                " > threshold ", IMBALANCE_RATIO_THRESHOLD
+            )
+        }
+        message(
+            "    Discarding pre-computed group scores (", reason,
+            "); falling back to Mahalanobis distance"
+        )
+        use_precomputed <- FALSE
+    }
     distance_method <- if (use_precomputed) "precomputed" else
                        if (use_mahalanobis) "mahalanobis" else "glm"
 
