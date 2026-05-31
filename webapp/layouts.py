@@ -1448,6 +1448,48 @@ def submit_layout(user, recompute_config=None):
                                                 ],
                                                 className="g-3 mb-3",
                                             ),
+                                            dbc.Row(
+                                                [
+                                                    dbc.Col(
+                                                        [
+                                                            dbc.Label(
+                                                                "Analysis Resolution"
+                                                            ),
+                                                            dbc.Select(
+                                                                id="resolution-m",
+                                                                options=[
+                                                                    {
+                                                                        "label": "1 km (default)",
+                                                                        "value": "1000",
+                                                                    },
+                                                                    {
+                                                                        "label": "250 m",
+                                                                        "value": "250",
+                                                                    },
+                                                                ],
+                                                                value=str(
+                                                                    rc.get(
+                                                                        "resolution_m",
+                                                                        ANALYSIS_DEFAULTS[
+                                                                            "resolution_m"
+                                                                        ],
+                                                                    )
+                                                                ),
+                                                            ),
+                                                            html.Small(
+                                                                "Pixel resolution for covariate data "
+                                                                "and matching. Only covariates "
+                                                                "available at this resolution are "
+                                                                "shown below.",
+                                                                className="text-muted",
+                                                            ),
+                                                        ],
+                                                        xs=12,
+                                                        sm=4,
+                                                    ),
+                                                ],
+                                                className="mb-3",
+                                            ),
                                             dbc.Card(
                                                 [
                                                     dbc.CardHeader(
@@ -1702,48 +1744,6 @@ def submit_layout(user, recompute_config=None):
                                 children=[
                                     html.Div(
                                         [
-                                            dbc.Row(
-                                                [
-                                                    dbc.Col(
-                                                        [
-                                                            dbc.Label(
-                                                                "Analysis Resolution"
-                                                            ),
-                                                            dbc.Select(
-                                                                id="resolution-m",
-                                                                options=[
-                                                                    {
-                                                                        "label": "1 km (default)",
-                                                                        "value": "1000",
-                                                                    },
-                                                                    {
-                                                                        "label": "250 m",
-                                                                        "value": "250",
-                                                                    },
-                                                                ],
-                                                                value=str(
-                                                                    rc.get(
-                                                                        "resolution_m",
-                                                                        ANALYSIS_DEFAULTS[
-                                                                            "resolution_m"
-                                                                        ],
-                                                                    )
-                                                                ),
-                                                            ),
-                                                            html.Small(
-                                                                "Pixel resolution for covariate data "
-                                                                "and matching. Only covariates "
-                                                                "available at this resolution are "
-                                                                "shown below.",
-                                                                className="text-muted",
-                                                            ),
-                                                        ],
-                                                        xs=12,
-                                                        sm=4,
-                                                    ),
-                                                ],
-                                                className="mb-3",
-                                            ),
                                             dbc.Row(
                                                 [
                                                     dbc.Col(

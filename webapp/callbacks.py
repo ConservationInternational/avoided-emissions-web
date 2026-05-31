@@ -1147,9 +1147,11 @@ def register_callbacks(app, limiter=None):
             Output("site-set-metadata", "children"),
         ],
         Input("site-set-selector", "value"),
+        Input("resolution-m", "value"),
         prevent_initial_call=False,
     )
-    def load_selected_site_set(site_set_id):
+    def load_selected_site_set(site_set_id, resolution_m_str):
+        resolution_m = int(resolution_m_str) if resolution_m_str else 1000
         if not site_set_id:
             return (
                 None,
@@ -1234,6 +1236,7 @@ def register_callbacks(app, limiter=None):
                 detail["geojson"],
                 height="500px",
                 enable_cog_layers=True,
+                resolution_m=resolution_m,
             ),
             metadata,
         )
