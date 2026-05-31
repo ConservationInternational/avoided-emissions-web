@@ -1861,6 +1861,7 @@ def import_execution_results(task_id, results_payload, db=None):
 
         # --- per-site-year time series → TaskResult ---
         time_series = results_payload.get("time_series") or []
+
         for ts in time_series:
             values = ts.get("values", {})
             metadata = ts.get("metadata", {})

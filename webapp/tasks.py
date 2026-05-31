@@ -1650,6 +1650,15 @@ def poll_batch_tasks() -> dict:
                                     results_exc,
                                 )
                                 report_exception(task_id=str(task.id))
+                                # If import_execution_results raised a SQLAlchemy
+                                # exception, the session is now in a "needs rollback"
+                                # state.  Rolling back here restores session integrity
+                                # so the status update can still be committed.
+                                # Re-apply the status after the rollback (which expires
+                                # all ORM-tracked attributes).
+                                db.rollback()
+                                task.status = "succeeded"
+                                task.completed_at = now
                         elif api_status == "FAILED":
                             task.status = "failed"
                             task.error_message = exec_data.get("results", {}).get(

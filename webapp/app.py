@@ -30,6 +30,16 @@ from auth import (
     touch_refresh_token,
     validate_and_refresh,
 )
+
+# Import webapp's tasks module here — before callbacks/layouts/services are
+# imported — so that sys.modules['tasks'] is populated with webapp/tasks.py
+# *before* any of those modules inserts gee-export/ at position 0 of
+# sys.path.  Without this early import, callbacks.py → layouts.py →
+# services.py would run `import tasks` after sys.path is already contaminated
+# and would bind webapp_tasks to gee-export/tasks.py (which has no
+# run_cog_merge), causing AttributeError at runtime.
+import tasks as _webapp_tasks  # noqa: F401 — side-effect: caches correct module
+
 from callbacks import register_callbacks
 from config import Config
 
