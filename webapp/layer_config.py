@@ -311,6 +311,30 @@ COVARIATE_STYLES = {
         "nodata_value": None,
     },
     # ── Biomass ──────────────────────────────────────────────────────────
+    # agb_2025: WHRC AGB-2000 Mg/ha, loss-masked through 2025 via Hansen GFC.
+    # nodata=0 (ocean + non-forest + post-loss pixels), valid = remaining forest.
+    # shape=(21600,43200), 83.8% nodata, valid range [1,1446] Mg/ha.
+    # p2=1, p10=2, p25=13, p50=40, p75=90, p90=180, p95=277, p98=336.
+    # Heavily right-skewed: stop positions anchored at percentile boundaries
+    # normalised to max_value=350 so each quartile gets equal colour bandwidth.
+    "agb_2025": {
+        "type": "continuous",
+        "min_value": 0,
+        "max_value": 350,
+        "color_stops": [
+            [0.000, 255, 255, 229, 0],  # 0 Mg/ha — nodata, transparent
+            [0.003, 255, 255, 229, 1],  # ~1 Mg/ha (p2)
+            [0.006, 247, 252, 196, 1],  # ~2 Mg/ha (p10)
+            [0.037, 217, 240, 163, 1],  # ~13 Mg/ha (p25)
+            [0.114, 173, 221, 142, 1],  # ~40 Mg/ha (p50)
+            [0.257, 120, 198, 121, 1],  # ~90 Mg/ha (p75)
+            [0.514, 49, 163, 84, 1],  # ~180 Mg/ha (p90)
+            [0.791, 0, 109, 44, 1],  # ~277 Mg/ha (p95)
+            [1.000, 0, 68, 27, 1],  # 350 Mg/ha (≈p98)
+        ],
+        "opacity": 1.0,
+        "nodata_value": 0,
+    },
     # total_biomass: range [0, 329], p2=0, p50=11.6, p98=~150
     # Right-skewed, 24% zeros, 82% nodata.
     "total_biomass": {
