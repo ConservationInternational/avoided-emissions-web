@@ -167,6 +167,18 @@ CATEGORY_STYLES = {
         "opacity": 1.0,
         "nodata_value": None,
     },
+    "soil": {
+        "type": "continuous",
+        "color_stops": [
+            [0.0, 255, 250, 220, 1],
+            [0.25, 210, 168, 107, 1],
+            [0.50, 155, 110, 55, 1],
+            [0.75, 100, 65, 25, 1],
+            [1.0, 55, 30, 10, 1],
+        ],
+        "opacity": 1.0,
+        "nodata_value": None,
+    },
 }
 
 # ── Per-covariate overrides ─────────────────────────────────────────────────
@@ -319,6 +331,47 @@ COVARIATE_STYLES = {
             [0.65, 49, 163, 84, 1],
             [0.85, 0, 109, 44, 1],
             [1.0, 0, 68, 27, 1],
+        ],
+        "opacity": 1.0,
+        "nodata_value": None,
+    },
+    # ── Carbon ────────────────────────────────────────────────────────────
+    # irr_carbon: CI Irrecoverable Carbon Total 2024 (Mg C/ha).
+    # Extremely right-skewed: most land has 0; dense forest, peatland, mangrove
+    # pixels push the tail to ~800+ Mg C/ha. Non-linear stops concentrate colour
+    # in the 0-150 Mg C/ha range where differentiation matters most.
+    "irr_carbon_2024": {
+        "type": "continuous",
+        "min_value": 0,
+        "max_value": 300,
+        "color_stops": [
+            [0.0, 255, 255, 240, 0],
+            [0.005, 255, 255, 204, 1],
+            [0.02, 199, 233, 180, 1],
+            [0.07, 127, 205, 187, 1],
+            [0.18, 65, 182, 196, 1],
+            [0.40, 29, 145, 192, 1],
+            [0.70, 34, 94, 168, 1],
+            [1.0, 12, 44, 132, 1],
+        ],
+        "opacity": 1.0,
+        "nodata_value": None,
+    },
+    # ── Soil ─────────────────────────────────────────────────────────────
+    # soil_oc: SoilGrids OCS 0-30 cm (t/ha); range [0, ~500+], p50≈45, p98≈180.
+    # Right-skewed: arid soils are low; boreal/peatland soils push the tail high.
+    "soil_oc": {
+        "type": "continuous",
+        "min_value": 0,
+        "max_value": 200,
+        "color_stops": [
+            [0.0, 255, 250, 220, 1],
+            [0.05, 230, 205, 160, 1],
+            [0.15, 200, 155, 95, 1],
+            [0.30, 155, 110, 55, 1],
+            [0.55, 110, 70, 25, 1],
+            [0.80, 70, 40, 10, 1],
+            [1.0, 35, 18, 5, 1],
         ],
         "opacity": 1.0,
         "nodata_value": None,

@@ -228,6 +228,22 @@ COVARIATES = {
         "category": "biomass",
         "resample": "mean",
     },
+    # Soil
+    "soil_oc": {
+        "asset": "projects/soilgrids-isric/ocs_mean",
+        "select": ["b1"],
+        "description": "Soil organic carbon stock, 0-30 cm (t/ha)",
+        "category": "soil",
+        "resample": "mean",
+    },
+    # Carbon
+    "irr_carbon_2024": {
+        "asset": "projects/ci_external_assets/irrC/Update/Irrecoverable_Carbon_Total_v1a_30m_2024",
+        "select": ["b1"],
+        "description": "Irrecoverable carbon total, 2024 (Mg C/ha)",
+        "category": "biomass",
+        "resample": "mean",
+    },
 }
 
 # Agro-ecological zones
