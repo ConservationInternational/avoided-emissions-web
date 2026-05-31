@@ -254,8 +254,17 @@ dagcomponentfuncs.CovariateActions = function (props) {
     var status = (data.status || "").toLowerCase();
     var hasTiles = (data.gcs_tiles || 0) > 0;
 
-    // Disable buttons during transitional states
-    var busy = [
+    // Re-export is disabled only while GEE is actively running (pending_export,
+    // exporting) or while a merge task has the worker locked (merging).
+    // "pending_merge" is intentionally allowed: clicking Re-export will cancel
+    // the queued merge and start a fresh GEE export.
+    var reexportBusy = [
+        "pending_export", "exporting", "merging"
+    ].indexOf(status) >= 0;
+
+    // Re-merge is disabled during all transitional states (including
+    // pending_merge, since the covariate is already queued for merge).
+    var remergeBusy = [
         "pending_export", "exporting", "pending_merge", "merging"
     ].indexOf(status) >= 0;
 
@@ -268,15 +277,15 @@ dagcomponentfuncs.CovariateActions = function (props) {
                 fontWeight: 600,
                 border: "1px solid #dc3545",
                 borderRadius: "3px",
-                backgroundColor: busy ? "#e9ecef" : "#fff",
-                color: busy ? "#6c757d" : "#dc3545",
-                cursor: busy ? "not-allowed" : "pointer",
+                backgroundColor: reexportBusy ? "#e9ecef" : "#fff",
+                color: reexportBusy ? "#6c757d" : "#dc3545",
+                cursor: reexportBusy ? "not-allowed" : "pointer",
                 marginRight: "4px",
             },
-            disabled: busy,
+            disabled: reexportBusy,
             onClick: function (e) {
                 e.stopPropagation();
-                if (!busy) {
+                if (!reexportBusy) {
                     props.setData(Object.assign({}, data, {
                         _action: "reexport",
                         _actionTs: Date.now(),
@@ -287,7 +296,7 @@ dagcomponentfuncs.CovariateActions = function (props) {
         "\u21BB Export"
     );
 
-    var remergeDisabled = busy || !hasTiles;
+    var remergeDisabled = remergeBusy || !hasTiles;
     var remergeBtn = React.createElement(
         "button",
         {
