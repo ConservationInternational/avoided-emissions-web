@@ -5,6 +5,7 @@
 services:
   postgres:
     image: postgis/postgis:18-3.6-alpine
+    command: ["postgres", "-c", "log_min_error_statement=FATAL"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
