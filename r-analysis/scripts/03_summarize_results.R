@@ -800,7 +800,27 @@ if (length(match_files_all) > 0) {
                 .groups = "drop"
             ) %>%
             left_join(
-                m_proc %>% distinct(site_id, sampled_fraction),
+                # When group_by_exact_match_regions splits a site into
+                # sub-sites, each sub-site gets its own sampled_fraction
+                # (n_treatment_final / n_treatment_total for that sub-site).
+                # Reconstruct the combined fraction as:
+                #   sum(n_treatment_sampled) / sum(n_treatment_total)
+                # where, per (site_id, match_group):
+                #   n_treatment_sampled = sum(treatment rows)
+                #   n_treatment_total   = n_treatment_sampled / sampled_fraction
+                m_proc %>%
+                    group_by(site_id, match_group) %>%
+                    summarise(
+                        n_sampled = sum(treatment, na.rm = TRUE),
+                        sampled_fraction = sampled_fraction[1],
+                        .groups = "drop"
+                    ) %>%
+                    mutate(n_total = n_sampled / sampled_fraction) %>%
+                    group_by(site_id) %>%
+                    summarise(
+                        sampled_fraction = sum(n_sampled) / sum(n_total),
+                        .groups = "drop"
+                    ),
                 by = "site_id"
             )
     }
