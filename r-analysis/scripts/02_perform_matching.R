@@ -576,7 +576,7 @@ match_site <- function(d, f) {
 }
 
 
-match_site_matchit <- function(d, f) {
+match_site_matchit <- function(d, f, precomputed_scores = NULL) {
     # Match treatment to control pixels using MatchIt nearest-neighbour
     # matching.  This is a greedy (non-optimal) algorithm that is
     # substantially faster than optmatch.
@@ -624,15 +624,35 @@ match_site_matchit <- function(d, f) {
         NULL
     }
 
-    # Determine distance method
-    use_mahalanobis <- n_treatment < MIN_GLM ||
+    # Determine distance method.
+    # When a named numeric vector of pre-computed propensity scores is
+    # supplied, skip GLM fitting entirely and pass the scores to MatchIt.
+    use_precomputed <- !is.null(precomputed_scores)
+    if (use_precomputed) {
+        cell_scores <- precomputed_scores[as.character(d$cell)]
+        if (anyNA(cell_scores)) {
+            message(
+                "    WARNING: ", sum(is.na(cell_scores)),
+                " cells missing from pre-computed scores;",
+                " falling back to per-site GLM"
+            )
+            use_precomputed <- FALSE
+        }
+    }
+    use_mahalanobis <- !use_precomputed && (
+        n_treatment < MIN_GLM ||
         (sep$separated && SEPARATION_FALLBACK)
-    distance_method <- if (use_mahalanobis) "mahalanobis" else "glm"
+    )
+    distance_method <- if (use_precomputed) "precomputed" else
+                       if (use_mahalanobis) "mahalanobis" else "glm"
 
     # When falling back to Mahalanobis due to separation, exclude the
     # separated variables so they don't dominate the distance.
+    # When using pre-computed scores, pass the base formula f — MatchIt
+    # uses it only to identify the treatment column; no GLM is fitted.
     mi_formula <- f
-    if (use_mahalanobis && sep$separated && length(sep$sep_vars) > 0) {
+    if (!use_precomputed && use_mahalanobis &&
+        sep$separated && length(sep$sep_vars) > 0) {
         rhs_vars <- setdiff(all.vars(f), "treatment")
         reduced_vars <- setdiff(rhs_vars, sep$sep_vars)
         if (length(reduced_vars) > 0) {
@@ -650,7 +670,7 @@ match_site_matchit <- function(d, f) {
         matchit(
             mi_formula, data = d,
             method = "nearest",
-            distance = distance_method,
+            distance = if (use_precomputed) cell_scores else distance_method,
             exact = exact_formula,
             ratio = if (!is.na(ratio_val)) ratio_val else 1L,
             caliper = if (CALIPER_WIDTH > 0 &&
@@ -711,7 +731,7 @@ match_site_matchit <- function(d, f) {
     }
 
     # Add propensity scores
-    if (distance_method == "glm") {
+    if (distance_method %in% c("glm", "precomputed")) {
         md$pscore <- md$distance
     } else {
         md$pscore <- NA_real_
@@ -773,6 +793,115 @@ required_match_cols <- c(
     "cell", "site_id", "id_numeric", "area_ha", "treatment",
     "sampled_fraction", "total_biomass", "match_group", "match_weight"
 )
+
+# ======================================================================
+# Group-level pre-computation (cross-site mode only)
+#
+# When multiple sites share an exact-match group, a single Arrow scan,
+# one distance exclusion, and one propensity model are computed here.
+# The per-site loop then works entirely from this in-memory cache,
+# eliminating repeated I/O and repeated GLM fitting.
+# ======================================================================
+group_cache <- NULL
+if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
+    cache_timer <- proc.time()
+    message("Pre-computing group cache for ", length(site_ids), " sites ...")
+
+    gc_treatment_cells <- filter(treatment_key, id_numeric %in% site_ids)$cell
+
+    # Single Arrow scan: all group treatment pixels + all eligible controls
+    gc_raw <- base_dataset %>%
+        filter(cell %in% gc_treatment_cells | !(cell %in% all_treatment_cells)) %>%
+        collect() %>%
+        mutate(treatment = cell %in% gc_treatment_cells)
+
+    # Remove pixels missing any exact-match grouping variable, then drop
+    # strata that lack both treatment and control representation.
+    gc_raw <- gc_raw %>%
+        filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.)))
+    gc_raw <- filter_groups(gc_raw, EXACT_MATCH_VARS)
+
+    # Spatial distance exclusion — performed once for all sites in the group
+    if (MIN_CONTROL_DISTANCE_KM > 0) {
+        ctrl_mask <- !gc_raw$treatment
+        n_ctrl <- sum(ctrl_mask)
+        if (n_ctrl > 0) {
+            coords <- cell_to_lonlat(gc_raw$cell[ctrl_mask], grid_meta)
+            ctrl_pts <- st_as_sf(
+                coords, coords = c("lon", "lat"), crs = 4326
+            )
+            too_close <- lengths(st_intersects(ctrl_pts, all_sites_buffer)) > 0
+            n_excluded <- sum(too_close)
+            if (n_excluded > 0) {
+                gc_raw <- gc_raw[-which(ctrl_mask)[too_close], ]
+                message(
+                    "  Group cache: excluded ", n_excluded, " control pixels",
+                    " within ", MIN_CONTROL_DISTANCE_KM, " km of treatment"
+                )
+            }
+        }
+        # Re-filter groups after distance exclusion
+        gc_raw <- filter_groups(gc_raw, EXACT_MATCH_VARS)
+    }
+
+    # Fit ONE propensity model on the pooled group data (base formula f).
+    # These scores are reused for every site, avoiding N repeated GLM fits.
+    gc_complete <- gc_raw[
+        complete.cases(gc_raw[, all.vars(f), drop = FALSE]), , drop = FALSE
+    ]
+    gc_propensity_scores <- NULL
+    if (sum(gc_complete$treatment) >= MIN_GLM) {
+        gc_sep <- check_separation(gc_complete, f)
+        if (!gc_sep$separated) {
+            gc_glm <- tryCatch(
+                glm(f, data = gc_complete, family = binomial),
+                error = function(e) {
+                    message(
+                        "  Group GLM failed: ", conditionMessage(e),
+                        "; each site will fit its own model"
+                    )
+                    NULL
+                }
+            )
+            if (!is.null(gc_glm)) {
+                raw_scores <- predict(gc_glm, newdata = gc_raw, type = "response")
+                gc_propensity_scores <- setNames(
+                    raw_scores, as.character(gc_raw$cell)
+                )
+            }
+        } else {
+            message(
+                "  Group GLM skipped (separation detected);",
+                " each site will fit its own model"
+            )
+        }
+    } else {
+        message(
+            "  Group GLM skipped (only ", sum(gc_complete$treatment),
+            " treatment pixels < MIN_GLM=", MIN_GLM, ");",
+            " each site will fit its own model"
+        )
+    }
+
+    cache_elapsed <- round((proc.time() - cache_timer)["elapsed"], 1)
+    message(
+        "Group cache ready: ",
+        sum(gc_raw$treatment), " treatment / ",
+        sum(!gc_raw$treatment), " control pixels; ",
+        if (!is.null(gc_propensity_scores)) {
+            "shared propensity model fitted"
+        } else {
+            "no shared model (per-site GLM will be used)"
+        },
+        " (", cache_elapsed, "s)"
+    )
+
+    group_cache <- list(
+        raw               = gc_raw,
+        treatment_cells   = gc_treatment_cells,
+        propensity_scores = gc_propensity_scores
+    )
+}
 
 for (this_id in site_ids) {
     site <- filter(sites, id_numeric == this_id)
@@ -887,147 +1016,141 @@ for (this_id in site_ids) {
             TRUE
         } else {
             # Load treatment and control pixels for matching.
-            # In cross-site grouping mode, load treatment pixels from ALL
-            # sites in the group to build a shared propensity score model.
-            if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
-                # Load treatment cells for ALL sites in this group
-                group_treatment_cells <- filter(
-                    treatment_key, id_numeric %in% site_ids
-                )$cell
-                message(
-                    "    Cross-site grouping: loading ",
-                    length(group_treatment_cells),
-                    " treatment pixels from ", length(site_ids), " sites"
-                )
-            } else {
-                # Standard per-site mode
-                group_treatment_cells <- treatment_cells$cell
-            }
-
-            # All candidate pixels (treatment + controls) are spatially
-            # constrained to the matching extent computed in the webapp.
-            # Filter in Arrow to avoid materialising the full parquet.
-            arrow_timer <- proc.time()
             site_treatment_cells <- treatment_cells$cell
 
-            if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
-                # Load only current-site treatment + true controls.
-                # Other sites' treatment pixels are loaded separately to
-                # prevent them from contaminating filter_groups() logic;
-                # they are added back after filtering for propensity modeling.
-                vals <- base_dataset %>%
-                    filter(cell %in% site_treatment_cells |
-                           !(cell %in% all_treatment_cells)) %>%
-                    collect() %>%
-                    mutate(treatment = cell %in% site_treatment_cells)
+            if (!is.null(group_cache)) {
+                # ---- Cross-site: derive data from the pre-loaded group cache ----
+                # All Arrow I/O and spatial distance exclusion were done once
+                # before the site loop.  Here we only slice the in-memory cache.
+                group_treatment_cells <- group_cache$treatment_cells
 
-                other_sites_treatment <- base_dataset %>%
-                    filter(cell %in% group_treatment_cells &
-                           !(cell %in% site_treatment_cells)) %>%
-                    collect() %>%
+                data_timer <- proc.time()
+                # Build site-specific dataset: current site's treatment pixels
+                # plus all controls.  Exclude other sites' treatment pixels so
+                # that filter_groups() only sees groups relevant to THIS site,
+                # preventing control pool contamination.
+                vals <- group_cache$raw %>%
+                    filter(
+                        cell %in% site_treatment_cells |
+                        !(cell %in% group_treatment_cells)
+                    ) %>%
+                    mutate(treatment = cell %in% site_treatment_cells)
+                vals <- filter_groups(vals, EXACT_MATCH_VARS)
+
+                # Other sites' treatment pixels — added back after sampling for
+                # shared propensity modeling (via pre-computed group scores)
+                other_sites_treatment <- group_cache$raw %>%
+                    filter(
+                        cell %in% group_treatment_cells &
+                        !(cell %in% site_treatment_cells)
+                    ) %>%
                     mutate(treatment = TRUE)
 
+                n_control_pool_site <- sum(!vals$treatment)
+                data_elapsed <- round(
+                    (proc.time() - data_timer)["elapsed"], 2
+                )
                 message(
-                    "    Cross-site grouping: loaded ",
-                    nrow(other_sites_treatment),
-                    " treatment pixels from other sites for propensity modeling"
+                    "    [TIMING] Group cache derivation: ",
+                    data_elapsed, "s",
+                    " (T=", sum(vals$treatment),
+                    ", C=", n_control_pool_site, ")"
                 )
             } else {
+                # ---- Standard mode: Arrow scan + distance exclusion ----
+                group_treatment_cells <- treatment_cells$cell
+                other_sites_treatment <- NULL
+
+                arrow_timer <- proc.time()
                 vals <- base_dataset %>%
                     filter(cell %in% group_treatment_cells |
                            !(cell %in% all_treatment_cells)) %>%
                     collect() %>%
                     mutate(treatment = cell %in% site_treatment_cells)
-                other_sites_treatment <- NULL
-            }
-            
-            arrow_elapsed <- (proc.time() - arrow_timer)["elapsed"]
-            message(
-                "    [TIMING] Arrow dataset filter & collect: ",
-                round(arrow_elapsed, 2), "s (", nrow(vals), " rows)"
-            )
+                arrow_elapsed <- (proc.time() - arrow_timer)["elapsed"]
+                message(
+                    "    [TIMING] Arrow dataset filter & collect: ",
+                    round(arrow_elapsed, 2), "s (", nrow(vals), " rows)"
+                )
 
-            # Remove pixels with NA in exact-match grouping variables
-            n_before <- nrow(vals)
-            vals <- vals %>%
-                filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.)))
-            n_dropped <- n_before - nrow(vals)
-            if (n_dropped > 0) {
-                message("  Filtered ", n_dropped,
-                        " pixels with missing group data")
-            }
+                # Remove pixels with NA in exact-match grouping variables
+                n_before <- nrow(vals)
+                vals <- vals %>%
+                    filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.)))
+                n_dropped <- n_before - nrow(vals)
+                if (n_dropped > 0) {
+                    message("  Filtered ", n_dropped,
+                            " pixels with missing group data")
+                }
 
-            # Filter to groups present in both treatment and control.
-            # In cross-site mode, we've excluded other sites' treatment pixels,
-            # so this only drops controls that conflict with CURRENT site.
-            vals <- filter_groups(vals, EXACT_MATCH_VARS)
+                # Filter to groups present in both treatment and control.
+                vals <- filter_groups(vals, EXACT_MATCH_VARS)
 
-            # Exclude control pixels too close to ANY treatment polygon
-            if (MIN_CONTROL_DISTANCE_KM > 0) {
-                control_mask <- !vals$treatment
-                n_ctrl_before <- sum(control_mask)
-                if (n_ctrl_before > 0) {
-                    # Coordinate conversion
-                    coord_timer <- proc.time()
-                    coords <- cell_to_lonlat(
-                        vals$cell[control_mask], grid_meta
-                    )
-                    ctrl_pts <- st_as_sf(
-                        coords,
-                        coords = c("lon", "lat"), crs = 4326
-                    )
-                    coord_elapsed <- (proc.time() - coord_timer)["elapsed"]
-                    message(
-                        "    [TIMING] Coordinate conversion: ",
-                        round(coord_elapsed, 2), "s for ", n_ctrl_before,
-                        " pixels"
-                    )
-
-                    # Spatial intersection - likely bottleneck
-                    intersect_timer <- proc.time()
-                    too_close <- lengths(
-                        st_intersects(ctrl_pts, all_sites_buffer)
-                    ) > 0
-                    intersect_elapsed <- (proc.time() - intersect_timer)["elapsed"]
-
-                    n_excluded <- sum(too_close)
-                    if (n_excluded > 0) {
-                        exclude_rows <- which(control_mask)[too_close]
-                        vals <- vals[-exclude_rows, ]
+                # Exclude control pixels too close to ANY treatment polygon
+                if (MIN_CONTROL_DISTANCE_KM > 0) {
+                    control_mask <- !vals$treatment
+                    n_ctrl_before <- sum(control_mask)
+                    if (n_ctrl_before > 0) {
+                        # Coordinate conversion
+                        coord_timer <- proc.time()
+                        coords <- cell_to_lonlat(
+                            vals$cell[control_mask], grid_meta
+                        )
+                        ctrl_pts <- st_as_sf(
+                            coords,
+                            coords = c("lon", "lat"), crs = 4326
+                        )
+                        coord_elapsed <- (proc.time() - coord_timer)["elapsed"]
                         message(
-                            "  Excluded ", n_excluded,
-                            " control pixels within ",
-                            MIN_CONTROL_DISTANCE_KM,
-                            " km of treatment polygons"
+                            "    [TIMING] Coordinate conversion: ",
+                            round(coord_elapsed, 2), "s for ", n_ctrl_before,
+                            " pixels"
+                        )
+
+                        # Spatial intersection - likely bottleneck
+                        intersect_timer <- proc.time()
+                        too_close <- lengths(
+                            st_intersects(ctrl_pts, all_sites_buffer)
+                        ) > 0
+                        intersect_elapsed <- (proc.time() - intersect_timer)["elapsed"]
+
+                        n_excluded <- sum(too_close)
+                        if (n_excluded > 0) {
+                            exclude_rows <- which(control_mask)[too_close]
+                            vals <- vals[-exclude_rows, ]
+                            message(
+                                "  Excluded ", n_excluded,
+                                " control pixels within ",
+                                MIN_CONTROL_DISTANCE_KM,
+                                " km of treatment polygons"
+                            )
+                        }
+                        message(
+                            "    [TIMING] Spatial intersection: ",
+                            round(intersect_elapsed, 2), "s (",
+                            round(n_ctrl_before / intersect_elapsed, 0),
+                            " pixels/sec)"
                         )
                     }
+                    # Re-filter groups after distance exclusion
+                    refilter_timer <- proc.time()
+                    vals <- filter_groups(vals, EXACT_MATCH_VARS)
+                    refilter_elapsed <- (proc.time() - refilter_timer)["elapsed"]
                     message(
-                        "    [TIMING] Spatial intersection: ",
-                        round(intersect_elapsed, 2), "s (",
-                        round(n_ctrl_before / intersect_elapsed, 0),
-                        " pixels/sec)"
+                        "    [TIMING] Group re-filtering: ",
+                        round(refilter_elapsed, 2), "s"
                     )
                 }
-                # Re-filter groups after distance exclusion
-                refilter_timer <- proc.time()
-                vals <- filter_groups(vals, EXACT_MATCH_VARS)
-                refilter_elapsed <- (proc.time() - refilter_timer)["elapsed"]
+
+                n_control_pool_site <- sum(!vals$treatment)
+                data_elapsed <- (proc.time() - site_timer)["elapsed"]
                 message(
-                    "    [TIMING] Group re-filtering: ",
-                    round(refilter_elapsed, 2), "s"
+                    "    [TIMING] Data loading & filtering: ",
+                    round(data_elapsed, 1), "s",
+                    " (T=", sum(vals$treatment),
+                    ", C=", n_control_pool_site, ")"
                 )
             }
-
-            # Record control pool size before subsampling
-            n_control_pool_site <- sum(!vals$treatment)
-
-            data_elapsed <- (proc.time() - site_timer)["elapsed"]
-            message(
-                "    [TIMING] Data loading & filtering: ",
-                round(data_elapsed, 1), "s",
-                " (T=", sum(vals$treatment),
-                ", C=", n_control_pool_site, ")"
-            )
 
             # Determine formula update for pre-intervention deforestation
             # (deterministic — computed once, applied inside each replicate)
@@ -1047,9 +1170,11 @@ for (this_id in site_ids) {
                 }
             }
 
-            # Pre-compute defor_pre_intervention for cross-site treatment pixels
-            # so they can contribute to the propensity model when that term is used.
-            if (!is.null(other_sites_treatment) && add_defor_pre) {
+            # Pre-compute defor_pre_intervention for cross-site treatment pixels.
+            # Only needed when falling back to per-site GLM (i.e. no shared
+            # propensity scores from the group cache).
+            if (!is.null(other_sites_treatment) && add_defor_pre &&
+                is.null(group_cache)) {
                 other_sites_treatment <- other_sites_treatment %>%
                     mutate(
                         defor_pre_intervention = if_else(
@@ -1332,7 +1457,14 @@ for (this_id in site_ids) {
                     # Run matching
                     match_timer <- proc.time()
                     if (MATCHING_METHOD == "nearest") {
-                        match_result <- match_site_matchit(vals, this_f)
+                        match_result <- match_site_matchit(
+                            vals, this_f,
+                            precomputed_scores = if (!is.null(group_cache)) {
+                                group_cache$propensity_scores
+                            } else {
+                                NULL
+                            }
+                        )
                     } else {
                         match_result <- match_site(vals, this_f)
                     }
