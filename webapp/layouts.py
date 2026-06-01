@@ -1711,32 +1711,17 @@ def submit_layout(user, recompute_config=None):
                                                                 size="sm",
                                                                 className="mb-3",
                                                             ),
-                                                            dcc.Upload(
-                                                                id="upload-sites",
-                                                                children=dbc.Button(
-                                                                    "Drag & Drop or Click to Upload",
-                                                                    color="secondary",
-                                                                    outline=True,
-                                                                    className="w-100",
-                                                                ),
-                                                                multiple=False,
-                                                                accept=".geojson,.json,.gpkg,.zip,.tar.gz,.tgz",
-                                                                max_size=800
-                                                                * 1024
-                                                                * 1024,
-                                                                className="mb-2",
-                                                            ),
                                                             html.Div(
                                                                 [
                                                                     dbc.Button(
-                                                                        "Large File Upload (Streamed)",
+                                                                        "Click to Upload",
                                                                         id="upload-sites-stream-btn",
                                                                         color="secondary",
                                                                         outline=True,
                                                                         className="w-100 mb-1",
                                                                     ),
                                                                     html.Div(
-                                                                        "Use this option for very large files (recommended for files over 100 MB).",
+                                                                        "All uploads use streamed transfer for reliability on large and small files.",
                                                                         className="small text-muted mb-2",
                                                                     ),
                                                                     dcc.Input(
@@ -2553,7 +2538,6 @@ def submit_layout(user, recompute_config=None):
             dcc.Store(id="presets-store"),
             dcc.Store(id="site-set-refresh-store"),
             dcc.Store(id="site-upload-columns-store"),
-            dcc.Store(id="site-upload-stream-store"),
             dcc.Store(id="submit-lock-store", data=False),
             dcc.Store(id="recompute-config-store", data=rc or None),
         ]

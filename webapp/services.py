@@ -638,24 +638,6 @@ def _parse_sites_geometry_file(file_content, filename):
     return gdf, errors
 
 
-def parse_sites_file(file_content, filename):
-    """Parse uploaded site files into a GeoDataFrame.
-
-    Validates required columns and geometry types. Returns the GeoDataFrame
-    and a list of validation errors (empty if valid).
-    """
-    gdf, errors = _parse_sites_geometry_file(file_content, filename)
-    if errors:
-        return gdf, errors
-
-    required = set(REQUIRED_SITE_FIELDS)
-    missing = required - set(gdf.columns)
-    if missing:
-        errors.append(f"Missing required columns: {', '.join(sorted(missing))}")
-
-    return gdf, errors
-
-
 def _normalize_col_name(name):
     return "".join(ch for ch in str(name or "").strip().lower() if ch.isalnum())
 
@@ -712,40 +694,6 @@ def suggest_site_column_mapping(columns):
                 break
         suggested[target] = chosen
     return suggested
-
-
-def get_site_upload_mapping_preview(file_content, filename):
-    """Parse upload and return source-column metadata + suggested mapping."""
-    gdf, errors = _parse_sites_geometry_file(file_content, filename)
-    if errors:
-        return None, errors
-    if gdf is None or gdf.empty:
-        return None, ["No features were found in the uploaded file."]
-
-    non_geom_cols = [c for c in gdf.columns if c != "geometry"]
-    column_info = []
-    for col in non_geom_cols:
-        series = gdf[col]
-        sample_val = ""
-        sample_series = series.dropna()
-        if not sample_series.empty:
-            sample_val = str(sample_series.iloc[0])
-        column_info.append(
-            {
-                "name": col,
-                "dtype": str(series.dtype),
-                "sample": sample_val,
-            }
-        )
-
-    return (
-        {
-            "column_info": column_info,
-            "suggested_mapping": suggest_site_column_mapping(non_geom_cols),
-            "n_features": int(len(gdf)),
-        },
-        [],
-    )
 
 
 def _normalize_site_mapping(column_mapping):

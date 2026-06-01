@@ -5,7 +5,6 @@ submission, dashboard refresh (AG Grid), task detail views, result
 visualization, and admin panel actions.
 """
 
-import base64
 import json
 import logging
 import random
@@ -54,7 +53,6 @@ from services import (
     get_covariate_presets,
     get_ready_covariate_names,
     get_ready_exact_match_names,
-    get_site_upload_mapping_preview,
     get_task_detail,
     get_task_list,
     get_user_site_set_detail,
@@ -1017,13 +1015,11 @@ def register_callbacks(app, limiter=None):
             Output("mapping-end-date", "value"),
         ],
         [
-            Input("upload-sites", "contents"),
             Input("site-upload-stream-payload", "value"),
             Input("confirm-site-upload-mapping-btn", "n_clicks"),
             Input("cancel-site-upload-mapping-btn", "n_clicks"),
         ],
         [
-            State("upload-sites", "filename"),
             State("site-upload-columns-store", "data"),
             State("mapping-site-id", "value"),
             State("mapping-site-name", "value"),
@@ -1033,11 +1029,9 @@ def register_callbacks(app, limiter=None):
         prevent_initial_call=True,
     )
     def handle_site_upload_flow(
-        contents,
         stream_payload,
         _confirm_mapping_clicks,
         _cancel_mapping_clicks,
-        filename,
         pending_upload,
         mapped_site_id,
         mapped_site_name,
@@ -1066,134 +1060,6 @@ def register_callbacks(app, limiter=None):
                 [{"label": "(none)", "value": ""}],
                 "",
             )
-
-        if trigger_id == "upload-sites":
-            if contents is None:
-                raise PreventUpdate
-
-            # dcc.Upload usually returns a data URL
-            # ("data:<mime>;base64,<data>"). In some Dash/driver combinations,
-            # binary files may arrive as raw base64 without the prefix.
-            if contents.startswith("data:"):
-                if "," not in contents:
-                    return (
-                        dbc.Alert(
-                            "Invalid file upload — malformed data URL payload.",
-                            color="danger",
-                        ),
-                        no_update,
-                        no_update,
-                        False,
-                        None,
-                        [],
-                        None,
-                        [],
-                        None,
-                        [],
-                        None,
-                        [{"label": "(none)", "value": ""}],
-                        "",
-                    )
-                _, content_string = contents.split(",", 1)
-            else:
-                content_string = contents
-
-            # Remove accidental whitespace/newlines and enforce strict base64.
-            content_string = "".join(content_string.split())
-
-            try:
-                decoded = base64.b64decode(content_string, validate=True)
-            except Exception:
-                return (
-                    dbc.Alert(
-                        "Invalid file upload — could not decode the uploaded content. Please try again.",
-                        color="danger",
-                    ),
-                    no_update,
-                    no_update,
-                    False,
-                    None,
-                    [],
-                    None,
-                    [],
-                    None,
-                    [],
-                    None,
-                    [{"label": "(none)", "value": ""}],
-                    "",
-                )
-
-            try:
-                preview, errors = get_site_upload_mapping_preview(decoded, filename)
-                if errors:
-                    return (
-                        dbc.Alert("\n".join(errors), color="danger"),
-                        no_update,
-                        no_update,
-                        False,
-                        None,
-                        [],
-                        None,
-                        [],
-                        None,
-                        [],
-                        None,
-                        [{"label": "(none)", "value": ""}],
-                        "",
-                    )
-
-                columns = preview.get("column_info", [])
-                suggested = preview.get("suggested_mapping", {})
-                options = [
-                    {"label": f"{c['name']} ({c['dtype']})", "value": c["name"]}
-                    for c in columns
-                ]
-                end_options = [{"label": "(none)", "value": ""}] + options
-                pending_data = {
-                    "filename": filename,
-                    "content_string": content_string,
-                    "n_features": preview.get("n_features", 0),
-                }
-
-                return (
-                    dbc.Alert(
-                        (
-                            f"Parsed {preview.get('n_features', 0)} features. "
-                            "Confirm column mapping to save this site set."
-                        ),
-                        color="info",
-                    ),
-                    no_update,
-                    no_update,
-                    True,
-                    pending_data,
-                    options,
-                    suggested.get("site_id"),
-                    options,
-                    suggested.get("site_name"),
-                    options,
-                    suggested.get("start_date"),
-                    end_options,
-                    suggested.get("end_date") or "",
-                )
-            except Exception:
-                logger.exception("Failed to parse uploaded site set")
-                report_exception()
-                return (
-                    dbc.Alert("Failed to parse uploaded sites.", color="danger"),
-                    no_update,
-                    no_update,
-                    False,
-                    None,
-                    [],
-                    None,
-                    [],
-                    None,
-                    [],
-                    None,
-                    [{"label": "(none)", "value": ""}],
-                    "",
-                )
 
         if trigger_id == "site-upload-stream-payload":
             if not stream_payload:
@@ -1324,19 +1190,32 @@ def register_callbacks(app, limiter=None):
                 )
 
             try:
-                if pending_upload.get("upload_token"):
-                    staged = get_staged_site_upload(
-                        pending_upload["upload_token"], user.id, consume=True
+                upload_token = pending_upload.get("upload_token")
+                if not upload_token:
+                    return (
+                        dbc.Alert(
+                            "Upload token missing. Please upload the file again.",
+                            color="danger",
+                        ),
+                        no_update,
+                        no_update,
+                        False,
+                        None,
+                        [],
+                        None,
+                        [],
+                        None,
+                        [],
+                        None,
+                        [{"label": "(none)", "value": ""}],
+                        "",
                     )
-                    decoded = staged["content"]
-                    resolved_filename = pending_upload.get("filename") or staged.get(
-                        "filename"
-                    )
-                else:
-                    decoded = base64.b64decode(
-                        pending_upload["content_string"], validate=True
-                    )
-                    resolved_filename = pending_upload.get("filename")
+
+                staged = get_staged_site_upload(upload_token, user.id, consume=True)
+                decoded = staged["content"]
+                resolved_filename = pending_upload.get("filename") or staged.get(
+                    "filename"
+                )
 
                 mapping = {
                     "site_id": mapped_site_id,
@@ -1506,7 +1385,24 @@ def register_callbacks(app, limiter=None):
             return None
 
         try:
-            decoded = base64.b64decode(pending_upload["content_string"])
+            user = get_current_user()
+            if not user:
+                return dbc.Alert(
+                    "Please log in first.",
+                    color="danger",
+                    className="mb-0 py-2",
+                )
+
+            upload_token = pending_upload.get("upload_token")
+            if not upload_token:
+                return dbc.Alert(
+                    "Upload token missing. Please upload the file again.",
+                    color="danger",
+                    className="mb-0 py-2",
+                )
+
+            staged = get_staged_site_upload(upload_token, user.id)
+            decoded = staged["content"]
             mapping = {
                 "site_id": mapped_site_id,
                 "site_name": mapped_site_name,
