@@ -88,6 +88,7 @@ SITE_UPLOAD_STAGE_S3_PREFIX = f"{Config.S3_PREFIX.rstrip('/')}/site-upload-stage
 SITE_UPLOAD_INSERT_BATCH_SIZE = 1000
 SITE_UPLOAD_INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024
 SITE_UPLOAD_PROGRESS_BATCH_SIZE = 250
+SITE_UPLOAD_PROGRESS_CHECK_ROW_INTERVAL = 25
 SITE_UPLOAD_PROGRESS_INTERVAL_SECONDS = 10
 
 REQUIRED_SITE_FIELDS = ("site_id", "site_name", "start_date")
@@ -1564,6 +1565,10 @@ def save_user_site_set_from_staged(
                 last_progress_sites = n_sites
                 last_progress_at = now
 
+            def _maybe_report_upload_progress():
+                if n_sites % SITE_UPLOAD_PROGRESS_CHECK_ROW_INTERVAL == 0:
+                    _report_upload_progress()
+
             def _flush_batch_rows():
                 nonlocal batch_row_bytes
                 if not batch_rows:
@@ -1733,7 +1738,7 @@ def save_user_site_set_from_staged(
                         }
                         batch_rows.append(batch_row)
                         n_sites += 1
-                        _report_upload_progress()
+                        _maybe_report_upload_progress()
                         batch_row_bytes += len(
                             json.dumps(batch_row, default=str).encode("utf-8")
                         )
@@ -1794,7 +1799,7 @@ def save_user_site_set_from_staged(
                     }
                     batch_rows.append(batch_row)
                     n_sites += 1
-                    _report_upload_progress()
+                    _maybe_report_upload_progress()
                     batch_row_bytes += len(
                         json.dumps(batch_row, default=str).encode("utf-8")
                     )
