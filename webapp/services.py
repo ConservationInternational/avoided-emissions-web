@@ -1109,6 +1109,7 @@ def _derive_site_set_name(filename):
 
 
 def _site_set_summary_row(row):
+    meta = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
     return {
         "id": str(row.id),
         "name": row.name,
@@ -1118,6 +1119,7 @@ def _site_set_summary_row(row):
         "file_size_bytes": int(row.file_size_bytes or 0),
         "file_format": row.file_format,
         "is_archived": bool(row.is_archived),
+        "ingest_stats": meta.get("ingest_stats") if meta else None,
     }
 
 
@@ -1302,6 +1304,10 @@ def save_user_site_set_from_staged(
             bounds_miny = None
             bounds_maxx = None
             bounds_maxy = None
+            skipped_missing_required = 0
+            skipped_bad_start_date = 0
+            skipped_bad_geometry = 0
+            skipped_examples = []
 
             batch_rows = []
 
@@ -1364,7 +1370,6 @@ def save_user_site_set_from_staged(
                         # If CRS is unavailable/unparseable, trust source geometry.
                         to_wgs84 = None
 
-                    parse_errors = []
                     for feature_index, feature in enumerate(src, start=1):
                         props = feature.get("properties") or {}
                         raw_site_id = props.get(mapping_to_apply["site_id"])
@@ -1385,20 +1390,26 @@ def save_user_site_set_from_staged(
                             else ""
                         )
                         if not site_id:
-                            parse_errors.append(
-                                f"Mapped 'site_id' is empty at feature {feature_index}."
-                            )
+                            skipped_missing_required += 1
+                            if len(skipped_examples) < 10:
+                                skipped_examples.append(
+                                    f"Feature {feature_index}: mapped 'site_id' is empty."
+                                )
                         if not site_name:
-                            parse_errors.append(
-                                f"Mapped 'site_name' is empty at feature {feature_index}."
-                            )
+                            skipped_missing_required += 1
+                            if len(skipped_examples) < 10:
+                                skipped_examples.append(
+                                    f"Feature {feature_index}: mapped 'site_name' is empty."
+                                )
 
                         start_dt = pd.to_datetime(raw_start, errors="coerce")
                         if pd.isna(start_dt):
-                            parse_errors.append(
-                                "Mapped 'start_date' is missing or unparseable at "
-                                f"feature {feature_index}."
-                            )
+                            skipped_bad_start_date += 1
+                            if len(skipped_examples) < 10:
+                                skipped_examples.append(
+                                    "Feature "
+                                    f"{feature_index}: mapped 'start_date' is missing or unparseable."
+                                )
                             start_date = None
                         else:
                             start_date = start_dt.date()
@@ -1409,16 +1420,16 @@ def save_user_site_set_from_staged(
                             end_dt = pd.to_datetime(raw_end, errors="coerce")
                             end_date = None if pd.isna(end_dt) else end_dt.date()
 
-                        if len(parse_errors) >= 10:
-                            break
+                        if not site_id or not site_name or start_date is None:
+                            continue
 
                         geom_json = feature.get("geometry")
                         if not geom_json:
-                            parse_errors.append(
-                                f"Feature {feature_index} has missing geometry."
-                            )
-                            if len(parse_errors) >= 10:
-                                break
+                            skipped_bad_geometry += 1
+                            if len(skipped_examples) < 10:
+                                skipped_examples.append(
+                                    f"Feature {feature_index}: missing geometry."
+                                )
                             continue
 
                         geom = shape(geom_json)
@@ -1427,19 +1438,20 @@ def save_user_site_set_from_staged(
                         geom = _repair_geometry_single(geom)
 
                         if geom.is_empty:
-                            parse_errors.append(
-                                f"Feature {feature_index} has empty geometry after repair."
-                            )
-                            if len(parse_errors) >= 10:
-                                break
+                            skipped_bad_geometry += 1
+                            if len(skipped_examples) < 10:
+                                skipped_examples.append(
+                                    f"Feature {feature_index}: empty geometry after repair."
+                                )
                             continue
 
                         if geom.geom_type not in ("Polygon", "MultiPolygon"):
-                            parse_errors.append(
-                                f"Feature {feature_index} has unsupported geometry type: {geom.geom_type}."
-                            )
-                            if len(parse_errors) >= 10:
-                                break
+                            skipped_bad_geometry += 1
+                            if len(skipped_examples) < 10:
+                                skipped_examples.append(
+                                    "Feature "
+                                    f"{feature_index}: unsupported geometry type {geom.geom_type}."
+                                )
                             continue
 
                         minx, miny, maxx, maxy = geom.bounds
@@ -1469,9 +1481,6 @@ def save_user_site_set_from_staged(
                         if len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE:
                             _flush_batch_rows()
                         n_sites += 1
-
-                    if parse_errors:
-                        raise ValueError("\n".join(parse_errors))
             else:
                 gdf, errors = _parse_sites_geometry_file_from_path(local_path, filename)
                 if errors:
@@ -1531,7 +1540,46 @@ def save_user_site_set_from_staged(
             _flush_batch_rows()
 
             if n_sites == 0:
+                skipped_total = (
+                    skipped_missing_required
+                    + skipped_bad_start_date
+                    + skipped_bad_geometry
+                )
+                if skipped_total > 0:
+                    details = (
+                        "No valid features were found after applying the selected mapping. "
+                        f"Skipped checks: missing required={skipped_missing_required}, "
+                        f"bad start_date={skipped_bad_start_date}, "
+                        f"bad geometry={skipped_bad_geometry}."
+                    )
+                    if skipped_examples:
+                        details += " Examples: " + " ".join(skipped_examples)
+                    raise ValueError(details)
                 raise ValueError("No features were found in the uploaded file.")
+
+            skipped_total = (
+                skipped_missing_required + skipped_bad_start_date + skipped_bad_geometry
+            )
+            if skipped_total > 0:
+                logger.warning(
+                    "Site upload saved with skipped features: site_set_id=%s skipped_total=%s "
+                    "missing_required=%s bad_start_date=%s bad_geometry=%s",
+                    site_set.id,
+                    skipped_total,
+                    skipped_missing_required,
+                    skipped_bad_start_date,
+                    skipped_bad_geometry,
+                )
+                metadata = dict(site_set.extra_metadata or {})
+                metadata["ingest_stats"] = {
+                    "skipped_total": int(skipped_total),
+                    "skipped_missing_required": int(skipped_missing_required),
+                    "skipped_bad_start_date": int(skipped_bad_start_date),
+                    "skipped_bad_geometry": int(skipped_bad_geometry),
+                }
+                if skipped_examples:
+                    metadata["ingest_skip_examples"] = skipped_examples
+                site_set.extra_metadata = metadata
 
             site_set.n_sites = n_sites
             if bounds_minx is not None:

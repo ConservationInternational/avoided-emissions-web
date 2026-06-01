@@ -1250,10 +1250,18 @@ def register_callbacks(app, limiter=None):
                     upload_token,
                     column_mapping=mapping,
                 )
+                ingest_stats = detail.get("ingest_stats") or {}
+                skipped_total = int(ingest_stats.get("skipped_total") or 0)
+                success_msg = f"Uploaded and saved {detail['n_sites']} sites as '{detail['name']}'."
+                if skipped_total > 0:
+                    success_msg += (
+                        f" Skipped {skipped_total} invalid features "
+                        "(missing required fields, unparseable start_date, or invalid geometry)."
+                    )
                 return (
                     dbc.Alert(
-                        f"Uploaded and saved {detail['n_sites']} sites as '{detail['name']}'.",
-                        color="success",
+                        success_msg,
+                        color="warning" if skipped_total > 0 else "success",
                     ),
                     str(_uuid.uuid4()),
                     detail["id"],
