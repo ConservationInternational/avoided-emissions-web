@@ -335,24 +335,29 @@ COVARIATE_STYLES = {
         "opacity": 1.0,
         "nodata_value": 0,
     },
-    # total_biomass: range [0, 329], p2=0, p50=11.6, p98=~150
-    # Right-skewed, 24% zeros, 82% nodata.
-    "total_biomass": {
+    # total_biomass_2025: Mokany et al. above+belowground biomass 2025 (Mg/ha).
+    # dtype=float32, nodata=0.0 (non-forest/ocean).  Tiny negatives (~min=-34)
+    # are float artefacts and clipped to 0 by min_value.
+    # 85.7% nodata, valid range (0, 670] Mg/ha.
+    # p25=44, p50=75, p75=121, p90=226, p95=339, p98=404.
+    # Stop positions anchored at percentile boundaries / max_value=420.
+    "total_biomass_2025": {
         "type": "continuous",
         "min_value": 0,
-        "max_value": 170,
+        "max_value": 420,
         "color_stops": [
-            [0.0, 255, 255, 229, 1],
-            [0.02, 247, 252, 196, 1],
-            [0.08, 217, 240, 163, 1],
-            [0.20, 173, 221, 142, 1],
-            [0.40, 120, 198, 121, 1],
-            [0.65, 49, 163, 84, 1],
-            [0.85, 0, 109, 44, 1],
-            [1.0, 0, 68, 27, 1],
+            [0.000, 255, 255, 229, 0],  # 0 Mg/ha — nodata, transparent
+            [0.001, 255, 255, 229, 1],  # ~0 Mg/ha (onset of valid pixels)
+            [0.105, 247, 252, 196, 1],  # ~44 Mg/ha (p25)
+            [0.178, 217, 240, 163, 1],  # ~75 Mg/ha (p50)
+            [0.288, 173, 221, 142, 1],  # ~121 Mg/ha (p75)
+            [0.538, 120, 198, 121, 1],  # ~226 Mg/ha (p90)
+            [0.807, 49, 163, 84, 1],  # ~339 Mg/ha (p95)
+            [0.962, 0, 109, 44, 1],  # ~404 Mg/ha (p98)
+            [1.000, 0, 68, 27, 1],  # 420 Mg/ha
         ],
         "opacity": 1.0,
-        "nodata_value": None,
+        "nodata_value": 0,
     },
     # ── Carbon ────────────────────────────────────────────────────────────
     # irr_carbon: CI Irrecoverable Carbon Total 2024 (Mg C/ha).

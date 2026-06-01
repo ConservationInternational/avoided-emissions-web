@@ -228,9 +228,9 @@ COVARIATES = {
         "category": "biomass",
         "resample": "mean",
     },
-    "total_biomass": {
-        "derived": "total_biomass",
-        "description": "Above + below ground biomass (Mg/ha)",
+    "total_biomass_2025": {
+        "external": True,
+        "description": "Total biomass 2025 — above + belowground (Mg/ha, Mokany et al. formula, Hansen GFC loss-masked)",
         "category": "biomass",
         "resample": "mean",
     },
@@ -300,7 +300,7 @@ DEFAULT_MATCHING_COVARIATES = [
     "friction_surface",
     "pop_2015",
     "pop_growth",
-    "total_biomass",
+    "total_biomass_2025",
 ]
 
 # These are used for exact matching (stratification), not propensity scores.
