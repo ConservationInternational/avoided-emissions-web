@@ -1067,7 +1067,17 @@ def register_callbacks(app, limiter=None):
             if contents is None:
                 raise PreventUpdate
 
-            if "," not in contents:
+            # dcc.Upload returns a data URL ("data:<mime>;base64,<data>") for most
+            # files, but Dash 4 may send binary files as raw base64 without the
+            # prefix.  Handle both formats gracefully.
+            if contents.startswith("data:") and "," in contents:
+                _, content_string = contents.split(",", 1)
+            else:
+                content_string = contents
+
+            try:
+                decoded = base64.b64decode(content_string)
+            except Exception:
                 return (
                     dbc.Alert(
                         "Invalid file upload — could not decode the uploaded content. Please try again.",
@@ -1086,8 +1096,6 @@ def register_callbacks(app, limiter=None):
                     [{"label": "(none)", "value": ""}],
                     "",
                 )
-            _, content_string = contents.split(",", 1)
-            decoded = base64.b64decode(content_string)
 
             try:
                 preview, errors = get_site_upload_mapping_preview(decoded, filename)
