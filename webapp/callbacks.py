@@ -1067,16 +1067,38 @@ def register_callbacks(app, limiter=None):
             if contents is None:
                 raise PreventUpdate
 
-            # dcc.Upload returns a data URL ("data:<mime>;base64,<data>") for most
-            # files, but Dash 4 may send binary files as raw base64 without the
-            # prefix.  Handle both formats gracefully.
-            if contents.startswith("data:") and "," in contents:
+            # dcc.Upload usually returns a data URL
+            # ("data:<mime>;base64,<data>"). In some Dash/driver combinations,
+            # binary files may arrive as raw base64 without the prefix.
+            if contents.startswith("data:"):
+                if "," not in contents:
+                    return (
+                        dbc.Alert(
+                            "Invalid file upload — malformed data URL payload.",
+                            color="danger",
+                        ),
+                        no_update,
+                        no_update,
+                        False,
+                        None,
+                        [],
+                        None,
+                        [],
+                        None,
+                        [],
+                        None,
+                        [{"label": "(none)", "value": ""}],
+                        "",
+                    )
                 _, content_string = contents.split(",", 1)
             else:
                 content_string = contents
 
+            # Remove accidental whitespace/newlines and enforce strict base64.
+            content_string = "".join(content_string.split())
+
             try:
-                decoded = base64.b64decode(content_string)
+                decoded = base64.b64decode(content_string, validate=True)
             except Exception:
                 return (
                     dbc.Alert(

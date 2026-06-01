@@ -247,7 +247,7 @@ def _read_sites_from_archive(file_content, filename):
         if shapefiles:
             return _read_shapefile(shapefiles[0])
         if geopackages:
-            return gpd.read_file(geopackages[0])
+            return gpd.read_file(geopackages[0], driver="GPKG")
         return gpd.read_file(geojsons[0], driver="GeoJSON")
 
 
@@ -343,7 +343,7 @@ def _parse_sites_geometry_file(file_content, filename):
             with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as f:
                 f.write(file_content)
                 tmp_path = f.name
-            gdf = gpd.read_file(tmp_path)
+            gdf = gpd.read_file(tmp_path, driver="GPKG")
             os.unlink(tmp_path)
         elif ext in (".zip", ".tar.gz", ".tgz"):
             gdf = _read_sites_from_archive(file_content, filename)
