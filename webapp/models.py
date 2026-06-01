@@ -360,6 +360,7 @@ class UserSiteUpload(Base):
             "running",
             "completed",
             "failed",
+            "cancelled",
             name="site_upload_status",
         ),
         nullable=False,

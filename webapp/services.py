@@ -1359,6 +1359,9 @@ def update_user_site_upload_status(
         if not upload:
             return False
 
+        if upload.status == "cancelled" and status != "cancelled":
+            return False
+
         upload.status = status
         if started_at is not None:
             upload.started_at = started_at

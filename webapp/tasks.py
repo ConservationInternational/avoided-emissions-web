@@ -53,12 +53,34 @@ def import_user_site_upload_task(
     import uuid
 
     from services import (
+        UserSiteUpload,
+        get_db,
         save_user_site_set_from_staged,
         update_user_site_upload_status,
     )
 
     upload_uuid = uuid.UUID(str(upload_id))
     user_uuid = uuid.UUID(str(user_id))
+
+    db = get_db()
+    try:
+        upload = (
+            db.query(UserSiteUpload)
+            .filter(
+                UserSiteUpload.id == upload_uuid, UserSiteUpload.user_id == user_uuid
+            )
+            .first()
+        )
+        if upload and upload.status == "cancelled":
+            return {
+                "status": "cancelled",
+                "site_set_id": None,
+                "site_set_name": None,
+                "n_sites": 0,
+            }
+    finally:
+        db.close()
+
     update_user_site_upload_status(
         upload_uuid,
         status="running",
