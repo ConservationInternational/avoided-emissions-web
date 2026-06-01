@@ -8,7 +8,7 @@ conservation sites.
 
 ```
 avoided-emissions-web/
-  gee-export/          Python scripts to export GEE covariate layers to GCS as COGs
+  gee_export/          Python scripts to export GEE covariate layers to GCS as COGs
   r-analysis/          Docker container for R-based avoided emissions matching
   webapp/              Dash web application (includes Alembic migrations)
   deploy/              CI/CD, Docker Compose, and CodeDeploy configuration
@@ -16,7 +16,7 @@ avoided-emissions-web/
 
 ## Components
 
-### 1. GEE Covariate Export (`gee-export/`)
+### 1. GEE Covariate Export (`gee_export/`)
 
 Python scripts using the Earth Engine Python API to export covariate rasters
 as Cloud-Optimized GeoTIFFs (COGs) to Google Cloud Storage. Each covariate is

@@ -48,7 +48,7 @@ service-account*.json
 *.RDS
 *.rds
 *.csv
-!gee-export/requirements.txt
+!gee_export/requirements.txt
 !webapp/requirements.txt
 
 # Docker

@@ -4,10 +4,10 @@
 
 A multi-component system for running avoided deforestation emissions analyses using propensity score matching. It has three main parts: a **Dash web application** (Python), a **GEE covariate export** pipeline (Python/Earth Engine), and an **R analysis container** for the statistical matching. The database is PostgreSQL + PostGIS, managed by Alembic migrations. Background tasks use Celery with Redis.
 
-- **Languages**: Python 3.13 (webapp, gee-export, extraction scripts), R 4.5 (matching/summarization)
+- **Languages**: Python 3.13 (webapp, gee_export, extraction scripts), R 4.5 (matching/summarization)
 - **Frameworks**: Dash/Plotly, Flask-Login, SQLAlchemy, Alembic, Celery, AG Grid
 - **Runtime**: Docker Compose (PostGIS 18, Redis 7, Python 3.13-slim)
-- **Size**: ~30 Python source files in `webapp/`, 6 in `gee-export/`, 6 in `r-analysis/scripts/`
+- **Size**: ~30 Python source files in `webapp/`, 6 in `gee_export/`, 6 in `r-analysis/scripts/`
 
 ## Project Structure
 
@@ -41,11 +41,12 @@ webapp/                       # Dash web application (main component)
     create_service_client.py  # CLI to register OAuth2 client on trends.earth API
     analyze_cog_distributions.py  # Pixel distribution analysis for styling COG layers
   assets/                     # CSS, JS (AG Grid renderers), images
-gee-export/                   # GEE covariate export scripts
-  config.py                   # Covariate definitions, grid params, GEE asset IDs
-  tasks.py                    # GEE batch task management (start/check exports)
+gee_export/                   # GEE covariate export scripts
+  gee_config.py               # Covariate definitions, grid params, GEE asset IDs
+  gee_tasks.py                # GEE batch task management (start/check exports)
   export_covariates.py        # Click CLI for triggering exports
   derived_layers.py           # Custom GEE computations (slope, forest cover, etc.)
+  __init__.py                 # Package init
 r-analysis/                   # R analysis Docker container
   Dockerfile                  # rocker/r-ver:4.5.2 with spatial R packages + Python
   entrypoint.sh               # Dispatches to extract/match/summarize steps
@@ -113,13 +114,13 @@ db.close()
 #### Python — Ruff
 There is no `pyproject.toml` or `ruff.toml` — ruff uses its defaults. Always run from the repo root:
 ```bash
-ruff check webapp/ gee-export/ r-analysis/scripts/
-ruff format --check webapp/ gee-export/ r-analysis/scripts/
+ruff check webapp/ gee_export/ r-analysis/scripts/
+ruff format --check webapp/ gee_export/ r-analysis/scripts/
 ```
 To auto-fix:
 ```bash
-ruff format webapp/ gee-export/ r-analysis/scripts/
-ruff check --fix webapp/ gee-export/ r-analysis/scripts/
+ruff format webapp/ gee_export/ r-analysis/scripts/
+ruff check --fix webapp/ gee_export/ r-analysis/scripts/
 ```
 Both `ruff check` and `ruff format --check` **must pass with zero errors** before any code change is submitted.
 
@@ -193,7 +194,7 @@ There is **no CI linting or test workflow** — linting and formatting must be d
 - **Database**: PostgreSQL with PostGIS extensions (`uuid-ossp`, `postgis`). Session management is manual — callers of `get_db()` must close the session.
 - **Environment variables**: `Config` class in `webapp/config.py` reads all settings from env vars with sensible defaults. `DATABASE_URL` is auto-constructed from `POSTGRES_*` vars if not set explicitly.
 - **Vector data import**: On first webapp startup, `import_vector_data_task` is dispatched to the Celery worker to download and import geoBoundaries, ecoregions, and WDPA data into PostGIS. This chains to `rasterize_vectors_task`.
-- **Grid alignment**: All covariates share a fixed 30 arc-second (~1 km) grid defined in `gee-export/config.py` (EPSG:4326, origin at 0°E/0°N). The rasterize step in `webapp/rasterize_vectors.py` must stay in sync with these constants.
+- **Grid alignment**: All covariates share a fixed 30 arc-second (~1 km) grid defined in `gee_export/gee_config.py` (EPSG:4326, origin at 0°E/0°N). The rasterize step in `webapp/rasterize_vectors.py` must stay in sync with these constants.
 
 ## Trust These Instructions
 
