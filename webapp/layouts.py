@@ -498,6 +498,150 @@ USER_MANAGEMENT_COLUMNS = [
     },
 ]
 
+USER_SITE_SET_COLUMNS = [
+    {
+        "headerName": "Name",
+        "field": "name",
+        "flex": 1.6,
+        "minWidth": 180,
+        "cellStyle": {**TRUNCATED_CELL},
+        "tooltipField": "name",
+    },
+    {
+        "headerName": "Source File",
+        "field": "filename",
+        "flex": 1.8,
+        "minWidth": 200,
+        "cellStyle": {**TRUNCATED_CELL},
+        "tooltipField": "filename",
+    },
+    {
+        "headerName": "Sites",
+        "field": "n_sites",
+        "flex": 0.7,
+        "minWidth": 90,
+        "type": "numericColumn",
+        "filter": "agNumberColumnFilter",
+    },
+    {
+        "headerName": "Format",
+        "field": "file_format",
+        "flex": 0.7,
+        "minWidth": 90,
+    },
+    {
+        "headerName": "Uploaded",
+        "field": "uploaded_at",
+        "flex": 1.3,
+        "minWidth": 170,
+        "sort": "desc",
+        "sortIndex": 0,
+        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "cellRenderer": "LocalDateTime",
+    },
+    {
+        "headerName": "Archived",
+        "field": "is_archived",
+        "flex": 0.8,
+        "minWidth": 100,
+        "valueFormatter": {"function": "params.value ? 'Yes' : 'No'"},
+    },
+]
+
+USER_SITE_UPLOAD_COLUMNS = [
+    {
+        "headerName": "Source File",
+        "field": "filename",
+        "flex": 1.7,
+        "minWidth": 200,
+        "cellStyle": {**TRUNCATED_CELL},
+        "tooltipField": "filename",
+    },
+    {
+        "headerName": "Status",
+        "field": "status",
+        "flex": 0.9,
+        "minWidth": 110,
+    },
+    {
+        "headerName": "Detected Features",
+        "field": "n_features",
+        "flex": 0.9,
+        "minWidth": 130,
+        "type": "numericColumn",
+        "filter": "agNumberColumnFilter",
+    },
+    {
+        "headerName": "Imported Sites",
+        "field": "n_sites_imported",
+        "flex": 0.9,
+        "minWidth": 130,
+        "type": "numericColumn",
+        "filter": "agNumberColumnFilter",
+    },
+    {
+        "headerName": "Site Set",
+        "field": "site_set_name",
+        "flex": 1.4,
+        "minWidth": 180,
+        "cellStyle": {**TRUNCATED_CELL},
+        "tooltipField": "site_set_name",
+    },
+    {
+        "headerName": "Queued",
+        "field": "created_at",
+        "flex": 1.2,
+        "minWidth": 165,
+        "sort": "desc",
+        "sortIndex": 0,
+        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "cellRenderer": "LocalDateTime",
+    },
+    {
+        "headerName": "Started",
+        "field": "started_at",
+        "flex": 1.2,
+        "minWidth": 165,
+        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "cellRenderer": "LocalDateTime",
+    },
+    {
+        "headerName": "Completed",
+        "field": "completed_at",
+        "flex": 1.2,
+        "minWidth": 165,
+        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "cellRenderer": "LocalDateTime",
+    },
+    {
+        "headerName": "Error",
+        "field": "error_message",
+        "flex": 1.8,
+        "minWidth": 220,
+        "cellStyle": {**TRUNCATED_CELL},
+        "tooltipField": "error_message",
+    },
+]
+
+USER_SITE_UPLOAD_ROW_STYLES = [
+    {
+        "condition": "params.data.status === 'pending'",
+        "style": {"backgroundColor": "#E2E3E5", "color": "#495057"},
+    },
+    {
+        "condition": "params.data.status === 'running'",
+        "style": {"backgroundColor": "#CCE5FF", "color": "#084298"},
+    },
+    {
+        "condition": "params.data.status === 'completed'",
+        "style": {"backgroundColor": "#D1E7DD", "color": "#0F5132"},
+    },
+    {
+        "condition": "params.data.status === 'failed'",
+        "style": {"backgroundColor": "#F8D7DA", "color": "#721C24"},
+    },
+]
+
 
 # -- AG Grid defaults (mirroring api-ui patterns) ---------------------------
 
@@ -1385,7 +1529,7 @@ def submit_layout(user, recompute_config=None):
                         [
                             html.H2("Submit Analysis Task", className="mb-1"),
                             html.P(
-                                "Use the guided tabs to upload sites, configure matching, and submit.",
+                                "Use the guided tabs to select uploaded sites, configure matching, and submit.",
                                 className="text-muted mb-0",
                             ),
                         ],
@@ -1493,7 +1637,7 @@ def submit_layout(user, recompute_config=None):
                                             dbc.Card(
                                                 [
                                                     dbc.CardHeader(
-                                                        "Use Previously Uploaded Sites"
+                                                        "Use Uploaded Sites"
                                                     ),
                                                     dbc.CardBody(
                                                         [
@@ -1506,33 +1650,17 @@ def submit_layout(user, recompute_config=None):
                                                                             placeholder="Select a saved site set...",
                                                                         ),
                                                                         xs=12,
-                                                                        md=7,
-                                                                    ),
-                                                                    dbc.Col(
-                                                                        dbc.Button(
-                                                                            "Archive",
-                                                                            id="archive-site-set-btn",
-                                                                            color="warning",
-                                                                            outline=True,
-                                                                            className="w-100",
-                                                                        ),
-                                                                        xs=6,
-                                                                        md=2,
-                                                                    ),
-                                                                    dbc.Col(
-                                                                        dbc.Button(
-                                                                            "Delete",
-                                                                            id="delete-site-set-btn",
-                                                                            color="danger",
-                                                                            outline=True,
-                                                                            className="w-100",
-                                                                        ),
-                                                                        xs=6,
-                                                                        md=3,
+                                                                        md=12,
                                                                     ),
                                                                 ],
                                                                 className="g-2 mb-2",
                                                             ),
+                                                            html.Small(
+                                                                "Upload, rename, archive, and delete site sets from the Admin page.",
+                                                                className="d-block text-muted mb-2",
+                                                            )
+                                                            if user.is_admin
+                                                            else None,
                                                             dbc.Checkbox(
                                                                 id="show-archived-site-sets",
                                                                 label="Show archived site sets",
@@ -1541,10 +1669,6 @@ def submit_layout(user, recompute_config=None):
                                                             ),
                                                             html.Div(
                                                                 id="site-set-metadata"
-                                                            ),
-                                                            html.Div(
-                                                                id="site-set-action-status",
-                                                                className="mt-2",
                                                             ),
                                                         ]
                                                     ),
@@ -1569,300 +1693,26 @@ def submit_layout(user, recompute_config=None):
                                             dbc.Card(
                                                 [
                                                     dbc.CardHeader(
-                                                        "Upload New Sites (GeoJSON, GeoPackage, or Archive)"
+                                                        "Need to add more sites?"
                                                     ),
                                                     dbc.CardBody(
                                                         [
                                                             html.P(
-                                                                [
-                                                                    "Upload a ",
-                                                                    html.Strong(
-                                                                        "GeoJSON"
-                                                                    ),
-                                                                    " or ",
-                                                                    html.Strong(
-                                                                        "GeoPackage"
-                                                                    ),
-                                                                    " file, or a ",
-                                                                    html.Strong(
-                                                                        ".zip/.tar.gz"
-                                                                    ),
-                                                                    " archive containing exactly one ",
-                                                                    html.Strong(
-                                                                        "Shapefile"
-                                                                    ),
-                                                                    ", ",
-                                                                    html.Strong(
-                                                                        "GeoJSON"
-                                                                    ),
-                                                                    ", or ",
-                                                                    html.Strong(
-                                                                        "GeoPackage"
-                                                                    ),
-                                                                    " dataset with site polygons. "
-                                                                    "Geometries must be valid Polygons or "
-                                                                    "MultiPolygons in EPSG:4326 (WGS 84).",
-                                                                ],
-                                                                className="mb-2 small",
+                                                                "Site uploads are now managed asynchronously from the Admin page.",
+                                                                className="mb-2",
                                                             ),
-                                                            html.P(
-                                                                "After upload, map your file columns to required fields before saving.",
-                                                                className="mb-2 small text-muted",
-                                                            ),
-                                                            dbc.Table(
-                                                                [
-                                                                    html.Thead(
-                                                                        html.Tr(
-                                                                            [
-                                                                                html.Th(
-                                                                                    "Field"
-                                                                                ),
-                                                                                html.Th(
-                                                                                    "Type"
-                                                                                ),
-                                                                                html.Th(
-                                                                                    "Required"
-                                                                                ),
-                                                                                html.Th(
-                                                                                    "Description"
-                                                                                ),
-                                                                            ]
-                                                                        )
-                                                                    ),
-                                                                    html.Tbody(
-                                                                        [
-                                                                            html.Tr(
-                                                                                [
-                                                                                    html.Td(
-                                                                                        html.Code(
-                                                                                            "site_id"
-                                                                                        )
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "string"
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "Yes"
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "Unique site identifier"
-                                                                                    ),
-                                                                                ]
-                                                                            ),
-                                                                            html.Tr(
-                                                                                [
-                                                                                    html.Td(
-                                                                                        html.Code(
-                                                                                            "site_name"
-                                                                                        )
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "string"
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "Yes"
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "Human-readable site name"
-                                                                                    ),
-                                                                                ]
-                                                                            ),
-                                                                            html.Tr(
-                                                                                [
-                                                                                    html.Td(
-                                                                                        html.Code(
-                                                                                            "start_date"
-                                                                                        )
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "date"
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "Yes"
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "Intervention start date (YYYY-MM-DD)"
-                                                                                    ),
-                                                                                ]
-                                                                            ),
-                                                                            html.Tr(
-                                                                                [
-                                                                                    html.Td(
-                                                                                        html.Code(
-                                                                                            "end_date"
-                                                                                        )
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "date"
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "No"
-                                                                                    ),
-                                                                                    html.Td(
-                                                                                        "Intervention end date (optional; omit if ongoing)"
-                                                                                    ),
-                                                                                ]
-                                                                            ),
-                                                                        ]
-                                                                    ),
-                                                                ],
-                                                                bordered=True,
-                                                                hover=True,
-                                                                size="sm",
-                                                                className="mb-3",
-                                                            ),
-                                                            html.Div(
-                                                                [
-                                                                    dbc.Button(
-                                                                        "Click to Upload",
-                                                                        id="upload-sites-stream-btn",
-                                                                        color="secondary",
-                                                                        outline=True,
-                                                                        className="w-100 mb-1",
-                                                                    ),
-                                                                    html.Div(
-                                                                        "All uploads use streamed transfer for reliability on large and small files.",
-                                                                        className="small text-muted mb-2",
-                                                                    ),
-                                                                    dcc.Input(
-                                                                        id="site-upload-stream-payload",
-                                                                        type="text",
-                                                                        value="",
-                                                                        style={
-                                                                            "display": "none"
-                                                                        },
-                                                                    ),
-                                                                    # File input is created dynamically in siteUploadStream.js
-                                                                    # to avoid html.Input compatibility issues with some Dash versions.
-                                                                ]
-                                                            ),
-                                                            html.Div(
-                                                                id="upload-status"
-                                                            ),
-                                                            dbc.Collapse(
-                                                                dbc.Card(
-                                                                    dbc.CardBody(
-                                                                        [
-                                                                            html.H6(
-                                                                                "Map Uploaded Columns",
-                                                                                className="mb-2",
-                                                                            ),
-                                                                            html.P(
-                                                                                "Confirm which columns should be used for each required field. "
-                                                                                "start_date must be parseable as dates; end_date is optional.",
-                                                                                className="small text-muted mb-3",
-                                                                            ),
-                                                                            dbc.Row(
-                                                                                [
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Label(
-                                                                                                "site_id",
-                                                                                                className="mb-1",
-                                                                                            ),
-                                                                                            dbc.Select(
-                                                                                                id="mapping-site-id",
-                                                                                                options=[],
-                                                                                                placeholder="Select source column...",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs=12,
-                                                                                        md=6,
-                                                                                        className="mb-2",
-                                                                                    ),
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Label(
-                                                                                                "site_name",
-                                                                                                className="mb-1",
-                                                                                            ),
-                                                                                            dbc.Select(
-                                                                                                id="mapping-site-name",
-                                                                                                options=[],
-                                                                                                placeholder="Select source column...",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs=12,
-                                                                                        md=6,
-                                                                                        className="mb-2",
-                                                                                    ),
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Label(
-                                                                                                "start_date",
-                                                                                                className="mb-1",
-                                                                                            ),
-                                                                                            dbc.Select(
-                                                                                                id="mapping-start-date",
-                                                                                                options=[],
-                                                                                                placeholder="Select source column...",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs=12,
-                                                                                        md=6,
-                                                                                        className="mb-2",
-                                                                                    ),
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Label(
-                                                                                                "end_date (optional)",
-                                                                                                className="mb-1",
-                                                                                            ),
-                                                                                            dbc.Select(
-                                                                                                id="mapping-end-date",
-                                                                                                options=[],
-                                                                                                placeholder="Leave empty for ongoing interventions",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs=12,
-                                                                                        md=6,
-                                                                                        className="mb-2",
-                                                                                    ),
-                                                                                ],
-                                                                                className="g-2",
-                                                                            ),
-                                                                            html.Div(
-                                                                                id="site-upload-mapping-status",
-                                                                                className="mt-2",
-                                                                            ),
-                                                                            dbc.Row(
-                                                                                [
-                                                                                    dbc.Col(
-                                                                                        dbc.Button(
-                                                                                            "Confirm Mapping and Save",
-                                                                                            id="confirm-site-upload-mapping-btn",
-                                                                                            color="primary",
-                                                                                            className="w-100",
-                                                                                        ),
-                                                                                        xs=12,
-                                                                                        md=7,
-                                                                                    ),
-                                                                                    dbc.Col(
-                                                                                        dbc.Button(
-                                                                                            "Cancel",
-                                                                                            id="cancel-site-upload-mapping-btn",
-                                                                                            color="secondary",
-                                                                                            outline=True,
-                                                                                            className="w-100",
-                                                                                        ),
-                                                                                        xs=12,
-                                                                                        md=5,
-                                                                                    ),
-                                                                                ],
-                                                                                className="g-2 mt-2",
-                                                                            ),
-                                                                        ]
-                                                                    )
-                                                                ),
-                                                                id="site-upload-mapping-panel",
-                                                                is_open=False,
-                                                                className="mt-2",
+                                                            dbc.Button(
+                                                                "Open Admin Site Uploads",
+                                                                href="/admin",
+                                                                color="secondary",
+                                                                outline=True,
+                                                                disabled=not user.is_admin,
                                                             ),
                                                         ]
                                                     ),
                                                     dbc.CardFooter(
                                                         html.Small(
-                                                            "After selecting or uploading a site set, continue to the Matching Setup tab.",
+                                                            "After selecting a site set, continue to the Matching Setup tab.",
                                                             className="text-muted",
                                                         )
                                                     ),
@@ -2900,8 +2750,250 @@ def _build_category_options():
     return options
 
 
+def _site_upload_card(footer_text):
+    """Build the shared admin site-upload card.
+
+    Parameters
+    ----------
+    footer_text : str
+        Footer copy shown beneath the upload controls.
+
+    Returns
+    -------
+    dbc.Card
+        Card containing the streamed upload controls and mapping UI.
+    """
+    return dbc.Card(
+        [
+            dbc.CardHeader("Upload New Sites (GeoJSON, GeoPackage, or Archive)"),
+            dbc.CardBody(
+                [
+                    html.P(
+                        [
+                            "Upload a ",
+                            html.Strong("GeoJSON"),
+                            " or ",
+                            html.Strong("GeoPackage"),
+                            " file, or a ",
+                            html.Strong(".zip/.tar.gz"),
+                            " archive containing exactly one ",
+                            html.Strong("Shapefile"),
+                            ", ",
+                            html.Strong("GeoJSON"),
+                            ", or ",
+                            html.Strong("GeoPackage"),
+                            " dataset with site polygons. Geometries must be valid "
+                            "Polygons or MultiPolygons in EPSG:4326 (WGS 84).",
+                        ],
+                        className="mb-2 small",
+                    ),
+                    html.P(
+                        "After upload, map your file columns to required fields before starting the background import.",
+                        className="mb-2 small text-muted",
+                    ),
+                    dbc.Table(
+                        [
+                            html.Thead(
+                                html.Tr(
+                                    [
+                                        html.Th("Field"),
+                                        html.Th("Type"),
+                                        html.Th("Required"),
+                                        html.Th("Description"),
+                                    ]
+                                )
+                            ),
+                            html.Tbody(
+                                [
+                                    html.Tr(
+                                        [
+                                            html.Td(html.Code("site_id")),
+                                            html.Td("string"),
+                                            html.Td("Yes"),
+                                            html.Td("Unique site identifier"),
+                                        ]
+                                    ),
+                                    html.Tr(
+                                        [
+                                            html.Td(html.Code("site_name")),
+                                            html.Td("string"),
+                                            html.Td("Yes"),
+                                            html.Td("Human-readable site name"),
+                                        ]
+                                    ),
+                                    html.Tr(
+                                        [
+                                            html.Td(html.Code("start_date")),
+                                            html.Td("date"),
+                                            html.Td("Yes"),
+                                            html.Td(
+                                                "Intervention start date (YYYY-MM-DD)"
+                                            ),
+                                        ]
+                                    ),
+                                    html.Tr(
+                                        [
+                                            html.Td(html.Code("end_date")),
+                                            html.Td("date"),
+                                            html.Td("No"),
+                                            html.Td(
+                                                "Intervention end date (optional; omit if ongoing)"
+                                            ),
+                                        ]
+                                    ),
+                                ]
+                            ),
+                        ],
+                        bordered=True,
+                        hover=True,
+                        size="sm",
+                        className="mb-3",
+                    ),
+                    html.Div(
+                        [
+                            dbc.Button(
+                                "Click to Upload",
+                                id="upload-sites-stream-btn",
+                                color="secondary",
+                                outline=True,
+                                className="w-100 mb-1",
+                            ),
+                            html.Div(
+                                "All uploads use streamed transfer for reliability on large and small files.",
+                                className="small text-muted mb-2",
+                            ),
+                            dcc.Input(
+                                id="site-upload-stream-payload",
+                                type="text",
+                                value="",
+                                style={"display": "none"},
+                            ),
+                        ]
+                    ),
+                    html.Div(id="upload-status"),
+                    dbc.Collapse(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.H6("Map Uploaded Columns", className="mb-2"),
+                                    html.P(
+                                        "Confirm which columns should be used for each required field. "
+                                        "start_date must be parseable as dates; end_date is optional.",
+                                        className="small text-muted mb-3",
+                                    ),
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                [
+                                                    dbc.Label(
+                                                        "site_id", className="mb-1"
+                                                    ),
+                                                    dbc.Select(
+                                                        id="mapping-site-id",
+                                                        options=[],
+                                                        placeholder="Select source column...",
+                                                    ),
+                                                ],
+                                                xs=12,
+                                                md=6,
+                                                className="mb-2",
+                                            ),
+                                            dbc.Col(
+                                                [
+                                                    dbc.Label(
+                                                        "site_name", className="mb-1"
+                                                    ),
+                                                    dbc.Select(
+                                                        id="mapping-site-name",
+                                                        options=[],
+                                                        placeholder="Select source column...",
+                                                    ),
+                                                ],
+                                                xs=12,
+                                                md=6,
+                                                className="mb-2",
+                                            ),
+                                            dbc.Col(
+                                                [
+                                                    dbc.Label(
+                                                        "start_date", className="mb-1"
+                                                    ),
+                                                    dbc.Select(
+                                                        id="mapping-start-date",
+                                                        options=[],
+                                                        placeholder="Select source column...",
+                                                    ),
+                                                ],
+                                                xs=12,
+                                                md=6,
+                                                className="mb-2",
+                                            ),
+                                            dbc.Col(
+                                                [
+                                                    dbc.Label(
+                                                        "end_date (optional)",
+                                                        className="mb-1",
+                                                    ),
+                                                    dbc.Select(
+                                                        id="mapping-end-date",
+                                                        options=[],
+                                                        placeholder="Leave empty for ongoing interventions",
+                                                    ),
+                                                ],
+                                                xs=12,
+                                                md=6,
+                                                className="mb-2",
+                                            ),
+                                        ],
+                                        className="g-2",
+                                    ),
+                                    html.Div(
+                                        id="site-upload-mapping-status",
+                                        className="mt-2",
+                                    ),
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                dbc.Button(
+                                                    "Confirm Mapping and Start Import",
+                                                    id="confirm-site-upload-mapping-btn",
+                                                    color="primary",
+                                                    className="w-100",
+                                                ),
+                                                xs=12,
+                                                md=7,
+                                            ),
+                                            dbc.Col(
+                                                dbc.Button(
+                                                    "Cancel",
+                                                    id="cancel-site-upload-mapping-btn",
+                                                    color="secondary",
+                                                    outline=True,
+                                                    className="w-100",
+                                                ),
+                                                xs=12,
+                                                md=5,
+                                            ),
+                                        ],
+                                        className="g-2 mt-2",
+                                    ),
+                                ]
+                            )
+                        ),
+                        id="site-upload-mapping-panel",
+                        is_open=False,
+                        className="mt-2",
+                    ),
+                ]
+            ),
+            dbc.CardFooter(html.Small(footer_text, className="text-muted")),
+        ],
+        className="ae-section-card mb-3",
+    )
+
+
 def admin_layout(user):
-    """Admin panel for covariate management and users."""
+    """Admin panel for covariate management, site uploads, and users."""
     category_options = _build_category_options()
 
     return dbc.Container(
@@ -2913,7 +3005,7 @@ def admin_layout(user):
                         [
                             html.H2("Admin Panel", className="mb-1"),
                             html.P(
-                                "Manage covariate inventory and user accounts.",
+                                "Manage covariates, asynchronous site uploads, and user accounts.",
                                 className="text-muted mb-0",
                             ),
                         ],
@@ -3082,6 +3174,187 @@ def admin_layout(user):
                                                     html.Div(
                                                         id="covariate-action-result",
                                                         className="mt-2",
+                                                    ),
+                                                ]
+                                            )
+                                        ],
+                                        className="ae-section-card",
+                                    ),
+                                ],
+                                className="pt-3",
+                            ),
+                        ],
+                    ),
+                    dbc.Tab(
+                        label="Site Uploads",
+                        tab_id="tab-site-uploads",
+                        children=[
+                            html.Div(
+                                [
+                                    _site_upload_card(
+                                        "After the mapping is confirmed, a background Celery worker imports the staged site file into the database."
+                                    ),
+                                    dbc.Card(
+                                        [
+                                            dbc.CardHeader(
+                                                "Manage Previously Uploaded Site Sets"
+                                            ),
+                                            dbc.CardBody(
+                                                [
+                                                    dbc.Row(
+                                                        [
+                                                            dbc.Col(
+                                                                [
+                                                                    dbc.Label(
+                                                                        "Selected Site Set",
+                                                                        size="sm",
+                                                                    ),
+                                                                    dbc.Select(
+                                                                        id="admin-site-set-selector",
+                                                                        options=[],
+                                                                        placeholder="Select a site set...",
+                                                                    ),
+                                                                ],
+                                                                xs=12,
+                                                                lg=4,
+                                                            ),
+                                                            dbc.Col(
+                                                                [
+                                                                    dbc.Label(
+                                                                        "Rename Site Set",
+                                                                        size="sm",
+                                                                    ),
+                                                                    dbc.Input(
+                                                                        id="admin-site-set-name",
+                                                                        type="text",
+                                                                        placeholder="Enter a site set name...",
+                                                                    ),
+                                                                ],
+                                                                xs=12,
+                                                                lg=4,
+                                                            ),
+                                                            dbc.Col(
+                                                                [
+                                                                    html.Div(
+                                                                        style={
+                                                                            "height": "32px"
+                                                                        }
+                                                                    ),
+                                                                    dbc.ButtonGroup(
+                                                                        [
+                                                                            dbc.Button(
+                                                                                "Rename",
+                                                                                id="admin-rename-site-set-btn",
+                                                                                color="primary",
+                                                                                size="sm",
+                                                                            ),
+                                                                            dbc.Button(
+                                                                                "Archive",
+                                                                                id="admin-archive-site-set-btn",
+                                                                                color="warning",
+                                                                                size="sm",
+                                                                            ),
+                                                                            dbc.Button(
+                                                                                "Delete",
+                                                                                id="admin-delete-site-set-btn",
+                                                                                color="danger",
+                                                                                size="sm",
+                                                                            ),
+                                                                        ]
+                                                                    ),
+                                                                ],
+                                                                width="auto",
+                                                                className="d-flex align-items-end",
+                                                            ),
+                                                        ],
+                                                        className="g-3 mb-2",
+                                                    ),
+                                                    dbc.Checkbox(
+                                                        id="admin-show-archived-site-sets",
+                                                        label="Show archived site sets",
+                                                        value=False,
+                                                        className="mb-2",
+                                                    ),
+                                                    html.Div(
+                                                        id="admin-site-set-metadata",
+                                                        className="mb-2",
+                                                    ),
+                                                    html.Div(
+                                                        id="admin-site-set-action-status",
+                                                        className="mt-2",
+                                                    ),
+                                                ]
+                                            ),
+                                        ],
+                                        className="ae-section-card mb-3",
+                                    ),
+                                    dbc.Card(
+                                        [
+                                            dbc.CardBody(
+                                                [
+                                                    dbc.Row(
+                                                        [
+                                                            dbc.Col(
+                                                                html.H5(
+                                                                    "Uploaded Site Sets",
+                                                                    className="mb-0",
+                                                                ),
+                                                                width="auto",
+                                                            ),
+                                                            dbc.Col(
+                                                                html.Span(
+                                                                    id="admin-site-sets-total-count",
+                                                                    children="Total: 0",
+                                                                    className="text-muted fw-bold",
+                                                                ),
+                                                                width=True,
+                                                                className="text-end",
+                                                            ),
+                                                        ],
+                                                        className="ae-action-bar align-items-center mb-3",
+                                                    ),
+                                                    _make_ag_grid(
+                                                        table_id="admin-site-sets-table",
+                                                        column_defs=USER_SITE_SET_COLUMNS,
+                                                        row_model="clientSide",
+                                                        height="360px",
+                                                    ),
+                                                ]
+                                            )
+                                        ],
+                                        className="ae-section-card mb-3",
+                                    ),
+                                    dbc.Card(
+                                        [
+                                            dbc.CardBody(
+                                                [
+                                                    dbc.Row(
+                                                        [
+                                                            dbc.Col(
+                                                                html.H5(
+                                                                    "Background Site Import Status",
+                                                                    className="mb-0",
+                                                                ),
+                                                                width="auto",
+                                                            ),
+                                                            dbc.Col(
+                                                                html.Span(
+                                                                    id="admin-site-upload-total-count",
+                                                                    children="Total: 0",
+                                                                    className="text-muted fw-bold",
+                                                                ),
+                                                                width=True,
+                                                                className="text-end",
+                                                            ),
+                                                        ],
+                                                        className="ae-action-bar align-items-center mb-3",
+                                                    ),
+                                                    _make_ag_grid(
+                                                        table_id="admin-site-upload-table",
+                                                        column_defs=USER_SITE_UPLOAD_COLUMNS,
+                                                        row_model="clientSide",
+                                                        height="360px",
+                                                        style_conditions=USER_SITE_UPLOAD_ROW_STYLES,
                                                     ),
                                                 ]
                                             )
@@ -3270,6 +3543,8 @@ def admin_layout(user):
                 className="ae-content-tabs",
             ),
             dcc.Interval(id="admin-refresh-interval", interval=30000, n_intervals=0),
+            dcc.Store(id="site-set-refresh-store"),
+            dcc.Store(id="site-upload-columns-store"),
         ]
     )
 

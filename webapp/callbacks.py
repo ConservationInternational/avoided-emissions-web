@@ -64,14 +64,16 @@ from services import (
     revoke_share_link,
     revoke_te_script_access,
     save_covariate_preset,
-    save_user_site_set_from_staged,
     discard_staged_site_upload,
     start_gee_export,
     submit_analysis_task,
     update_task_info,
     validate_share_token,
     archive_user_site_set,
+    create_user_site_upload,
     delete_user_site_set,
+    list_user_site_uploads,
+    rename_user_site_set,
 )
 
 logger = logging.getLogger(__name__)
@@ -1000,7 +1002,6 @@ def register_callbacks(app, limiter=None):
         [
             Output("upload-status", "children"),
             Output("site-set-refresh-store", "data", allow_duplicate=True),
-            Output("site-set-selector", "value", allow_duplicate=True),
             Output("site-upload-mapping-panel", "is_open"),
             Output("site-upload-columns-store", "data"),
             Output("mapping-site-id", "options"),
@@ -1037,15 +1038,14 @@ def register_callbacks(app, limiter=None):
             ),
             (
                 Output("confirm-site-upload-mapping-btn", "children"),
-                "Saving...",
-                "Confirm Mapping and Save",
+                "Starting import...",
+                "Confirm Mapping and Start Import",
             ),
             (
                 Output("site-upload-mapping-status", "children"),
                 dbc.Alert(
                     (
-                        "Saving site set... large uploads may take several minutes. "
-                        "Please keep this page open."
+                        "Starting background site import... large uploads may take several minutes."
                     ),
                     color="info",
                     className="mb-0 py-2",
@@ -1071,10 +1071,9 @@ def register_callbacks(app, limiter=None):
 
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
         user = get_current_user()
-        if not user:
+        if not user or not user.is_admin:
             return (
-                dbc.Alert("Please log in first.", color="danger"),
-                no_update,
+                dbc.Alert("Admin access required.", color="danger"),
                 no_update,
                 False,
                 None,
@@ -1100,7 +1099,6 @@ def register_callbacks(app, limiter=None):
                         "Stream upload payload could not be parsed.", color="danger"
                     ),
                     no_update,
-                    no_update,
                     False,
                     None,
                     [],
@@ -1118,7 +1116,6 @@ def register_callbacks(app, limiter=None):
                 errors = response.get("errors") or ["Large file upload failed."]
                 return (
                     dbc.Alert("\n".join(str(e) for e in errors), color="danger"),
-                    no_update,
                     no_update,
                     False,
                     None,
@@ -1153,11 +1150,10 @@ def register_callbacks(app, limiter=None):
                 dbc.Alert(
                     (
                         f"Parsed {preview.get('n_features', 0)} features. "
-                        "Confirm column mapping to save this site set."
+                        "Confirm column mapping to start the background import."
                     ),
                     color="info",
                 ),
-                no_update,
                 no_update,
                 True,
                 pending_data,
@@ -1183,7 +1179,6 @@ def register_callbacks(app, limiter=None):
             return (
                 dbc.Alert("Upload mapping cancelled.", color="secondary"),
                 no_update,
-                no_update,
                 False,
                 None,
                 [],
@@ -1203,7 +1198,6 @@ def register_callbacks(app, limiter=None):
                         "No parsed upload is pending. Upload a file first.",
                         color="warning",
                     ),
-                    no_update,
                     no_update,
                     False,
                     None,
@@ -1226,7 +1220,6 @@ def register_callbacks(app, limiter=None):
                             color="danger",
                         ),
                         no_update,
-                        no_update,
                         False,
                         None,
                         [],
@@ -1245,26 +1238,22 @@ def register_callbacks(app, limiter=None):
                     "start_date": mapped_start_date,
                     "end_date": mapped_end_date or None,
                 }
-                detail = save_user_site_set_from_staged(
+                upload = create_user_site_upload(
                     user.id,
+                    pending_upload.get("filename"),
                     upload_token,
+                    n_features=pending_upload.get("n_features", 0),
                     column_mapping=mapping,
                 )
-                ingest_stats = detail.get("ingest_stats") or {}
-                skipped_total = int(ingest_stats.get("skipped_total") or 0)
-                success_msg = f"Uploaded and saved {detail['n_sites']} sites as '{detail['name']}'."
-                if skipped_total > 0:
-                    success_msg += (
-                        f" Skipped {skipped_total} invalid features "
-                        "(missing required fields, unparseable start_date, or invalid geometry)."
-                    )
                 return (
                     dbc.Alert(
-                        success_msg,
-                        color="warning" if skipped_total > 0 else "success",
+                        (
+                            f"Queued background import for '{upload['filename']}'. "
+                            "Track progress in the Admin site upload tables below."
+                        ),
+                        color="success",
                     ),
                     str(_uuid.uuid4()),
-                    detail["id"],
                     False,
                     None,
                     [],
@@ -1280,7 +1269,6 @@ def register_callbacks(app, limiter=None):
                 return (
                     dbc.Alert(str(exc), color="danger"),
                     no_update,
-                    no_update,
                     True,
                     no_update,
                     no_update,
@@ -1293,11 +1281,10 @@ def register_callbacks(app, limiter=None):
                     no_update,
                 )
             except Exception:
-                logger.exception("Failed to save mapped site upload")
+                logger.exception("Failed to queue mapped site upload")
                 report_exception()
                 return (
-                    dbc.Alert("Failed to save mapped site upload.", color="danger"),
-                    no_update,
+                    dbc.Alert("Failed to queue mapped site upload.", color="danger"),
                     no_update,
                     True,
                     no_update,
@@ -1315,19 +1302,130 @@ def register_callbacks(app, limiter=None):
 
     @app.callback(
         [
-            Output("site-set-action-status", "children"),
-            Output("site-set-refresh-store", "data", allow_duplicate=True),
-            Output("site-set-selector", "value", allow_duplicate=True),
+            Output("admin-site-sets-table", "rowData"),
+            Output("admin-site-sets-total-count", "children"),
+            Output("admin-site-upload-table", "rowData"),
+            Output("admin-site-upload-total-count", "children"),
+            Output("admin-site-set-selector", "options"),
+            Output("admin-site-set-selector", "value"),
         ],
         [
-            Input("delete-site-set-btn", "n_clicks"),
-            Input("archive-site-set-btn", "n_clicks"),
+            Input("admin-refresh-interval", "n_intervals"),
+            Input("site-set-refresh-store", "data"),
+            Input("admin-show-archived-site-sets", "value"),
         ],
-        State("site-set-selector", "value"),
+        State("admin-site-set-selector", "value"),
+    )
+    def refresh_admin_site_upload_views(
+        _n_intervals, _refresh_token, show_archived, current_value
+    ):
+        user = get_current_user()
+        if not user or not user.is_admin:
+            raise PreventUpdate
+
+        site_sets = list_user_site_sets(user.id, include_archived=bool(show_archived))
+        uploads = list_user_site_uploads(user.id)
+        site_set_options = [
+            {
+                "label": (
+                    f"{row['name']} ({row['n_sites']} sites)"
+                    + (" [Archived]" if row.get("is_archived") else "")
+                ),
+                "value": row["id"],
+            }
+            for row in site_sets
+        ]
+        valid_ids = {row["id"] for row in site_sets}
+        selected_value = (
+            current_value
+            if current_value in valid_ids
+            else (site_set_options[0]["value"] if site_set_options else None)
+        )
+
+        archived_count = sum(1 for row in site_sets if row.get("is_archived"))
+        running_count = sum(1 for row in uploads if row.get("status") == "running")
+        queued_count = sum(1 for row in uploads if row.get("status") == "pending")
+
+        return (
+            site_sets,
+            f"Total: {len(site_sets)} | Archived: {archived_count}",
+            uploads,
+            f"Total: {len(uploads)} | Pending: {queued_count} | Running: {running_count}",
+            site_set_options,
+            selected_value,
+        )
+
+    @app.callback(
+        [
+            Output("admin-site-set-name", "value"),
+            Output("admin-site-set-metadata", "children"),
+            Output("admin-archive-site-set-btn", "children"),
+        ],
+        Input("admin-site-set-selector", "value"),
+        prevent_initial_call=False,
+    )
+    def load_admin_selected_site_set(site_set_id):
+        user = get_current_user()
+        if not user or not user.is_admin:
+            raise PreventUpdate
+
+        if not site_set_id:
+            return (
+                "",
+                html.Small("No site set selected.", className="text-muted"),
+                "Archive",
+            )
+
+        detail = get_user_site_set_detail(site_set_id, user.id)
+        if not detail:
+            return (
+                "",
+                html.Small("Selected site set was not found.", className="text-danger"),
+                "Archive",
+            )
+
+        metadata = html.Div(
+            [
+                html.Small(f"Name: {detail['name']}", className="d-block text-muted"),
+                html.Small(
+                    f"Source file: {detail['filename']} ({detail['file_size_bytes']:,} bytes)",
+                    className="d-block text-muted",
+                ),
+                html.Small(
+                    f"Uploaded: {(detail['uploaded_at'] or '').replace('T', ' ')[:19]} UTC",
+                    className="d-block text-muted",
+                ),
+                html.Small(
+                    f"Sites: {detail['n_sites']}",
+                    className="d-block text-muted",
+                ),
+            ]
+        )
+        return (
+            detail["name"],
+            metadata,
+            "Restore" if detail.get("is_archived") else "Archive",
+        )
+
+    @app.callback(
+        [
+            Output("admin-site-set-action-status", "children"),
+            Output("site-set-refresh-store", "data", allow_duplicate=True),
+            Output("admin-site-set-selector", "value", allow_duplicate=True),
+        ],
+        [
+            Input("admin-rename-site-set-btn", "n_clicks"),
+            Input("admin-archive-site-set-btn", "n_clicks"),
+            Input("admin-delete-site-set-btn", "n_clicks"),
+        ],
+        [
+            State("admin-site-set-selector", "value"),
+            State("admin-site-set-name", "value"),
+        ],
         prevent_initial_call=True,
     )
-    def handle_site_set_delete_or_archive(
-        _delete_clicks, _archive_clicks, selected_set_id
+    def handle_admin_site_set_actions(
+        _rename_clicks, _archive_clicks, _delete_clicks, selected_set_id, new_name
     ):
         ctx = callback_context
         if not ctx.triggered:
@@ -1335,64 +1433,47 @@ def register_callbacks(app, limiter=None):
 
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
         user = get_current_user()
-        if not user:
+        if not user or not user.is_admin:
             return (
-                dbc.Alert("Please log in first.", color="danger"),
+                dbc.Alert("Admin access required.", color="danger"),
                 no_update,
                 no_update,
             )
 
-        if trigger_id == "delete-site-set-btn":
-            if not selected_set_id:
-                return (
-                    dbc.Alert("Select a site set to delete.", color="warning"),
-                    no_update,
-                    no_update,
-                )
+        if not selected_set_id:
+            return (
+                dbc.Alert("Select a site set first.", color="warning"),
+                no_update,
+                no_update,
+            )
 
-            try:
-                success, message = delete_user_site_set(selected_set_id, user.id)
-                color = "success" if success else "warning"
-                return (
-                    dbc.Alert(message, color=color),
-                    str(_uuid.uuid4()),
-                    None if success else no_update,
+        try:
+            if trigger_id == "admin-rename-site-set-btn":
+                success, message = rename_user_site_set(
+                    selected_set_id, user.id, new_name
                 )
-            except Exception:
-                logger.exception("Failed to delete site set")
-                report_exception()
-                return (
-                    dbc.Alert("Failed to delete site set.", color="danger"),
-                    no_update,
-                    no_update,
-                )
-
-        if trigger_id == "archive-site-set-btn":
-            if not selected_set_id:
-                return (
-                    dbc.Alert("Select a site set to archive.", color="warning"),
-                    no_update,
-                    no_update,
-                )
-
-            try:
+            elif trigger_id == "admin-archive-site-set-btn":
                 success, message = archive_user_site_set(selected_set_id, user.id)
-                color = "success" if success else "warning"
-                return (
-                    dbc.Alert(message, color=color),
-                    str(_uuid.uuid4()),
-                    None if success else no_update,
-                )
-            except Exception:
-                logger.exception("Failed to archive site set")
-                report_exception()
-                return (
-                    dbc.Alert("Failed to archive site set.", color="danger"),
-                    no_update,
-                    no_update,
-                )
+            elif trigger_id == "admin-delete-site-set-btn":
+                success, message = delete_user_site_set(selected_set_id, user.id)
+            else:
+                raise PreventUpdate
 
-        raise PreventUpdate
+            color = "success" if success else "warning"
+            next_value = (
+                None
+                if success and trigger_id == "admin-delete-site-set-btn"
+                else selected_set_id
+            )
+            return dbc.Alert(message, color=color), str(_uuid.uuid4()), next_value
+        except Exception:
+            logger.exception("Failed admin site set action: %s", trigger_id)
+            report_exception()
+            return (
+                dbc.Alert("Failed to update site set.", color="danger"),
+                no_update,
+                no_update,
+            )
 
     @app.callback(
         Output("site-upload-mapping-status", "children"),
@@ -1449,29 +1530,11 @@ def register_callbacks(app, limiter=None):
         return dbc.Alert(
             (
                 f"Mapping looks good for {pending_upload.get('n_features', 0)} features. "
-                "Full validation and parsing run when you click Confirm Mapping and Save."
+                "Full validation runs in the background import when you click Confirm Mapping and Start Import."
             ),
             color="success",
             className="mb-0 py-2",
         )
-
-    @app.callback(
-        Output("archive-site-set-btn", "children"),
-        Input("site-set-selector", "value"),
-        State("show-archived-site-sets", "value"),
-        prevent_initial_call=True,
-    )
-    def update_archive_button_label(selected_set_id, show_archived):
-        if not selected_set_id or not show_archived:
-            return "Archive"
-        user = get_current_user()
-        if not user:
-            return "Archive"
-        site_sets = list_user_site_sets(user.id, include_archived=True)
-        for s in site_sets:
-            if s["id"] == selected_set_id and s.get("is_archived"):
-                return "Restore"
-        return "Archive"
 
     @app.callback(
         [

@@ -15,6 +15,7 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 
 import boto3
 from botocore.exceptions import ClientError
@@ -32,6 +33,7 @@ from models import (
     TaskResultTotal,
     TaskSite,
     User,
+    UserSiteUpload,
     UserSiteSet,
     get_db,
 )
@@ -84,6 +86,10 @@ SITE_UPLOAD_STAGE_DIR = Path(tempfile.gettempdir()) / "ae_site_upload_stage"
 SITE_UPLOAD_STAGE_TTL_SECONDS = 12 * 60 * 60
 SITE_UPLOAD_STAGE_S3_PREFIX = f"{Config.S3_PREFIX.rstrip('/')}/site-upload-stage"
 SITE_UPLOAD_INSERT_BATCH_SIZE = 1000
+SITE_UPLOAD_INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024
+SITE_UPLOAD_PROGRESS_BATCH_SIZE = 250
+SITE_UPLOAD_PROGRESS_CHECK_ROW_INTERVAL = 25
+SITE_UPLOAD_PROGRESS_INTERVAL_SECONDS = 10
 
 REQUIRED_SITE_FIELDS = ("site_id", "site_name", "start_date")
 OPTIONAL_SITE_FIELDS = ("end_date",)
@@ -679,6 +685,36 @@ def _find_supported_dataset_paths(directory):
     return sorted(shapefiles), sorted(geopackages), sorted(geojsons)
 
 
+def _select_site_dataset_path(directory):
+    shapefiles, geopackages, geojsons = _find_supported_dataset_paths(directory)
+    candidate_count = len(shapefiles) + len(geopackages) + len(geojsons)
+
+    if candidate_count == 0:
+        raise ValueError(
+            "No supported site dataset found in archive. Include a .shp, .gpkg, or .geojson/.json file."
+        )
+
+    if candidate_count > 1:
+        raise ValueError(
+            "Archive contains multiple supported datasets. Include exactly one site dataset per upload."
+        )
+
+    if shapefiles:
+        return shapefiles[0]
+    if geopackages:
+        return geopackages[0]
+    return geojsons[0]
+
+
+def _extract_site_archive_dataset(archive_path, filename, target_dir):
+    ext = _get_file_extension(filename)
+    if ext == ".zip":
+        _safe_extract_zip(archive_path, target_dir)
+    else:
+        _safe_extract_tar(archive_path, target_dir)
+    return _select_site_dataset_path(target_dir)
+
+
 def _read_shapefile(path):
     """Read a shapefile, preferring UTF-8 when no .cpg sidecar is present.
 
@@ -705,29 +741,27 @@ def _read_sites_from_archive(file_content, filename):
         with open(archive_path, "wb") as archive_file:
             archive_file.write(file_content)
 
-        if ext == ".zip":
-            _safe_extract_zip(archive_path, tmpdir)
-        else:
-            _safe_extract_tar(archive_path, tmpdir)
+        dataset_path = _extract_site_archive_dataset(archive_path, filename, tmpdir)
+        if dataset_path.lower().endswith(".shp"):
+            return _read_shapefile(dataset_path)
+        return gpd.read_file(dataset_path)
 
-        shapefiles, geopackages, geojsons = _find_supported_dataset_paths(tmpdir)
-        candidate_count = len(shapefiles) + len(geopackages) + len(geojsons)
 
-        if candidate_count == 0:
-            raise ValueError(
-                "No supported site dataset found in archive. Include a .shp, .gpkg, or .geojson/.json file."
-            )
+def _open_site_feature_source(path):
+    import fiona  # noqa: PLC0415
 
-        if candidate_count > 1:
-            raise ValueError(
-                "Archive contains multiple supported datasets. Include exactly one site dataset per upload."
-            )
+    if str(path).lower().endswith(".shp"):
+        cpg_path = os.path.splitext(path)[0] + ".cpg"
+        if not os.path.exists(cpg_path):
+            try:
+                return fiona.open(path, encoding="utf-8")
+            except Exception:
+                logger.debug(
+                    "Failed to open shapefile as UTF-8, falling back to GDAL defaults",
+                    exc_info=True,
+                )
 
-        if shapefiles:
-            return _read_shapefile(shapefiles[0])
-        if geopackages:
-            return gpd.read_file(geopackages[0])
-        return gpd.read_file(geojsons[0])
+    return fiona.open(path)
 
 
 def _remove_duplicate_vertices(coords):
@@ -1123,6 +1157,189 @@ def _site_set_summary_row(row):
     }
 
 
+def _site_upload_summary_row(row):
+    meta = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
+    return {
+        "id": str(row.id),
+        "filename": row.original_filename,
+        "celery_task_id": row.celery_task_id,
+        "site_set_id": str(row.site_set_id) if row.site_set_id else None,
+        "site_set_name": row.site_set_name,
+        "n_features": int(row.n_features or 0),
+        "n_sites_imported": int(row.n_sites_imported or 0),
+        "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "error_message": row.error_message,
+        "ingest_stats": meta.get("ingest_stats"),
+    }
+
+
+def create_user_site_upload(
+    user_id, filename, upload_token, column_mapping=None, n_features=0
+):
+    """Create and dispatch an asynchronous site import job.
+
+    Parameters
+    ----------
+    user_id : UUID | str
+        Owner of the staged upload and resulting site set.
+    filename : str
+        Original uploaded filename shown in the admin UI.
+    upload_token : str
+        Token pointing at the staged upload payload.
+    column_mapping : dict | None
+        Mapping from canonical site fields to source columns.
+    n_features : int
+        Preview feature count detected before dispatch.
+
+    Returns
+    -------
+    dict
+        Summary row for the queued upload job.
+    """
+    db = get_db()
+    normalized_mapping = _normalize_site_mapping(column_mapping)
+    try:
+        upload = UserSiteUpload(
+            user_id=user_id,
+            original_filename=filename or "sites",
+            n_features=int(n_features or 0),
+            status="pending",
+            extra_metadata={
+                "upload_token": upload_token,
+                "column_mapping": normalized_mapping,
+            },
+        )
+        db.add(upload)
+        db.flush()
+
+        async_result = webapp_tasks.import_user_site_upload_task.apply_async(
+            kwargs={
+                "upload_id": str(upload.id),
+                "user_id": str(user_id),
+                "upload_token": str(upload_token),
+                "column_mapping": normalized_mapping,
+            }
+        )
+        upload.celery_task_id = async_result.id
+        db.commit()
+        return _site_upload_summary_row(upload)
+    except Exception:
+        db.rollback()
+        try:
+            discard_staged_site_upload(upload_token, user_id)
+        except Exception:
+            logger.warning(
+                "Failed to discard staged upload after async dispatch error",
+                exc_info=True,
+            )
+        raise
+    finally:
+        db.close()
+
+
+def list_user_site_uploads(user_id, limit=50):
+    """Return recent background site import jobs for a user.
+
+    Parameters
+    ----------
+    user_id : UUID | str
+        Owner whose upload jobs should be listed.
+    limit : int
+        Maximum number of recent jobs to return.
+
+    Returns
+    -------
+    list[dict]
+        Upload summary rows ordered from newest to oldest.
+    """
+    db = get_db()
+    try:
+        rows = (
+            db.query(UserSiteUpload)
+            .filter(UserSiteUpload.user_id == user_id)
+            .order_by(UserSiteUpload.created_at.desc())
+            .limit(max(1, int(limit or 50)))
+            .all()
+        )
+        return [_site_upload_summary_row(row) for row in rows]
+    finally:
+        db.close()
+
+
+def update_user_site_upload_status(
+    upload_id,
+    *,
+    status,
+    started_at=None,
+    completed_at=None,
+    site_set_id=None,
+    site_set_name=None,
+    n_sites_imported=None,
+    error_message=None,
+    ingest_stats=None,
+):
+    """Update a background site import job row.
+
+    Parameters
+    ----------
+    upload_id : UUID | str
+        Upload job identifier.
+    status : str
+        New lifecycle status.
+    started_at, completed_at : datetime | None
+        Optional timestamps to persist.
+    site_set_id : UUID | None
+        Persisted site set identifier created by the upload.
+    site_set_name : str | None
+        Resulting site set name shown in the admin UI.
+    n_sites_imported : int | None
+        Number of valid sites imported into the database.
+    error_message : str | None
+        Failure details, truncated before storage.
+    ingest_stats : dict | None
+        Optional skipped-feature statistics copied from the site set metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when the row was updated, else ``False`` when it was not found.
+    """
+    db = get_db()
+    try:
+        upload = db.query(UserSiteUpload).filter(UserSiteUpload.id == upload_id).first()
+        if not upload:
+            return False
+
+        upload.status = status
+        if started_at is not None:
+            upload.started_at = started_at
+        if completed_at is not None:
+            upload.completed_at = completed_at
+        if site_set_id is not None:
+            upload.site_set_id = site_set_id
+        if site_set_name is not None:
+            upload.site_set_name = site_set_name
+        if n_sites_imported is not None:
+            upload.n_sites_imported = int(n_sites_imported)
+        if error_message is not None:
+            upload.error_message = error_message[:2000] if error_message else None
+        if ingest_stats is not None:
+            metadata = dict(upload.extra_metadata or {})
+            metadata["ingest_stats"] = ingest_stats
+            upload.extra_metadata = metadata
+
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def save_user_site_set(user_id, filename, file_content, column_mapping=None):
     """Persist uploaded sites as a reusable PostGIS-backed user site set.
 
@@ -1240,20 +1457,36 @@ def save_user_site_set(user_id, filename, file_content, column_mapping=None):
 
 
 def save_user_site_set_from_staged(
-    user_id, upload_token, column_mapping=None, consume=True
+    user_id, upload_token, column_mapping=None, consume=True, upload_id=None
 ):
-    """Persist staged upload without loading full file content into memory."""
+    """Persist staged upload without loading full file content into memory.
+
+    When ``upload_id`` is provided, periodically writes import progress back to
+    the corresponding ``user_site_uploads`` row so the admin UI can surface it
+    while the Celery worker is still processing the file.
+    """
     local_path = None
+    extracted_archive_dir = None
     try:
         local_path, filename, file_size_bytes = _materialize_staged_upload_path(
             upload_token, user_id
         )
         mapping_to_apply = _normalize_site_mapping(column_mapping)
+        source_path = local_path
+        source_name = filename
         ext = _get_file_extension(filename)
 
-        # True streamed path for large flat files. Archives still use the
-        # existing full-frame fallback because they require full extraction.
-        use_streaming_ingest = ext in {".gpkg", ".geojson", ".json"}
+        if ext in {".zip", ".tar.gz", ".tgz"}:
+            extracted_archive_dir = tempfile.mkdtemp(prefix="ae_site_upload_extract_")
+            source_path = _extract_site_archive_dataset(
+                local_path, filename, extracted_archive_dir
+            )
+            source_name = os.path.basename(source_path)
+            ext = _get_file_extension(source_name)
+
+        # Stream supported datasets directly so Celery only holds a small insert
+        # batch in memory at a time, even when the upload arrived as an archive.
+        use_streaming_ingest = ext in {".shp", ".gpkg", ".geojson", ".json"}
 
         db = get_db()
         try:
@@ -1310,20 +1543,47 @@ def save_user_site_set_from_staged(
             skipped_examples = []
 
             batch_rows = []
+            batch_row_bytes = 0
+            last_progress_sites = 0
+            last_progress_at = monotonic()
+
+            def _report_upload_progress(force=False):
+                nonlocal last_progress_sites, last_progress_at
+                if upload_id is None or n_sites <= 0:
+                    return
+                now = monotonic()
+                if not force and (
+                    n_sites - last_progress_sites < SITE_UPLOAD_PROGRESS_BATCH_SIZE
+                    and now - last_progress_at < SITE_UPLOAD_PROGRESS_INTERVAL_SECONDS
+                ):
+                    return
+                update_user_site_upload_status(
+                    upload_id,
+                    status="running",
+                    n_sites_imported=n_sites,
+                )
+                last_progress_sites = n_sites
+                last_progress_at = now
+
+            def _maybe_report_upload_progress():
+                if n_sites % SITE_UPLOAD_PROGRESS_CHECK_ROW_INTERVAL == 0:
+                    _report_upload_progress()
 
             def _flush_batch_rows():
+                nonlocal batch_row_bytes
                 if not batch_rows:
                     return
                 db.execute(insert_sql, batch_rows)
                 batch_rows.clear()
+                batch_row_bytes = 0
+                _report_upload_progress()
 
             if use_streaming_ingest:
-                import fiona  # noqa: PLC0415
                 from pyproj import Transformer  # noqa: PLC0415
                 from shapely.geometry import shape  # noqa: PLC0415
                 from shapely.ops import transform as shapely_transform  # noqa: PLC0415
 
-                with fiona.open(local_path) as src:
+                with _open_site_feature_source(source_path) as src:
                     source_columns = list(
                         (src.schema or {}).get("properties", {}).keys()
                     )
@@ -1468,19 +1728,25 @@ def save_user_site_set_from_staged(
                             maxy if bounds_maxy is None else max(bounds_maxy, maxy)
                         )
 
-                        batch_rows.append(
-                            {
-                                "site_set_id": str(site_set.id),
-                                "site_id": site_id,
-                                "site_name": site_name,
-                                "start_date": start_date,
-                                "end_date": end_date,
-                                "geom_geojson": json.dumps(geom.__geo_interface__),
-                            }
-                        )
-                        if len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE:
-                            _flush_batch_rows()
+                        batch_row = {
+                            "site_set_id": str(site_set.id),
+                            "site_id": site_id,
+                            "site_name": site_name,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "geom_geojson": json.dumps(geom.__geo_interface__),
+                        }
+                        batch_rows.append(batch_row)
                         n_sites += 1
+                        _maybe_report_upload_progress()
+                        batch_row_bytes += len(
+                            json.dumps(batch_row, default=str).encode("utf-8")
+                        )
+                        if (
+                            len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE
+                            or batch_row_bytes >= SITE_UPLOAD_INSERT_BATCH_MAX_BYTES
+                        ):
+                            _flush_batch_rows()
             else:
                 gdf, errors = _parse_sites_geometry_file_from_path(local_path, filename)
                 if errors:
@@ -1506,8 +1772,7 @@ def save_user_site_set_from_staged(
                 elif gdf.crs.to_epsg() != 4326:
                     gdf = gdf.to_crs(epsg=4326)
 
-                n_sites = int(len(gdf))
-                if n_sites > 0:
+                if len(gdf) > 0:
                     minx, miny, maxx, maxy = gdf.total_bounds
                     bounds_minx, bounds_miny, bounds_maxx, bounds_maxy = (
                         minx,
@@ -1524,20 +1789,28 @@ def save_user_site_set_from_staged(
                         else None
                     )
 
-                    batch_rows.append(
-                        {
-                            "site_set_id": str(site_set.id),
-                            "site_id": str(row["site_id"]),
-                            "site_name": str(row.get("site_name", "")),
-                            "start_date": start_date,
-                            "end_date": end_date,
-                            "geom_geojson": json.dumps(row.geometry.__geo_interface__),
-                        }
+                    batch_row = {
+                        "site_set_id": str(site_set.id),
+                        "site_id": str(row["site_id"]),
+                        "site_name": str(row.get("site_name", "")),
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "geom_geojson": json.dumps(row.geometry.__geo_interface__),
+                    }
+                    batch_rows.append(batch_row)
+                    n_sites += 1
+                    _maybe_report_upload_progress()
+                    batch_row_bytes += len(
+                        json.dumps(batch_row, default=str).encode("utf-8")
                     )
-                    if len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE:
+                    if (
+                        len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE
+                        or batch_row_bytes >= SITE_UPLOAD_INSERT_BATCH_MAX_BYTES
+                    ):
                         _flush_batch_rows()
 
             _flush_batch_rows()
+            _report_upload_progress(force=True)
 
             if n_sites == 0:
                 skipped_total = (
@@ -1623,6 +1896,9 @@ def save_user_site_set_from_staged(
                 os.unlink(local_path)
             except OSError:
                 logger.debug("Failed to remove temporary staged file: %s", local_path)
+
+        if extracted_archive_dir:
+            shutil.rmtree(extracted_archive_dir, ignore_errors=True)
 
 
 def list_user_site_sets(user_id, include_archived=False):
@@ -1773,6 +2049,49 @@ def delete_user_site_set(site_set_id, user_id):
         db.delete(site_set)
         db.commit()
         return True, "Site set deleted."
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def rename_user_site_set(site_set_id, user_id, new_name):
+    """Rename a user-owned site set.
+
+    Parameters
+    ----------
+    site_set_id : UUID | str
+        Site set to rename.
+    user_id : UUID | str
+        Owner of the site set.
+    new_name : str
+        Requested replacement name.
+
+    Returns
+    -------
+    tuple[bool, str]
+        Success flag and user-facing status message.
+    """
+    cleaned_name = (new_name or "").strip()
+    if not cleaned_name:
+        return False, "Enter a name for the site set."
+    if len(cleaned_name) > 255:
+        return False, "Site set names must be 255 characters or fewer."
+
+    db = get_db()
+    try:
+        site_set = (
+            db.query(UserSiteSet)
+            .filter(UserSiteSet.id == site_set_id, UserSiteSet.user_id == user_id)
+            .first()
+        )
+        if not site_set:
+            return False, "Site set not found."
+
+        site_set.name = cleaned_name
+        db.commit()
+        return True, "Site set renamed."
     except Exception:
         db.rollback()
         raise
