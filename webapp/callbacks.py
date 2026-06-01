@@ -1449,7 +1449,9 @@ def register_callbacks(app, limiter=None):
 
         try:
             if trigger_id == "admin-rename-site-set-btn":
-                success, message = rename_user_site_set(selected_set_id, user.id, new_name)
+                success, message = rename_user_site_set(
+                    selected_set_id, user.id, new_name
+                )
             elif trigger_id == "admin-archive-site-set-btn":
                 success, message = archive_user_site_set(selected_set_id, user.id)
             elif trigger_id == "admin-delete-site-set-btn":

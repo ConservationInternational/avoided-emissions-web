@@ -1143,7 +1143,9 @@ def _site_upload_summary_row(row):
     }
 
 
-def create_user_site_upload(user_id, filename, upload_token, column_mapping=None, n_features=0):
+def create_user_site_upload(
+    user_id, filename, upload_token, column_mapping=None, n_features=0
+):
     """Create and dispatch an asynchronous site import job."""
     db = get_db()
     normalized_mapping = _normalize_site_mapping(column_mapping)

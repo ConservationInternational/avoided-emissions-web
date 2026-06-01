@@ -1636,7 +1636,9 @@ def submit_layout(user, recompute_config=None):
                                             ),
                                             dbc.Card(
                                                 [
-                                                    dbc.CardHeader("Use Uploaded Sites"),
+                                                    dbc.CardHeader(
+                                                        "Use Uploaded Sites"
+                                                    ),
                                                     dbc.CardBody(
                                                         [
                                                             dbc.Row(
@@ -2872,7 +2874,9 @@ def _site_upload_card(footer_text):
                                         [
                                             dbc.Col(
                                                 [
-                                                    dbc.Label("site_id", className="mb-1"),
+                                                    dbc.Label(
+                                                        "site_id", className="mb-1"
+                                                    ),
                                                     dbc.Select(
                                                         id="mapping-site-id",
                                                         options=[],
