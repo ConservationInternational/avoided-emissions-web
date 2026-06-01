@@ -3,10 +3,38 @@
         // Resolve the element at emit-time because Dash can replace nodes
         // during rerenders while a long upload is in flight.
         const payloadInput = document.getElementById("site-upload-stream-payload");
+        const payloadJson = JSON.stringify(payload);
+
+        // Preferred path for Dash >= 2.16: update component props directly.
+        if (
+            window.dash_clientside &&
+            typeof window.dash_clientside.set_props === "function"
+        ) {
+            try {
+                window.dash_clientside.set_props("site-upload-stream-payload", {
+                    value: payloadJson,
+                });
+                return true;
+            } catch (_error) {
+                // Fall through to DOM event path below.
+            }
+        }
+
         if (!payloadInput) {
             return false;
         }
-        payloadInput.value = JSON.stringify(payload);
+
+        // Use the native setter so React's internal value tracker sees updates.
+        const setter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype,
+            "value",
+        )?.set;
+        if (setter) {
+            setter.call(payloadInput, payloadJson);
+        } else {
+            payloadInput.value = payloadJson;
+        }
+
         payloadInput.dispatchEvent(new Event("input", { bubbles: true }));
         payloadInput.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
