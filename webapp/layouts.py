@@ -1747,14 +1747,8 @@ def submit_layout(user, recompute_config=None):
                                                                             "display": "none"
                                                                         },
                                                                     ),
-                                                                    html.Input(
-                                                                        id="upload-sites-stream-input",
-                                                                        type="file",
-                                                                        accept=".geojson,.json,.gpkg,.zip,.tar.gz,.tgz",
-                                                                        style={
-                                                                            "display": "none"
-                                                                        },
-                                                                    ),
+                                                                    # File input is created dynamically in siteUploadStream.js
+                                                                    # to avoid html.Input compatibility issues with some Dash versions.
                                                                 ]
                                                             ),
                                                             html.Div(

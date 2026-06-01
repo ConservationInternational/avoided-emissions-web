@@ -7,11 +7,21 @@
 
     function bindUploadControls() {
         const button = document.getElementById("upload-sites-stream-btn");
-        const fileInput = document.getElementById("upload-sites-stream-input");
         const payloadInput = document.getElementById("site-upload-stream-payload");
 
-        if (!button || !fileInput || !payloadInput || button.dataset.streamBound === "1") {
+        if (!button || !payloadInput || button.dataset.streamBound === "1") {
             return;
+        }
+
+        // Create the hidden file input dynamically to avoid Dash html.Input limitations.
+        let fileInput = document.getElementById("upload-sites-stream-input");
+        if (!fileInput) {
+            fileInput = document.createElement("input");
+            fileInput.type = "file";
+            fileInput.id = "upload-sites-stream-input";
+            fileInput.accept = ".geojson,.json,.gpkg,.zip,.tar.gz,.tgz";
+            fileInput.style.display = "none";
+            document.body.appendChild(fileInput);
         }
 
         button.dataset.streamBound = "1";
