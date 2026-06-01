@@ -52,7 +52,10 @@ from layouts import (
     submit_layout,
     task_detail_layout,
 )
-from services import get_site_upload_mapping_preview, stage_site_upload
+from services import (
+    get_site_upload_mapping_preview_from_staged,
+    stream_stage_site_upload,
+)
 
 # ---------------------------------------------------------------------------
 # Logging — configure the root logger so that all application loggers (auth,
@@ -231,19 +234,28 @@ def site_upload_stream_preview():
         return jsonify({"ok": False, "errors": ["No file was provided."]}), 400
 
     filename = file.filename
-    file_content = file.read()
-    if not file_content:
-        return jsonify({"ok": False, "errors": ["Uploaded file is empty."]}), 400
 
-    preview, errors = get_site_upload_mapping_preview(file_content, filename)
+    # Stream directly to disk in 1 MB chunks — never buffer the full file in
+    # Python memory so that large uploads (100 MB+) don't exhaust the worker.
+    try:
+        upload_token = stream_stage_site_upload(
+            file_stream=file.stream,
+            filename=filename,
+            user_id=flask_login.current_user.id,
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 400
+
+    # Read only the first 10 rows for the column-mapping preview.
+    preview, errors = get_site_upload_mapping_preview_from_staged(
+        upload_token, flask_login.current_user.id
+    )
     if errors:
+        from services import discard_staged_site_upload
+
+        discard_staged_site_upload(upload_token, flask_login.current_user.id)
         return jsonify({"ok": False, "errors": errors}), 400
 
-    upload_token = stage_site_upload(
-        file_content=file_content,
-        filename=filename,
-        user_id=flask_login.current_user.id,
-    )
     return jsonify(
         {
             "ok": True,

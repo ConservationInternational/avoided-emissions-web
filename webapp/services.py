@@ -200,6 +200,119 @@ def discard_staged_site_upload(upload_token, user_id=None):
     return removed
 
 
+def stream_stage_site_upload(file_stream, filename, user_id):
+    """Write an upload stream directly to staging in 1 MB chunks.
+
+    Unlike ``stage_site_upload``, this never loads the full file content into
+    Python memory, which is critical for files >200 MB.  Returns the token.
+    """
+    _cleanup_expired_staged_uploads()
+    SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+    token = uuid.uuid4().hex
+    data_path, meta_path = _site_upload_stage_paths(token)
+
+    try:
+        with open(data_path, "wb") as out:
+            chunk_size = 1024 * 1024  # 1 MB
+            while True:
+                chunk = file_stream.read(chunk_size)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+        if data_path.stat().st_size == 0:
+            data_path.unlink(missing_ok=True)
+            raise ValueError("Uploaded file is empty.")
+
+        meta = {
+            "user_id": str(user_id),
+            "filename": filename,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+    except Exception:
+        data_path.unlink(missing_ok=True)
+        meta_path.unlink(missing_ok=True)
+        raise
+
+    return token
+
+
+def get_site_upload_mapping_preview_from_staged(token, user_id):
+    """Return a column-mapping preview by reading the staged file directly.
+
+    For GPKG/GeoJSON, reads only the first 10 rows so memory usage is O(1)
+    rather than O(file size).  Feature count is obtained cheaply via fiona.
+    For archive formats the full archive is still read (archives are small on
+    disk due to compression) but the behaviour matches the existing fallback.
+    """
+    import fiona  # local import — only needed here
+
+    data_path, meta_path = _site_upload_stage_paths(token)
+    if not meta_path.exists() or not data_path.exists():
+        return None, ["Staged upload not found. Please upload the file again."]
+
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+
+    if str(meta.get("user_id")) != str(user_id):
+        return None, ["You do not have access to this staged upload."]
+
+    filename = meta.get("filename") or "sites"
+    ext = _get_file_extension(filename)
+
+    gdf_sample = None
+    n_features = 0
+
+    try:
+        if ext in (".gpkg", ".geojson", ".json"):
+            # Read a tiny sample — just enough to get column names + one value.
+            gdf_sample = gpd.read_file(str(data_path), rows=10)
+            with fiona.open(str(data_path)) as src:
+                n_features = len(src)
+        elif ext in (".zip", ".tar.gz", ".tgz"):
+            # Archives are compressed; read them fully (still small in RAM).
+            with open(data_path, "rb") as f:
+                archive_bytes = f.read()
+            gdf_sample = _read_sites_from_archive(archive_bytes, filename)
+            if gdf_sample is not None:
+                n_features = len(gdf_sample)
+        else:
+            return None, [f"Unsupported file format: {ext}"]
+    except Exception as exc:
+        return None, [f"Failed to read file: {exc}"]
+
+    if gdf_sample is None or gdf_sample.empty:
+        return None, ["No features were found in the uploaded file."]
+
+    non_geom_cols = [c for c in gdf_sample.columns if c != "geometry"]
+    column_info = []
+    for col in non_geom_cols:
+        series = gdf_sample[col]
+        sample_val = ""
+        sample_series = series.dropna()
+        if not sample_series.empty:
+            sample_val = str(sample_series.iloc[0])
+        column_info.append(
+            {
+                "name": col,
+                "dtype": str(series.dtype),
+                "sample": sample_val,
+            }
+        )
+
+    return (
+        {
+            "column_info": column_info,
+            "suggested_mapping": suggest_site_column_mapping(non_geom_cols),
+            "n_features": n_features,
+        },
+        [],
+    )
+
+
 def get_s3_client():
     return boto3.client("s3", region_name=Config.AWS_REGION)
 
