@@ -85,6 +85,7 @@ SITE_UPLOAD_STAGE_DIR = Path(tempfile.gettempdir()) / "ae_site_upload_stage"
 SITE_UPLOAD_STAGE_TTL_SECONDS = 12 * 60 * 60
 SITE_UPLOAD_STAGE_S3_PREFIX = f"{Config.S3_PREFIX.rstrip('/')}/site-upload-stage"
 SITE_UPLOAD_INSERT_BATCH_SIZE = 1000
+SITE_UPLOAD_INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024
 
 REQUIRED_SITE_FIELDS = ("site_id", "site_name", "start_date")
 OPTIONAL_SITE_FIELDS = ("end_date",)
@@ -680,6 +681,36 @@ def _find_supported_dataset_paths(directory):
     return sorted(shapefiles), sorted(geopackages), sorted(geojsons)
 
 
+def _select_site_dataset_path(directory):
+    shapefiles, geopackages, geojsons = _find_supported_dataset_paths(directory)
+    candidate_count = len(shapefiles) + len(geopackages) + len(geojsons)
+
+    if candidate_count == 0:
+        raise ValueError(
+            "No supported site dataset found in archive. Include a .shp, .gpkg, or .geojson/.json file."
+        )
+
+    if candidate_count > 1:
+        raise ValueError(
+            "Archive contains multiple supported datasets. Include exactly one site dataset per upload."
+        )
+
+    if shapefiles:
+        return shapefiles[0]
+    if geopackages:
+        return geopackages[0]
+    return geojsons[0]
+
+
+def _extract_site_archive_dataset(archive_path, filename, target_dir):
+    ext = _get_file_extension(filename)
+    if ext == ".zip":
+        _safe_extract_zip(archive_path, target_dir)
+    else:
+        _safe_extract_tar(archive_path, target_dir)
+    return _select_site_dataset_path(target_dir)
+
+
 def _read_shapefile(path):
     """Read a shapefile, preferring UTF-8 when no .cpg sidecar is present.
 
@@ -706,29 +737,27 @@ def _read_sites_from_archive(file_content, filename):
         with open(archive_path, "wb") as archive_file:
             archive_file.write(file_content)
 
-        if ext == ".zip":
-            _safe_extract_zip(archive_path, tmpdir)
-        else:
-            _safe_extract_tar(archive_path, tmpdir)
+        dataset_path = _extract_site_archive_dataset(archive_path, filename, tmpdir)
+        if dataset_path.lower().endswith(".shp"):
+            return _read_shapefile(dataset_path)
+        return gpd.read_file(dataset_path)
 
-        shapefiles, geopackages, geojsons = _find_supported_dataset_paths(tmpdir)
-        candidate_count = len(shapefiles) + len(geopackages) + len(geojsons)
 
-        if candidate_count == 0:
-            raise ValueError(
-                "No supported site dataset found in archive. Include a .shp, .gpkg, or .geojson/.json file."
-            )
+def _open_site_feature_source(path):
+    import fiona  # noqa: PLC0415
 
-        if candidate_count > 1:
-            raise ValueError(
-                "Archive contains multiple supported datasets. Include exactly one site dataset per upload."
-            )
+    if str(path).lower().endswith(".shp"):
+        cpg_path = os.path.splitext(path)[0] + ".cpg"
+        if not os.path.exists(cpg_path):
+            try:
+                return fiona.open(path, encoding="utf-8")
+            except Exception:
+                logger.debug(
+                    "Failed to open shapefile as UTF-8, falling back to GDAL defaults",
+                    exc_info=True,
+                )
 
-        if shapefiles:
-            return _read_shapefile(shapefiles[0])
-        if geopackages:
-            return gpd.read_file(geopackages[0])
-        return gpd.read_file(geojsons[0])
+    return fiona.open(path)
 
 
 def _remove_duplicate_vertices(coords):
@@ -1428,16 +1457,27 @@ def save_user_site_set_from_staged(
 ):
     """Persist staged upload without loading full file content into memory."""
     local_path = None
+    extracted_archive_dir = None
     try:
         local_path, filename, file_size_bytes = _materialize_staged_upload_path(
             upload_token, user_id
         )
         mapping_to_apply = _normalize_site_mapping(column_mapping)
+        source_path = local_path
+        source_name = filename
         ext = _get_file_extension(filename)
 
-        # True streamed path for large flat files. Archives still use the
-        # existing full-frame fallback because they require full extraction.
-        use_streaming_ingest = ext in {".gpkg", ".geojson", ".json"}
+        if ext in {".zip", ".tar.gz", ".tgz"}:
+            extracted_archive_dir = tempfile.mkdtemp(prefix="ae_site_upload_extract_")
+            source_path = _extract_site_archive_dataset(
+                local_path, filename, extracted_archive_dir
+            )
+            source_name = os.path.basename(source_path)
+            ext = _get_file_extension(source_name)
+
+        # Stream supported datasets directly so Celery only holds a small insert
+        # batch in memory at a time, even when the upload arrived as an archive.
+        use_streaming_ingest = ext in {".shp", ".gpkg", ".geojson", ".json"}
 
         db = get_db()
         try:
@@ -1494,20 +1534,22 @@ def save_user_site_set_from_staged(
             skipped_examples = []
 
             batch_rows = []
+            batch_row_bytes = 0
 
             def _flush_batch_rows():
+                nonlocal batch_row_bytes
                 if not batch_rows:
                     return
                 db.execute(insert_sql, batch_rows)
                 batch_rows.clear()
+                batch_row_bytes = 0
 
             if use_streaming_ingest:
-                import fiona  # noqa: PLC0415
                 from pyproj import Transformer  # noqa: PLC0415
                 from shapely.geometry import shape  # noqa: PLC0415
                 from shapely.ops import transform as shapely_transform  # noqa: PLC0415
 
-                with fiona.open(local_path) as src:
+                with _open_site_feature_source(source_path) as src:
                     source_columns = list(
                         (src.schema or {}).get("properties", {}).keys()
                     )
@@ -1652,17 +1694,22 @@ def save_user_site_set_from_staged(
                             maxy if bounds_maxy is None else max(bounds_maxy, maxy)
                         )
 
-                        batch_rows.append(
-                            {
-                                "site_set_id": str(site_set.id),
-                                "site_id": site_id,
-                                "site_name": site_name,
-                                "start_date": start_date,
-                                "end_date": end_date,
-                                "geom_geojson": json.dumps(geom.__geo_interface__),
-                            }
+                        batch_row = {
+                            "site_set_id": str(site_set.id),
+                            "site_id": site_id,
+                            "site_name": site_name,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "geom_geojson": json.dumps(geom.__geo_interface__),
+                        }
+                        batch_rows.append(batch_row)
+                        batch_row_bytes += len(
+                            json.dumps(batch_row, default=str).encode("utf-8")
                         )
-                        if len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE:
+                        if (
+                            len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE
+                            or batch_row_bytes >= SITE_UPLOAD_INSERT_BATCH_MAX_BYTES
+                        ):
                             _flush_batch_rows()
                         n_sites += 1
             else:
@@ -1708,17 +1755,22 @@ def save_user_site_set_from_staged(
                         else None
                     )
 
-                    batch_rows.append(
-                        {
-                            "site_set_id": str(site_set.id),
-                            "site_id": str(row["site_id"]),
-                            "site_name": str(row.get("site_name", "")),
-                            "start_date": start_date,
-                            "end_date": end_date,
-                            "geom_geojson": json.dumps(row.geometry.__geo_interface__),
-                        }
+                    batch_row = {
+                        "site_set_id": str(site_set.id),
+                        "site_id": str(row["site_id"]),
+                        "site_name": str(row.get("site_name", "")),
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "geom_geojson": json.dumps(row.geometry.__geo_interface__),
+                    }
+                    batch_rows.append(batch_row)
+                    batch_row_bytes += len(
+                        json.dumps(batch_row, default=str).encode("utf-8")
                     )
-                    if len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE:
+                    if (
+                        len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE
+                        or batch_row_bytes >= SITE_UPLOAD_INSERT_BATCH_MAX_BYTES
+                    ):
                         _flush_batch_rows()
 
             _flush_batch_rows()
@@ -1807,6 +1859,9 @@ def save_user_site_set_from_staged(
                 os.unlink(local_path)
             except OSError:
                 logger.debug("Failed to remove temporary staged file: %s", local_path)
+
+        if extracted_archive_dir:
+            shutil.rmtree(extracted_archive_dir, ignore_errors=True)
 
 
 def list_user_site_sets(user_id, include_archived=False):
