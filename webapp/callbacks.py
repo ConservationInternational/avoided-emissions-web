@@ -54,6 +54,7 @@ from services import (
     get_covariate_presets,
     get_ready_covariate_names,
     get_ready_exact_match_names,
+    get_site_upload_mapping_preview,
     get_task_detail,
     get_task_list,
     get_user_site_set_detail,
@@ -69,6 +70,7 @@ from services import (
     start_gee_export,
     submit_analysis_task,
     update_task_info,
+    validate_site_upload_mapping,
     validate_share_token,
     archive_user_site_set,
     delete_user_site_set,
@@ -113,7 +115,7 @@ def _authorize_task_access(task_id, share_token=None):
 
     Returns the task_id (str) if access is granted, or ``None``.
     """
-    # Mode 1: share token (lightweight check — access was already
+    # Mode 1: share token (lightweight check ΓÇö access was already
     # recorded when the page was loaded via display_page)
     if share_token:
         token_task_id = validate_share_token(share_token, record_access=False)
@@ -179,7 +181,7 @@ def _render_share_links_list(links, task_id):
                         dbc.Badge(badge_text, color=badge_color, className="me-2"),
                         url_display,
                         html.Small(
-                            f"Expires {expires} · {lnk['access_count']} view(s)",
+                            f"Expires {expires} ┬╖ {lnk['access_count']} view(s)",
                             className="text-muted text-nowrap",
                         ),
                     ],
@@ -290,7 +292,7 @@ def _normalize_metadata_list(value):
     converts such dicts to a flat list so callers can always iterate over
     dicts.
 
-    A single-element list may also be unboxed to a flat dict — i.e. the
+    A single-element list may also be unboxed to a flat dict ΓÇö i.e. the
     record itself rather than a dict-of-dicts.  We detect this by checking
     whether the dict values are themselves dicts (nested) or scalars (flat
     record that should be wrapped).
@@ -420,7 +422,7 @@ def register_callbacks(app, limiter=None):
             return "Your account is pending admin approval."
         if result:
             flask_login.login_user(result, remember=True)
-            # Create a refresh token — the after_request hook in app.py
+            # Create a refresh token ΓÇö the after_request hook in app.py
             # reads this from the Flask session and sets the cookie.
             token = create_refresh_token(result.id)
             if token:
@@ -698,7 +700,7 @@ def register_callbacks(app, limiter=None):
         raise PreventUpdate
 
     # ------------------------------------------------------------------
-    # Review summary — rendered when the user switches to the Review tab
+    # Review summary ΓÇö rendered when the user switches to the Review tab
     # ------------------------------------------------------------------
     _EXACT_MATCH_LABELS = {opt["value"]: opt["label"] for opt in EXACT_MATCH_OPTIONS}
 
@@ -837,20 +839,20 @@ def register_callbacks(app, limiter=None):
                     html.Table(
                         html.Tbody(
                             [
-                                _param_row("Name", task_name or "—"),
+                                _param_row("Name", task_name or "ΓÇö"),
                                 _param_row("Description", description or "(none)"),
                                 _param_row(
                                     "Sites",
                                     (
                                         f"{n_sites} site(s)"
                                         + (
-                                            f" — {site_set_name}"
+                                            f" ΓÇö {site_set_name}"
                                             if site_set_name
                                             else ""
                                         )
                                     )
                                     if sites_data
-                                    else "—",
+                                    else "ΓÇö",
                                 ),
                             ]
                         ),
@@ -962,7 +964,7 @@ def register_callbacks(app, limiter=None):
                                 ),
                                 _param_row(
                                     "Random seed",
-                                    str(random_seed) if random_seed else "—",
+                                    str(random_seed) if random_seed else "ΓÇö",
                                 ),
                                 _param_row(
                                     "Matching memory",
@@ -970,7 +972,7 @@ def register_callbacks(app, limiter=None):
                                 ),
                                 _param_row(
                                     "Batch job queue",
-                                    str(matching_job_queue or "—"),
+                                    str(matching_job_queue or "ΓÇö"),
                                 ),
                             ]
                         ),
@@ -999,20 +1001,44 @@ def register_callbacks(app, limiter=None):
     @app.callback(
         [
             Output("upload-status", "children"),
-            Output("site-set-action-status", "children"),
-            Output("site-set-refresh-store", "data"),
+            Output("site-set-refresh-store", "data", allow_duplicate=True),
             Output("site-set-selector", "value", allow_duplicate=True),
+            Output("site-upload-mapping-panel", "is_open"),
+            Output("site-upload-columns-store", "data"),
+            Output("mapping-site-id", "options"),
+            Output("mapping-site-id", "value"),
+            Output("mapping-site-name", "options"),
+            Output("mapping-site-name", "value"),
+            Output("mapping-start-date", "options"),
+            Output("mapping-start-date", "value"),
+            Output("mapping-end-date", "options"),
+            Output("mapping-end-date", "value"),
         ],
         [
             Input("upload-sites", "contents"),
-            Input("delete-site-set-btn", "n_clicks"),
-            Input("archive-site-set-btn", "n_clicks"),
+            Input("confirm-site-upload-mapping-btn", "n_clicks"),
+            Input("cancel-site-upload-mapping-btn", "n_clicks"),
         ],
-        [State("upload-sites", "filename"), State("site-set-selector", "value")],
+        [
+            State("upload-sites", "filename"),
+            State("site-upload-columns-store", "data"),
+            State("mapping-site-id", "value"),
+            State("mapping-site-name", "value"),
+            State("mapping-start-date", "value"),
+            State("mapping-end-date", "value"),
+        ],
         prevent_initial_call=True,
     )
-    def handle_site_set_upload_or_delete(
-        contents, _delete_clicks, _archive_clicks, filename, selected_set_id
+    def handle_site_upload_flow(
+        contents,
+        _confirm_mapping_clicks,
+        _cancel_mapping_clicks,
+        filename,
+        pending_upload,
+        mapped_site_id,
+        mapped_site_name,
+        mapped_start_date,
+        mapped_end_date,
     ):
         ctx = callback_context
         if not ctx.triggered:
@@ -1025,48 +1051,236 @@ def register_callbacks(app, limiter=None):
                 dbc.Alert("Please log in first.", color="danger"),
                 no_update,
                 no_update,
-                no_update,
+                False,
+                None,
+                [],
+                None,
+                [],
+                None,
+                [],
+                None,
+                [{"label": "(none)", "value": ""}],
+                "",
             )
 
         if trigger_id == "upload-sites":
             if contents is None:
                 raise PreventUpdate
 
-            _, content_string = contents.split(",")
+            _, content_string = contents.split(",", 1)
             decoded = base64.b64decode(content_string)
 
             try:
-                detail = save_user_site_set(user.id, filename, decoded)
+                preview, errors = get_site_upload_mapping_preview(decoded, filename)
+                if errors:
+                    return (
+                        dbc.Alert("\n".join(errors), color="danger"),
+                        no_update,
+                        no_update,
+                        False,
+                        None,
+                        [],
+                        None,
+                        [],
+                        None,
+                        [],
+                        None,
+                        [{"label": "(none)", "value": ""}],
+                        "",
+                    )
+
+                columns = preview.get("column_info", [])
+                suggested = preview.get("suggested_mapping", {})
+                options = [
+                    {"label": f"{c['name']} ({c['dtype']})", "value": c["name"]}
+                    for c in columns
+                ]
+                end_options = [{"label": "(none)", "value": ""}] + options
+                pending_data = {
+                    "filename": filename,
+                    "content_string": content_string,
+                    "n_features": preview.get("n_features", 0),
+                }
+
+                return (
+                    dbc.Alert(
+                        (
+                            f"Parsed {preview.get('n_features', 0)} features. "
+                            "Confirm column mapping to save this site set."
+                        ),
+                        color="info",
+                    ),
+                    no_update,
+                    no_update,
+                    True,
+                    pending_data,
+                    options,
+                    suggested.get("site_id"),
+                    options,
+                    suggested.get("site_name"),
+                    options,
+                    suggested.get("start_date"),
+                    end_options,
+                    suggested.get("end_date") or "",
+                )
+            except Exception:
+                logger.exception("Failed to parse uploaded site set")
+                report_exception()
+                return (
+                    dbc.Alert("Failed to parse uploaded sites.", color="danger"),
+                    no_update,
+                    no_update,
+                    False,
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [{"label": "(none)", "value": ""}],
+                    "",
+                )
+
+        if trigger_id == "cancel-site-upload-mapping-btn":
+            return (
+                dbc.Alert("Upload mapping cancelled.", color="secondary"),
+                no_update,
+                no_update,
+                False,
+                None,
+                [],
+                None,
+                [],
+                None,
+                [],
+                None,
+                [{"label": "(none)", "value": ""}],
+                "",
+            )
+
+        if trigger_id == "confirm-site-upload-mapping-btn":
+            if not pending_upload:
+                return (
+                    dbc.Alert(
+                        "No parsed upload is pending. Upload a file first.",
+                        color="warning",
+                    ),
+                    no_update,
+                    no_update,
+                    False,
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [{"label": "(none)", "value": ""}],
+                    "",
+                )
+
+            try:
+                decoded = base64.b64decode(pending_upload["content_string"])
+                mapping = {
+                    "site_id": mapped_site_id,
+                    "site_name": mapped_site_name,
+                    "start_date": mapped_start_date,
+                    "end_date": mapped_end_date or None,
+                }
+                detail = save_user_site_set(
+                    user.id,
+                    pending_upload.get("filename"),
+                    decoded,
+                    column_mapping=mapping,
+                )
                 return (
                     dbc.Alert(
                         f"Uploaded and saved {detail['n_sites']} sites as '{detail['name']}'.",
                         color="success",
                     ),
-                    no_update,
                     str(_uuid.uuid4()),
                     detail["id"],
+                    False,
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [{"label": "(none)", "value": ""}],
+                    "",
                 )
             except ValueError as exc:
                 return (
                     dbc.Alert(str(exc), color="danger"),
                     no_update,
                     no_update,
+                    True,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
                     no_update,
                 )
             except Exception:
-                logger.exception("Failed to save uploaded site set")
+                logger.exception("Failed to save mapped site upload")
                 report_exception()
                 return (
-                    dbc.Alert("Failed to save uploaded sites.", color="danger"),
+                    dbc.Alert("Failed to save mapped site upload.", color="danger"),
+                    no_update,
+                    no_update,
+                    True,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
                     no_update,
                     no_update,
                     no_update,
                 )
 
+        raise PreventUpdate
+
+    @app.callback(
+        [
+            Output("site-set-action-status", "children"),
+            Output("site-set-refresh-store", "data", allow_duplicate=True),
+            Output("site-set-selector", "value", allow_duplicate=True),
+        ],
+        [
+            Input("delete-site-set-btn", "n_clicks"),
+            Input("archive-site-set-btn", "n_clicks"),
+        ],
+        State("site-set-selector", "value"),
+        prevent_initial_call=True,
+    )
+    def handle_site_set_delete_or_archive(
+        _delete_clicks, _archive_clicks, selected_set_id
+    ):
+        ctx = callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
+
+        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        user = get_current_user()
+        if not user:
+            return (
+                dbc.Alert("Please log in first.", color="danger"),
+                no_update,
+                no_update,
+            )
+
         if trigger_id == "delete-site-set-btn":
             if not selected_set_id:
                 return (
-                    no_update,
                     dbc.Alert("Select a site set to delete.", color="warning"),
                     no_update,
                     no_update,
@@ -1076,7 +1290,6 @@ def register_callbacks(app, limiter=None):
                 success, message = delete_user_site_set(selected_set_id, user.id)
                 color = "success" if success else "warning"
                 return (
-                    no_update,
                     dbc.Alert(message, color=color),
                     str(_uuid.uuid4()),
                     None if success else no_update,
@@ -1085,7 +1298,6 @@ def register_callbacks(app, limiter=None):
                 logger.exception("Failed to delete site set")
                 report_exception()
                 return (
-                    no_update,
                     dbc.Alert("Failed to delete site set.", color="danger"),
                     no_update,
                     no_update,
@@ -1094,7 +1306,6 @@ def register_callbacks(app, limiter=None):
         if trigger_id == "archive-site-set-btn":
             if not selected_set_id:
                 return (
-                    no_update,
                     dbc.Alert("Select a site set to archive.", color="warning"),
                     no_update,
                     no_update,
@@ -1104,7 +1315,6 @@ def register_callbacks(app, limiter=None):
                 success, message = archive_user_site_set(selected_set_id, user.id)
                 color = "success" if success else "warning"
                 return (
-                    no_update,
                     dbc.Alert(message, color=color),
                     str(_uuid.uuid4()),
                     None if success else no_update,
@@ -1113,13 +1323,84 @@ def register_callbacks(app, limiter=None):
                 logger.exception("Failed to archive site set")
                 report_exception()
                 return (
-                    no_update,
                     dbc.Alert("Failed to archive site set.", color="danger"),
                     no_update,
                     no_update,
                 )
 
         raise PreventUpdate
+
+    @app.callback(
+        Output("site-upload-mapping-status", "children"),
+        Input("mapping-site-id", "value"),
+        Input("mapping-site-name", "value"),
+        Input("mapping-start-date", "value"),
+        Input("mapping-end-date", "value"),
+        State("site-upload-columns-store", "data"),
+        prevent_initial_call=True,
+    )
+    def validate_site_upload_mapping_selection(
+        mapped_site_id,
+        mapped_site_name,
+        mapped_start_date,
+        mapped_end_date,
+        pending_upload,
+    ):
+        if not pending_upload:
+            return None
+
+        try:
+            decoded = base64.b64decode(pending_upload["content_string"])
+            mapping = {
+                "site_id": mapped_site_id,
+                "site_name": mapped_site_name,
+                "start_date": mapped_start_date,
+                "end_date": mapped_end_date or None,
+            }
+            result = validate_site_upload_mapping(
+                decoded,
+                pending_upload.get("filename"),
+                mapping,
+            )
+
+            errors = result.get("errors", [])
+            warnings = result.get("warnings", [])
+            summary = result.get("summary", {})
+
+            if errors:
+                return dbc.Alert(
+                    [html.Div(err) for err in errors],
+                    color="danger",
+                    className="mb-0 py-2",
+                )
+
+            details = [
+                html.Div(
+                    (
+                        f"Ready to save {summary.get('n_features', 0)} features "
+                        f"with {summary.get('n_unique_site_id', 0)} unique site IDs."
+                    )
+                ),
+                html.Div(
+                    f"Rows with empty end_date after parsing: {summary.get('n_missing_end_date', 0)}",
+                    className="small text-muted",
+                ),
+            ]
+            details.extend(html.Div(msg) for msg in warnings)
+
+            return dbc.Alert(
+                details,
+                color="warning" if warnings else "success",
+                className="mb-0 py-2",
+            )
+        except Exception:
+            logger.exception("Failed to validate upload column mapping")
+            report_exception()
+            return dbc.Alert(
+                "Could not validate mapping preview.",
+                color="danger",
+                className="mb-0 py-2",
+            )
 
     @app.callback(
         Output("archive-site-set-btn", "children"),
@@ -1377,7 +1658,7 @@ def register_callbacks(app, limiter=None):
         if overlap:
             return _error_alert(
                 "The following variables are selected as both covariates "
-                "and exact matches — each must be one or the other: "
+                "and exact matches ΓÇö each must be one or the other: "
                 + ", ".join(sorted(overlap))
             )
 
@@ -1664,7 +1945,7 @@ def register_callbacks(app, limiter=None):
         }.get(task.status, "secondary")
         badge = dbc.Badge(task.status.upper(), color=status_color, className="fs-5")
 
-        # Quality warning banner (above tabs) — only for succeeded tasks
+        # Quality warning banner (above tabs) ΓÇö only for succeeded tasks
         quality_banner = html.Div()
         quality_warnings = []
         if task.status == "succeeded":
@@ -1813,10 +2094,10 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
 
         if is_open:
-            # Closing — return empty list to avoid stale data
+            # Closing ΓÇö return empty list to avoid stale data
             return False, html.Div()
 
-        # Opening — fetch existing links
+        # Opening ΓÇö fetch existing links
         links = list_share_links(task_id, str(user.id))
         return True, _render_share_links_list(links, task_id)
 
@@ -1949,7 +2230,7 @@ def register_callbacks(app, limiter=None):
         if is_open:
             return False, no_update, no_update, html.Div()
 
-        # Opening — populate inputs with current values
+        # Opening ΓÇö populate inputs with current values
         user = get_current_user()
         if not user or not _check_task_access(task_id, user):
             raise PreventUpdate
@@ -2119,7 +2400,7 @@ def register_callbacks(app, limiter=None):
         try:
             cancel_task(task_id, user)
             return dbc.Alert(
-                "Task cancelled successfully. Refreshing…",
+                "Task cancelled successfully. RefreshingΓÇª",
                 color="success",
                 duration=3000,
             )
@@ -3218,7 +3499,7 @@ def register_callbacks(app, limiter=None):
             fig_em.update_layout(
                 title=f"Annual Emissions: {site_name}{sub_note}",
                 xaxis_title="Year",
-                yaxis_title="Emissions (MgCO₂e)",
+                yaxis_title="Emissions (MgCOΓéée)",
                 legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
                 hovermode="x unified",
             )
@@ -3514,12 +3795,14 @@ def _build_overview(task, sites, totals, quality_warnings=None):
 
     caliper_val = config.get("caliper_width")
     caliper_display = (
-        "Disabled" if caliper_val == 0 else (caliper_val if caliper_val else "—")
+        "Disabled" if caliper_val == 0 else (caliper_val if caliper_val else "ΓÇö")
     )
     max_ctrl = config.get("max_controls_per_treatment")
-    max_ctrl_display = "No limit" if max_ctrl == 0 else (max_ctrl if max_ctrl else "—")
+    max_ctrl_display = (
+        "No limit" if max_ctrl == 0 else (max_ctrl if max_ctrl else "ΓÇö")
+    )
     mem_mib = config.get("match_memory_mib")
-    mem_display = f"{mem_mib / 1024:.1f} GB" if mem_mib else "—"
+    mem_display = f"{mem_mib / 1024:.1f} GB" if mem_mib else "ΓÇö"
 
     # Derive API execution ID and batch job names from extract_job_id.
     api_exec_id = None
@@ -3572,11 +3855,11 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         ),
                         _detail_row(
                             "Covariates",
-                            ", ".join(task.covariates or []) or "—",
+                            ", ".join(task.covariates or []) or "ΓÇö",
                         ),
                         _detail_row(
                             "Exact match variables",
-                            ", ".join(config.get("exact_match_vars", [])) or "—",
+                            ", ".join(config.get("exact_match_vars", [])) or "ΓÇö",
                         ),
                         _detail_row(
                             "Resolution",
@@ -3590,25 +3873,25 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         ),
                         _detail_row(
                             "Max treatment pixels",
-                            config.get("max_treatment_pixels", "—"),
+                            config.get("max_treatment_pixels", "ΓÇö"),
                         ),
                         _detail_row(
                             "Control multiplier",
-                            config.get("control_multiplier", "—"),
+                            config.get("control_multiplier", "ΓÇö"),
                         ),
                         _detail_row(
                             "Min site area (ha)",
-                            config.get("min_site_area_ha", "—"),
+                            config.get("min_site_area_ha", "ΓÇö"),
                         ),
                         _detail_row(
                             "Min GLM treatment pixels",
-                            config.get("min_glm_treatment_pixels", "—"),
+                            config.get("min_glm_treatment_pixels", "ΓÇö"),
                         ),
                         _detail_row("Caliper width (SD)", caliper_display),
                         _detail_row("Max controls per treatment", max_ctrl_display),
                         _detail_row(
                             "Min control distance (km)",
-                            config.get("min_control_distance_km", "—"),
+                            config.get("min_control_distance_km", "ΓÇö"),
                         ),
                         _detail_row(
                             "Separation fallback",
@@ -3639,7 +3922,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         _detail_row("Matching memory", mem_display),
                         _detail_row(
                             "Batch job queue",
-                            config.get("matching_job_queue", "—"),
+                            config.get("matching_job_queue", "ΓÇö"),
                         ),
                         html.Hr(className="my-2"),
                         html.H6(
@@ -3649,15 +3932,15 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         ),
                         _detail_row(
                             "API execution ID",
-                            api_exec_id or "—",
+                            api_exec_id or "ΓÇö",
                         ),
                         _detail_row(
                             "Batch job names",
-                            ", ".join(batch_job_names) if batch_job_names else "—",
+                            ", ".join(batch_job_names) if batch_job_names else "ΓÇö",
                         ),
                         _detail_row(
                             "S3 output path",
-                            task.results_s3_uri or "—",
+                            task.results_s3_uri or "ΓÇö",
                         ),
                         _detail_row(
                             "Internal task ID",
@@ -3673,7 +3956,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                 ),
                                 (
                                     html.A(
-                                        config.get("code_git_sha", "—")[:7],
+                                        config.get("code_git_sha", "ΓÇö")[:7],
                                         href=(
                                             "https://github.com/ConservationInternational"
                                             "/avoided-emissions-web/commit/"
@@ -3687,7 +3970,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                         },
                                     )
                                     if config.get("code_git_sha")
-                                    else html.Span("—", style={"fontWeight": "500"})
+                                    else html.Span("ΓÇö", style={"fontWeight": "500"})
                                 ),
                             ],
                             style={
@@ -3707,7 +3990,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                 (
                                     html.A(
                                         (task.extra_metadata or {}).get(
-                                            "r_analysis_git_sha", "—"
+                                            "r_analysis_git_sha", "ΓÇö"
                                         )[:7],
                                         href=(
                                             "https://github.com/ConservationInternational"
@@ -3724,7 +4007,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                     if (task.extra_metadata or {}).get(
                                         "r_analysis_git_sha"
                                     )
-                                    else html.Span("—", style={"fontWeight": "500"})
+                                    else html.Span("ΓÇö", style={"fontWeight": "500"})
                                 ),
                             ],
                             style={
@@ -3764,7 +4047,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                             className="text-success",
                                         ),
                                         html.P(
-                                            "Total Avoided Emissions (MgCO₂e)",
+                                            "Total Avoided Emissions (MgCOΓéée)",
                                             className="text-muted mb-0",
                                         ),
                                     ]
@@ -3900,7 +4183,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
         if per_site:
             # Build lookups from totals
             name_lookup = {}
-            totals_lookup = {}  # sid → {n_matched, area_ha, ...}
+            totals_lookup = {}  # sid ΓåÆ {n_matched, area_ha, ...}
             if totals:
                 for t in totals:
                     name_lookup[str(t.site_id)] = t.site_name or str(t.site_id)
@@ -4072,7 +4355,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                 ),
                                 html.Strong("Match Quality Issues"),
                                 html.Span(
-                                    f" — {subtitle}",
+                                    f" ΓÇö {subtitle}",
                                     className="text-muted ms-1",
                                 ),
                             ]
@@ -4202,7 +4485,7 @@ def _build_results_content(results, totals, sites=None, quality_warnings=None):
     if quality_warnings:
         content.append(_build_site_quality_table(quality_warnings, totals))
 
-    # Sites table — always shown when sites are available
+    # Sites table ΓÇö always shown when sites are available
     if sites:
         site_rows = [
             {
@@ -4625,7 +4908,7 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
             hovermode="x unified",
         )
         # Only shade pre/post-intervention when all sites share the
-        # same start/end year — mixed dates make a single band misleading.
+        # same start/end year ΓÇö mixed dates make a single band misleading.
         unique_start_years = set()
         unique_end_years = set()
         if sites:
@@ -4765,7 +5048,7 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
         color="site_id",
         title="Avoided Emissions by Year",
         labels={
-            "emissions_avoided_mgco2e": "Emissions Avoided (MgCO₂e)",
+            "emissions_avoided_mgco2e": "Emissions Avoided (MgCOΓéée)",
             "year": "Year",
             "site_id": "Site",
         },
@@ -4861,7 +5144,7 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
             y="emissions_avoided_mgco2e",
             title="Total Avoided Emissions by Site",
             labels={
-                "emissions_avoided_mgco2e": "Emissions Avoided (MgCO₂e)",
+                "emissions_avoided_mgco2e": "Emissions Avoided (MgCOΓéée)",
                 "site_name": "Site",
             },
         )
@@ -4978,11 +5261,11 @@ def _build_plots(results, totals, sites=None, task=None, quality_warnings=None):
 
 # Thresholds for automated quality checks (from propensity score matching
 # best-practice literature).
-_SMD_CRITICAL = 0.25  # |SMD| above this → critical imbalance
-_SMD_WARN = 0.1  # |SMD| above this → imperfect balance
+_SMD_CRITICAL = 0.25  # |SMD| above this ΓåÆ critical imbalance
+_SMD_WARN = 0.1  # |SMD| above this ΓåÆ imperfect balance
 _SMD_POOR_FRAC = 0.20  # fraction of covariates with |SMD| > 0.1 to trigger warning
-_PCT_MATCHED_CRITICAL = 5  # % matched below this → critical
-_PCT_MATCHED_WARN = 25  # % matched below this → warning
+_PCT_MATCHED_CRITICAL = 5  # % matched below this ΓåÆ critical
+_PCT_MATCHED_WARN = 25  # % matched below this ΓåÆ warning
 
 
 def _build_group_diagnostics_card(group_diags):
@@ -5175,9 +5458,9 @@ def _assess_match_quality(balance_df=None, totals=None):
 
     Each warning has:
 
-    * ``level`` – ``"danger"`` (critical) or ``"warning"`` (caution).
-    * ``scope`` – ``"aggregate"`` or a *site_id* string.
-    * ``message`` – human-readable description.
+    * ``level`` ΓÇô ``"danger"`` (critical) or ``"warning"`` (caution).
+    * ``scope`` ΓÇô ``"aggregate"`` or a *site_id* string.
+    * ``message`` ΓÇô human-readable description.
     """
     warnings = []
 
@@ -5394,7 +5677,7 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                             html.P(
                                 [
                                     html.Strong("Critical quality issue"),
-                                    " (red) — Results are likely unreliable. "
+                                    " (red) ΓÇö Results are likely unreliable. "
                                     "Triggers include:",
                                 ],
                                 className="mb-1",
@@ -5403,7 +5686,7 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                                 [
                                     html.Li(
                                         f"Fewer than {_PCT_MATCHED_CRITICAL}% "
-                                        f"of treatment pixels matched — "
+                                        f"of treatment pixels matched ΓÇö "
                                         f"too few for statistical confidence. "
                                         f"This is often caused by covariate "
                                         f"separation (see group diagnostics "
@@ -5411,7 +5694,7 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                                     ),
                                     html.Li(
                                         f"One or more covariates with "
-                                        f"|SMD| \u2265 {_SMD_CRITICAL} — "
+                                        f"|SMD| \u2265 {_SMD_CRITICAL} ΓÇö "
                                         f"severe imbalance between treatment "
                                         f"and control groups, meaning matching "
                                         f"failed to find comparable areas."
@@ -5422,7 +5705,7 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                             html.P(
                                 [
                                     html.Strong("Quality concern"),
-                                    " (yellow) — Results may be limited but "
+                                    " (yellow) ΓÇö Results may be limited but "
                                     "are not necessarily invalid. "
                                     "Triggers include:",
                                 ],
@@ -5432,14 +5715,14 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                                 [
                                     html.Li(
                                         f"Fewer than {_PCT_MATCHED_WARN}% "
-                                        f"of treatment pixels matched — "
+                                        f"of treatment pixels matched ΓÇö "
                                         f"low sample size that may limit "
                                         f"reliability."
                                     ),
                                     html.Li(
                                         f"More than {_SMD_POOR_FRAC:.0%} of "
                                         f"covariates with |SMD| > {_SMD_WARN} "
-                                        f"— overall matching quality is "
+                                        f"ΓÇö overall matching quality is "
                                         f"imperfect."
                                     ),
                                 ],
@@ -5625,10 +5908,10 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
 
     Produces:
 
-    * **Love plot** — standardized mean differences (uses balance CSV,
+    * **Love plot** ΓÇö standardized mean differences (uses balance CSV,
       which is always small).
-    * **Propensity score QQ plot** — from pre-computed quantiles.
-    * **Covariate histograms** — from pre-computed bin counts.
+    * **Propensity score QQ plot** ΓÇö from pre-computed quantiles.
+    * **Covariate histograms** ΓÇö from pre-computed bin counts.
 
     Also provides download buttons for the underlying CSVs.
     """
@@ -5676,7 +5959,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
         if sid is not None:
             site_areas[str(sid)] = area or 0
 
-    # Fetch balance statistics (Love plot data) — always small.
+    # Fetch balance statistics (Love plot data) ΓÇö always small.
     balance_df = None
     balance_csv = download_results_csv(
         task_id, "balance", results_s3_uri=task.results_s3_uri
@@ -5686,7 +5969,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
         if balance_df.empty:
             balance_df = None
 
-    # Run quality checks (uses balance_df + totals — both small).
+    # Run quality checks (uses balance_df + totals ΓÇö both small).
     quality_warnings = _assess_match_quality(balance_df=balance_df, totals=totals)
 
     # ---- Try loading the pre-computed summary JSON -----------------------
@@ -5703,7 +5986,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
             summary = None
 
     if not summary or not summary.get("histograms"):
-        # Summary not available — try to generate it in the background
+        # Summary not available ΓÇö try to generate it in the background
         # via a Celery task (routed to the merge queue which has more
         # memory), then show a placeholder for now.
         try:
@@ -5757,7 +6040,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
 
     content.append(html.H5("Match Quality Diagnostics", className="mt-4 mb-2"))
 
-    # Per-site selector — derive from summary stats keys
+    # Per-site selector ΓÇö derive from summary stats keys
     site_ids = sorted(k for k in summary.get("summary_stats", {}) if k != "__all__")
     site_name_map = {}
     for t in totals or []:
@@ -5977,7 +6260,7 @@ def _build_all_match_quality_plots(
             html.P(
                 "Empirical quantile-quantile plot comparing the propensity "
                 "score distributions of matched treatment and control "
-                "pixels. Points close to the 45° line indicate similar "
+                "pixels. Points close to the 45┬░ line indicate similar "
                 "distributions.",
                 className="text-muted mb-2",
             )
@@ -5996,7 +6279,7 @@ def _build_love_plot(balance_df, cov_df, site_filter=None):
 
     Shows a horizontal dot plot with one row per covariate.  The x-axis is
     the Standardized Mean Difference (SMD) and dashed vertical lines mark
-    the ±0.1 threshold that is conventionally considered acceptable.
+    the ┬▒0.1 threshold that is conventionally considered acceptable.
 
     Parameters
     ----------
@@ -6035,7 +6318,7 @@ def _build_love_plot(balance_df, cov_df, site_filter=None):
     # Sort by absolute SMD for visual clarity
     agg = agg.sort_values("smd", key=lambda s: s.abs(), ascending=True)
 
-    # Colour-code by whether SMD is within the ±0.1 threshold
+    # Colour-code by whether SMD is within the ┬▒0.1 threshold
     colors = ["#2ca02c" if abs(v) <= 0.1 else "#d62728" for v in agg["smd"]]
 
     fig = go.Figure()
@@ -6048,7 +6331,7 @@ def _build_love_plot(balance_df, cov_df, site_filter=None):
             hovertemplate="%{y}: SMD = %{x:.3f}<extra></extra>",
         )
     )
-    # Reference lines at ±0.1
+    # Reference lines at ┬▒0.1
     fig.add_vline(x=0.1, line_dash="dash", line_color="gray", opacity=0.6)
     fig.add_vline(x=-0.1, line_dash="dash", line_color="gray", opacity=0.6)
     fig.add_vline(x=0, line_color="black", opacity=0.3)
@@ -6109,7 +6392,7 @@ def _build_pscore_qq_plot(pscore_df, cov_df, site_filter=None):
     c_quantiles = np.quantile(control_scores, quantiles)
 
     fig = go.Figure()
-    # 45° reference line
+    # 45┬░ reference line
     q_min = min(t_quantiles.min(), c_quantiles.min())
     q_max = max(t_quantiles.max(), c_quantiles.max())
     fig.add_trace(
@@ -6118,7 +6401,7 @@ def _build_pscore_qq_plot(pscore_df, cov_df, site_filter=None):
             y=[q_min, q_max],
             mode="lines",
             line=dict(color="gray", dash="dash"),
-            name="45° line",
+            name="45┬░ line",
             hoverinfo="skip",
         )
     )
@@ -6270,7 +6553,7 @@ def _build_plots_from_summary(store_data, site_filter=None):
         )
     components.append(dbc.Row(stat_cols, className="mb-4"))
 
-    # --- Love plot (from balance CSV — already small) ----------------------
+    # --- Love plot (from balance CSV ΓÇö already small) ----------------------
     balance_rows = store_data.get("balance_rows")
     if balance_rows:
         balance_df = pd.DataFrame(balance_rows)
@@ -6297,7 +6580,7 @@ def _build_plots_from_summary(store_data, site_filter=None):
             html.P(
                 "Empirical quantile-quantile plot comparing the propensity "
                 "score distributions of matched treatment and control "
-                "pixels. Points close to the 45° line indicate similar "
+                "pixels. Points close to the 45┬░ line indicate similar "
                 "distributions.",
                 className="text-muted mb-2",
             )
@@ -6332,7 +6615,7 @@ def _build_qq_from_summary(qq_data):
             y=[q_min, q_max],
             mode="lines",
             line=dict(color="gray", dash="dash"),
-            name="45° line",
+            name="45┬░ line",
             hoverinfo="skip",
         )
     )

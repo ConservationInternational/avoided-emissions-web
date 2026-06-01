@@ -77,6 +77,10 @@ MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 MAX_ARCHIVE_MEMBER_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 200.0
 
+REQUIRED_SITE_FIELDS = ("site_id", "site_name", "start_date")
+OPTIONAL_SITE_FIELDS = ("end_date",)
+ALL_SITE_FIELDS = REQUIRED_SITE_FIELDS + OPTIONAL_SITE_FIELDS
+
 
 def get_s3_client():
     return boto3.client("s3", region_name=Config.AWS_REGION)
@@ -326,12 +330,8 @@ def _repair_geometries(gdf):
     return gdf
 
 
-def parse_sites_file(file_content, filename):
-    """Parse uploaded site files into a GeoDataFrame.
-
-    Validates required columns and geometry types. Returns the GeoDataFrame
-    and a list of validation errors (empty if valid).
-    """
+def _parse_sites_geometry_file(file_content, filename):
+    """Parse uploaded site files and validate geometry/CRS constraints."""
     errors = []
     gdf = None
 
@@ -353,12 +353,6 @@ def parse_sites_file(file_content, filename):
     except Exception as e:
         errors.append(f"Failed to read file: {str(e)}")
         return None, errors
-
-    # Validate required columns
-    required = {"site_id", "site_name", "start_date"}
-    missing = required - set(gdf.columns)
-    if missing:
-        errors.append(f"Missing required columns: {', '.join(missing)}")
 
     # Validate geometries
     if gdf is not None and not gdf.empty:
@@ -396,6 +390,254 @@ def parse_sites_file(file_content, filename):
     return gdf, errors
 
 
+def parse_sites_file(file_content, filename):
+    """Parse uploaded site files into a GeoDataFrame.
+
+    Validates required columns and geometry types. Returns the GeoDataFrame
+    and a list of validation errors (empty if valid).
+    """
+    gdf, errors = _parse_sites_geometry_file(file_content, filename)
+    if errors:
+        return gdf, errors
+
+    required = set(REQUIRED_SITE_FIELDS)
+    missing = required - set(gdf.columns)
+    if missing:
+        errors.append(f"Missing required columns: {', '.join(sorted(missing))}")
+
+    return gdf, errors
+
+
+def _normalize_col_name(name):
+    return "".join(ch for ch in str(name or "").strip().lower() if ch.isalnum())
+
+
+def suggest_site_column_mapping(columns):
+    """Return best-effort source-column defaults for required site fields."""
+    aliases = {
+        "site_id": [
+            "site_id",
+            "siteid",
+            "id",
+            "site_code",
+            "sitecode",
+            "ci_id",
+            "ciid",
+            "objectid",
+        ],
+        "site_name": [
+            "site_name",
+            "sitename",
+            "name",
+            "site",
+            "ci_name",
+            "ciname",
+        ],
+        "start_date": [
+            "start_date",
+            "startdate",
+            "start",
+            "ci_start_date",
+            "cistartdate",
+            "intervention_start",
+            "interventionstart",
+        ],
+        "end_date": [
+            "end_date",
+            "enddate",
+            "end",
+            "ci_end_date",
+            "cienddate",
+            "intervention_end",
+            "interventionend",
+        ],
+    }
+
+    by_norm = {_normalize_col_name(col): col for col in columns}
+    suggested = {}
+    for target, candidate_aliases in aliases.items():
+        chosen = None
+        for alias in candidate_aliases:
+            col = by_norm.get(_normalize_col_name(alias))
+            if col:
+                chosen = col
+                break
+        suggested[target] = chosen
+    return suggested
+
+
+def get_site_upload_mapping_preview(file_content, filename):
+    """Parse upload and return source-column metadata + suggested mapping."""
+    gdf, errors = _parse_sites_geometry_file(file_content, filename)
+    if errors:
+        return None, errors
+    if gdf is None or gdf.empty:
+        return None, ["No features were found in the uploaded file."]
+
+    non_geom_cols = [c for c in gdf.columns if c != "geometry"]
+    column_info = []
+    for col in non_geom_cols:
+        series = gdf[col]
+        sample_val = ""
+        sample_series = series.dropna()
+        if not sample_series.empty:
+            sample_val = str(sample_series.iloc[0])
+        column_info.append(
+            {
+                "name": col,
+                "dtype": str(series.dtype),
+                "sample": sample_val,
+            }
+        )
+
+    return (
+        {
+            "column_info": column_info,
+            "suggested_mapping": suggest_site_column_mapping(non_geom_cols),
+            "n_features": int(len(gdf)),
+        },
+        [],
+    )
+
+
+def _normalize_site_mapping(column_mapping):
+    mapping = {field: None for field in ALL_SITE_FIELDS}
+    if not isinstance(column_mapping, dict):
+        return mapping
+
+    for field in ALL_SITE_FIELDS:
+        value = column_mapping.get(field)
+        if value is None:
+            continue
+        as_str = str(value).strip()
+        mapping[field] = as_str or None
+
+    return mapping
+
+
+def apply_site_column_mapping(gdf, column_mapping):
+    """Map and coerce source columns into canonical site upload schema.
+
+    Returns a tuple of (mapped_gdf, errors, warnings).
+    """
+    mapped = gdf.copy()
+    errors = []
+    warnings = []
+
+    available_cols = {c for c in mapped.columns if c != "geometry"}
+    mapping = _normalize_site_mapping(column_mapping)
+
+    selected_sources = [mapping[field] for field in ALL_SITE_FIELDS if mapping[field]]
+    duplicate_sources = sorted(
+        {c for c in selected_sources if selected_sources.count(c) > 1}
+    )
+    if duplicate_sources:
+        errors.append(
+            "Each required field must use a different source column. "
+            f"Duplicate selections: {', '.join(duplicate_sources)}"
+        )
+
+    for field in REQUIRED_SITE_FIELDS:
+        src = mapping.get(field)
+        if not src:
+            errors.append(f"Please select a source column for '{field}'.")
+        elif src not in available_cols:
+            errors.append(f"Selected source column for '{field}' was not found: {src}")
+
+    end_src = mapping.get("end_date")
+    if end_src and end_src not in available_cols:
+        errors.append(f"Selected source column for 'end_date' was not found: {end_src}")
+
+    if errors:
+        return None, errors, warnings
+
+    # Copy source values to canonical field names.
+    for field in ALL_SITE_FIELDS:
+        src = mapping.get(field)
+        if src:
+            mapped[field] = mapped[src]
+        elif field == "end_date":
+            mapped[field] = pd.Series([None] * len(mapped), index=mapped.index)
+
+    mapped["site_id"] = mapped["site_id"].astype("string").str.strip()
+    mapped["site_name"] = mapped["site_name"].astype("string").str.strip()
+
+    blank_id = mapped["site_id"].isna() | mapped["site_id"].eq("")
+    if blank_id.any():
+        feature_nums = [i + 1 for i in mapped[blank_id].index[:10]]
+        errors.append(
+            "Mapped 'site_id' contains empty values. "
+            f"Affected features (first 10): {feature_nums}"
+        )
+
+    blank_name = mapped["site_name"].isna() | mapped["site_name"].eq("")
+    if blank_name.any():
+        feature_nums = [i + 1 for i in mapped[blank_name].index[:10]]
+        errors.append(
+            "Mapped 'site_name' contains empty values. "
+            f"Affected features (first 10): {feature_nums}"
+        )
+
+    start_raw = mapped["start_date"].astype("string").str.strip()
+    start_blank = start_raw.isna() | start_raw.eq("")
+    start_parsed = pd.to_datetime(mapped["start_date"], errors="coerce")
+    start_invalid = (~start_blank) & start_parsed.isna()
+    if start_blank.any() or start_invalid.any():
+        bad_idx = mapped[start_blank | start_invalid].index[:10]
+        feature_nums = [i + 1 for i in bad_idx]
+        errors.append(
+            "Mapped 'start_date' has missing or unparseable values. "
+            f"Affected features (first 10): {feature_nums}"
+        )
+    mapped["start_date"] = start_parsed.dt.date
+
+    if mapping.get("end_date"):
+        end_raw = mapped["end_date"].astype("string").str.strip()
+        end_blank = end_raw.isna() | end_raw.eq("")
+        end_parsed = pd.to_datetime(mapped["end_date"], errors="coerce")
+        end_invalid = (~end_blank) & end_parsed.isna()
+        if end_invalid.any():
+            n_invalid = int(end_invalid.sum())
+            warnings.append(
+                "Some 'end_date' values could not be parsed and will be saved as empty. "
+                f"Affected rows: {n_invalid}"
+            )
+        mapped["end_date"] = end_parsed.dt.date
+    else:
+        mapped["end_date"] = pd.Series([None] * len(mapped), index=mapped.index)
+
+    if errors:
+        return None, errors, warnings
+
+    return mapped, errors, warnings
+
+
+def validate_site_upload_mapping(file_content, filename, column_mapping):
+    """Validate a proposed column mapping against uploaded content."""
+    gdf, errors = _parse_sites_geometry_file(file_content, filename)
+    if errors:
+        return {"errors": errors, "warnings": [], "summary": {}}
+    mapped_gdf, map_errors, warnings = apply_site_column_mapping(gdf, column_mapping)
+    if map_errors:
+        return {"errors": map_errors, "warnings": warnings, "summary": {}}
+
+    summary = {
+        "n_features": int(len(mapped_gdf)),
+        "n_missing_end_date": int(mapped_gdf["end_date"].isna().sum()),
+        "n_unique_site_id": int(mapped_gdf["site_id"].nunique(dropna=True)),
+    }
+    if summary["n_unique_site_id"] < summary["n_features"]:
+        warnings.append(
+            "Mapped 'site_id' contains duplicates. Duplicates are allowed but may cause confusion in reporting."
+        )
+
+    return {
+        "errors": [],
+        "warnings": warnings,
+        "summary": summary,
+    }
+
+
 def _derive_site_set_name(filename):
     stem = os.path.splitext(os.path.basename(filename or "sites"))[0].strip()
     stem = stem or "sites"
@@ -416,17 +658,30 @@ def _site_set_summary_row(row):
     }
 
 
-def save_user_site_set(user_id, filename, file_content):
+def save_user_site_set(user_id, filename, file_content, column_mapping=None):
     """Persist uploaded sites as a reusable PostGIS-backed user site set.
 
     Geometries are repaired with ``ST_MakeValid`` and coerced to
     ``MULTIPOLYGON`` before storage.
     """
-    gdf, errors = parse_sites_file(file_content, filename)
+    gdf, errors = _parse_sites_geometry_file(file_content, filename)
     if errors:
         raise ValueError("\n".join(errors))
     if gdf is None or gdf.empty:
         raise ValueError("No features were found in the uploaded file.")
+
+    mapping_to_apply = _normalize_site_mapping(column_mapping)
+    if any(mapping_to_apply.values()):
+        gdf, mapping_errors, _mapping_warnings = apply_site_column_mapping(
+            gdf, mapping_to_apply
+        )
+        if mapping_errors:
+            raise ValueError("\n".join(mapping_errors))
+    else:
+        # Backward-compatible path for datasets already using canonical names.
+        missing = set(REQUIRED_SITE_FIELDS) - set(gdf.columns)
+        if missing:
+            raise ValueError("Missing required columns: " + ", ".join(sorted(missing)))
 
     if not gdf.crs:
         gdf = gdf.set_crs(epsg=4326)
@@ -443,6 +698,11 @@ def save_user_site_set(user_id, filename, file_content):
             file_format=_get_file_extension(filename).lstrip("."),
             n_sites=len(gdf),
             bounds={"bbox": list(gdf.total_bounds)} if len(gdf) > 0 else None,
+            extra_metadata={
+                "column_mapping": mapping_to_apply,
+            }
+            if any(mapping_to_apply.values())
+            else None,
         )
         db.add(site_set)
         db.flush()

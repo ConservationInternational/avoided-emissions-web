@@ -1605,6 +1605,10 @@ def submit_layout(user, recompute_config=None):
                                                                 ],
                                                                 className="mb-2 small",
                                                             ),
+                                                            html.P(
+                                                                "After upload, map your file columns to required fields before saving.",
+                                                                className="mb-2 small text-muted",
+                                                            ),
                                                             dbc.Table(
                                                                 [
                                                                     html.Thead(
@@ -1721,6 +1725,125 @@ def submit_layout(user, recompute_config=None):
                                                             ),
                                                             html.Div(
                                                                 id="upload-status"
+                                                            ),
+                                                            dbc.Collapse(
+                                                                dbc.Card(
+                                                                    dbc.CardBody(
+                                                                        [
+                                                                            html.H6(
+                                                                                "Map Uploaded Columns",
+                                                                                className="mb-2",
+                                                                            ),
+                                                                            html.P(
+                                                                                "Confirm which columns should be used for each required field. "
+                                                                                "start_date must be parseable as dates; end_date is optional.",
+                                                                                className="small text-muted mb-3",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "site_id",
+                                                                                                className="mb-1",
+                                                                                            ),
+                                                                                            dbc.Select(
+                                                                                                id="mapping-site-id",
+                                                                                                options=[],
+                                                                                                placeholder="Select source column...",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        md=6,
+                                                                                        className="mb-2",
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "site_name",
+                                                                                                className="mb-1",
+                                                                                            ),
+                                                                                            dbc.Select(
+                                                                                                id="mapping-site-name",
+                                                                                                options=[],
+                                                                                                placeholder="Select source column...",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        md=6,
+                                                                                        className="mb-2",
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "start_date",
+                                                                                                className="mb-1",
+                                                                                            ),
+                                                                                            dbc.Select(
+                                                                                                id="mapping-start-date",
+                                                                                                options=[],
+                                                                                                placeholder="Select source column...",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        md=6,
+                                                                                        className="mb-2",
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Label(
+                                                                                                "end_date (optional)",
+                                                                                                className="mb-1",
+                                                                                            ),
+                                                                                            dbc.Select(
+                                                                                                id="mapping-end-date",
+                                                                                                options=[],
+                                                                                                placeholder="Leave empty for ongoing interventions",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        md=6,
+                                                                                        className="mb-2",
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-2",
+                                                                            ),
+                                                                            html.Div(
+                                                                                id="site-upload-mapping-status",
+                                                                                className="mt-2",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        dbc.Button(
+                                                                                            "Confirm Mapping and Save",
+                                                                                            id="confirm-site-upload-mapping-btn",
+                                                                                            color="primary",
+                                                                                            className="w-100",
+                                                                                        ),
+                                                                                        xs=12,
+                                                                                        md=7,
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        dbc.Button(
+                                                                                            "Cancel",
+                                                                                            id="cancel-site-upload-mapping-btn",
+                                                                                            color="secondary",
+                                                                                            outline=True,
+                                                                                            className="w-100",
+                                                                                        ),
+                                                                                        xs=12,
+                                                                                        md=5,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-2 mt-2",
+                                                                            ),
+                                                                        ]
+                                                                    )
+                                                                ),
+                                                                id="site-upload-mapping-panel",
+                                                                is_open=False,
+                                                                className="mt-2",
                                                             ),
                                                         ]
                                                     ),
@@ -2401,6 +2524,7 @@ def submit_layout(user, recompute_config=None):
             dcc.Store(id="parsed-sites-store"),
             dcc.Store(id="presets-store"),
             dcc.Store(id="site-set-refresh-store"),
+            dcc.Store(id="site-upload-columns-store"),
             dcc.Store(id="submit-lock-store", data=False),
             dcc.Store(id="recompute-config-store", data=rc or None),
         ]
