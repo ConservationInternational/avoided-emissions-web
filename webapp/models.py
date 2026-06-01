@@ -334,7 +334,13 @@ class UserSiteFeature(Base):
 
 
 class UserSiteUpload(Base):
-    """Background site-upload job metadata for asynchronous imports."""
+    """Background site-upload job metadata for asynchronous imports.
+
+    Stores the owning ``user_id``, source ``original_filename``, Celery
+    ``celery_task_id``, optional resulting ``site_set_id`` / ``site_set_name``,
+    lifecycle ``status``, timestamps, and any extra metadata needed to render
+    upload status in the admin UI.
+    """
 
     __tablename__ = "user_site_uploads"
 

@@ -2751,7 +2751,18 @@ def _build_category_options():
 
 
 def _site_upload_card(footer_text):
-    """Shared site-upload card used by the admin page."""
+    """Build the shared admin site-upload card.
+
+    Parameters
+    ----------
+    footer_text : str
+        Footer copy shown beneath the upload controls.
+
+    Returns
+    -------
+    dbc.Card
+        Card containing the streamed upload controls and mapping UI.
+    """
     return dbc.Card(
         [
             dbc.CardHeader("Upload New Sites (GeoJSON, GeoPackage, or Archive)"),

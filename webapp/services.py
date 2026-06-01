@@ -1146,7 +1146,26 @@ def _site_upload_summary_row(row):
 def create_user_site_upload(
     user_id, filename, upload_token, column_mapping=None, n_features=0
 ):
-    """Create and dispatch an asynchronous site import job."""
+    """Create and dispatch an asynchronous site import job.
+
+    Parameters
+    ----------
+    user_id : UUID | str
+        Owner of the staged upload and resulting site set.
+    filename : str
+        Original uploaded filename shown in the admin UI.
+    upload_token : str
+        Token pointing at the staged upload payload.
+    column_mapping : dict | None
+        Mapping from canonical site fields to source columns.
+    n_features : int
+        Preview feature count detected before dispatch.
+
+    Returns
+    -------
+    dict
+        Summary row for the queued upload job.
+    """
     db = get_db()
     normalized_mapping = _normalize_site_mapping(column_mapping)
     try:
@@ -1189,7 +1208,20 @@ def create_user_site_upload(
 
 
 def list_user_site_uploads(user_id, limit=50):
-    """Return recent background site import jobs for a user."""
+    """Return recent background site import jobs for a user.
+
+    Parameters
+    ----------
+    user_id : UUID | str
+        Owner whose upload jobs should be listed.
+    limit : int
+        Maximum number of recent jobs to return.
+
+    Returns
+    -------
+    list[dict]
+        Upload summary rows ordered from newest to oldest.
+    """
     db = get_db()
     try:
         rows = (
@@ -1216,7 +1248,32 @@ def update_user_site_upload_status(
     error_message=None,
     ingest_stats=None,
 ):
-    """Update a background site import job row."""
+    """Update a background site import job row.
+
+    Parameters
+    ----------
+    upload_id : UUID | str
+        Upload job identifier.
+    status : str
+        New lifecycle status.
+    started_at, completed_at : datetime | None
+        Optional timestamps to persist.
+    site_set_id : UUID | None
+        Persisted site set identifier created by the upload.
+    site_set_name : str | None
+        Resulting site set name shown in the admin UI.
+    n_sites_imported : int | None
+        Number of valid sites imported into the database.
+    error_message : str | None
+        Failure details, truncated before storage.
+    ingest_stats : dict | None
+        Optional skipped-feature statistics copied from the site set metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when the row was updated, else ``False`` when it was not found.
+    """
     db = get_db()
     try:
         upload = db.query(UserSiteUpload).filter(UserSiteUpload.id == upload_id).first()
@@ -1908,7 +1965,22 @@ def delete_user_site_set(site_set_id, user_id):
 
 
 def rename_user_site_set(site_set_id, user_id, new_name):
-    """Rename a user-owned site set."""
+    """Rename a user-owned site set.
+
+    Parameters
+    ----------
+    site_set_id : UUID | str
+        Site set to rename.
+    user_id : UUID | str
+        Owner of the site set.
+    new_name : str
+        Requested replacement name.
+
+    Returns
+    -------
+    tuple[bool, str]
+        Success flag and user-facing status message.
+    """
     cleaned_name = (new_name or "").strip()
     if not cleaned_name:
         return False, "Enter a name for the site set."

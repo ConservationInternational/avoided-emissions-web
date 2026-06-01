@@ -30,7 +30,26 @@ logger = logging.getLogger(__name__)
 def import_user_site_upload_task(
     self, upload_id, user_id, upload_token, column_mapping=None
 ) -> dict:
-    """Persist a staged site upload asynchronously."""
+    """Persist a staged site upload asynchronously.
+
+    Parameters
+    ----------
+    self : celery.Task
+        Bound Celery task instance.
+    upload_id : str
+        Upload-job UUID stored in ``user_site_uploads``.
+    user_id : str
+        Owning user UUID.
+    upload_token : str
+        Token pointing at the staged upload payload.
+    column_mapping : dict | None
+        Canonical site-field to source-column mapping selected in the UI.
+
+    Returns
+    -------
+    dict
+        Completion payload with job status plus imported site-set identifiers.
+    """
     import uuid
 
     from services import (
