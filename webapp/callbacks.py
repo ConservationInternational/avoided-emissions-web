@@ -67,6 +67,8 @@ from services import (
     revoke_te_script_access,
     save_covariate_preset,
     save_user_site_set,
+    get_staged_site_upload,
+    discard_staged_site_upload,
     start_gee_export,
     submit_analysis_task,
     update_task_info,
@@ -1016,6 +1018,7 @@ def register_callbacks(app, limiter=None):
         ],
         [
             Input("upload-sites", "contents"),
+            Input("site-upload-stream-payload", "value"),
             Input("confirm-site-upload-mapping-btn", "n_clicks"),
             Input("cancel-site-upload-mapping-btn", "n_clicks"),
         ],
@@ -1031,6 +1034,7 @@ def register_callbacks(app, limiter=None):
     )
     def handle_site_upload_flow(
         contents,
+        stream_payload,
         _confirm_mapping_clicks,
         _cancel_mapping_clicks,
         filename,
@@ -1191,7 +1195,97 @@ def register_callbacks(app, limiter=None):
                     "",
                 )
 
+        if trigger_id == "site-upload-stream-payload":
+            if not stream_payload:
+                raise PreventUpdate
+
+            try:
+                payload = json.loads(stream_payload)
+            except Exception:
+                return (
+                    dbc.Alert(
+                        "Stream upload payload could not be parsed.", color="danger"
+                    ),
+                    no_update,
+                    no_update,
+                    False,
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [{"label": "(none)", "value": ""}],
+                    "",
+                )
+
+            if payload.get("status") != "ok":
+                response = payload.get("response") or {}
+                errors = response.get("errors") or ["Large file upload failed."]
+                return (
+                    dbc.Alert("\n".join(str(e) for e in errors), color="danger"),
+                    no_update,
+                    no_update,
+                    False,
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [{"label": "(none)", "value": ""}],
+                    "",
+                )
+
+            response = payload.get("response") or {}
+            preview = response.get("preview") or {}
+            columns = preview.get("column_info", [])
+            suggested = preview.get("suggested_mapping", {})
+            options = [
+                {"label": f"{c['name']} ({c['dtype']})", "value": c["name"]}
+                for c in columns
+            ]
+            end_options = [{"label": "(none)", "value": ""}] + options
+
+            pending_data = {
+                "filename": response.get("filename") or payload.get("filename"),
+                "upload_token": response.get("upload_token"),
+                "n_features": preview.get("n_features", 0),
+            }
+
+            return (
+                dbc.Alert(
+                    (
+                        f"Parsed {preview.get('n_features', 0)} features. "
+                        "Confirm column mapping to save this site set."
+                    ),
+                    color="info",
+                ),
+                no_update,
+                no_update,
+                True,
+                pending_data,
+                options,
+                suggested.get("site_id"),
+                options,
+                suggested.get("site_name"),
+                options,
+                suggested.get("start_date"),
+                end_options,
+                suggested.get("end_date") or "",
+            )
+
         if trigger_id == "cancel-site-upload-mapping-btn":
+            if pending_upload and pending_upload.get("upload_token"):
+                try:
+                    discard_staged_site_upload(pending_upload["upload_token"], user.id)
+                except Exception:
+                    logger.warning(
+                        "Failed to discard staged upload on cancel", exc_info=True
+                    )
+
             return (
                 dbc.Alert("Upload mapping cancelled.", color="secondary"),
                 no_update,
@@ -1230,7 +1324,20 @@ def register_callbacks(app, limiter=None):
                 )
 
             try:
-                decoded = base64.b64decode(pending_upload["content_string"])
+                if pending_upload.get("upload_token"):
+                    staged = get_staged_site_upload(
+                        pending_upload["upload_token"], user.id, consume=True
+                    )
+                    decoded = staged["content"]
+                    resolved_filename = pending_upload.get("filename") or staged.get(
+                        "filename"
+                    )
+                else:
+                    decoded = base64.b64decode(
+                        pending_upload["content_string"], validate=True
+                    )
+                    resolved_filename = pending_upload.get("filename")
+
                 mapping = {
                     "site_id": mapped_site_id,
                     "site_name": mapped_site_name,
@@ -1239,7 +1346,7 @@ def register_callbacks(app, limiter=None):
                 }
                 detail = save_user_site_set(
                     user.id,
-                    pending_upload.get("filename"),
+                    resolved_filename,
                     decoded,
                     column_mapping=mapping,
                 )

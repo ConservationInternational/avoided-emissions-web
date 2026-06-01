@@ -16,6 +16,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 
 import boto3
+from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 from sqlalchemy import text
@@ -77,9 +78,126 @@ MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 MAX_ARCHIVE_MEMBER_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 200.0
 
+SITE_UPLOAD_STAGE_DIR = Path(tempfile.gettempdir()) / "ae_site_upload_stage"
+SITE_UPLOAD_STAGE_TTL_SECONDS = 12 * 60 * 60
+
 REQUIRED_SITE_FIELDS = ("site_id", "site_name", "start_date")
 OPTIONAL_SITE_FIELDS = ("end_date",)
 ALL_SITE_FIELDS = REQUIRED_SITE_FIELDS + OPTIONAL_SITE_FIELDS
+
+
+def _site_upload_stage_paths(upload_token):
+    token = str(upload_token or "").strip()
+    if not token or not all(ch in "0123456789abcdef" for ch in token.lower()):
+        raise ValueError("Invalid upload token.")
+
+    data_path = SITE_UPLOAD_STAGE_DIR / f"{token}.bin"
+    meta_path = SITE_UPLOAD_STAGE_DIR / f"{token}.json"
+    return data_path, meta_path
+
+
+def _cleanup_expired_staged_uploads():
+    SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        seconds=SITE_UPLOAD_STAGE_TTL_SECONDS
+    )
+
+    for meta_path in SITE_UPLOAD_STAGE_DIR.glob("*.json"):
+        token = meta_path.stem
+        data_path = SITE_UPLOAD_STAGE_DIR / f"{token}.bin"
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+            created_at = datetime.fromisoformat(meta.get("created_at", ""))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            created_at = datetime.fromtimestamp(
+                meta_path.stat().st_mtime, tz=timezone.utc
+            )
+
+        if created_at < cutoff:
+            try:
+                meta_path.unlink(missing_ok=True)
+                data_path.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("Failed cleaning expired staged upload: %s", token)
+
+
+def stage_site_upload(file_content, filename, user_id):
+    """Persist uploaded bytes to short-lived local staging and return a token."""
+    _cleanup_expired_staged_uploads()
+    SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+    token = uuid.uuid4().hex
+    data_path, meta_path = _site_upload_stage_paths(token)
+
+    with open(data_path, "wb") as f:
+        f.write(file_content)
+
+    meta = {
+        "user_id": str(user_id),
+        "filename": filename,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+
+    return token
+
+
+def get_staged_site_upload(upload_token, user_id, consume=False):
+    """Read staged upload bytes by token, enforcing ownership and TTL."""
+    data_path, meta_path = _site_upload_stage_paths(upload_token)
+    if not meta_path.exists() or not data_path.exists():
+        raise ValueError("Staged upload not found. Please upload the file again.")
+
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+
+    if str(meta.get("user_id")) != str(user_id):
+        raise ValueError("You do not have access to this staged upload.")
+
+    created_at = datetime.fromisoformat(meta.get("created_at", ""))
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+    if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS:
+        discard_staged_site_upload(upload_token, user_id)
+        raise ValueError("Staged upload expired. Please upload the file again.")
+
+    with open(data_path, "rb") as f:
+        content = f.read()
+
+    if consume:
+        discard_staged_site_upload(upload_token, user_id)
+
+    return {
+        "filename": meta.get("filename") or "sites",
+        "content": content,
+    }
+
+
+def discard_staged_site_upload(upload_token, user_id=None):
+    """Delete staged upload bytes + metadata. Returns True if removed."""
+    data_path, meta_path = _site_upload_stage_paths(upload_token)
+    if user_id is not None and meta_path.exists():
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+            if str(meta.get("user_id")) != str(user_id):
+                raise ValueError("You do not have access to this staged upload.")
+        except FileNotFoundError:
+            return False
+
+    removed = False
+    if meta_path.exists():
+        meta_path.unlink(missing_ok=True)
+        removed = True
+    if data_path.exists():
+        data_path.unlink(missing_ok=True)
+        removed = True
+    return removed
 
 
 def get_s3_client():

@@ -1727,6 +1727,37 @@ def submit_layout(user, recompute_config=None):
                                                                 className="mb-2",
                                                             ),
                                                             html.Div(
+                                                                [
+                                                                    dbc.Button(
+                                                                        "Large File Upload (Streamed)",
+                                                                        id="upload-sites-stream-btn",
+                                                                        color="secondary",
+                                                                        outline=True,
+                                                                        className="w-100 mb-1",
+                                                                    ),
+                                                                    html.Div(
+                                                                        "Use this option for very large files (recommended for files over 100 MB).",
+                                                                        className="small text-muted mb-2",
+                                                                    ),
+                                                                    dcc.Input(
+                                                                        id="site-upload-stream-payload",
+                                                                        type="text",
+                                                                        value="",
+                                                                        style={
+                                                                            "display": "none"
+                                                                        },
+                                                                    ),
+                                                                    html.Input(
+                                                                        id="upload-sites-stream-input",
+                                                                        type="file",
+                                                                        accept=".geojson,.json,.gpkg,.zip,.tar.gz,.tgz",
+                                                                        style={
+                                                                            "display": "none"
+                                                                        },
+                                                                    ),
+                                                                ]
+                                                            ),
+                                                            html.Div(
                                                                 id="upload-status"
                                                             ),
                                                             dbc.Collapse(
@@ -2528,6 +2559,7 @@ def submit_layout(user, recompute_config=None):
             dcc.Store(id="presets-store"),
             dcc.Store(id="site-set-refresh-store"),
             dcc.Store(id="site-upload-columns-store"),
+            dcc.Store(id="site-upload-stream-store"),
             dcc.Store(id="submit-lock-store", data=False),
             dcc.Store(id="recompute-config-store", data=rc or None),
         ]

@@ -52,6 +52,7 @@ from layouts import (
     submit_layout,
     task_detail_layout,
 )
+from services import get_site_upload_mapping_preview, stage_site_upload
 
 # ---------------------------------------------------------------------------
 # Logging — configure the root logger so that all application loggers (auth,
@@ -163,8 +164,10 @@ server.config["MAX_CONTENT_LENGTH"] = 800 * 1024 * 1024  # 800 MB
 # SECURITY NOTE: WTF_CSRF_CHECK_DEFAULT is intentionally disabled.
 # Dash submits all interactions as same-origin XHR/JSON requests which are
 # already guarded by SameSite cookies and the browser same-origin policy.
-# The Flask API routes (/api/*) are read-only GET endpoints behind
-# @flask_login.login_required, so they are not CSRF targets.
+# Most Flask API routes (/api/*) are read-only GET endpoints behind
+# @flask_login.login_required. The streamed upload endpoint is POST but it
+# accepts only multipart file bytes and does not perform state-changing account
+# actions.
 # WARNING: If you add Flask routes that accept POST/PUT/DELETE with
 # form data or cookies, decorate them with @csrf.protect to opt in.
 server.config["WTF_CSRF_CHECK_DEFAULT"] = False
@@ -216,6 +219,39 @@ def session_check():
     if flask_login.current_user.is_authenticated:
         return jsonify({"authenticated": True})
     return jsonify({"authenticated": False}), 401
+
+
+@server.route("/api/site-upload/stream-preview", methods=["POST"])
+@flask_login.login_required
+@limiter.limit("20 per minute")
+def site_upload_stream_preview():
+    """Receive a streamed multipart upload and return mapping preview + token."""
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return jsonify({"ok": False, "errors": ["No file was provided."]}), 400
+
+    filename = file.filename
+    file_content = file.read()
+    if not file_content:
+        return jsonify({"ok": False, "errors": ["Uploaded file is empty."]}), 400
+
+    preview, errors = get_site_upload_mapping_preview(file_content, filename)
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    upload_token = stage_site_upload(
+        file_content=file_content,
+        filename=filename,
+        user_id=flask_login.current_user.id,
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "filename": filename,
+            "upload_token": upload_token,
+            "preview": preview,
+        }
+    )
 
 
 # -- Refresh-token based session management -----------------------------------
