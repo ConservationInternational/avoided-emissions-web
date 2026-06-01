@@ -97,6 +97,23 @@ services:
 
   webapp:
     image: ${WEBAPP_IMAGE}
+    command:
+      [
+        "gunicorn",
+        "--bind",
+        "0.0.0.0:8050",
+        "--workers",
+        "1",
+        "--timeout",
+        "300",
+        "--max-requests",
+        "200",
+        "--max-requests-jitter",
+        "30",
+        "--worker-tmp-dir",
+        "/run/gunicorn",
+        "app:server",
+      ]
     env_file:
       - ../.env
     environment:
@@ -130,11 +147,11 @@ services:
         max_attempts: 3
       resources:
         limits:
-          cpus: "1.0"
-          memory: 1G
+          cpus: "2.0"
+          memory: 4G
         reservations:
-          cpus: "0.25"
-          memory: 256M
+          cpus: "0.5"
+          memory: 1G
 
   worker:
     image: ${WEBAPP_IMAGE}
