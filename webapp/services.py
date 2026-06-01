@@ -1915,41 +1915,56 @@ def list_user_site_sets(user_id, include_archived=False):
 
 
 def get_user_site_set_geojson(site_set_id):
-    """Export a user site set from PostGIS as a GeoJSON FeatureCollection."""
+    """Export a user site set from PostGIS as a GeoJSON FeatureCollection.
+
+    Rows are fetched individually and assembled into the FeatureCollection on
+    the Python side rather than using jsonb_agg() inside PostgreSQL.  The
+    aggregation approach builds the entire JSON blob in database working memory
+    (work_mem), which causes PostgreSQL backends to be killed by the OOM killer
+    when site sets are large.
+    """
     db = get_db()
     try:
-        row = db.execute(
+        rows = db.execute(
             text(
                 """
-                SELECT jsonb_build_object(
-                    'type', 'FeatureCollection',
-                    'features', COALESCE(jsonb_agg(
-                        jsonb_build_object(
-                            'type', 'Feature',
-                            'geometry', ST_AsGeoJSON(f.geom)::jsonb,
-                            'properties', jsonb_build_object(
-                                'site_id', f.site_id,
-                                'site_name', f.site_name,
-                                'start_date', to_char(f.start_date, 'YYYY-MM-DD'),
-                                'end_date', CASE
-                                    WHEN f.end_date IS NULL THEN NULL
-                                    ELSE to_char(f.end_date, 'YYYY-MM-DD')
-                                END,
-                                'area_ha', f.area_ha
-                            )
-                        )
-                        ORDER BY f.site_id
-                    ), '[]'::jsonb)
-                )
+                SELECT
+                    f.site_id,
+                    f.site_name,
+                    to_char(f.start_date, 'YYYY-MM-DD') AS start_date,
+                    CASE
+                        WHEN f.end_date IS NULL THEN NULL
+                        ELSE to_char(f.end_date, 'YYYY-MM-DD')
+                    END AS end_date,
+                    f.area_ha,
+                    ST_AsGeoJSON(f.geom) AS geom_json
                 FROM user_site_features f
                 WHERE f.site_set_id = :site_set_id
+                ORDER BY f.site_id
                 """
             ),
             {"site_set_id": str(site_set_id)},
-        ).fetchone()
-        return (
-            row[0] if row and row[0] else {"type": "FeatureCollection", "features": []}
-        )
+        ).fetchall()
+        # fetchall() retrieves all rows in a single round trip; PostgreSQL streams
+        # the result set and Python collects it here.  JSON assembly happens on the
+        # Python side so the database never has to hold the full FeatureCollection
+        # as a single JSONB value (which would exhaust work_mem on large site sets).
+        features = [
+            {
+                "type": "Feature",
+                "geometry": json.loads(r.geom_json),
+                "properties": {
+                    "site_id": r.site_id,
+                    "site_name": r.site_name,
+                    "start_date": r.start_date,
+                    "end_date": r.end_date,
+                    "area_ha": r.area_ha,
+                },
+            }
+            for r in rows
+            if r.geom_json is not None
+        ]
+        return {"type": "FeatureCollection", "features": features}
     finally:
         db.close()
 
