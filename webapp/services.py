@@ -32,6 +32,7 @@ from models import (
     TaskResultTotal,
     TaskSite,
     User,
+    UserSiteUpload,
     UserSiteSet,
     get_db,
 )
@@ -1123,6 +1124,130 @@ def _site_set_summary_row(row):
     }
 
 
+def _site_upload_summary_row(row):
+    meta = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
+    return {
+        "id": str(row.id),
+        "filename": row.original_filename,
+        "celery_task_id": row.celery_task_id,
+        "site_set_id": str(row.site_set_id) if row.site_set_id else None,
+        "site_set_name": row.site_set_name,
+        "n_features": int(row.n_features or 0),
+        "n_sites_imported": int(row.n_sites_imported or 0),
+        "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "error_message": row.error_message,
+        "ingest_stats": meta.get("ingest_stats"),
+    }
+
+
+def create_user_site_upload(user_id, filename, upload_token, column_mapping=None, n_features=0):
+    """Create and dispatch an asynchronous site import job."""
+    db = get_db()
+    normalized_mapping = _normalize_site_mapping(column_mapping)
+    try:
+        upload = UserSiteUpload(
+            user_id=user_id,
+            original_filename=filename or "sites",
+            n_features=int(n_features or 0),
+            status="pending",
+            extra_metadata={
+                "upload_token": upload_token,
+                "column_mapping": normalized_mapping,
+            },
+        )
+        db.add(upload)
+        db.flush()
+
+        async_result = webapp_tasks.import_user_site_upload_task.apply_async(
+            kwargs={
+                "upload_id": str(upload.id),
+                "user_id": str(user_id),
+                "upload_token": str(upload_token),
+                "column_mapping": normalized_mapping,
+            }
+        )
+        upload.celery_task_id = async_result.id
+        db.commit()
+        return _site_upload_summary_row(upload)
+    except Exception:
+        db.rollback()
+        try:
+            discard_staged_site_upload(upload_token, user_id)
+        except Exception:
+            logger.warning(
+                "Failed to discard staged upload after async dispatch error",
+                exc_info=True,
+            )
+        raise
+    finally:
+        db.close()
+
+
+def list_user_site_uploads(user_id, limit=50):
+    """Return recent background site import jobs for a user."""
+    db = get_db()
+    try:
+        rows = (
+            db.query(UserSiteUpload)
+            .filter(UserSiteUpload.user_id == user_id)
+            .order_by(UserSiteUpload.created_at.desc())
+            .limit(max(1, int(limit or 50)))
+            .all()
+        )
+        return [_site_upload_summary_row(row) for row in rows]
+    finally:
+        db.close()
+
+
+def update_user_site_upload_status(
+    upload_id,
+    *,
+    status,
+    started_at=None,
+    completed_at=None,
+    site_set_id=None,
+    site_set_name=None,
+    n_sites_imported=None,
+    error_message=None,
+    ingest_stats=None,
+):
+    """Update a background site import job row."""
+    db = get_db()
+    try:
+        upload = db.query(UserSiteUpload).filter(UserSiteUpload.id == upload_id).first()
+        if not upload:
+            return False
+
+        upload.status = status
+        if started_at is not None:
+            upload.started_at = started_at
+        if completed_at is not None:
+            upload.completed_at = completed_at
+        if site_set_id is not None:
+            upload.site_set_id = site_set_id
+        if site_set_name is not None:
+            upload.site_set_name = site_set_name
+        if n_sites_imported is not None:
+            upload.n_sites_imported = int(n_sites_imported)
+        if error_message is not None:
+            upload.error_message = error_message[:2000] if error_message else None
+        if ingest_stats is not None:
+            metadata = dict(upload.extra_metadata or {})
+            metadata["ingest_stats"] = ingest_stats
+            upload.extra_metadata = metadata
+
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def save_user_site_set(user_id, filename, file_content, column_mapping=None):
     """Persist uploaded sites as a reusable PostGIS-backed user site set.
 
@@ -1773,6 +1898,34 @@ def delete_user_site_set(site_set_id, user_id):
         db.delete(site_set)
         db.commit()
         return True, "Site set deleted."
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def rename_user_site_set(site_set_id, user_id, new_name):
+    """Rename a user-owned site set."""
+    cleaned_name = (new_name or "").strip()
+    if not cleaned_name:
+        return False, "Enter a name for the site set."
+    if len(cleaned_name) > 255:
+        return False, "Site set names must be 255 characters or fewer."
+
+    db = get_db()
+    try:
+        site_set = (
+            db.query(UserSiteSet)
+            .filter(UserSiteSet.id == site_set_id, UserSiteSet.user_id == user_id)
+            .first()
+        )
+        if not site_set:
+            return False, "Site set not found."
+
+        site_set.name = cleaned_name
+        db.commit()
+        return True, "Site set renamed."
     except Exception:
         db.rollback()
         raise

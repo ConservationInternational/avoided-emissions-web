@@ -71,6 +71,7 @@ celery_app.conf.update(
         "tasks.run_cog_merge": {"queue": "merge"},
         "tasks.rasterize_vectors": {"queue": "merge"},
         "tasks.import_vector_data": {"queue": "merge"},
+        "tasks.import_user_site_upload": {"queue": "merge"},
         "tasks.ingest_sdg_cog": {"queue": "merge"},
         "tasks.generate_match_quality_summary": {"queue": "merge"},
     },

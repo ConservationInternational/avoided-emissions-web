@@ -56,6 +56,9 @@ class User(Base):
     site_sets = relationship(
         "UserSiteSet", back_populates="user", cascade="all, delete-orphan"
     )
+    site_uploads = relationship(
+        "UserSiteUpload", back_populates="user", cascade="all, delete-orphan"
+    )
     covariate_presets = relationship(
         "CovariatePreset", back_populates="user", cascade="all, delete-orphan"
     )
@@ -328,6 +331,43 @@ class UserSiteFeature(Base):
     )
 
     site_set = relationship("UserSiteSet", back_populates="sites")
+
+
+class UserSiteUpload(Base):
+    """Background site-upload job metadata for asynchronous imports."""
+
+    __tablename__ = "user_site_uploads"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    original_filename = Column(String(500), nullable=False)
+    celery_task_id = Column(String(255), index=True)
+    site_set_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    site_set_name = Column(String(255))
+    n_features = Column(Integer)
+    n_sites_imported = Column(Integer)
+    status = Column(
+        Enum(
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            name="site_upload_status",
+        ),
+        nullable=False,
+        default="pending",
+    )
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    started_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+    error_message = Column(Text)
+    extra_metadata = Column("metadata", JSON, default=dict)
+
+    user = relationship("User", back_populates="site_uploads")
 
 
 class TaskResult(Base):
