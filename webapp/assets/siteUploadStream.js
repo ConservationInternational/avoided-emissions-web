@@ -5,6 +5,68 @@
         payloadInput.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
+    function formatBytes(value) {
+        const bytes = Number(value) || 0;
+        if (bytes < 1024) {
+            return `${bytes} B`;
+        }
+        const units = ["KB", "MB", "GB", "TB"];
+        let size = bytes / 1024;
+        let unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex += 1;
+        }
+        return `${size.toFixed(1)} ${units[unitIndex]}`;
+    }
+
+    function uploadFileWithProgress(file, onProgress) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", "/api/site-upload/stream-preview", true);
+            xhr.withCredentials = true;
+
+            xhr.upload.onprogress = (event) => {
+                if (!event.lengthComputable || typeof onProgress !== "function") {
+                    return;
+                }
+                onProgress(event.loaded, event.total);
+            };
+
+            xhr.onload = () => {
+                let body;
+                try {
+                    body = xhr.responseText
+                        ? JSON.parse(xhr.responseText)
+                        : { ok: false, errors: ["Empty server response."] };
+                } catch (_error) {
+                    body = {
+                        ok: false,
+                        errors: ["Unexpected server response while uploading file."],
+                    };
+                }
+
+                resolve({
+                    status: xhr.status,
+                    ok: xhr.status >= 200 && xhr.status < 300,
+                    body,
+                });
+            };
+
+            xhr.onerror = () => {
+                reject(new Error("Network error during upload."));
+            };
+
+            xhr.onabort = () => {
+                reject(new Error("Upload was cancelled."));
+            };
+
+            const formData = new FormData();
+            formData.append("file", file, file.name);
+            xhr.send(formData);
+        });
+    }
+
     function bindUploadControls() {
         const button = document.getElementById("upload-sites-stream-btn");
         const payloadInput = document.getElementById("site-upload-stream-payload");
@@ -37,27 +99,25 @@
 
             const originalText = button.textContent;
             button.disabled = true;
-            button.textContent = "Uploading...";
+            button.textContent = "Uploading... 0%";
 
             try {
-                const formData = new FormData();
-                formData.append("file", file, file.name);
+                const response = await uploadFileWithProgress(
+                    file,
+                    (loaded, total) => {
+                        const pct = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+                        button.textContent = `Uploading... ${pct}% (${formatBytes(loaded)} / ${formatBytes(total)})`;
+                    },
+                );
 
-                const response = await fetch("/api/site-upload/stream-preview", {
-                    method: "POST",
-                    body: formData,
-                    credentials: "same-origin",
-                });
+                // Upload bytes have reached the server; server may still be
+                // parsing the file and generating a preview.
+                button.textContent = "Processing preview...";
 
-                let body;
-                try {
-                    body = await response.json();
-                } catch (_error) {
-                    body = {
-                        ok: false,
-                        errors: ["Unexpected server response while uploading file."],
-                    };
-                }
+                const body = response.body || {
+                    ok: false,
+                    errors: ["Unexpected server response while uploading file."],
+                };
 
                 emitPayload(payloadInput, {
                     ts: Date.now(),
