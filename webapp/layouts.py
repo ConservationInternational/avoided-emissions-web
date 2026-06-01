@@ -561,6 +561,16 @@ USER_SITE_SET_COLUMNS = [
         "minWidth": 100,
         "valueFormatter": {"function": "params.value ? 'Yes' : 'No'"},
     },
+    {
+        "headerName": "Actions",
+        "field": "id",
+        "flex": 1.2,
+        "minWidth": 230,
+        "sortable": False,
+        "filter": False,
+        "pinned": "right",
+        "cellRenderer": "SiteSetActions",
+    },
 ]
 
 USER_SITE_UPLOAD_COLUMNS = [
@@ -577,6 +587,7 @@ USER_SITE_UPLOAD_COLUMNS = [
         "field": "status",
         "flex": 0.9,
         "minWidth": 110,
+        "cellRenderer": "StatusBadge",
     },
     {
         "headerName": "Detected Features",
@@ -636,6 +647,16 @@ USER_SITE_UPLOAD_COLUMNS = [
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "error_message",
     },
+    {
+        "headerName": "Actions",
+        "field": "id",
+        "flex": 0.95,
+        "minWidth": 120,
+        "sortable": False,
+        "filter": False,
+        "pinned": "right",
+        "cellRenderer": "SiteUploadActions",
+    },
 ]
 
 USER_SITE_UPLOAD_ROW_STYLES = [
@@ -654,6 +675,10 @@ USER_SITE_UPLOAD_ROW_STYLES = [
     {
         "condition": "params.data.status === 'failed'",
         "style": {"backgroundColor": "#F8D7DA", "color": "#721C24"},
+    },
+    {
+        "condition": "params.data.status === 'cancelled'",
+        "style": {"backgroundColor": "#FFF3CD", "color": "#664D03"},
     },
 ]
 
@@ -3211,100 +3236,6 @@ def admin_layout(user):
                                     ),
                                     dbc.Card(
                                         [
-                                            dbc.CardHeader(
-                                                "Manage Previously Uploaded Site Sets"
-                                            ),
-                                            dbc.CardBody(
-                                                [
-                                                    dbc.Row(
-                                                        [
-                                                            dbc.Col(
-                                                                [
-                                                                    dbc.Label(
-                                                                        "Selected Site Set",
-                                                                        size="sm",
-                                                                    ),
-                                                                    dbc.Select(
-                                                                        id="admin-site-set-selector",
-                                                                        options=[],
-                                                                        placeholder="Select a site set...",
-                                                                    ),
-                                                                ],
-                                                                xs=12,
-                                                                lg=4,
-                                                            ),
-                                                            dbc.Col(
-                                                                [
-                                                                    dbc.Label(
-                                                                        "Rename Site Set",
-                                                                        size="sm",
-                                                                    ),
-                                                                    dbc.Input(
-                                                                        id="admin-site-set-name",
-                                                                        type="text",
-                                                                        placeholder="Enter a site set name...",
-                                                                    ),
-                                                                ],
-                                                                xs=12,
-                                                                lg=4,
-                                                            ),
-                                                            dbc.Col(
-                                                                [
-                                                                    html.Div(
-                                                                        style={
-                                                                            "height": "32px"
-                                                                        }
-                                                                    ),
-                                                                    dbc.ButtonGroup(
-                                                                        [
-                                                                            dbc.Button(
-                                                                                "Rename",
-                                                                                id="admin-rename-site-set-btn",
-                                                                                color="primary",
-                                                                                size="sm",
-                                                                            ),
-                                                                            dbc.Button(
-                                                                                "Archive",
-                                                                                id="admin-archive-site-set-btn",
-                                                                                color="warning",
-                                                                                size="sm",
-                                                                            ),
-                                                                            dbc.Button(
-                                                                                "Delete",
-                                                                                id="admin-delete-site-set-btn",
-                                                                                color="danger",
-                                                                                size="sm",
-                                                                            ),
-                                                                        ]
-                                                                    ),
-                                                                ],
-                                                                width="auto",
-                                                                className="d-flex align-items-end",
-                                                            ),
-                                                        ],
-                                                        className="g-3 mb-2",
-                                                    ),
-                                                    dbc.Checkbox(
-                                                        id="admin-show-archived-site-sets",
-                                                        label="Show archived site sets",
-                                                        value=False,
-                                                        className="mb-2",
-                                                    ),
-                                                    html.Div(
-                                                        id="admin-site-set-metadata",
-                                                        className="mb-2",
-                                                    ),
-                                                    html.Div(
-                                                        id="admin-site-set-action-status",
-                                                        className="mt-2",
-                                                    ),
-                                                ]
-                                            ),
-                                        ],
-                                        className="ae-section-card mb-3",
-                                    ),
-                                    dbc.Card(
-                                        [
                                             dbc.CardBody(
                                                 [
                                                     dbc.Row(
@@ -3328,11 +3259,21 @@ def admin_layout(user):
                                                         ],
                                                         className="ae-action-bar align-items-center mb-3",
                                                     ),
+                                                    dbc.Checkbox(
+                                                        id="admin-show-archived-site-sets",
+                                                        label="Show archived site sets",
+                                                        value=False,
+                                                        className="mb-2",
+                                                    ),
                                                     _make_ag_grid(
                                                         table_id="admin-site-sets-table",
                                                         column_defs=USER_SITE_SET_COLUMNS,
                                                         row_model="clientSide",
                                                         height="360px",
+                                                    ),
+                                                    html.Div(
+                                                        id="admin-site-set-row-action-status",
+                                                        className="mt-2",
                                                     ),
                                                 ]
                                             )
@@ -3370,6 +3311,10 @@ def admin_layout(user):
                                                         row_model="clientSide",
                                                         height="360px",
                                                         style_conditions=USER_SITE_UPLOAD_ROW_STYLES,
+                                                    ),
+                                                    html.Div(
+                                                        id="admin-site-upload-action-status",
+                                                        className="mt-2",
                                                     ),
                                                 ]
                                             )

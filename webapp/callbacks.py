@@ -70,6 +70,7 @@ from services import (
     update_task_info,
     validate_share_token,
     archive_user_site_set,
+    cancel_user_site_upload,
     create_user_site_upload,
     delete_user_site_set,
     list_user_site_uploads,
@@ -1306,174 +1307,115 @@ def register_callbacks(app, limiter=None):
             Output("admin-site-sets-total-count", "children"),
             Output("admin-site-upload-table", "rowData"),
             Output("admin-site-upload-total-count", "children"),
-            Output("admin-site-set-selector", "options"),
-            Output("admin-site-set-selector", "value"),
         ],
         [
             Input("admin-refresh-interval", "n_intervals"),
             Input("site-set-refresh-store", "data"),
             Input("admin-show-archived-site-sets", "value"),
         ],
-        State("admin-site-set-selector", "value"),
     )
-    def refresh_admin_site_upload_views(
-        _n_intervals, _refresh_token, show_archived, current_value
-    ):
+    def refresh_admin_site_upload_views(_n_intervals, _refresh_token, show_archived):
         user = get_current_user()
         if not user or not user.is_admin:
             raise PreventUpdate
 
         site_sets = list_user_site_sets(user.id, include_archived=bool(show_archived))
         uploads = list_user_site_uploads(user.id)
-        site_set_options = [
-            {
-                "label": (
-                    f"{row['name']} ({row['n_sites']} sites)"
-                    + (" [Archived]" if row.get("is_archived") else "")
-                ),
-                "value": row["id"],
-            }
-            for row in site_sets
-        ]
-        valid_ids = {row["id"] for row in site_sets}
-        selected_value = (
-            current_value
-            if current_value in valid_ids
-            else (site_set_options[0]["value"] if site_set_options else None)
-        )
 
         archived_count = sum(1 for row in site_sets if row.get("is_archived"))
         running_count = sum(1 for row in uploads if row.get("status") == "running")
         queued_count = sum(1 for row in uploads if row.get("status") == "pending")
+        cancelled_count = sum(1 for row in uploads if row.get("status") == "cancelled")
 
         return (
             site_sets,
             f"Total: {len(site_sets)} | Archived: {archived_count}",
             uploads,
-            f"Total: {len(uploads)} | Pending: {queued_count} | Running: {running_count}",
-            site_set_options,
-            selected_value,
+            "Total: "
+            f"{len(uploads)} | Pending: {queued_count} | Running: {running_count} "
+            f"| Cancelled: {cancelled_count}",
         )
 
     @app.callback(
         [
-            Output("admin-site-set-name", "value"),
-            Output("admin-site-set-metadata", "children"),
-            Output("admin-archive-site-set-btn", "children"),
-        ],
-        Input("admin-site-set-selector", "value"),
-        prevent_initial_call=False,
-    )
-    def load_admin_selected_site_set(site_set_id):
-        user = get_current_user()
-        if not user or not user.is_admin:
-            raise PreventUpdate
-
-        if not site_set_id:
-            return (
-                "",
-                html.Small("No site set selected.", className="text-muted"),
-                "Archive",
-            )
-
-        detail = get_user_site_set_detail(site_set_id, user.id)
-        if not detail:
-            return (
-                "",
-                html.Small("Selected site set was not found.", className="text-danger"),
-                "Archive",
-            )
-
-        metadata = html.Div(
-            [
-                html.Small(f"Name: {detail['name']}", className="d-block text-muted"),
-                html.Small(
-                    f"Source file: {detail['filename']} ({detail['file_size_bytes']:,} bytes)",
-                    className="d-block text-muted",
-                ),
-                html.Small(
-                    f"Uploaded: {(detail['uploaded_at'] or '').replace('T', ' ')[:19]} UTC",
-                    className="d-block text-muted",
-                ),
-                html.Small(
-                    f"Sites: {detail['n_sites']}",
-                    className="d-block text-muted",
-                ),
-            ]
-        )
-        return (
-            detail["name"],
-            metadata,
-            "Restore" if detail.get("is_archived") else "Archive",
-        )
-
-    @app.callback(
-        [
-            Output("admin-site-set-action-status", "children"),
+            Output("admin-site-set-row-action-status", "children"),
             Output("site-set-refresh-store", "data", allow_duplicate=True),
-            Output("admin-site-set-selector", "value", allow_duplicate=True),
         ],
-        [
-            Input("admin-rename-site-set-btn", "n_clicks"),
-            Input("admin-archive-site-set-btn", "n_clicks"),
-            Input("admin-delete-site-set-btn", "n_clicks"),
-        ],
-        [
-            State("admin-site-set-selector", "value"),
-            State("admin-site-set-name", "value"),
-        ],
+        Input("admin-site-sets-table", "cellRendererData"),
         prevent_initial_call=True,
     )
-    def handle_admin_site_set_actions(
-        _rename_clicks, _archive_clicks, _delete_clicks, selected_set_id, new_name
-    ):
-        ctx = callback_context
-        if not ctx.triggered:
+    def handle_admin_site_set_row_actions(renderer_data):
+        if not renderer_data:
             raise PreventUpdate
 
-        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        value = renderer_data.get("value") or {}
+        action = value.get("action")
+        selected_set_id = value.get("site_set_id")
+        new_name = value.get("new_name")
+        if not action or not selected_set_id:
+            raise PreventUpdate
+
         user = get_current_user()
         if not user or not user.is_admin:
             return (
                 dbc.Alert("Admin access required.", color="danger"),
                 no_update,
-                no_update,
-            )
-
-        if not selected_set_id:
-            return (
-                dbc.Alert("Select a site set first.", color="warning"),
-                no_update,
-                no_update,
             )
 
         try:
-            if trigger_id == "admin-rename-site-set-btn":
+            if action == "rename_site_set":
                 success, message = rename_user_site_set(
                     selected_set_id, user.id, new_name
                 )
-            elif trigger_id == "admin-archive-site-set-btn":
+            elif action == "toggle_archive_site_set":
                 success, message = archive_user_site_set(selected_set_id, user.id)
-            elif trigger_id == "admin-delete-site-set-btn":
+            elif action == "delete_site_set":
                 success, message = delete_user_site_set(selected_set_id, user.id)
             else:
                 raise PreventUpdate
 
             color = "success" if success else "warning"
-            next_value = (
-                None
-                if success and trigger_id == "admin-delete-site-set-btn"
-                else selected_set_id
-            )
-            return dbc.Alert(message, color=color), str(_uuid.uuid4()), next_value
+            return dbc.Alert(message, color=color), str(_uuid.uuid4())
         except Exception:
-            logger.exception("Failed admin site set action: %s", trigger_id)
+            logger.exception("Failed admin site set action: %s", action)
             report_exception()
             return (
                 dbc.Alert("Failed to update site set.", color="danger"),
                 no_update,
-                no_update,
             )
+
+    @app.callback(
+        [
+            Output("admin-site-upload-action-status", "children"),
+            Output("site-set-refresh-store", "data", allow_duplicate=True),
+        ],
+        Input("admin-site-upload-table", "cellRendererData"),
+        prevent_initial_call=True,
+    )
+    def handle_admin_site_upload_row_actions(renderer_data):
+        if not renderer_data:
+            raise PreventUpdate
+
+        value = renderer_data.get("value") or {}
+        action = value.get("action")
+        upload_id = value.get("upload_id")
+        if action != "cancel_import" or not upload_id:
+            raise PreventUpdate
+
+        user = get_current_user()
+        if not user or not user.is_admin:
+            return dbc.Alert("Admin access required.", color="danger"), no_update
+
+        try:
+            success, message = cancel_user_site_upload(upload_id, user.id)
+            color = "success" if success else "warning"
+            return dbc.Alert(message, color=color), str(_uuid.uuid4())
+        except Exception:
+            logger.exception(
+                "Failed admin upload cancel action for upload %s", upload_id
+            )
+            report_exception()
+            return dbc.Alert("Failed to cancel upload.", color="danger"), no_update
 
     @app.callback(
         Output("site-upload-mapping-status", "children"),

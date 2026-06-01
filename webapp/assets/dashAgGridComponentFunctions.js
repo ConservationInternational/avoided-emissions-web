@@ -445,6 +445,151 @@ dagcomponentfuncs.TaskActions = function (props) {
 };
 
 /**
+ * SiteUploadActions – renders a per-row cancel button for background imports.
+ */
+dagcomponentfuncs.SiteUploadActions = function (props) {
+    var data = props.data || {};
+    var status = (data.status || "").toLowerCase();
+    var useStateResult = React.useState(false);
+    var pending = useStateResult[0];
+    var setPending = useStateResult[1];
+    var statusAllowsCancel = ["pending", "running"].indexOf(status) >= 0;
+    var canCancel = statusAllowsCancel && !pending;
+
+    return React.createElement(
+        "button",
+        {
+            style: {
+                padding: "1px 6px",
+                fontSize: "10px",
+                fontWeight: 600,
+                border: "1px solid #dc3545",
+                borderRadius: "3px",
+                backgroundColor: canCancel ? "#fff" : "#e9ecef",
+                color: canCancel ? "#842029" : "#6c757d",
+                cursor: canCancel ? "pointer" : "not-allowed",
+            },
+            disabled: !canCancel,
+            title: canCancel
+                ? "Cancel this import"
+                : "Only pending/running imports can be cancelled",
+            onClick: function (e) {
+                e.stopPropagation();
+                if (!canCancel) return;
+                if (!window.confirm("Cancel this background site import?")) return;
+                setPending(true);
+                props.setData({
+                    action: "cancel_import",
+                    upload_id: data.id,
+                    _actionTs: Date.now(),
+                });
+            },
+        },
+        pending ? "Cancelling..." : "\u2715 Cancel"
+    );
+};
+
+/**
+ * SiteSetActions – renders per-row rename/archive/delete buttons.
+ */
+dagcomponentfuncs.SiteSetActions = function (props) {
+    var data = props.data || {};
+    var isArchived = !!data.is_archived;
+    var useStateResult = React.useState(false);
+    var pending = useStateResult[0];
+    var setPending = useStateResult[1];
+
+    var btnStyle = {
+        padding: "1px 6px",
+        fontSize: "10px",
+        fontWeight: 600,
+        borderRadius: "3px",
+        backgroundColor: pending ? "#e9ecef" : "#fff",
+        cursor: pending ? "not-allowed" : "pointer",
+    };
+
+    return React.createElement(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: "4px" } },
+        React.createElement(
+            "button",
+            {
+                style: Object.assign({}, btnStyle, {
+                    border: "1px solid #0d6efd",
+                    color: pending ? "#6c757d" : "#0d6efd",
+                }),
+                disabled: pending,
+                title: "Rename this site set",
+                onClick: function (e) {
+                    e.stopPropagation();
+                    if (pending) return;
+                    var currentName = data.name || "";
+                    var nextName = window.prompt("Rename site set:", currentName);
+                    if (nextName === null) return;
+                    nextName = String(nextName).trim();
+                    if (!nextName || nextName === currentName) return;
+                    setPending(true);
+                    props.setData({
+                        action: "rename_site_set",
+                        site_set_id: data.id,
+                        new_name: nextName,
+                        _actionTs: Date.now(),
+                    });
+                },
+            },
+            pending ? "Working..." : "Rename"
+        ),
+        React.createElement(
+            "button",
+            {
+                style: Object.assign({}, btnStyle, {
+                    border: "1px solid #ffc107",
+                    color: pending ? "#6c757d" : "#664d03",
+                }),
+                disabled: pending,
+                title: isArchived ? "Restore this site set" : "Archive this site set",
+                onClick: function (e) {
+                    e.stopPropagation();
+                    if (pending) return;
+                    var actionLabel = isArchived ? "restore" : "archive";
+                    if (!window.confirm("Are you sure you want to " + actionLabel + " this site set?")) return;
+                    setPending(true);
+                    props.setData({
+                        action: "toggle_archive_site_set",
+                        site_set_id: data.id,
+                        _actionTs: Date.now(),
+                    });
+                },
+            },
+            pending ? "Working..." : (isArchived ? "Restore" : "Archive")
+        ),
+        React.createElement(
+            "button",
+            {
+                style: Object.assign({}, btnStyle, {
+                    border: "1px solid #dc3545",
+                    color: pending ? "#6c757d" : "#842029",
+                }),
+                disabled: pending,
+                title: "Delete this site set",
+                onClick: function (e) {
+                    e.stopPropagation();
+                    if (pending) return;
+                    if (!window.confirm("Delete this site set? This cannot be undone.")) return;
+                    setPending(true);
+                    props.setData({
+                        action: "delete_site_set",
+                        site_set_id: data.id,
+                        _actionTs: Date.now(),
+                    });
+                },
+            },
+            pending ? "Working..." : "Delete"
+        )
+    );
+};
+
+/**
  * TruncatedList – renders an abbreviated comma-separated list with a
  * tooltip showing the full list on mouseover.
  *

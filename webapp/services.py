@@ -1269,6 +1269,52 @@ def list_user_site_uploads(user_id, limit=50):
         db.close()
 
 
+def cancel_user_site_upload(upload_id, user_id):
+    """Cancel a user-owned background site import job.
+
+    Only uploads in ``pending`` or ``running`` state can be cancelled.
+    The associated Celery task is revoked and the upload row is marked
+    ``cancelled``.
+    """
+    db = get_db()
+    try:
+        upload = (
+            db.query(UserSiteUpload)
+            .filter(UserSiteUpload.id == upload_id, UserSiteUpload.user_id == user_id)
+            .first()
+        )
+        if not upload:
+            return False, "Upload job not found."
+
+        if upload.status in {"completed", "failed", "cancelled"}:
+            return False, f"Upload is already {upload.status}."
+
+        if upload.status not in {"pending", "running"}:
+            return False, f"Upload cannot be cancelled from status '{upload.status}'."
+
+        if upload.celery_task_id:
+            try:
+                webapp_tasks.import_user_site_upload_task.AsyncResult(
+                    upload.celery_task_id
+                ).revoke(terminate=True, signal="SIGTERM")
+            except Exception:
+                logger.exception(
+                    "Failed to revoke upload Celery task %s", upload.celery_task_id
+                )
+                return False, "Failed to cancel upload task."
+
+        upload.status = "cancelled"
+        upload.completed_at = datetime.now(timezone.utc)
+        upload.error_message = "Cancelled by admin."
+        db.commit()
+        return True, "Upload cancelled."
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def update_user_site_upload_status(
     upload_id,
     *,
