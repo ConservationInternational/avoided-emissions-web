@@ -63,6 +63,7 @@ def import_user_site_upload_task(
         upload_uuid,
         status="running",
         started_at=datetime.now(timezone.utc),
+        n_sites_imported=0,
         error_message=None,
     )
 
@@ -71,6 +72,7 @@ def import_user_site_upload_task(
             user_uuid,
             upload_token,
             column_mapping=column_mapping,
+            upload_id=upload_uuid,
         )
         update_user_site_upload_status(
             upload_uuid,
@@ -95,6 +97,7 @@ def import_user_site_upload_task(
             upload_uuid,
             status="failed",
             completed_at=datetime.now(timezone.utc),
+            n_sites_imported=0,
             error_message=str(exc),
         )
         raise

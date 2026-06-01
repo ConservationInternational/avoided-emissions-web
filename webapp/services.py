@@ -15,6 +15,7 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 
 import boto3
 from botocore.exceptions import ClientError
@@ -86,6 +87,8 @@ SITE_UPLOAD_STAGE_TTL_SECONDS = 12 * 60 * 60
 SITE_UPLOAD_STAGE_S3_PREFIX = f"{Config.S3_PREFIX.rstrip('/')}/site-upload-stage"
 SITE_UPLOAD_INSERT_BATCH_SIZE = 1000
 SITE_UPLOAD_INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024
+SITE_UPLOAD_PROGRESS_BATCH_SIZE = 250
+SITE_UPLOAD_PROGRESS_INTERVAL_SECONDS = 10
 
 REQUIRED_SITE_FIELDS = ("site_id", "site_name", "start_date")
 OPTIONAL_SITE_FIELDS = ("end_date",)
@@ -1453,9 +1456,14 @@ def save_user_site_set(user_id, filename, file_content, column_mapping=None):
 
 
 def save_user_site_set_from_staged(
-    user_id, upload_token, column_mapping=None, consume=True
+    user_id, upload_token, column_mapping=None, consume=True, upload_id=None
 ):
-    """Persist staged upload without loading full file content into memory."""
+    """Persist staged upload without loading full file content into memory.
+
+    When ``upload_id`` is provided, periodically writes import progress back to
+    the corresponding ``user_site_uploads`` row so the admin UI can surface it
+    while the Celery worker is still processing the file.
+    """
     local_path = None
     extracted_archive_dir = None
     try:
@@ -1535,6 +1543,26 @@ def save_user_site_set_from_staged(
 
             batch_rows = []
             batch_row_bytes = 0
+            last_progress_sites = 0
+            last_progress_at = monotonic()
+
+            def _report_upload_progress(force=False):
+                nonlocal last_progress_sites, last_progress_at
+                if upload_id is None or n_sites <= 0:
+                    return
+                now = monotonic()
+                if not force and (
+                    n_sites - last_progress_sites < SITE_UPLOAD_PROGRESS_BATCH_SIZE
+                    and now - last_progress_at < SITE_UPLOAD_PROGRESS_INTERVAL_SECONDS
+                ):
+                    return
+                update_user_site_upload_status(
+                    upload_id,
+                    status="running",
+                    n_sites_imported=n_sites,
+                )
+                last_progress_sites = n_sites
+                last_progress_at = now
 
             def _flush_batch_rows():
                 nonlocal batch_row_bytes
@@ -1543,6 +1571,7 @@ def save_user_site_set_from_staged(
                 db.execute(insert_sql, batch_rows)
                 batch_rows.clear()
                 batch_row_bytes = 0
+                _report_upload_progress()
 
             if use_streaming_ingest:
                 from pyproj import Transformer  # noqa: PLC0415
@@ -1703,6 +1732,8 @@ def save_user_site_set_from_staged(
                             "geom_geojson": json.dumps(geom.__geo_interface__),
                         }
                         batch_rows.append(batch_row)
+                        n_sites += 1
+                        _report_upload_progress()
                         batch_row_bytes += len(
                             json.dumps(batch_row, default=str).encode("utf-8")
                         )
@@ -1711,7 +1742,6 @@ def save_user_site_set_from_staged(
                             or batch_row_bytes >= SITE_UPLOAD_INSERT_BATCH_MAX_BYTES
                         ):
                             _flush_batch_rows()
-                        n_sites += 1
             else:
                 gdf, errors = _parse_sites_geometry_file_from_path(local_path, filename)
                 if errors:
@@ -1737,8 +1767,7 @@ def save_user_site_set_from_staged(
                 elif gdf.crs.to_epsg() != 4326:
                     gdf = gdf.to_crs(epsg=4326)
 
-                n_sites = int(len(gdf))
-                if n_sites > 0:
+                if len(gdf) > 0:
                     minx, miny, maxx, maxy = gdf.total_bounds
                     bounds_minx, bounds_miny, bounds_maxx, bounds_maxy = (
                         minx,
@@ -1764,6 +1793,8 @@ def save_user_site_set_from_staged(
                         "geom_geojson": json.dumps(row.geometry.__geo_interface__),
                     }
                     batch_rows.append(batch_row)
+                    n_sites += 1
+                    _report_upload_progress()
                     batch_row_bytes += len(
                         json.dumps(batch_row, default=str).encode("utf-8")
                     )
@@ -1774,6 +1805,7 @@ def save_user_site_set_from_staged(
                         _flush_batch_rows()
 
             _flush_batch_rows()
+            _report_upload_progress(force=True)
 
             if n_sites == 0:
                 skipped_total = (
