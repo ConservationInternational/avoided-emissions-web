@@ -1067,6 +1067,25 @@ def register_callbacks(app, limiter=None):
             if contents is None:
                 raise PreventUpdate
 
+            if "," not in contents:
+                return (
+                    dbc.Alert(
+                        "Invalid file upload — could not decode the uploaded content. Please try again.",
+                        color="danger",
+                    ),
+                    no_update,
+                    no_update,
+                    False,
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [],
+                    None,
+                    [{"label": "(none)", "value": ""}],
+                    "",
+                )
             _, content_string = contents.split(",", 1)
             decoded = base64.b64decode(content_string)
 

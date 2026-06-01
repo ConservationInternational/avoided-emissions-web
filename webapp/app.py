@@ -155,9 +155,9 @@ server.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 if not Config.DEBUG:
     server.config["SESSION_COOKIE_SECURE"] = True
 
-# --- Upload size limit (50 MB) ---
-# Prevents memory/disk exhaustion from arbitrarily large file uploads.
-server.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
+# --- Upload size limit (800 MB) ---
+# Supports large site geometry files (up to several hundred MB).
+server.config["MAX_CONTENT_LENGTH"] = 800 * 1024 * 1024  # 800 MB
 
 # Initialize CSRF protection.
 # SECURITY NOTE: WTF_CSRF_CHECK_DEFAULT is intentionally disabled.

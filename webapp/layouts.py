@@ -1721,6 +1721,9 @@ def submit_layout(user, recompute_config=None):
                                                                 ),
                                                                 multiple=False,
                                                                 accept=".geojson,.json,.gpkg,.zip,.tar.gz,.tgz",
+                                                                max_size=800
+                                                                * 1024
+                                                                * 1024,
                                                                 className="mb-2",
                                                             ),
                                                             html.Div(
