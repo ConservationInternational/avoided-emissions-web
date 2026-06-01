@@ -25,7 +25,7 @@ DEFAULT_COVARIATES = [
     "friction_surface",
     "pop_2015",
     "pop_growth",
-    "total_biomass",
+    "total_biomass_2025",
 ]
 
 # All available covariates (matching + additional options)

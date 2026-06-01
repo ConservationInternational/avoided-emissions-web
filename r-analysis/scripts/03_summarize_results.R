@@ -6,7 +6,7 @@
 #
 # Emissions calculation:
 #   forest_frac_remaining = forest_at_year_end / forest_at_year_start
-#   biomass_at_year_end = total_biomass * forest_frac_remaining
+#   biomass_at_year_end = total_biomass_2025 * forest_frac_remaining
 #   C_change = diff(biomass_at_year_end) * 0.5   (biomass -> carbon)
 #   Emissions_MgCO2e = C_change * -3.67           (carbon -> CO2e)
 #   Avoided = control_emissions - treatment_emissions
@@ -238,7 +238,7 @@ PRE_INTERVENTION_YEARS <- 5
 if (length(match_files_all) > 0) {
     required_match_cols <- c(
         "cell", "site_id", "id_numeric", "area_ha", "treatment",
-        "sampled_fraction", "total_biomass", "match_group", "match_weight",
+        "sampled_fraction", "total_biomass_2025", "match_group", "match_weight",
         "sampling_weight"
     )
 
@@ -646,7 +646,7 @@ if (length(match_files_all) > 0) {
             m %>%
                 select(
                     cell, site_id, id_numeric, sub_site_index, area_ha,
-                    treatment, sampled_fraction, total_biomass, match_group,
+                    treatment, sampled_fraction, total_biomass_2025, match_group,
                     match_weight, sampling_weight,
                     all_of(fc_cols[fc_cols %in% names(m)])
                 ) %>%
@@ -686,7 +686,7 @@ if (length(match_files_all) > 0) {
                         NA_real_
                     },
                     biomass_at_year_end =
-                        total_biomass * forest_frac_remaining,
+                        total_biomass_2025 * forest_frac_remaining,
                     C_change =
                         c(NA, diff(biomass_at_year_end)) * 0.5,
                     Emissions_MgCO2e = C_change * -3.67

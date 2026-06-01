@@ -476,7 +476,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     all_layers = list(
         dict.fromkeys(
             config["covariates"]
-            + ["total_biomass"]
+            + ["total_biomass_2025"]
             + config["exact_match_vars"]
             + [f"fc_{y}" for y in config["fc_years"]]
         )

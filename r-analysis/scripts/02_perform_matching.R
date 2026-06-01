@@ -819,7 +819,7 @@ match_site_matchit <- function(d, f, precomputed_scores = NULL) {
 n_failed <- 0L
 required_match_cols <- c(
     "cell", "site_id", "id_numeric", "area_ha", "treatment",
-    "sampled_fraction", "total_biomass", "match_group", "match_weight"
+    "sampled_fraction", "total_biomass_2025", "match_group", "match_weight"
 )
 
 # ======================================================================
