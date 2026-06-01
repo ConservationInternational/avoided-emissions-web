@@ -83,6 +83,7 @@ MAX_ARCHIVE_COMPRESSION_RATIO = 200.0
 SITE_UPLOAD_STAGE_DIR = Path(tempfile.gettempdir()) / "ae_site_upload_stage"
 SITE_UPLOAD_STAGE_TTL_SECONDS = 12 * 60 * 60
 SITE_UPLOAD_STAGE_S3_PREFIX = f"{Config.S3_PREFIX.rstrip('/')}/site-upload-stage"
+SITE_UPLOAD_INSERT_BATCH_SIZE = 1000
 
 REQUIRED_SITE_FIELDS = ("site_id", "site_name", "start_date")
 OPTIONAL_SITE_FIELDS = ("end_date",)
@@ -808,6 +809,42 @@ def _repair_geometries(gdf):
     return gdf
 
 
+def _repair_geometry_single(geom):
+    """Repair a single geometry (streaming-friendly version)."""
+    from shapely.geometry import MultiPolygon as ShapelyMultiPolygon
+    from shapely.validation import make_valid
+
+    if geom is None or geom.is_empty:
+        return geom
+
+    if geom.geom_type == "Polygon":
+        geom = _clean_polygon(geom)
+    elif geom.geom_type == "MultiPolygon":
+        geom = ShapelyMultiPolygon([_clean_polygon(p) for p in geom.geoms])
+
+    if not geom.is_valid:
+        geom = make_valid(geom)
+        if geom.geom_type == "GeometryCollection":
+            polys = [
+                g for g in geom.geoms if g.geom_type in ("Polygon", "MultiPolygon")
+            ]
+            if not polys:
+                return geom
+            geom = (
+                polys[0]
+                if len(polys) == 1
+                else ShapelyMultiPolygon(
+                    [
+                        p
+                        for g in polys
+                        for p in (g.geoms if g.geom_type == "MultiPolygon" else [g])
+                    ]
+                )
+            )
+
+    return geom
+
+
 def _parse_sites_geometry_file(file_content, filename):
     """Parse uploaded site files and validate geometry/CRS constraints."""
     errors = []
@@ -1209,30 +1246,12 @@ def save_user_site_set_from_staged(
         local_path, filename, file_size_bytes = _materialize_staged_upload_path(
             upload_token, user_id
         )
-        gdf, errors = _parse_sites_geometry_file_from_path(local_path, filename)
-        if errors:
-            raise ValueError("\n".join(errors))
-        if gdf is None or gdf.empty:
-            raise ValueError("No features were found in the uploaded file.")
-
         mapping_to_apply = _normalize_site_mapping(column_mapping)
-        if any(mapping_to_apply.values()):
-            gdf, mapping_errors, _mapping_warnings = apply_site_column_mapping(
-                gdf, mapping_to_apply
-            )
-            if mapping_errors:
-                raise ValueError("\n".join(mapping_errors))
-        else:
-            missing = set(REQUIRED_SITE_FIELDS) - set(gdf.columns)
-            if missing:
-                raise ValueError(
-                    "Missing required columns: " + ", ".join(sorted(missing))
-                )
+        ext = _get_file_extension(filename)
 
-        if not gdf.crs:
-            gdf = gdf.set_crs(epsg=4326)
-        elif gdf.crs.to_epsg() != 4326:
-            gdf = gdf.to_crs(epsg=4326)
+        # True streamed path for large flat files. Archives still use the
+        # existing full-frame fallback because they require full extraction.
+        use_streaming_ingest = ext in {".gpkg", ".geojson", ".json"}
 
         db = get_db()
         try:
@@ -1242,8 +1261,8 @@ def save_user_site_set_from_staged(
                 original_filename=filename,
                 file_size_bytes=int(file_size_bytes or 0),
                 file_format=_get_file_extension(filename).lstrip("."),
-                n_sites=len(gdf),
-                bounds={"bbox": list(gdf.total_bounds)} if len(gdf) > 0 else None,
+                n_sites=0,
+                bounds=None,
                 extra_metadata={"column_mapping": mapping_to_apply}
                 if any(mapping_to_apply.values())
                 else None,
@@ -1278,25 +1297,247 @@ def save_user_site_set_from_staged(
                 """
             )
 
-            for _, row in gdf.iterrows():
-                start_date = pd.to_datetime(row["start_date"]).date()
-                end_date = (
-                    pd.to_datetime(row["end_date"]).date()
-                    if pd.notna(row.get("end_date")) and str(row.get("end_date"))
-                    else None
-                )
+            n_sites = 0
+            bounds_minx = None
+            bounds_miny = None
+            bounds_maxx = None
+            bounds_maxy = None
 
-                db.execute(
-                    insert_sql,
-                    {
-                        "site_set_id": str(site_set.id),
-                        "site_id": str(row["site_id"]),
-                        "site_name": str(row.get("site_name", "")),
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "geom_geojson": json.dumps(row.geometry.__geo_interface__),
-                    },
-                )
+            batch_rows = []
+
+            def _flush_batch_rows():
+                if not batch_rows:
+                    return
+                db.execute(insert_sql, batch_rows)
+                batch_rows.clear()
+
+            if use_streaming_ingest:
+                import fiona  # noqa: PLC0415
+                from pyproj import Transformer  # noqa: PLC0415
+                from shapely.geometry import shape  # noqa: PLC0415
+                from shapely.ops import transform as shapely_transform  # noqa: PLC0415
+
+                with fiona.open(local_path) as src:
+                    source_columns = list(
+                        (src.schema or {}).get("properties", {}).keys()
+                    )
+
+                    # Validate mapping against available columns once.
+                    selected_sources = [
+                        mapping_to_apply[field]
+                        for field in ALL_SITE_FIELDS
+                        if mapping_to_apply.get(field)
+                    ]
+                    duplicate_sources = sorted(
+                        {c for c in selected_sources if selected_sources.count(c) > 1}
+                    )
+                    if duplicate_sources:
+                        raise ValueError(
+                            "Each required field must use a different source column. "
+                            f"Duplicate selections: {', '.join(duplicate_sources)}"
+                        )
+
+                    for field in REQUIRED_SITE_FIELDS:
+                        src_col = mapping_to_apply.get(field)
+                        if not src_col:
+                            raise ValueError(
+                                f"Please select a source column for '{field}'."
+                            )
+                        if src_col not in source_columns:
+                            raise ValueError(
+                                f"Selected source column for '{field}' was not found: {src_col}"
+                            )
+
+                    end_src = mapping_to_apply.get("end_date")
+                    if end_src and end_src not in source_columns:
+                        raise ValueError(
+                            f"Selected source column for 'end_date' was not found: {end_src}"
+                        )
+
+                    to_wgs84 = None
+                    try:
+                        if src.crs and src.crs.to_epsg() != 4326:
+                            to_wgs84 = Transformer.from_crs(
+                                src.crs, "EPSG:4326", always_xy=True
+                            ).transform
+                    except Exception:
+                        # If CRS is unavailable/unparseable, trust source geometry.
+                        to_wgs84 = None
+
+                    parse_errors = []
+                    for feature_index, feature in enumerate(src, start=1):
+                        props = feature.get("properties") or {}
+                        raw_site_id = props.get(mapping_to_apply["site_id"])
+                        raw_site_name = props.get(mapping_to_apply["site_name"])
+                        raw_start = props.get(mapping_to_apply["start_date"])
+                        raw_end = (
+                            props.get(mapping_to_apply["end_date"])
+                            if mapping_to_apply.get("end_date")
+                            else None
+                        )
+
+                        site_id = (
+                            str(raw_site_id).strip() if raw_site_id is not None else ""
+                        )
+                        site_name = (
+                            str(raw_site_name).strip()
+                            if raw_site_name is not None
+                            else ""
+                        )
+                        if not site_id:
+                            parse_errors.append(
+                                f"Mapped 'site_id' is empty at feature {feature_index}."
+                            )
+                        if not site_name:
+                            parse_errors.append(
+                                f"Mapped 'site_name' is empty at feature {feature_index}."
+                            )
+
+                        start_dt = pd.to_datetime(raw_start, errors="coerce")
+                        if pd.isna(start_dt):
+                            parse_errors.append(
+                                "Mapped 'start_date' is missing or unparseable at "
+                                f"feature {feature_index}."
+                            )
+                            start_date = None
+                        else:
+                            start_date = start_dt.date()
+
+                        if raw_end is None or str(raw_end).strip() == "":
+                            end_date = None
+                        else:
+                            end_dt = pd.to_datetime(raw_end, errors="coerce")
+                            end_date = None if pd.isna(end_dt) else end_dt.date()
+
+                        if len(parse_errors) >= 10:
+                            break
+
+                        geom_json = feature.get("geometry")
+                        if not geom_json:
+                            parse_errors.append(
+                                f"Feature {feature_index} has missing geometry."
+                            )
+                            if len(parse_errors) >= 10:
+                                break
+                            continue
+
+                        geom = shape(geom_json)
+                        if to_wgs84 is not None:
+                            geom = shapely_transform(to_wgs84, geom)
+                        geom = _repair_geometry_single(geom)
+
+                        if geom.is_empty:
+                            parse_errors.append(
+                                f"Feature {feature_index} has empty geometry after repair."
+                            )
+                            if len(parse_errors) >= 10:
+                                break
+                            continue
+
+                        if geom.geom_type not in ("Polygon", "MultiPolygon"):
+                            parse_errors.append(
+                                f"Feature {feature_index} has unsupported geometry type: {geom.geom_type}."
+                            )
+                            if len(parse_errors) >= 10:
+                                break
+                            continue
+
+                        minx, miny, maxx, maxy = geom.bounds
+                        bounds_minx = (
+                            minx if bounds_minx is None else min(bounds_minx, minx)
+                        )
+                        bounds_miny = (
+                            miny if bounds_miny is None else min(bounds_miny, miny)
+                        )
+                        bounds_maxx = (
+                            maxx if bounds_maxx is None else max(bounds_maxx, maxx)
+                        )
+                        bounds_maxy = (
+                            maxy if bounds_maxy is None else max(bounds_maxy, maxy)
+                        )
+
+                        batch_rows.append(
+                            {
+                                "site_set_id": str(site_set.id),
+                                "site_id": site_id,
+                                "site_name": site_name,
+                                "start_date": start_date,
+                                "end_date": end_date,
+                                "geom_geojson": json.dumps(geom.__geo_interface__),
+                            }
+                        )
+                        if len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE:
+                            _flush_batch_rows()
+                        n_sites += 1
+
+                    if parse_errors:
+                        raise ValueError("\n".join(parse_errors))
+            else:
+                gdf, errors = _parse_sites_geometry_file_from_path(local_path, filename)
+                if errors:
+                    raise ValueError("\n".join(errors))
+                if gdf is None or gdf.empty:
+                    raise ValueError("No features were found in the uploaded file.")
+
+                if any(mapping_to_apply.values()):
+                    gdf, mapping_errors, _mapping_warnings = apply_site_column_mapping(
+                        gdf, mapping_to_apply
+                    )
+                    if mapping_errors:
+                        raise ValueError("\n".join(mapping_errors))
+                else:
+                    missing = set(REQUIRED_SITE_FIELDS) - set(gdf.columns)
+                    if missing:
+                        raise ValueError(
+                            "Missing required columns: " + ", ".join(sorted(missing))
+                        )
+
+                if not gdf.crs:
+                    gdf = gdf.set_crs(epsg=4326)
+                elif gdf.crs.to_epsg() != 4326:
+                    gdf = gdf.to_crs(epsg=4326)
+
+                n_sites = int(len(gdf))
+                if n_sites > 0:
+                    minx, miny, maxx, maxy = gdf.total_bounds
+                    bounds_minx, bounds_miny, bounds_maxx, bounds_maxy = (
+                        minx,
+                        miny,
+                        maxx,
+                        maxy,
+                    )
+
+                for _, row in gdf.iterrows():
+                    start_date = pd.to_datetime(row["start_date"]).date()
+                    end_date = (
+                        pd.to_datetime(row["end_date"]).date()
+                        if pd.notna(row.get("end_date")) and str(row.get("end_date"))
+                        else None
+                    )
+
+                    batch_rows.append(
+                        {
+                            "site_set_id": str(site_set.id),
+                            "site_id": str(row["site_id"]),
+                            "site_name": str(row.get("site_name", "")),
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "geom_geojson": json.dumps(row.geometry.__geo_interface__),
+                        }
+                    )
+                    if len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE:
+                        _flush_batch_rows()
+
+            _flush_batch_rows()
+
+            if n_sites == 0:
+                raise ValueError("No features were found in the uploaded file.")
+
+            site_set.n_sites = n_sites
+            if bounds_minx is not None:
+                site_set.bounds = {
+                    "bbox": [bounds_minx, bounds_miny, bounds_maxx, bounds_maxy]
+                }
 
             db.execute(
                 text(

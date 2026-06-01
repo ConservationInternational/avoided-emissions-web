@@ -1024,6 +1024,35 @@ def register_callbacks(app, limiter=None):
             State("mapping-start-date", "value"),
             State("mapping-end-date", "value"),
         ],
+        running=[
+            (
+                Output("confirm-site-upload-mapping-btn", "disabled"),
+                True,
+                False,
+            ),
+            (
+                Output("cancel-site-upload-mapping-btn", "disabled"),
+                True,
+                False,
+            ),
+            (
+                Output("confirm-site-upload-mapping-btn", "children"),
+                "Saving...",
+                "Confirm Mapping and Save",
+            ),
+            (
+                Output("site-upload-mapping-status", "children"),
+                dbc.Alert(
+                    (
+                        "Saving site set... large uploads may take several minutes. "
+                        "Please keep this page open."
+                    ),
+                    color="info",
+                    className="mb-0 py-2",
+                ),
+                None,
+            ),
+        ],
         prevent_initial_call=True,
     )
     def handle_site_upload_flow(
