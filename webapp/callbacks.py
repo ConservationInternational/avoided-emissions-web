@@ -70,7 +70,6 @@ from services import (
     start_gee_export,
     submit_analysis_task,
     update_task_info,
-    validate_site_upload_mapping,
     validate_share_token,
     archive_user_site_set,
     delete_user_site_set,
@@ -1119,6 +1118,7 @@ def register_callbacks(app, limiter=None):
                 "filename": response.get("filename") or payload.get("filename"),
                 "upload_token": response.get("upload_token"),
                 "n_features": preview.get("n_features", 0),
+                "available_columns": [c.get("name") for c in columns],
             }
 
             return (
@@ -1384,75 +1384,47 @@ def register_callbacks(app, limiter=None):
         if not pending_upload:
             return None
 
-        try:
-            user = get_current_user()
-            if not user:
-                return dbc.Alert(
-                    "Please log in first.",
-                    color="danger",
-                    className="mb-0 py-2",
-                )
-
-            upload_token = pending_upload.get("upload_token")
-            if not upload_token:
-                return dbc.Alert(
-                    "Upload token missing. Please upload the file again.",
-                    color="danger",
-                    className="mb-0 py-2",
-                )
-
-            staged = get_staged_site_upload(upload_token, user.id)
-            decoded = staged["content"]
-            mapping = {
-                "site_id": mapped_site_id,
-                "site_name": mapped_site_name,
-                "start_date": mapped_start_date,
-                "end_date": mapped_end_date or None,
-            }
-            result = validate_site_upload_mapping(
-                decoded,
-                pending_upload.get("filename"),
-                mapping,
-            )
-
-            errors = result.get("errors", [])
-            warnings = result.get("warnings", [])
-            summary = result.get("summary", {})
-
-            if errors:
-                return dbc.Alert(
-                    [html.Div(err) for err in errors],
-                    color="danger",
-                    className="mb-0 py-2",
-                )
-
-            details = [
-                html.Div(
-                    (
-                        f"Ready to save {summary.get('n_features', 0)} features "
-                        f"with {summary.get('n_unique_site_id', 0)} unique site IDs."
-                    )
-                ),
-                html.Div(
-                    f"Rows with empty end_date after parsing: {summary.get('n_missing_end_date', 0)}",
-                    className="small text-muted",
-                ),
-            ]
-            details.extend(html.Div(msg) for msg in warnings)
-
+        required = {
+            "site_id": mapped_site_id,
+            "site_name": mapped_site_name,
+            "start_date": mapped_start_date,
+        }
+        missing = [key for key, value in required.items() if not value]
+        if missing:
             return dbc.Alert(
-                details,
-                color="warning" if warnings else "success",
+                f"Select source columns for required fields: {', '.join(missing)}.",
+                color="warning",
                 className="mb-0 py-2",
             )
-        except Exception:
-            logger.exception("Failed to validate upload column mapping")
-            report_exception()
+
+        chosen = [mapped_site_id, mapped_site_name, mapped_start_date]
+        if mapped_end_date:
+            chosen.append(mapped_end_date)
+        duplicates = sorted({c for c in chosen if chosen.count(c) > 1})
+        if duplicates:
             return dbc.Alert(
-                "Could not validate mapping preview.",
+                f"Each field must map to a distinct source column. Duplicate selection(s): {', '.join(duplicates)}.",
                 color="danger",
                 className="mb-0 py-2",
             )
+
+        available = set(pending_upload.get("available_columns") or [])
+        unknown = [c for c in chosen if c not in available]
+        if unknown:
+            return dbc.Alert(
+                "Selected column(s) are no longer available in the uploaded file. Please upload again.",
+                color="danger",
+                className="mb-0 py-2",
+            )
+
+        return dbc.Alert(
+            (
+                f"Mapping looks good for {pending_upload.get('n_features', 0)} features. "
+                "Full validation and parsing run when you click Confirm Mapping and Save."
+            ),
+            color="success",
+            className="mb-0 py-2",
+        )
 
     @app.callback(
         Output("archive-site-set-btn", "children"),

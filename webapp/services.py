@@ -17,6 +17,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 
 import boto3
+from botocore.exceptions import ClientError
 from pathlib import Path
 import geopandas as gpd
 import pandas as pd
@@ -81,6 +82,7 @@ MAX_ARCHIVE_COMPRESSION_RATIO = 200.0
 
 SITE_UPLOAD_STAGE_DIR = Path(tempfile.gettempdir()) / "ae_site_upload_stage"
 SITE_UPLOAD_STAGE_TTL_SECONDS = 12 * 60 * 60
+SITE_UPLOAD_STAGE_S3_PREFIX = f"{Config.S3_PREFIX.rstrip('/')}/site-upload-stage"
 
 REQUIRED_SITE_FIELDS = ("site_id", "site_name", "start_date")
 OPTIONAL_SITE_FIELDS = ("end_date",)
@@ -97,7 +99,52 @@ def _site_upload_stage_paths(upload_token):
     return data_path, meta_path
 
 
+def _site_upload_stage_s3_keys(upload_token):
+    token = str(upload_token or "").strip()
+    if not token or not all(ch in "0123456789abcdef" for ch in token.lower()):
+        raise ValueError("Invalid upload token.")
+    return (
+        f"{SITE_UPLOAD_STAGE_S3_PREFIX}/{token}.bin",
+        f"{SITE_UPLOAD_STAGE_S3_PREFIX}/{token}.json",
+    )
+
+
+def _use_shared_site_upload_stage():
+    return Config.ENVIRONMENT in {"staging", "production"} and bool(Config.S3_BUCKET)
+
+
+def _parse_staged_upload_created_at(meta):
+    created_at = datetime.fromisoformat(meta.get("created_at", ""))
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return created_at
+
+
+def _load_staged_upload_meta(upload_token):
+    if _use_shared_site_upload_stage():
+        _, meta_key = _site_upload_stage_s3_keys(upload_token)
+        try:
+            response = get_s3_client().get_object(Bucket=Config.S3_BUCKET, Key=meta_key)
+            return json.loads(response["Body"].read().decode("utf-8"))
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                raise ValueError(
+                    "Staged upload not found. Please upload the file again."
+                ) from exc
+            raise
+
+    _, meta_path = _site_upload_stage_paths(upload_token)
+    if not meta_path.exists():
+        raise ValueError("Staged upload not found. Please upload the file again.")
+    with open(meta_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def _cleanup_expired_staged_uploads():
+    if _use_shared_site_upload_stage():
+        # Expired shared staged uploads are deleted lazily when retrieved.
+        return
+
     SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
     cutoff = datetime.now(timezone.utc) - timedelta(
         seconds=SITE_UPLOAD_STAGE_TTL_SECONDS
@@ -128,19 +175,31 @@ def _cleanup_expired_staged_uploads():
 def stage_site_upload(file_content, filename, user_id):
     """Persist uploaded bytes to short-lived local staging and return a token."""
     _cleanup_expired_staged_uploads()
-    SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
 
     token = uuid.uuid4().hex
-    data_path, meta_path = _site_upload_stage_paths(token)
-
-    with open(data_path, "wb") as f:
-        f.write(file_content)
-
     meta = {
         "user_id": str(user_id),
         "filename": filename,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    if _use_shared_site_upload_stage():
+        data_key, meta_key = _site_upload_stage_s3_keys(token)
+        s3 = get_s3_client()
+        s3.put_object(Bucket=Config.S3_BUCKET, Key=data_key, Body=file_content)
+        s3.put_object(
+            Bucket=Config.S3_BUCKET,
+            Key=meta_key,
+            Body=json.dumps(meta).encode("utf-8"),
+            ContentType="application/json",
+        )
+        return token
+
+    SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+    data_path, meta_path = _site_upload_stage_paths(token)
+
+    with open(data_path, "wb") as f:
+        f.write(file_content)
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f)
 
@@ -149,26 +208,34 @@ def stage_site_upload(file_content, filename, user_id):
 
 def get_staged_site_upload(upload_token, user_id, consume=False):
     """Read staged upload bytes by token, enforcing ownership and TTL."""
-    data_path, meta_path = _site_upload_stage_paths(upload_token)
-    if not meta_path.exists() or not data_path.exists():
-        raise ValueError("Staged upload not found. Please upload the file again.")
-
-    with open(meta_path, encoding="utf-8") as f:
-        meta = json.load(f)
+    meta = _load_staged_upload_meta(upload_token)
 
     if str(meta.get("user_id")) != str(user_id):
         raise ValueError("You do not have access to this staged upload.")
 
-    created_at = datetime.fromisoformat(meta.get("created_at", ""))
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
+    created_at = _parse_staged_upload_created_at(meta)
     age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
     if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS:
         discard_staged_site_upload(upload_token, user_id)
         raise ValueError("Staged upload expired. Please upload the file again.")
 
-    with open(data_path, "rb") as f:
-        content = f.read()
+    if _use_shared_site_upload_stage():
+        data_key, _ = _site_upload_stage_s3_keys(upload_token)
+        try:
+            response = get_s3_client().get_object(Bucket=Config.S3_BUCKET, Key=data_key)
+            content = response["Body"].read()
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                raise ValueError(
+                    "Staged upload not found. Please upload the file again."
+                ) from exc
+            raise
+    else:
+        data_path, _ = _site_upload_stage_paths(upload_token)
+        if not data_path.exists():
+            raise ValueError("Staged upload not found. Please upload the file again.")
+        with open(data_path, "rb") as f:
+            content = f.read()
 
     if consume:
         discard_staged_site_upload(upload_token, user_id)
@@ -181,6 +248,26 @@ def get_staged_site_upload(upload_token, user_id, consume=False):
 
 def discard_staged_site_upload(upload_token, user_id=None):
     """Delete staged upload bytes + metadata. Returns True if removed."""
+    if _use_shared_site_upload_stage():
+        data_key, meta_key = _site_upload_stage_s3_keys(upload_token)
+        s3 = get_s3_client()
+        try:
+            if user_id is not None:
+                meta = _load_staged_upload_meta(upload_token)
+                if str(meta.get("user_id")) != str(user_id):
+                    raise ValueError("You do not have access to this staged upload.")
+        except ValueError:
+            return False
+
+        s3.delete_objects(
+            Bucket=Config.S3_BUCKET,
+            Delete={
+                "Objects": [{"Key": data_key}, {"Key": meta_key}],
+                "Quiet": True,
+            },
+        )
+        return True
+
     data_path, meta_path = _site_upload_stage_paths(upload_token)
     if user_id is not None and meta_path.exists():
         try:
@@ -208,12 +295,39 @@ def stream_stage_site_upload(file_stream, filename, user_id):
     Python memory, which is critical for files >200 MB.  Returns the token.
     """
     _cleanup_expired_staged_uploads()
-    SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
 
     token = uuid.uuid4().hex
-    data_path, meta_path = _site_upload_stage_paths(token)
 
     try:
+        meta = {
+            "user_id": str(user_id),
+            "filename": filename,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if _use_shared_site_upload_stage():
+            data_key, meta_key = _site_upload_stage_s3_keys(token)
+            s3 = get_s3_client()
+            s3.upload_fileobj(file_stream, Config.S3_BUCKET, data_key)
+
+            size_bytes = s3.head_object(Bucket=Config.S3_BUCKET, Key=data_key).get(
+                "ContentLength", 0
+            )
+            if int(size_bytes or 0) == 0:
+                s3.delete_object(Bucket=Config.S3_BUCKET, Key=data_key)
+                raise ValueError("Uploaded file is empty.")
+
+            s3.put_object(
+                Bucket=Config.S3_BUCKET,
+                Key=meta_key,
+                Body=json.dumps(meta).encode("utf-8"),
+                ContentType="application/json",
+            )
+            return token
+
+        SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+        data_path, meta_path = _site_upload_stage_paths(token)
+
         with open(data_path, "wb") as out:
             chunk_size = 1024 * 1024  # 1 MB
             while True:
@@ -226,16 +340,25 @@ def stream_stage_site_upload(file_stream, filename, user_id):
             data_path.unlink(missing_ok=True)
             raise ValueError("Uploaded file is empty.")
 
-        meta = {
-            "user_id": str(user_id),
-            "filename": filename,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f)
     except Exception:
-        data_path.unlink(missing_ok=True)
-        meta_path.unlink(missing_ok=True)
+        if _use_shared_site_upload_stage():
+            try:
+                data_key, meta_key = _site_upload_stage_s3_keys(token)
+                get_s3_client().delete_objects(
+                    Bucket=Config.S3_BUCKET,
+                    Delete={
+                        "Objects": [{"Key": data_key}, {"Key": meta_key}],
+                        "Quiet": True,
+                    },
+                )
+            except Exception:
+                logger.warning("Failed cleaning staged upload from S3", exc_info=True)
+        else:
+            data_path, meta_path = _site_upload_stage_paths(token)
+            data_path.unlink(missing_ok=True)
+            meta_path.unlink(missing_ok=True)
         raise
 
     return token
@@ -251,15 +374,19 @@ def get_site_upload_mapping_preview_from_staged(token, user_id):
     """
     import fiona  # local import — only needed here
 
-    data_path, meta_path = _site_upload_stage_paths(token)
-    if not meta_path.exists() or not data_path.exists():
-        return None, ["Staged upload not found. Please upload the file again."]
-
-    with open(meta_path, encoding="utf-8") as f:
-        meta = json.load(f)
+    try:
+        meta = _load_staged_upload_meta(token)
+    except ValueError as exc:
+        return None, [str(exc)]
 
     if str(meta.get("user_id")) != str(user_id):
         return None, ["You do not have access to this staged upload."]
+
+    created_at = _parse_staged_upload_created_at(meta)
+    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+    if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS:
+        discard_staged_site_upload(token, user_id)
+        return None, ["Staged upload expired. Please upload the file again."]
 
     filename = meta.get("filename") or "sites"
     ext = _get_file_extension(filename)
@@ -275,7 +402,18 @@ def get_site_upload_mapping_preview_from_staged(token, user_id):
             # temporary path with the original suffix.
             with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
                 preview_path = tmp.name
-            shutil.copyfile(data_path, preview_path)
+
+            if _use_shared_site_upload_stage():
+                data_key, _ = _site_upload_stage_s3_keys(token)
+                with open(preview_path, "wb") as out:
+                    get_s3_client().download_fileobj(Config.S3_BUCKET, data_key, out)
+            else:
+                data_path, _ = _site_upload_stage_paths(token)
+                if not data_path.exists():
+                    return None, [
+                        "Staged upload not found. Please upload the file again."
+                    ]
+                shutil.copyfile(data_path, preview_path)
 
             # Read a tiny sample — just enough to get column names + one value.
             gdf_sample = gpd.read_file(preview_path, rows=10)
@@ -283,8 +421,21 @@ def get_site_upload_mapping_preview_from_staged(token, user_id):
                 n_features = len(src)
         elif ext in (".zip", ".tar.gz", ".tgz"):
             # Archives are compressed; read them fully (still small in RAM).
-            with open(data_path, "rb") as f:
-                archive_bytes = f.read()
+            if _use_shared_site_upload_stage():
+                data_key, _ = _site_upload_stage_s3_keys(token)
+                archive_bytes = (
+                    get_s3_client()
+                    .get_object(Bucket=Config.S3_BUCKET, Key=data_key)["Body"]
+                    .read()
+                )
+            else:
+                data_path, _ = _site_upload_stage_paths(token)
+                if not data_path.exists():
+                    return None, [
+                        "Staged upload not found. Please upload the file again."
+                    ]
+                with open(data_path, "rb") as f:
+                    archive_bytes = f.read()
             gdf_sample = _read_sites_from_archive(archive_bytes, filename)
             if gdf_sample is not None:
                 n_features = len(gdf_sample)
@@ -495,8 +646,8 @@ def _read_sites_from_archive(file_content, filename):
         if shapefiles:
             return _read_shapefile(shapefiles[0])
         if geopackages:
-            return gpd.read_file(geopackages[0], driver="GPKG")
-        return gpd.read_file(geojsons[0], driver="GeoJSON")
+            return gpd.read_file(geopackages[0])
+        return gpd.read_file(geojsons[0])
 
 
 def _remove_duplicate_vertices(coords):
@@ -586,12 +737,12 @@ def _parse_sites_geometry_file(file_content, filename):
     try:
         ext = _get_file_extension(filename)
         if ext in (".geojson", ".json"):
-            gdf = gpd.read_file(io.BytesIO(file_content), driver="GeoJSON")
+            gdf = gpd.read_file(io.BytesIO(file_content))
         elif ext == ".gpkg":
             with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as f:
                 f.write(file_content)
                 tmp_path = f.name
-            gdf = gpd.read_file(tmp_path, driver="GPKG")
+            gdf = gpd.read_file(tmp_path)
             os.unlink(tmp_path)
         elif ext in (".zip", ".tar.gz", ".tgz"):
             gdf = _read_sites_from_archive(file_content, filename)
