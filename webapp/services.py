@@ -140,6 +140,94 @@ def _load_staged_upload_meta(upload_token):
         return json.load(f)
 
 
+def _validate_staged_upload_access(upload_token, user_id):
+    """Return staged metadata after ownership/TTL checks."""
+    meta = _load_staged_upload_meta(upload_token)
+    if str(meta.get("user_id")) != str(user_id):
+        raise ValueError("You do not have access to this staged upload.")
+
+    created_at = _parse_staged_upload_created_at(meta)
+    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+    if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS:
+        discard_staged_site_upload(upload_token, user_id)
+        raise ValueError("Staged upload expired. Please upload the file again.")
+
+    return meta
+
+
+def _materialize_staged_upload_path(upload_token, user_id):
+    """Materialize staged upload to a local path and return (path, filename, size)."""
+    meta = _validate_staged_upload_access(upload_token, user_id)
+    filename = meta.get("filename") or "sites"
+    ext = _get_file_extension(filename)
+
+    if _use_shared_site_upload_stage():
+        data_key, _ = _site_upload_stage_s3_keys(upload_token)
+        with tempfile.NamedTemporaryFile(suffix=ext or ".bin", delete=False) as tmp:
+            local_path = tmp.name
+        try:
+            with open(local_path, "wb") as out:
+                get_s3_client().download_fileobj(Config.S3_BUCKET, data_key, out)
+        except Exception:
+            os.unlink(local_path)
+            raise
+        size_bytes = os.path.getsize(local_path)
+        return local_path, filename, size_bytes
+
+    data_path, _ = _site_upload_stage_paths(upload_token)
+    if not data_path.exists():
+        raise ValueError("Staged upload not found. Please upload the file again.")
+    return str(data_path), filename, data_path.stat().st_size
+
+
+def _parse_sites_geometry_file_from_path(file_path, filename):
+    """Parse sites geometry using a local file path (low-memory path)."""
+    errors = []
+    gdf = None
+
+    try:
+        ext = _get_file_extension(filename)
+        if ext in (".geojson", ".json", ".gpkg"):
+            gdf = gpd.read_file(file_path)
+        elif ext in (".zip", ".tar.gz", ".tgz"):
+            with open(file_path, "rb") as f:
+                gdf = _read_sites_from_archive(f.read(), filename)
+        else:
+            errors.append(f"Unsupported file format: {ext}")
+            return None, errors
+    except Exception as e:
+        errors.append(f"Failed to read file: {str(e)}")
+        return None, errors
+
+    # Reuse existing validation/repair pipeline by operating on the parsed gdf.
+    if gdf is not None and not gdf.empty:
+        null_geom = gdf.geometry.is_empty | gdf.geometry.isna()
+        if null_geom.any():
+            feature_nums = [i + 1 for i in gdf[null_geom].index[:10]]
+            errors.append(f"Features with missing/empty geometry: {feature_nums}")
+        valid_mask = ~null_geom
+        if valid_mask.any():
+            bad_type = ~gdf.loc[valid_mask].geometry.geom_type.isin(
+                ["Polygon", "MultiPolygon"]
+            )
+            if bad_type.any():
+                bad_rows = gdf.loc[valid_mask][bad_type]
+                details = [
+                    f"Feature {idx + 1}: geometry type={row.geometry.geom_type}"
+                    for idx, row in bad_rows.iterrows()
+                ]
+                errors.append(
+                    "All geometries must be Polygon or MultiPolygon.\n"
+                    + "\n".join(details[:10])
+                )
+        if gdf.crs and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
+
+        gdf = _repair_geometries(gdf)
+
+    return gdf, errors
+
+
 def _cleanup_expired_staged_uploads():
     if _use_shared_site_upload_stage():
         # Expired shared staged uploads are deleted lazily when retrieved.
@@ -208,16 +296,7 @@ def stage_site_upload(file_content, filename, user_id):
 
 def get_staged_site_upload(upload_token, user_id, consume=False):
     """Read staged upload bytes by token, enforcing ownership and TTL."""
-    meta = _load_staged_upload_meta(upload_token)
-
-    if str(meta.get("user_id")) != str(user_id):
-        raise ValueError("You do not have access to this staged upload.")
-
-    created_at = _parse_staged_upload_created_at(meta)
-    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
-    if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS:
-        discard_staged_site_upload(upload_token, user_id)
-        raise ValueError("Staged upload expired. Please upload the file again.")
+    meta = _validate_staged_upload_access(upload_token, user_id)
 
     if _use_shared_site_upload_stage():
         data_key, _ = _site_upload_stage_s3_keys(upload_token)
@@ -1119,6 +1198,142 @@ def save_user_site_set(user_id, filename, file_content, column_mapping=None):
         raise
     finally:
         db.close()
+
+
+def save_user_site_set_from_staged(
+    user_id, upload_token, column_mapping=None, consume=True
+):
+    """Persist staged upload without loading full file content into memory."""
+    local_path = None
+    try:
+        local_path, filename, file_size_bytes = _materialize_staged_upload_path(
+            upload_token, user_id
+        )
+        gdf, errors = _parse_sites_geometry_file_from_path(local_path, filename)
+        if errors:
+            raise ValueError("\n".join(errors))
+        if gdf is None or gdf.empty:
+            raise ValueError("No features were found in the uploaded file.")
+
+        mapping_to_apply = _normalize_site_mapping(column_mapping)
+        if any(mapping_to_apply.values()):
+            gdf, mapping_errors, _mapping_warnings = apply_site_column_mapping(
+                gdf, mapping_to_apply
+            )
+            if mapping_errors:
+                raise ValueError("\n".join(mapping_errors))
+        else:
+            missing = set(REQUIRED_SITE_FIELDS) - set(gdf.columns)
+            if missing:
+                raise ValueError(
+                    "Missing required columns: " + ", ".join(sorted(missing))
+                )
+
+        if not gdf.crs:
+            gdf = gdf.set_crs(epsg=4326)
+        elif gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
+
+        db = get_db()
+        try:
+            site_set = UserSiteSet(
+                user_id=user_id,
+                name=_derive_site_set_name(filename),
+                original_filename=filename,
+                file_size_bytes=int(file_size_bytes or 0),
+                file_format=_get_file_extension(filename).lstrip("."),
+                n_sites=len(gdf),
+                bounds={"bbox": list(gdf.total_bounds)} if len(gdf) > 0 else None,
+                extra_metadata={"column_mapping": mapping_to_apply}
+                if any(mapping_to_apply.values())
+                else None,
+            )
+            db.add(site_set)
+            db.flush()
+
+            insert_sql = text(
+                """
+                INSERT INTO user_site_features (
+                    id, site_set_id, site_id, site_name, start_date, end_date, area_ha, geom
+                )
+                VALUES (
+                    uuid_generate_v4(),
+                    :site_set_id,
+                    :site_id,
+                    :site_name,
+                    :start_date,
+                    :end_date,
+                    NULL,
+                    ST_Multi(
+                        ST_CollectionExtract(
+                            ST_Force2D(
+                                ST_MakeValid(
+                                    ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)
+                                )
+                            ),
+                            3
+                        )
+                    )
+                )
+                """
+            )
+
+            for _, row in gdf.iterrows():
+                start_date = pd.to_datetime(row["start_date"]).date()
+                end_date = (
+                    pd.to_datetime(row["end_date"]).date()
+                    if pd.notna(row.get("end_date")) and str(row.get("end_date"))
+                    else None
+                )
+
+                db.execute(
+                    insert_sql,
+                    {
+                        "site_set_id": str(site_set.id),
+                        "site_id": str(row["site_id"]),
+                        "site_name": str(row.get("site_name", "")),
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "geom_geojson": json.dumps(row.geometry.__geo_interface__),
+                    },
+                )
+
+            db.execute(
+                text(
+                    """
+                    UPDATE user_site_features
+                    SET area_ha = ST_Area(geom::geography) / 10000.0
+                    WHERE site_set_id = :site_set_id
+                    """
+                ),
+                {"site_set_id": str(site_set.id)},
+            )
+
+            db.commit()
+            return get_user_site_set_detail(site_set.id, user_id)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    finally:
+        if consume:
+            try:
+                discard_staged_site_upload(upload_token, user_id)
+            except Exception:
+                logger.warning(
+                    "Failed to discard staged upload after save", exc_info=True
+                )
+
+        if (
+            local_path
+            and _use_shared_site_upload_stage()
+            and os.path.exists(local_path)
+        ):
+            try:
+                os.unlink(local_path)
+            except OSError:
+                logger.debug("Failed to remove temporary staged file: %s", local_path)
 
 
 def list_user_site_sets(user_id, include_archived=False):

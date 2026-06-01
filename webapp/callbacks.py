@@ -64,8 +64,7 @@ from services import (
     revoke_share_link,
     revoke_te_script_access,
     save_covariate_preset,
-    save_user_site_set,
-    get_staged_site_upload,
+    save_user_site_set_from_staged,
     discard_staged_site_upload,
     start_gee_export,
     submit_analysis_task,
@@ -1211,22 +1210,15 @@ def register_callbacks(app, limiter=None):
                         "",
                     )
 
-                staged = get_staged_site_upload(upload_token, user.id, consume=True)
-                decoded = staged["content"]
-                resolved_filename = pending_upload.get("filename") or staged.get(
-                    "filename"
-                )
-
                 mapping = {
                     "site_id": mapped_site_id,
                     "site_name": mapped_site_name,
                     "start_date": mapped_start_date,
                     "end_date": mapped_end_date or None,
                 }
-                detail = save_user_site_set(
+                detail = save_user_site_set_from_staged(
                     user.id,
-                    resolved_filename,
-                    decoded,
+                    upload_token,
                     column_mapping=mapping,
                 )
                 return (
