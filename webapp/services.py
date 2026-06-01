@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import tarfile
 import tempfile
 import uuid
@@ -266,11 +267,19 @@ def get_site_upload_mapping_preview_from_staged(token, user_id):
     gdf_sample = None
     n_features = 0
 
+    preview_path = None
     try:
         if ext in (".gpkg", ".geojson", ".json"):
+            # GDAL/pyogrio expects GeoPackage files to have a conformant
+            # extension. Staged files are stored as .bin, so read through a
+            # temporary path with the original suffix.
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                preview_path = tmp.name
+            shutil.copyfile(data_path, preview_path)
+
             # Read a tiny sample — just enough to get column names + one value.
-            gdf_sample = gpd.read_file(str(data_path), rows=10)
-            with fiona.open(str(data_path)) as src:
+            gdf_sample = gpd.read_file(preview_path, rows=10)
+            with fiona.open(preview_path) as src:
                 n_features = len(src)
         elif ext in (".zip", ".tar.gz", ".tgz"):
             # Archives are compressed; read them fully (still small in RAM).
@@ -283,6 +292,14 @@ def get_site_upload_mapping_preview_from_staged(token, user_id):
             return None, [f"Unsupported file format: {ext}"]
     except Exception as exc:
         return None, [f"Failed to read file: {exc}"]
+    finally:
+        if preview_path:
+            try:
+                os.unlink(preview_path)
+            except OSError:
+                logger.debug(
+                    "Failed to remove temporary preview file: %s", preview_path
+                )
 
     if gdf_sample is None or gdf_sample.empty:
         return None, ["No features were found in the uploaded file."]
