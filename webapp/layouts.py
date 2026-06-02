@@ -739,6 +739,10 @@ TASK_STATUS_ROW_STYLES = [
         "style": {"backgroundColor": "#FFF3CD", "color": "#664D03"},
     },
     {
+        "condition": "params.data.status === 'submitting'",
+        "style": {"backgroundColor": "#E2E3E5", "color": "#495057"},
+    },
+    {
         "condition": "params.data.status === 'pending'",
         "style": {"backgroundColor": "#E2E3E5", "color": "#495057"},
     },
@@ -1722,14 +1726,14 @@ def submit_layout(user, recompute_config=None):
                                                                 value=False,
                                                                 className="mb-2",
                                                             ),
-                                                                dcc.Loading(
-                                                                    html.Div(
-                                                                        id="site-set-metadata"
-                                                                    ),
-                                                                    type="circle",
-                                                                    delay_show=250,
-                                                                    color="#0d6efd",
+                                                            dcc.Loading(
+                                                                html.Div(
+                                                                    id="site-set-metadata"
                                                                 ),
+                                                                type="circle",
+                                                                delay_show=250,
+                                                                color="#0d6efd",
+                                                            ),
                                                         ]
                                                     ),
                                                 ],
@@ -1745,7 +1749,9 @@ def submit_layout(user, recompute_config=None):
                                                                     id="site-preview-map",
                                                                     className="mb-3",
                                                                 ),
-                                                                html.Div(id="site-preview"),
+                                                                html.Div(
+                                                                    id="site-preview"
+                                                                ),
                                                             ],
                                                             type="circle",
                                                             delay_show=250,

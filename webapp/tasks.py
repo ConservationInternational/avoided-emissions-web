@@ -1897,6 +1897,60 @@ def poll_batch_tasks() -> dict:
 
 
 @celery_app.task(
+    name="tasks.submit_analysis_task_worker",
+    bind=True,
+    max_retries=0,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    soft_time_limit=1800,  # 30 minutes
+    time_limit=1900,
+)
+def submit_analysis_task_worker(self, task_id: str, user_id: str) -> None:
+    """Complete the async submission of an analysis task.
+
+    Called by :func:`services.queue_analysis_task` after it has created
+    a local ``AnalysisTask`` record with ``status='submitting'``.  This
+    task handles all of the slow, I/O-heavy work:
+
+    * PostGIS geometry computations (matching extent, exclusion buffer)
+    * Optional site splitting across exact-match boundaries
+    * ``TaskSite`` row creation
+    * S3 site upload
+    * trends.earth API call (``create_execution``)
+
+    On success the task record is updated to ``status='submitted'``.
+    On failure it is updated to ``status='failed'`` and the exception
+    is re-raised so Rollbar is notified.
+
+    Parameters
+    ----------
+    task_id:
+        UUID of the ``AnalysisTask`` record to complete.
+    user_id:
+        UUID of the submitting user (used to retrieve OAuth2 credentials).
+    """
+    from services import _complete_analysis_task_submission
+
+    logger.info(
+        "submit_analysis_task_worker: starting for task %s (user=%s)",
+        task_id,
+        user_id,
+    )
+    try:
+        _complete_analysis_task_submission(task_id, user_id)
+        logger.info("submit_analysis_task_worker: completed for task %s", task_id)
+    except Exception as exc:
+        logger.error(
+            "submit_analysis_task_worker: failed for task %s: %s",
+            task_id,
+            exc,
+            exc_info=True,
+        )
+        report_exception()
+        raise
+
+
+@celery_app.task(
     name="tasks.generate_match_quality_summary",
     soft_time_limit=3600,
     time_limit=3900,

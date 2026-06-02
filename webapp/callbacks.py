@@ -55,7 +55,6 @@ from services import (
     get_task_detail,
     get_task_list,
     get_user_site_set_detail,
-    get_user_site_set_gdf,
     get_user_site_set_geojson_by_bounds_and_zoom,
     grant_te_script_access,
     list_share_links,
@@ -67,7 +66,7 @@ from services import (
     save_covariate_preset,
     discard_staged_site_upload,
     start_gee_export,
-    submit_analysis_task,
+    queue_analysis_task,
     update_task_info,
     validate_share_token,
     archive_user_site_set,
@@ -1492,7 +1491,7 @@ def register_callbacks(app, limiter=None):
     )
     def load_selected_site_set(site_set_id, resolution_m_str):
         """Load and display selected site set, with resilience for large datasets.
-        
+
         For datasets with >5000 features, loads a simplified preview to prevent
         504 Gateway Timeouts. The full dataset is used for task submission.
         """
@@ -1523,7 +1522,12 @@ def register_callbacks(app, limiter=None):
                 )
 
             preview_cols = [
-                {"headerName": "Site ID", "field": "site_id", "flex": 1, "minWidth": 110},
+                {
+                    "headerName": "Site ID",
+                    "field": "site_id",
+                    "flex": 1,
+                    "minWidth": 110,
+                },
                 {
                     "headerName": "Site Name",
                     "field": "site_name",
@@ -1536,7 +1540,12 @@ def register_callbacks(app, limiter=None):
                     "flex": 1,
                     "minWidth": 120,
                 },
-                {"headerName": "End Date", "field": "end_date", "flex": 1, "minWidth": 120},
+                {
+                    "headerName": "End Date",
+                    "field": "end_date",
+                    "flex": 1,
+                    "minWidth": 120,
+                },
             ]
             preview_table = _make_ag_grid(
                 "site-preview-table",
@@ -1553,10 +1562,10 @@ def register_callbacks(app, limiter=None):
             )
 
             # Build metadata with indicator for sampled data
-            is_sampled = detail.get("geojson") and "_is_sample" in detail.get("geojson", "{}")
-            sample_note = (
-                html.Br() if not is_sampled else None
+            is_sampled = detail.get("geojson") and "_is_sample" in detail.get(
+                "geojson", "{}"
             )
+            sample_note = html.Br() if not is_sampled else None
             if is_sampled:
                 sample_note = html.Small(
                     "⚠ Map shows simplified preview. Full dataset will be used for analysis.",
@@ -1646,18 +1655,18 @@ def register_callbacks(app, limiter=None):
     )
     def update_map_on_zoom(zoom_bounds_data, sites_data, resolution_m_str):
         """Update map GeoJSON when user zooms/pans, using zoom-aware sampling.
-        
+
         This callback is triggered when the map emits a zoom/bounds change event.
         It fetches new sampled data at the appropriate detail level for the current
         zoom, preventing unnecessary rendering of thousands of features at low zoom.
         """
         if not zoom_bounds_data or not sites_data:
             raise PreventUpdate
-        
+
         site_set_id = sites_data.get("site_set_id")
         if not site_set_id:
             raise PreventUpdate
-        
+
         try:
             zoom = zoom_bounds_data.get("zoom", 2)
             bounds = zoom_bounds_data.get("bounds", {})
@@ -1665,15 +1674,15 @@ def register_callbacks(app, limiter=None):
             miny = bounds.get("miny")
             maxx = bounds.get("maxx")
             maxy = bounds.get("maxy")
-            
+
             if None in (minx, miny, maxx, maxy):
                 raise PreventUpdate
-            
+
             resolution_m = int(resolution_m_str) if resolution_m_str else 1000
             geojson_fc = get_user_site_set_geojson_by_bounds_and_zoom(
                 site_set_id, zoom, minx, miny, maxx, maxy
             )
-            
+
             return _openlayers_map_component(
                 "submit-sites-map",
                 json.dumps(geojson_fc),
@@ -1832,29 +1841,9 @@ def register_callbacks(app, limiter=None):
         try:
             site_set_id = sites_data.get("site_set_id") if sites_data else None
             if not site_set_id:
-                return _error_alert("Site set information is missing. Please reload and try again.")
-
-            # Load the FULL site set from the database, not the sampled preview
-            # This ensures all sites are used for analysis, even if preview was simplified
-            try:
-                gdf = get_user_site_set_gdf(site_set_id, user_id=user.id)
-            except ValueError as exc:
-                return _error_alert(f"Site set error: {str(exc)}")
-
-            # Auto-derive forest cover year range from site dates.
-            # Need years back to (earliest start_year - 5) for the
-            # pre-intervention deforestation covariate, and forward
-            # to the latest available year so post-end-date
-            # deforestation data is available for comparison plots.
-            start_dates = pd.to_datetime(gdf["start_date"])
-            fc_min = max(
-                ANALYSIS_DEFAULTS["fc_year_start"],
-                int(start_dates.dt.year.min()) - 5,
-            )
-            # Always pull all available FC years so post-end-date
-            # deforestation data is available for comparison plots.
-            fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
-            fc_years = list(range(fc_min, fc_max))
+                return _error_alert(
+                    "Site set information is missing. Please reload and try again."
+                )
 
             # Server-side bounds validation (mirrors the HTML input
             # min/max attributes so tampered requests are rejected).
@@ -1908,15 +1897,13 @@ def register_callbacks(app, limiter=None):
             if _res not in (1000, 250):
                 return _error_alert("Resolution must be 1000 or 250.")
 
-            task_id = submit_analysis_task(
+            task_id = queue_analysis_task(
                 task_name=name,
                 description=description or "",
                 user_id=user.id,
-                gdf=gdf,
+                site_set_id=site_set_id,
                 covariates=covariates,
                 exact_match_vars=exact_match_vars,
-                fc_years=fc_years,
-                site_set_id=sites_data.get("site_set_id"),
                 max_treatment_pixels=_mtp,
                 control_multiplier=_cm,
                 min_site_area_ha=_msa,
@@ -1936,7 +1923,10 @@ def register_callbacks(app, limiter=None):
 
             return None, dbc.Alert(
                 [
-                    html.P("Task submitted successfully."),
+                    html.P(
+                        "Task queued for submission. It will appear as "
+                        "\u2018submitted\u2019 within a few seconds."
+                    ),
                     dcc.Link(f"View task: {task_id}", href=f"/task/{task_id}"),
                 ],
                 id={"type": "submit-alert", "scope": "task-submit"},

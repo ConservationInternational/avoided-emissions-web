@@ -1720,9 +1720,7 @@ def save_user_site_set_from_staged(
                         # Auto-assign missing site_name
                         if not site_name:
                             missing_site_name_count += 1
-                            site_name = (
-                                f"Missing_Site_Name_{missing_site_name_count}"
-                            )
+                            site_name = f"Missing_Site_Name_{missing_site_name_count}"
                             if len(skipped_examples) < 10:
                                 skipped_examples.append(
                                     f"Feature {feature_index}: auto-assigned site_name to '{site_name}'."
@@ -2041,15 +2039,17 @@ def get_user_site_set_geojson(site_set_id):
         db.close()
 
 
-def _get_user_site_set_geojson_simplified(site_set_id, max_features=None, simplify_tolerance=0.01):
+def _get_user_site_set_geojson_simplified(
+    site_set_id, max_features=None, simplify_tolerance=0.01
+):
     """Load simplified GeoJSON for large datasets, either by sampling or simplification.
-    
+
     For datasets with more than max_features (default 5000), returns either:
     - A sample of evenly-spaced features if available
     - All features with simplified geometries to reduce payload size
-    
+
     This prevents 504 Gateway Timeouts when loading very large site sets (>100k features).
-    
+
     Parameters
     ----------
     site_set_id : UUID | str
@@ -2058,7 +2058,7 @@ def _get_user_site_set_geojson_simplified(site_set_id, max_features=None, simpli
         If set, limit visualization to this many features (samples or simplified)
     simplify_tolerance : float, optional
         Simplification tolerance for geometries (degrees, ~111km per degree at equator)
-    
+
     Returns
     -------
     dict
@@ -2066,32 +2066,34 @@ def _get_user_site_set_geojson_simplified(site_set_id, max_features=None, simpli
     """
     if max_features is None:
         max_features = 5000
-    
+
     db = get_db()
     try:
         # First, get the total count
         count_result = db.execute(
-            text("SELECT COUNT(*) as cnt FROM user_site_features WHERE site_set_id = :site_set_id"),
+            text(
+                "SELECT COUNT(*) as cnt FROM user_site_features WHERE site_set_id = :site_set_id"
+            ),
             {"site_set_id": str(site_set_id)},
         ).fetchone()
         total_count = count_result.cnt if count_result else 0
-        
+
         if total_count <= max_features:
             # Dataset is small enough, load full fidelity
             return get_user_site_set_geojson(site_set_id)
-        
+
         # Dataset is large - use sampling to show representative subset
         logger.info(
             f"Large site set detected: {total_count} features (max_features={max_features}). "
             "Loading simplified preview."
         )
-        
+
         # Sample every nth feature to get approximately max_features
         sample_interval = max(1, total_count // max_features)
-        
+
         rows = db.execute(
             text(
-                f"""
+                """
                 WITH ranked_features AS (
                     SELECT
                         ROW_NUMBER() OVER (ORDER BY site_id) as row_num,
@@ -2116,7 +2118,7 @@ def _get_user_site_set_geojson_simplified(site_set_id, max_features=None, simpli
                 "sample_interval": sample_interval,
             },
         ).fetchall()
-        
+
         features = [
             {
                 "type": "Feature",
@@ -2133,7 +2135,7 @@ def _get_user_site_set_geojson_simplified(site_set_id, max_features=None, simpli
             for r in rows
             if r.geom_json is not None
         ]
-        
+
         result = {"type": "FeatureCollection", "features": features}
         logger.info(f"Loaded {len(features)} sampled features (from {total_count})")
         return result
@@ -2141,18 +2143,20 @@ def _get_user_site_set_geojson_simplified(site_set_id, max_features=None, simpli
         db.close()
 
 
-def get_user_site_set_geojson_by_bounds_and_zoom(site_set_id, zoom, bounds_minx, bounds_miny, bounds_maxx, bounds_maxy):
+def get_user_site_set_geojson_by_bounds_and_zoom(
+    site_set_id, zoom, bounds_minx, bounds_miny, bounds_maxx, bounds_maxy
+):
     """Load GeoJSON sampled adaptively based on zoom level and map bounds.
-    
+
     Implements progressive refinement: as user zooms in, more detailed data is loaded
     within the current map bounds. This prevents rendering thousands of features at
     low zoom while still providing full detail when zoomed in.
-    
+
     Sampling strategy:
     - Zoom 0-8 (world/continent): Heavy sampling (1 in 50)
-    - Zoom 8-14 (region/province): Medium sampling (1 in 5)  
+    - Zoom 8-14 (region/province): Medium sampling (1 in 5)
     - Zoom 14+ (detailed): Minimal/no sampling, full geometry detail
-    
+
     Parameters
     ----------
     site_set_id : UUID | str
@@ -2161,7 +2165,7 @@ def get_user_site_set_geojson_by_bounds_and_zoom(site_set_id, zoom, bounds_minx,
         Current map zoom level (0-28)
     bounds_minx, bounds_miny, bounds_maxx, bounds_maxy : float
         Map bounds in EPSG:4326 (lon/lat)
-    
+
     Returns
     -------
     dict
@@ -2186,13 +2190,13 @@ def get_user_site_set_geojson_by_bounds_and_zoom(site_set_id, zoom, bounds_minx,
             # Very high zoom (street level): no sampling, minimal simplification
             sample_interval = 1
             simplify_tolerance = 0.001  # ~100 m
-        
+
         # Create a bounding box geometry in PostGIS
         bbox_wkt = f"POLYGON(({bounds_minx} {bounds_miny}, {bounds_maxx} {bounds_miny}, {bounds_maxx} {bounds_maxy}, {bounds_minx} {bounds_maxy}, {bounds_minx} {bounds_miny}))"
-        
+
         rows = db.execute(
             text(
-                f"""
+                """
                 WITH ranked_features AS (
                     SELECT
                         ROW_NUMBER() OVER (ORDER BY site_id) as row_num,
@@ -2219,7 +2223,7 @@ def get_user_site_set_geojson_by_bounds_and_zoom(site_set_id, zoom, bounds_minx,
                 "sample_interval": sample_interval,
             },
         ).fetchall()
-        
+
         features = [
             {
                 "type": "Feature",
@@ -2230,14 +2234,15 @@ def get_user_site_set_geojson_by_bounds_and_zoom(site_set_id, zoom, bounds_minx,
                     "start_date": r.start_date,
                     "end_date": r.end_date,
                     "area_ha": r.area_ha,
-                    "_is_sample": sample_interval > 1,  # Mark as sampled if sampling applied
+                    "_is_sample": sample_interval
+                    > 1,  # Mark as sampled if sampling applied
                     "_zoom_level": zoom,
                 },
             }
             for r in rows
             if r.geom_json is not None
         ]
-        
+
         result = {"type": "FeatureCollection", "features": features}
         logger.info(
             f"Loaded {len(features)} features at zoom {zoom} within bounds "
@@ -2250,7 +2255,7 @@ def get_user_site_set_geojson_by_bounds_and_zoom(site_set_id, zoom, bounds_minx,
 
 def get_user_site_set_detail(site_set_id, user_id):
     """Return full details for one user-owned site set, including preview rows.
-    
+
     For large datasets (>5000 features), returns a simplified/sampled GeoJSON
     preview to prevent 504 Gateway Timeouts. The full dataset can still be
     used for task submission via get_user_site_set_gdf().
@@ -2867,6 +2872,554 @@ def compute_exact_match_groups_with_splitting(
 
         return split_gdf, group_mapping
 
+    finally:
+        db.close()
+
+
+def queue_analysis_task(
+    task_name,
+    description,
+    user_id,
+    site_set_id,
+    covariates,
+    exact_match_vars,
+    max_treatment_pixels=ANALYSIS_DEFAULTS["max_treatment_pixels"],
+    control_multiplier=ANALYSIS_DEFAULTS["control_multiplier"],
+    min_site_area_ha=ANALYSIS_DEFAULTS["min_site_area_ha"],
+    min_glm_treatment_pixels=ANALYSIS_DEFAULTS["min_glm_treatment_pixels"],
+    caliper_width=ANALYSIS_DEFAULTS["caliper_width"],
+    max_controls_per_treatment=ANALYSIS_DEFAULTS["max_controls_per_treatment"],
+    min_control_distance_km=ANALYSIS_DEFAULTS["min_control_distance_km"],
+    separation_fallback_mahalanobis=ANALYSIS_DEFAULTS[
+        "separation_fallback_mahalanobis"
+    ],
+    group_by_exact_matches=ANALYSIS_DEFAULTS["group_by_exact_matches"],
+    matching_method=ANALYSIS_DEFAULTS["matching_method"],
+    n_replicates=ANALYSIS_DEFAULTS["n_replicates"],
+    random_seed=None,
+    match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
+    matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
+    resolution_m=ANALYSIS_DEFAULTS["resolution_m"],
+    source_sites_s3_uri=None,
+):
+    """Create an analysis task record and queue it for async submission.
+
+    Performs fast validation, creates a local DB record with
+    ``status='submitting'``, and dispatches
+    :func:`tasks.submit_analysis_task_worker` to handle the slow parts:
+    PostGIS geometry computations, S3 site upload, and the trends.earth
+    API call.  Returns the task_id immediately so the UI can redirect
+    to the task detail page without waiting.
+
+    ``site_set_id`` must be provided when sites are stored in the local
+    PostGIS database (the normal path).  ``source_sites_s3_uri`` is an
+    S3 fallback used when resubmitting adopted tasks that have no local
+    site set.
+
+    Raises ``ValueError`` for validation failures so the caller can
+    surface them to the user before any DB work is done.
+    """
+    if not exact_match_vars:
+        raise ValueError(
+            "At least one exact match variable must be selected "
+            "(admin0, admin1, admin2, ecoregion, or pa)."
+        )
+
+    overlap = set(covariates or []) & set(exact_match_vars)
+    if overlap:
+        raise ValueError(
+            "The following variables are selected as both covariates and "
+            "exact matches. Each variable must be used as one or the "
+            "other, not both: " + ", ".join(sorted(overlap))
+        )
+
+    ready_covariates = set(get_ready_covariate_names())
+    requested_covariates = set(covariates or [])
+    unavailable_covariates = sorted(requested_covariates - ready_covariates)
+    if unavailable_covariates:
+        raise ValueError(
+            "The following covariates are not fully processed and ready: "
+            + ", ".join(unavailable_covariates)
+        )
+
+    if max_treatment_pixels < 1:
+        raise ValueError("max_treatment_pixels must be at least 1")
+    if control_multiplier < 1:
+        raise ValueError("control_multiplier must be at least 1")
+    if min_site_area_ha < 0:
+        raise ValueError("min_site_area_ha must be zero or greater")
+    if min_glm_treatment_pixels < 1:
+        raise ValueError("min_glm_treatment_pixels must be at least 1")
+    if caliper_width < 0:
+        raise ValueError("caliper_width must be zero (disabled) or positive")
+    if max_controls_per_treatment < 0:
+        raise ValueError("max_controls_per_treatment must be 0 (no limit) or positive")
+    if min_control_distance_km < 0:
+        raise ValueError("min_control_distance_km must be 0 (disabled) or positive")
+    if random_seed is not None and (random_seed < 1 or random_seed > 2_147_483_647):
+        raise ValueError("random_seed must be between 1 and 2147483647")
+    if n_replicates < 1 or n_replicates > 1000:
+        raise ValueError("n_replicates must be between 1 and 1000")
+    if matching_job_queue not in ALLOWED_MATCHING_JOB_QUEUES:
+        raise ValueError(
+            "matching_job_queue must be one of: "
+            + ", ".join(sorted(ALLOWED_MATCHING_JOB_QUEUES))
+        )
+
+    # Verify trends.earth credentials before any DB work so the user
+    # gets an immediate error rather than a stuck "submitting" task.
+    from credential_store import get_decrypted_secret
+
+    user_creds = get_decrypted_secret(user_id)
+    if not user_creds:
+        raise ValueError(
+            "You must link your trends.earth account before "
+            "submitting analysis tasks.  Go to Profile \u2192 "
+            "trends.earth API Integration to connect your account."
+        )
+    if not Config.TRENDSEARTH_SCRIPT_ID:
+        raise ValueError(
+            "TRENDSEARTH_SCRIPT_ID is not configured. Set this "
+            "environment variable to the UUID of the avoided-emissions "
+            "script registered on the trends.earth API."
+        )
+
+    db = get_db()
+    try:
+        task_id = str(uuid.uuid4())
+        task = AnalysisTask(
+            id=task_id,
+            name=task_name,
+            description=description,
+            submitted_by=user_id,
+            site_set_id=site_set_id,
+            status="submitting",
+            config={
+                "exact_match_vars": list(exact_match_vars),
+                "max_treatment_pixels": max_treatment_pixels,
+                "control_multiplier": control_multiplier,
+                "min_site_area_ha": min_site_area_ha,
+                "min_glm_treatment_pixels": min_glm_treatment_pixels,
+                "caliper_width": caliper_width,
+                "max_controls_per_treatment": max_controls_per_treatment,
+                "min_control_distance_km": min_control_distance_km,
+                "separation_fallback_mahalanobis": bool(
+                    separation_fallback_mahalanobis
+                ),
+                "group_by_exact_matches": bool(group_by_exact_matches),
+                "matching_method": matching_method,
+                "n_replicates": n_replicates,
+                "resolution_m": resolution_m,
+                **({"random_seed": random_seed} if random_seed is not None else {}),
+                "match_memory_mib": match_memory_mib,
+                "matching_job_queue": matching_job_queue,
+                **(
+                    {"code_git_sha": Config.GIT_REVISION} if Config.GIT_REVISION else {}
+                ),
+                **(
+                    {"source_sites_s3_uri": source_sites_s3_uri}
+                    if source_sites_s3_uri
+                    else {}
+                ),
+            },
+            covariates=covariates,
+        )
+        db.add(task)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    # Dispatch the slow parts to a Celery worker.
+    webapp_tasks.submit_analysis_task_worker.delay(task_id, str(user_id))
+    logger.info(
+        "[QUEUE] Analysis task %s queued for async submission (user=%s)",
+        task_id,
+        user_id,
+    )
+    return task_id
+
+
+def _complete_analysis_task_submission(task_id, user_id):
+    """Execute the slow parts of an analysis task submission.
+
+    Called by the :func:`tasks.submit_analysis_task_worker` Celery task
+    after :func:`queue_analysis_task` has created the DB record.
+
+    1. Loads the task and its configuration from the database.
+    2. Recovers the sites GeoDataFrame from the linked site set or S3.
+    3. Runs PostGIS computations (matching extent, exclusion buffer,
+       optional site splitting).
+    4. Creates ``TaskSite`` rows and uploads sites to S3.
+    5. Submits the execution to the trends.earth API.
+    6. Updates the task record to ``status='submitted'``.
+
+    On any error the task is marked ``status='failed'`` with the error
+    message stored, and the exception is re-raised so the Celery task
+    can report it to Rollbar.
+    """
+    import time as _time
+
+    from credential_store import get_decrypted_secret
+    from trendsearth_client import TrendsEarthClient
+
+    _t0 = _time.perf_counter()
+
+    db = get_db()
+    try:
+        task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+        if not task:
+            raise ValueError(f"Task {task_id} not found in database")
+
+        if task.status != "submitting":
+            logger.warning(
+                "[SUBMIT-WORKER] Task %s has unexpected status %r — expected "
+                "'submitting'. Aborting.",
+                task_id,
+                task.status,
+            )
+            return
+
+        config = task.config or {}
+        exact_match_vars = config.get("exact_match_vars", [])
+        max_treatment_pixels = config.get(
+            "max_treatment_pixels", ANALYSIS_DEFAULTS["max_treatment_pixels"]
+        )
+        control_multiplier = config.get(
+            "control_multiplier", ANALYSIS_DEFAULTS["control_multiplier"]
+        )
+        min_site_area_ha = config.get(
+            "min_site_area_ha", ANALYSIS_DEFAULTS["min_site_area_ha"]
+        )
+        min_glm_treatment_pixels = config.get(
+            "min_glm_treatment_pixels", ANALYSIS_DEFAULTS["min_glm_treatment_pixels"]
+        )
+        caliper_width = config.get("caliper_width", ANALYSIS_DEFAULTS["caliper_width"])
+        max_controls_per_treatment = config.get(
+            "max_controls_per_treatment",
+            ANALYSIS_DEFAULTS["max_controls_per_treatment"],
+        )
+        min_control_distance_km = config.get(
+            "min_control_distance_km", ANALYSIS_DEFAULTS["min_control_distance_km"]
+        )
+        separation_fallback_mahalanobis = config.get(
+            "separation_fallback_mahalanobis", False
+        )
+        group_by_exact_matches = config.get("group_by_exact_matches", False)
+        matching_method = config.get(
+            "matching_method", ANALYSIS_DEFAULTS["matching_method"]
+        )
+        n_replicates = config.get("n_replicates", ANALYSIS_DEFAULTS["n_replicates"])
+        random_seed = config.get("random_seed")
+        match_memory_mib = config.get(
+            "match_memory_mib", ANALYSIS_DEFAULTS["match_memory_mib"]
+        )
+        matching_job_queue = config.get(
+            "matching_job_queue", DEFAULT_MATCHING_JOB_QUEUE
+        )
+        resolution_m = config.get("resolution_m", ANALYSIS_DEFAULTS["resolution_m"])
+
+        # Load the sites GeoDataFrame from the site set (primary) or S3 (fallback).
+        gdf = None
+        if task.site_set_id:
+            gdf = get_user_site_set_gdf(str(task.site_set_id))
+        if gdf is None or gdf.empty:
+            source_uri = config.get("source_sites_s3_uri")
+            if source_uri:
+                geojson_fc = _fetch_sites_geojson_from_s3(source_uri)
+                if geojson_fc and geojson_fc.get("features"):
+                    gdf = gpd.GeoDataFrame.from_features(
+                        geojson_fc["features"], crs="EPSG:4326"
+                    )
+        if gdf is None or gdf.empty:
+            raise ValueError(
+                f"Task {task_id}: could not load site data from the linked "
+                "site set or S3 URI. Cannot complete submission."
+            )
+
+        logger.info(
+            "[SUBMIT-WORKER] Task %s: loaded %d sites (%.2fs so far)",
+            task_id,
+            len(gdf),
+            _time.perf_counter() - _t0,
+        )
+
+        # Derive forest cover year range from site dates.
+        start_dates = pd.to_datetime(gdf["start_date"])
+        fc_min = max(
+            ANALYSIS_DEFAULTS["fc_year_start"],
+            int(start_dates.dt.year.min()) - 5,
+        )
+        fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
+        fc_years = list(range(fc_min, fc_max))
+
+        # Compute matching extent via PostGIS.
+        _pe_t0 = _time.perf_counter()
+        matching_extent = compute_matching_extent(gdf, exact_match_vars)
+        logger.info(
+            "[SUBMIT-WORKER] Task %s: matching extent computed in %.2fs",
+            task_id,
+            _time.perf_counter() - _pe_t0,
+        )
+
+        # Compute sites exclusion buffer via PostGIS.
+        _buf_t0 = _time.perf_counter()
+        sites_exclusion_buffer = compute_sites_exclusion_buffer(
+            gdf, min_control_distance_km
+        )
+        logger.info(
+            "[SUBMIT-WORKER] Task %s: exclusion buffer computed in %.2fs",
+            task_id,
+            _time.perf_counter() - _buf_t0,
+        )
+
+        # Optionally split sites across exact-match boundaries.
+        if group_by_exact_matches:
+            _split_t0 = _time.perf_counter()
+            split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
+                gdf, exact_match_vars
+            )
+            logger.info(
+                "[SUBMIT-WORKER] Task %s: site splitting %d → %d in %.2fs",
+                task_id,
+                len(gdf),
+                len(split_gdf),
+                _time.perf_counter() - _split_t0,
+            )
+            gdf_for_db = split_gdf
+        else:
+            gdf_for_db = gdf
+            group_mapping = None
+
+        # Create TaskSite rows and update n_sites on the task.
+        task.n_sites = len(gdf)
+        for _, row in gdf_for_db.iterrows():
+            geom = row.geometry
+            if geom is not None and not geom.is_empty:
+                area_gdf = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326").to_crs(
+                    "ESRI:54009"
+                )
+                area_ha = area_gdf.geometry.iloc[0].area / 10_000.0
+            else:
+                area_ha = None
+
+            site = TaskSite(
+                task_id=task_id,
+                site_id=str(row["site_id"]),
+                site_name=str(row.get("site_name", "")),
+                start_date=pd.to_datetime(row["start_date"]),
+                end_date=pd.to_datetime(row["end_date"])
+                if pd.notna(row.get("end_date"))
+                else None,
+                area_ha=area_ha,
+                sub_site_index=row.get("sub_site_index", 0),
+                is_sub_site=row.get("is_sub_site", False),
+                original_area_ha=row.get("original_area_ha"),
+            )
+            db.add(site)
+        db.commit()
+
+        logger.info(
+            "[SUBMIT-WORKER] Task %s: %d site rows created, uploading to S3",
+            task_id,
+            len(gdf_for_db),
+        )
+
+        # Upload sites to S3.
+        _s3_t0 = _time.perf_counter()
+        if group_by_exact_matches:
+            sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
+        elif task.site_set_id:
+            sites_uri = upload_user_site_set_geojson_to_s3(
+                str(task.site_set_id), task_id
+            )
+        else:
+            sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
+        logger.info(
+            "[SUBMIT-WORKER] Task %s: sites uploaded to %s (%.2fs)",
+            task_id,
+            sites_uri,
+            _time.perf_counter() - _s3_t0,
+        )
+
+        # Build params matching AvoidedEmissionsParams schema.
+        _cog_suffixes = {1000: "_1km", 250: "_250m"}
+        _cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
+        cog_prefix = f"{Config.S3_PREFIX}/cog{_cog_suffix}"
+
+        params = {
+            "task_id": task_id,
+            "task_name": task.name,
+            "task_description": task.description,
+            "sites_s3_uri": sites_uri,
+            "cog_bucket": Config.S3_BUCKET,
+            "cog_prefix": cog_prefix,
+            "resolution_m": resolution_m,
+            "covariates": list(task.covariates or []),
+            "exact_match_vars": exact_match_vars,
+            "matching_extent": matching_extent,
+            "fc_years": fc_years,
+            "max_treatment_pixels": max_treatment_pixels,
+            "control_multiplier": control_multiplier,
+            "min_site_area_ha": min_site_area_ha,
+            "min_glm_treatment_pixels": min_glm_treatment_pixels,
+            "caliper_width": caliper_width,
+            "max_controls_per_treatment": max_controls_per_treatment,
+            "min_control_distance_km": min_control_distance_km,
+            "separation_fallback_mahalanobis": bool(separation_fallback_mahalanobis),
+            "group_by_exact_matches": bool(group_by_exact_matches),
+            "matching_method": matching_method,
+            "n_replicates": n_replicates,
+            **(
+                {"sites_exclusion_buffer": sites_exclusion_buffer}
+                if sites_exclusion_buffer
+                else {}
+            ),
+            **({"exact_match_group_mapping": group_mapping} if group_mapping else {}),
+            **({"random_seed": random_seed} if random_seed is not None else {}),
+            "results_s3_uri": (
+                f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
+            ),
+            "intermediate_s3_uri": (
+                f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}"
+                f"/tasks/{task_id}/intermediate"
+            ),
+            **(
+                {
+                    "pipeline": [
+                        {
+                            "name": "extract",
+                            "command": ["extract"],
+                            "timeout_seconds": 14400,  # 4 h
+                            "memory_mib": max(
+                                61440, match_memory_mib
+                            ),  # at least 60 GB
+                            "vcpus": 4,
+                            "retry_attempts": 3,
+                        },
+                        {
+                            "name": "match",
+                            "command": ["match"],
+                            "array_size": (
+                                len(group_mapping) * n_replicates
+                                if group_by_exact_matches and group_mapping
+                                else len(gdf_for_db) * n_replicates
+                            ),
+                            "timeout_seconds": 14400,  # 4 h per element
+                            "memory_mib": match_memory_mib,
+                            "vcpus": 2,
+                            "retry_attempts": 5,
+                        },
+                        {
+                            "name": "summarize",
+                            "command": ["summarize"],
+                            "timeout_seconds": 7200,  # 2 h
+                            "memory_mib": max(16384, match_memory_mib // 2),
+                            "vcpus": 2,
+                            "retry_attempts": 3,
+                        },
+                    ],
+                }
+                if (
+                    (
+                        group_by_exact_matches
+                        and group_mapping
+                        and len(group_mapping) > 1
+                    )
+                    or (not group_by_exact_matches and len(gdf) > 1)
+                    or n_replicates > 1
+                )
+                else {}
+            ),
+        }
+
+        # Attach AWS Batch overrides.
+        batch_overrides = {
+            "timeout_seconds": Config.BATCH_TIMEOUT_SECONDS,
+            "memory_mib": max(Config.BATCH_MEMORY_MIB, match_memory_mib),
+            "vcpus": Config.BATCH_VCPUS,
+        }
+        if matching_job_queue:
+            batch_overrides["job_queue"] = matching_job_queue
+        elif Config.BATCH_JOB_QUEUE:
+            batch_overrides["job_queue"] = Config.BATCH_JOB_QUEUE
+        if Config.BATCH_JOB_DEFINITION:
+            batch_overrides["job_definition"] = Config.BATCH_JOB_DEFINITION
+        params["batch"] = batch_overrides
+
+        # Re-validate credentials (may have changed since queuing).
+        user_creds = get_decrypted_secret(user_id)
+        if not user_creds:
+            raise ValueError(
+                f"trends.earth credentials are no longer available for user "
+                f"{user_id}. Cannot complete submission."
+            )
+        script_id = Config.TRENDSEARTH_SCRIPT_ID
+        client_id, client_secret = user_creds
+
+        _auth_t0 = _time.perf_counter()
+        client = TrendsEarthClient.from_oauth2_credentials(
+            api_url=Config.TRENDSEARTH_API_URL,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        logger.info(
+            "[SUBMIT-WORKER] Task %s: OAuth2 auth in %.2fs, calling API (script=%s)",
+            task_id,
+            _time.perf_counter() - _auth_t0,
+            script_id,
+        )
+        _api_t0 = _time.perf_counter()
+        execution = client.create_execution(script_id, params)
+        logger.info(
+            "[SUBMIT-WORKER] Task %s: API create_execution took %.2fs",
+            task_id,
+            _time.perf_counter() - _api_t0,
+        )
+
+        exec_data = execution.get("data", {})
+        exec_id = exec_data.get("id", "")
+        exec_status = exec_data.get("status", "unknown")
+        logger.info(
+            "[SUBMIT-WORKER] Task %s: API execution created — exec_id=%s, "
+            "initial_status=%s",
+            task_id,
+            exec_id,
+            exec_status,
+        )
+
+        task.sites_s3_uri = sites_uri
+        task.results_s3_uri = params["results_s3_uri"]
+        task.status = "submitted"
+        task.submitted_at = datetime.now(timezone.utc)
+        task.extract_job_id = f"api:{exec_id}"
+        db.commit()
+        logger.info(
+            "[SUBMIT-WORKER] Task %s: status → submitted (api:%s) — total time %.2fs",
+            task_id,
+            exec_id,
+            _time.perf_counter() - _t0,
+        )
+
+    except Exception as e:
+        logger.error(
+            "[SUBMIT-WORKER] Task %s FAILED: %s",
+            task_id,
+            e,
+            exc_info=True,
+        )
+        db.rollback()
+        try:
+            task_obj = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+            if task_obj:
+                task_obj.status = "failed"
+                task_obj.error_message = str(e)
+                db.commit()
+        except Exception:
+            db.rollback()
+        raise
     finally:
         db.close()
 
@@ -5442,9 +5995,11 @@ def get_recompute_config(task_id, user_id):
 def resubmit_analysis_task(task_id, user_id):
     """Resubmit a previously submitted task with a new random seed.
 
-    Loads the original task's configuration and sites, generates a fresh
-    random seed, and creates a brand-new ``AnalysisTask`` via
-    :func:`submit_analysis_task`.
+    Looks up the original task's configuration, generates a fresh random
+    seed, and creates a brand-new ``AnalysisTask`` via
+    :func:`queue_analysis_task`.  The new task starts in
+    ``status='submitting'`` and a Celery worker handles the slow parts
+    (PostGIS computations, S3 upload, API call) asynchronously.
 
     Parameters
     ----------
@@ -5481,55 +6036,32 @@ def resubmit_analysis_task(task_id, user_id):
         if not user.is_admin and str(task.submitted_by) != str(user_id):
             raise ValueError("You can only recompute your own tasks.")
 
-        # Recover the sites GeoDataFrame
-        gdf = None
-        if task.site_set_id:
-            geojson_fc = get_user_site_set_geojson(task.site_set_id)
-            features = geojson_fc.get("features", [])
-            if features:
-                gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
-        if gdf is None or gdf.empty:
-            # Fall back to S3-stored sites
-            s3_uri = task.sites_s3_uri
-            if not s3_uri:
-                s3_uri = (task.config or {}).get("sites_s3_uri")
-            if s3_uri:
-                geojson_fc = _fetch_sites_geojson_from_s3(s3_uri)
-                if geojson_fc and geojson_fc.get("features"):
-                    gdf = gpd.GeoDataFrame.from_features(
-                        geojson_fc["features"], crs="EPSG:4326"
-                    )
-        if gdf is None or gdf.empty:
-            raise ValueError(
-                "Cannot recover sites for this task. The original site "
-                "data is no longer available."
+        # Verify that site data can be recovered — either via the local
+        # site set or an S3 URI.  We don't load the GDF here; the Celery
+        # worker will do that.
+        source_sites_s3_uri = None
+        if not task.site_set_id:
+            source_sites_s3_uri = task.sites_s3_uri or (task.config or {}).get(
+                "sites_s3_uri"
             )
+            if not source_sites_s3_uri:
+                raise ValueError(
+                    "Cannot recover sites for this task. The original site "
+                    "data is no longer available."
+                )
 
         config = task.config or {}
         new_seed = _random.randint(1, 2_147_483_647)
-
-        # Derive fc_years the same way the original submission does
-        start_dates = pd.to_datetime(gdf["start_date"])
-        fc_min = max(2000, int(start_dates.dt.year.min()) - 5)
-        # Always pull all available FC years so post-end-date
-        # deforestation data is available for comparison plots.
-        fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
-        fc_years = list(range(fc_min, fc_max))
-
-        # Memory is stored in MiB in config
         match_memory_mib = config.get("match_memory_mib", 30720)
-
         new_task_name = f"{task.name} (recompute)"
 
-        return submit_analysis_task(
+        return queue_analysis_task(
             task_name=new_task_name,
             description=task.description or "",
             user_id=user_id,
-            gdf=gdf,
+            site_set_id=str(task.site_set_id) if task.site_set_id else None,
             covariates=list(task.covariates or []),
             exact_match_vars=config.get("exact_match_vars", []),
-            fc_years=fc_years,
-            site_set_id=task.site_set_id,
             max_treatment_pixels=config.get("max_treatment_pixels", 1000),
             control_multiplier=config.get("control_multiplier", 50),
             min_site_area_ha=config.get("min_site_area_ha", 100),
@@ -5546,6 +6078,8 @@ def resubmit_analysis_task(task_id, user_id):
             random_seed=new_seed,
             match_memory_mib=match_memory_mib,
             matching_job_queue=config.get("matching_job_queue", "ae-spot-gp3"),
+            resolution_m=config.get("resolution_m", ANALYSIS_DEFAULTS["resolution_m"]),
+            source_sites_s3_uri=source_sites_s3_uri,
         )
     finally:
         db.close()

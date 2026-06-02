@@ -209,6 +209,7 @@ class AnalysisTask(Base):
     status = Column(
         Enum(
             "pending",
+            "submitting",
             "submitted",
             "running",
             "succeeded",
