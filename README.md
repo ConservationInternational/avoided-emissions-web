@@ -56,31 +56,46 @@ A Dash (Plotly) web application providing:
 - Task submission via the trends.earth API (dispatched to AWS Batch)
 - Task status monitoring
 - Results download and interactive visualization (plots, maps)
+- Shareable read-only result links with configurable expiry
 - Admin panel for triggering GEE covariate exports and managing asynchronous site uploads
+
+The application is organized as a package with sub-modules:
+
+```
+webapp/
+  app.py              Entry point — creates Dash app, Flask server, URL routing
+  api_routes.py       Flask API blueprint (/api/*, /health)
+  config.py           Config class reading from env vars
+  auth.py             Flask-Login + bcrypt authentication
+  celery_app.py       Celery factory with beat schedule and task routing
+  cog_merge.py        Merge GEE tiles into single COGs via GDAL
+  layer_config.py     Visualization styles for covariate COG map overlays
+  email_service.py    SparkPost transactional email (password reset)
+  credential_store.py Fernet-encrypted credential storage
+  trendsearth_client.py OAuth2 client for trends.earth API
+  callbacks/          Dash interactive callback functions
+  layouts/            Page layouts and AG Grid column definitions
+  models/             SQLAlchemy model definitions (one module per domain)
+  services/           Business logic (AWS Batch, GEE, S3, task management)
+  tasks/              Celery background tasks
+  tests/              Unit and integration tests
+  scripts/            Utility scripts (COG distribution analysis, etc.)
+  migrations/         Alembic migration versions
+```
 
 ### 4. Database
 
 PostgreSQL + PostGIS, managed by Alembic migrations (in `webapp/migrations/`).
 Schema is created automatically on first startup via `alembic upgrade head`.
 
-Core model definitions live in `webapp/models.py`.
+Model definitions live in `webapp/models/` (one file per domain):
 
-Primary application models:
-
-- **Auth & users**: `User`, `TrendsEarthCredential`, `PasswordResetToken`
+- **Auth & users**: `User`, `TrendsEarthCredential`, `PasswordResetToken`, `RefreshToken`
 - **Tasking & results**: `AnalysisTask`, `TaskSite`, `TaskResult`, `TaskResultTotal`
-- **Site uploads**: `UserSiteSet`, `UserSiteFeature`
-- **Covariates**: `Covariate`, `GeeExportMetadata`, `CovariatePreset`
+- **Site uploads**: `UserSiteSet`, `UserSiteFeature`, `UserSiteUpload`
+- **Covariates**: `Covariate`, `GeeExportMetadata`, `ReferenceLayerExport`, `CovariatePreset`, `MatchingSettingsPreset`
+- **Sharing**: `TaskShareLink`
 - **Reference vectors**: `GeoBoundaryADM0`, `GeoBoundaryADM1`, `GeoBoundaryADM2`, `Ecoregion`, `ProtectedArea`, `VectorImportMetadata`
-
-Database tracks:
-
-- Users and roles
-- Covariate export snapshots and merge status
-- Analysis tasks and per-site run metadata
-- Task results and metadata
-- Uploaded user site sets and site features
-- Imported vector reference-data provenance
 
 ### 5. Deployment (`deploy/`)
 
@@ -166,6 +181,21 @@ email and a strong password.
 > **Note:** Change the Postgres credentials in your `.env` file before
 > deploying to any non-local environment.
 
+### Testing
+
+Unit and integration tests live in `webapp/tests/`:
+
+```bash
+# Run the full test suite (activate the venv or run inside the webapp container)
+python -m pytest webapp/tests/ -v
+
+# Unit tests only (faster)
+python -m pytest webapp/tests/unit/ -v
+
+# Integration tests
+python -m pytest webapp/tests/integration/ -v
+```
+
 ## Covariate Configuration
 
 Users can customize which covariates are included in the matching analysis by
@@ -191,8 +221,8 @@ potential issues are detected.
 
 ### Checks performed
 
-The checks are implemented in `webapp/callbacks.py` (function
-`_assess_match_quality`) and use the following thresholds:
+The checks are implemented in `webapp/callbacks/_match_quality.py` and use
+the following thresholds:
 
 #### 1. Matched pixel count per site
 
@@ -218,8 +248,7 @@ shown on the Love plot). The checks are run both at the aggregate level
 
 ### Adjusting thresholds
 
-The threshold constants are defined at the top of the quality-check section
-in `webapp/callbacks.py`:
+The threshold constants are defined at the top of `webapp/callbacks/_match_quality.py`:
 
 ```python
 _SMD_CRITICAL = 0.25
