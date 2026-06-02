@@ -391,13 +391,11 @@ def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
     """Stream site geometries from PostGIS to an in-memory GeoParquet buffer.
 
     Uses server-side cursor iteration (``stream_results=True``) so that
-    only *batch_size* rows are decoded at once in Python.  Each batch is
-    converted to a tiny GeoDataFrame, serialised to an Arrow table via
-    ``GeoDataFrame.to_arrow()``, and appended to a ``ParquetWriter``.
-    The batch GeoDataFrame is released after each write, keeping peak
-    Python memory at O(batch_size) geometry rows + O(n_sites) Parquet
-    buffer — substantially less than the old O(n_sites) GeoDataFrame +
-    O(n_sites) Parquet approach.
+    the DB only sends rows in chunks.  All rows are collected as lightweight
+    Python row objects (WKB bytes, not Shapely objects) before the final
+    GeoDataFrame is built and written with ``to_parquet()`` in one shot.
+    This avoids geopandas-version incompatibilities with the ``to_arrow()``
+    batch-writer approach while keeping DB-side memory at O(batch_size).
 
     Returns
     -------
@@ -408,11 +406,7 @@ def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
     row_count : int
         Total number of site features written.
     """
-    import pyarrow.parquet as pq
-
     buf = io.BytesIO()
-    writer = None
-    total_rows = 0
 
     result = db.execute(
         text(
@@ -435,61 +429,33 @@ def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
         {"site_set_id": str(site_set_id)},
     )
 
-    batch = []
-    for row in result:
-        if row.geom_wkb is None:
-            continue
-        batch.append(row)
-        if len(batch) >= batch_size:
-            records = [
-                {
-                    "site_id": r.site_id,
-                    "site_name": r.site_name,
-                    "start_date": r.start_date,
-                    "end_date": r.end_date,
-                    "area_ha": r.area_ha,
-                    "geometry": wkb.loads(bytes(r.geom_wkb)),
-                }
-                for r in batch
-            ]
-            gdf_batch = gpd.GeoDataFrame(records, crs="EPSG:4326", geometry="geometry")
-            gdf_batch["start_date"] = pd.to_datetime(gdf_batch["start_date"])
-            gdf_batch["end_date"] = pd.to_datetime(gdf_batch["end_date"])
-            arrow_batch = gdf_batch.to_arrow()
-            if writer is None:
-                writer = pq.ParquetWriter(buf, arrow_batch.schema)
-            writer.write_table(arrow_batch)
-            total_rows += len(batch)
-            batch = []  # release batch GDF and rows
+    rows = [r for r in result if r.geom_wkb is not None]
 
-    if batch:
-        records = [
-            {
-                "site_id": r.site_id,
-                "site_name": r.site_name,
-                "start_date": r.start_date,
-                "end_date": r.end_date,
-                "area_ha": r.area_ha,
-                "geometry": wkb.loads(bytes(r.geom_wkb)),
-            }
-            for r in batch
-        ]
-        gdf_batch = gpd.GeoDataFrame(records, crs="EPSG:4326", geometry="geometry")
-        gdf_batch["start_date"] = pd.to_datetime(gdf_batch["start_date"])
-        gdf_batch["end_date"] = pd.to_datetime(gdf_batch["end_date"])
-        arrow_batch = gdf_batch.to_arrow()
-        if writer is None:
-            writer = pq.ParquetWriter(buf, arrow_batch.schema)
-        writer.write_table(arrow_batch)
-        total_rows += len(batch)
-
-    if writer:
-        writer.close()
-
-    if total_rows == 0:
+    if not rows:
         raise ValueError(
             f"Site set {site_set_id} has no valid geometries — cannot stream to Parquet."
         )
+
+    records = [
+        {
+            "site_id": r.site_id,
+            "site_name": r.site_name,
+            "start_date": r.start_date,
+            "end_date": r.end_date,
+            "area_ha": r.area_ha,
+            "geometry": wkb.loads(bytes(r.geom_wkb)),
+        }
+        for r in rows
+    ]
+    total_rows = len(rows)
+    del rows  # release DB row objects before building GDF
+
+    gdf = gpd.GeoDataFrame(records, crs="EPSG:4326", geometry="geometry")
+    del records
+    gdf["start_date"] = pd.to_datetime(gdf["start_date"])
+    gdf["end_date"] = pd.to_datetime(gdf["end_date"])
+    gdf.to_parquet(buf)
+    del gdf
 
     buf.seek(0)
     return buf, total_rows
