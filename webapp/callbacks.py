@@ -44,12 +44,14 @@ from services import (
     change_user_role,
     create_share_link,
     delete_covariate_preset,
+    delete_matching_settings_preset,
     delete_user,
     download_results_csv,
     force_reexport,
     force_remerge,
     get_covariate_inventory,
     get_covariate_presets,
+    get_matching_settings_presets,
     get_ready_covariate_names,
     get_ready_exact_match_names,
     get_task_detail,
@@ -64,6 +66,7 @@ from services import (
     revoke_share_link,
     revoke_te_script_access,
     save_covariate_preset,
+    save_matching_settings_preset,
     discard_staged_site_upload,
     start_gee_export,
     queue_analysis_task,
@@ -3930,6 +3933,243 @@ def register_callbacks(app, limiter=None):
     def refresh_random_seed(_n):
         """Generate a new random seed value."""
         return random.SystemRandom().randint(1, 2147483647)
+
+    # -- Matching settings presets -------------------------------------------
+
+    @app.callback(
+        [
+            Output("settings-preset-selector", "options"),
+            Output("matching-settings-presets-store", "data"),
+        ],
+        [
+            Input("url", "pathname"),
+            Input("matching-settings-presets-store", "modified_timestamp"),
+        ],
+    )
+    def refresh_settings_presets(_pathname, _ts):
+        """Populate the matching-settings preset dropdown on page load or
+        after a save/delete."""
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        presets = get_matching_settings_presets(user.id)
+        options = [{"label": p["name"], "value": p["id"]} for p in presets]
+        return options, presets
+
+    @app.callback(
+        [
+            Output("max-treatment-pixels", "value"),
+            Output("control-multiplier", "value"),
+            Output("min-site-area-ha", "value"),
+            Output("min-glm-treatment-pixels", "value"),
+            Output("caliper-width", "value"),
+            Output("max-controls-per-treatment", "value"),
+            Output("min-control-distance-km", "value"),
+            Output("matching-method", "value"),
+            Output("separation-fallback-mahalanobis", "value"),
+            Output("group-by-exact-matches", "value"),
+            Output("n-replicates", "value"),
+            Output("match-memory-gb", "value"),
+            Output("matching-job-queue", "value"),
+            Output("settings-preset-feedback", "children", allow_duplicate=True),
+        ],
+        Input("load-settings-preset-btn", "n_clicks"),
+        State("settings-preset-selector", "value"),
+        State("matching-settings-presets-store", "data"),
+        prevent_initial_call=True,
+    )
+    def load_settings_preset(_n, preset_id, presets_data):
+        """Apply the selected matching-settings preset to all form fields."""
+        if not preset_id or not presets_data:
+            return (*([no_update] * 13), "Please select a preset to load.")
+
+        for p in presets_data:
+            if p["id"] == preset_id:
+                s = p.get("settings") or {}
+                return (
+                    s.get("max_treatment_pixels", no_update),
+                    s.get("control_multiplier", no_update),
+                    s.get("min_site_area_ha", no_update),
+                    s.get("min_glm_treatment_pixels", no_update),
+                    s.get("caliper_width", no_update),
+                    s.get("max_controls_per_treatment", no_update),
+                    s.get("min_control_distance_km", no_update),
+                    s.get("matching_method", no_update),
+                    s.get("separation_fallback_mahalanobis", no_update),
+                    s.get("group_by_exact_matches", no_update),
+                    s.get("n_replicates", no_update),
+                    s.get("match_memory_gb", no_update),
+                    s.get("matching_job_queue", no_update),
+                    dbc.Alert(
+                        f'Loaded preset "{p["name"]}".',
+                        color="info",
+                        duration=3000,
+                    ),
+                )
+
+        return (
+            *([no_update] * 13),
+            dbc.Alert("Preset not found.", color="warning", duration=3000),
+        )
+
+    @app.callback(
+        [
+            Output("matching-settings-presets-store", "data", allow_duplicate=True),
+            Output("settings-preset-feedback", "children", allow_duplicate=True),
+            Output("settings-preset-name-input", "value"),
+        ],
+        Input("save-settings-preset-btn", "n_clicks"),
+        State("settings-preset-name-input", "value"),
+        State("max-treatment-pixels", "value"),
+        State("control-multiplier", "value"),
+        State("min-site-area-ha", "value"),
+        State("min-glm-treatment-pixels", "value"),
+        State("caliper-width", "value"),
+        State("max-controls-per-treatment", "value"),
+        State("min-control-distance-km", "value"),
+        State("matching-method", "value"),
+        State("separation-fallback-mahalanobis", "value"),
+        State("group-by-exact-matches", "value"),
+        State("n-replicates", "value"),
+        State("match-memory-gb", "value"),
+        State("matching-job-queue", "value"),
+        prevent_initial_call=True,
+    )
+    def save_settings_preset(
+        _n,
+        name,
+        max_treatment_pixels,
+        control_multiplier,
+        min_site_area_ha,
+        min_glm_treatment_pixels,
+        caliper_width,
+        max_controls_per_treatment,
+        min_control_distance_km,
+        matching_method,
+        separation_fallback_mahalanobis,
+        group_by_exact_matches,
+        n_replicates,
+        match_memory_gb,
+        matching_job_queue,
+    ):
+        """Save the current matching settings as a named preset."""
+        if not name or not name.strip():
+            return (
+                no_update,
+                dbc.Alert(
+                    "Please enter a name for the preset.",
+                    color="warning",
+                    duration=3000,
+                ),
+                no_update,
+            )
+
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        settings = {
+            "max_treatment_pixels": max_treatment_pixels,
+            "control_multiplier": control_multiplier,
+            "min_site_area_ha": min_site_area_ha,
+            "min_glm_treatment_pixels": min_glm_treatment_pixels,
+            "caliper_width": caliper_width,
+            "max_controls_per_treatment": max_controls_per_treatment,
+            "min_control_distance_km": min_control_distance_km,
+            "matching_method": matching_method,
+            "separation_fallback_mahalanobis": separation_fallback_mahalanobis,
+            "group_by_exact_matches": group_by_exact_matches,
+            "n_replicates": n_replicates,
+            "match_memory_gb": match_memory_gb,
+            "matching_job_queue": matching_job_queue,
+        }
+
+        try:
+            save_matching_settings_preset(user.id, name.strip(), settings)
+            updated = get_matching_settings_presets(user.id)
+            return (
+                updated,
+                dbc.Alert(
+                    f'Preset "{name.strip()}" saved.',
+                    color="success",
+                    duration=3000,
+                ),
+                "",
+            )
+        except Exception:
+            logger.exception("Failed to save matching settings preset")
+            report_exception()
+            return (
+                no_update,
+                dbc.Alert("Failed to save preset.", color="danger", duration=3000),
+                no_update,
+            )
+
+    @app.callback(
+        [
+            Output("matching-settings-presets-store", "data", allow_duplicate=True),
+            Output("settings-preset-feedback", "children", allow_duplicate=True),
+            Output("settings-preset-selector", "value"),
+        ],
+        Input("delete-settings-preset-btn", "n_clicks"),
+        State("settings-preset-selector", "value"),
+        State("matching-settings-presets-store", "data"),
+        prevent_initial_call=True,
+    )
+    def delete_settings_preset(_n, preset_id, presets_data):
+        """Delete the currently selected matching settings preset."""
+        if not preset_id:
+            return (
+                no_update,
+                dbc.Alert(
+                    "Please select a preset to delete.",
+                    color="warning",
+                    duration=3000,
+                ),
+                no_update,
+            )
+
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        preset_name = next(
+            (p["name"] for p in (presets_data or []) if p["id"] == preset_id),
+            "unknown",
+        )
+
+        try:
+            deleted = delete_matching_settings_preset(preset_id, user.id)
+            if not deleted:
+                return (
+                    no_update,
+                    dbc.Alert(
+                        "Preset not found or already deleted.",
+                        color="warning",
+                        duration=3000,
+                    ),
+                    no_update,
+                )
+
+            updated = get_matching_settings_presets(user.id)
+            return (
+                updated,
+                dbc.Alert(
+                    f'Preset "{preset_name}" deleted.',
+                    color="info",
+                    duration=3000,
+                ),
+                None,
+            )
+        except Exception:
+            logger.exception("Failed to delete matching settings preset")
+            report_exception()
+            return (
+                no_update,
+                dbc.Alert("Failed to delete preset.", color="danger", duration=3000),
+                no_update,
+            )
 
 
 # -- Helper functions for building detail page content -----------------------

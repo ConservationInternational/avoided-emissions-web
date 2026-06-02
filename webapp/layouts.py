@@ -1891,14 +1891,8 @@ def submit_layout(user, recompute_config=None):
                                                                     ),
                                                                     className="ae-scroll-panel",
                                                                 ),
-                                                                className="ae-section-card",
+                                                                className="mb-3 ae-section-card",
                                                             ),
-                                                        ],
-                                                        xs=12,
-                                                        lg=6,
-                                                    ),
-                                                    dbc.Col(
-                                                        [
                                                             dbc.Card(
                                                                 [
                                                                     dbc.CardHeader(
@@ -1923,8 +1917,14 @@ def submit_layout(user, recompute_config=None):
                                                                         ]
                                                                     ),
                                                                 ],
-                                                                className="mb-3 ae-section-card",
+                                                                className="ae-section-card",
                                                             ),
+                                                        ],
+                                                        xs=12,
+                                                        lg=6,
+                                                    ),
+                                                    dbc.Col(
+                                                        [
                                                             dbc.Card(
                                                                 [
                                                                     dbc.CardHeader(
@@ -1932,6 +1932,72 @@ def submit_layout(user, recompute_config=None):
                                                                     ),
                                                                     dbc.CardBody(
                                                                         [
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Select(
+                                                                                                id="settings-preset-selector",
+                                                                                                placeholder="Load a saved preset…",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        md=5,
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Button(
+                                                                                                "Load",
+                                                                                                id="load-settings-preset-btn",
+                                                                                                color="primary",
+                                                                                                size="sm",
+                                                                                                className="me-1",
+                                                                                            ),
+                                                                                            dbc.Button(
+                                                                                                "Delete",
+                                                                                                id="delete-settings-preset-btn",
+                                                                                                color="danger",
+                                                                                                outline=True,
+                                                                                                size="sm",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs="auto",
+                                                                                        md=3,
+                                                                                        className="d-flex align-items-center",
+                                                                                    ),
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.InputGroup(
+                                                                                                [
+                                                                                                    dbc.Input(
+                                                                                                        id="settings-preset-name-input",
+                                                                                                        type="text",
+                                                                                                        placeholder="Preset name",
+                                                                                                        size="sm",
+                                                                                                    ),
+                                                                                                    dbc.Button(
+                                                                                                        "Save",
+                                                                                                        id="save-settings-preset-btn",
+                                                                                                        color="success",
+                                                                                                        size="sm",
+                                                                                                    ),
+                                                                                                ],
+                                                                                                size="sm",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                        md=4,
+                                                                                    ),
+                                                                                ],
+                                                                                className="mb-2",
+                                                                            ),
+                                                                            html.Div(
+                                                                                id="settings-preset-feedback",
+                                                                                className="mb-2 small",
+                                                                            ),
+                                                                            html.Hr(
+                                                                                className="my-2"
+                                                                            ),
                                                                             dbc.Row(
                                                                                 [
                                                                                     dbc.Col(
@@ -2459,6 +2525,7 @@ def submit_layout(user, recompute_config=None):
             dcc.Store(id="zoom-bounds-store"),
             dcc.Interval(id="zoom-bounds-poll", interval=300),  # Check every 300ms
             dcc.Store(id="presets-store"),
+            dcc.Store(id="matching-settings-presets-store"),
             dcc.Store(id="site-set-refresh-store"),
             dcc.Store(id="site-upload-columns-store"),
             dcc.Store(id="submit-lock-store", data=False),

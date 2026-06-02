@@ -62,6 +62,11 @@ class User(Base):
     covariate_presets = relationship(
         "CovariatePreset", back_populates="user", cascade="all, delete-orphan"
     )
+    matching_settings_presets = relationship(
+        "MatchingSettingsPreset",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def is_admin(self):
@@ -521,6 +526,27 @@ class CovariatePreset(Base):
     )
 
     user = relationship("User", back_populates="covariate_presets")
+
+
+class MatchingSettingsPreset(Base):
+    """Named set of matching settings that a user can save and restore."""
+
+    __tablename__ = "matching_settings_presets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    name = Column(String(255), nullable=False)
+    settings = Column(JSON, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    user = relationship("User", back_populates="matching_settings_presets")
 
 
 # ---------------------------------------------------------------------------
