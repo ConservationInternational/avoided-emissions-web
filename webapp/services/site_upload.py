@@ -73,7 +73,11 @@ def _site_upload_stage_s3_keys(upload_token):
 
 
 def _use_shared_site_upload_stage():
-    return Config.ENVIRONMENT in {"staging", "production"} and bool(Config.S3_BUCKET)
+    # Use S3 whenever a bucket is configured so that the webapp and Celery
+    # worker containers (which have separate filesystems) share access to the
+    # staged upload.  The local-filesystem fallback is only safe when both
+    # processes run in the same container or the same filesystem namespace.
+    return bool(Config.S3_BUCKET)
 
 
 def _parse_staged_upload_created_at(meta):
