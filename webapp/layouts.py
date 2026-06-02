@@ -1805,11 +1805,11 @@ def submit_layout(user, recompute_config=None):
                                                 [
                                                     dbc.Col(
                                                         [
-                                                            dbc.Label(
-                                                                "Matching Covariates"
-                                                            ),
                                                             dbc.Card(
                                                                 [
+                                                                    dbc.CardHeader(
+                                                                        "Matching Covariates"
+                                                                    ),
                                                                     dbc.CardBody(
                                                                         [
                                                                             dbc.Row(
@@ -1868,38 +1868,40 @@ def submit_layout(user, recompute_config=None):
                                                                                         xs=12,
                                                                                         md=4,
                                                                                     ),
-                                                                                ]
+                                                                                ],
+                                                                                className="mb-2",
                                                                             ),
                                                                             html.Div(
                                                                                 id="preset-feedback",
-                                                                                className="mt-2 small",
+                                                                                className="mb-2 small",
                                                                             ),
-                                                                        ],
-                                                                        className="py-2 px-3",
-                                                                    ),
-                                                                ],
-                                                                className="mb-3 ae-section-card",
-                                                            ),
-                                                            dbc.Card(
-                                                                dbc.CardBody(
-                                                                    dbc.Checklist(
-                                                                        id="covariate-selection",
-                                                                        options=[],
-                                                                        value=[],
-                                                                        inline=False,
-                                                                        className="ms-2",
-                                                                    ),
-                                                                    className="ae-scroll-panel",
-                                                                ),
-                                                                className="mb-3 ae-section-card",
-                                                            ),
-                                                            dbc.Card(
-                                                                [
-                                                                    dbc.CardHeader(
-                                                                        "Exact Match Variables"
-                                                                    ),
-                                                                    dbc.CardBody(
-                                                                        [
+                                                                            html.Hr(
+                                                                                className="my-2"
+                                                                            ),
+                                                                            html.H6(
+                                                                                "Matching Covariates",
+                                                                                className="mb-2 fw-semibold",
+                                                                            ),
+                                                                            dbc.Card(
+                                                                                dbc.CardBody(
+                                                                                    dbc.Checklist(
+                                                                                        id="covariate-selection",
+                                                                                        options=[],
+                                                                                        value=[],
+                                                                                        inline=False,
+                                                                                        className="ms-2",
+                                                                                    ),
+                                                                                    className="ae-scroll-panel",
+                                                                                ),
+                                                                                className="mb-3",
+                                                                            ),
+                                                                            html.Hr(
+                                                                                className="my-2"
+                                                                            ),
+                                                                            html.H6(
+                                                                                "Exact Match Variables",
+                                                                                className="mb-1 fw-semibold",
+                                                                            ),
                                                                             html.Small(
                                                                                 "At least one must be selected. Controls are drawn only from areas sharing these attributes with treatment sites.",
                                                                                 className="text-muted d-block mb-2",
