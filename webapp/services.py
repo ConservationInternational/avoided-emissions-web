@@ -2279,12 +2279,13 @@ def get_user_site_set_detail(site_set_id, user_id):
 
         preview_rows = [
             {
+                "preview_row_id": f"{idx}:{r.site_id}:{r.start_date.isoformat() if r.start_date else ''}:{r.end_date.isoformat() if r.end_date else ''}",
                 "site_id": r.site_id,
                 "site_name": r.site_name,
                 "start_date": r.start_date.isoformat() if r.start_date else "",
                 "end_date": r.end_date.isoformat() if r.end_date else "",
             }
-            for r in rows
+            for idx, r in enumerate(rows)
         ]
 
         # Use simplified GeoJSON for map preview to avoid timeout on large datasets

@@ -13,7 +13,6 @@ import uuid as _uuid
 import dash_bootstrap_components as dbc
 import flask
 import flask_login
-import geopandas as gpd
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -1549,7 +1548,7 @@ def register_callbacks(app, limiter=None):
                         "mode": "singleRow",
                         "enableClickSelection": True,
                     },
-                    "getRowId": {"function": "params.data.site_id"},
+                    "getRowId": {"function": "params.data.preview_row_id"},
                 },
             )
 
@@ -1682,7 +1681,7 @@ def register_callbacks(app, limiter=None):
                 enable_cog_layers=True,
                 resolution_m=resolution_m,
             )
-        except Exception as exc:
+        except Exception:
             logger.exception("Error updating map on zoom")
             raise PreventUpdate
 
