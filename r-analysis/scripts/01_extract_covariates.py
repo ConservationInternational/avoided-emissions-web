@@ -10,7 +10,7 @@ speed using GDAL and xarray/rioxarray for Cloud-Optimised GeoTIFF access.
 
 Input:
     - Task config JSON (--config)
-    - Site polygons (GeoJSON or GeoPackage)
+    - Site polygons (GeoJSON, GeoPackage, or GeoParquet)
     - Covariate COGs on S3
 
 Output:
@@ -143,8 +143,11 @@ def parse_config(argv: list[str] | None = None) -> dict:
 
 
 def load_sites(sites_path: str, min_area_ha: float) -> gpd.GeoDataFrame:
-    """Load sites from GeoJSON / GeoPackage, filter by area, add metadata."""
-    sites = gpd.read_file(sites_path)
+    """Load sites from GeoJSON, GeoPackage, or GeoParquet."""
+    if sites_path.lower().endswith(".parquet"):
+        sites = gpd.read_parquet(sites_path)
+    else:
+        sites = gpd.read_file(sites_path)
 
     required = {"site_id", "site_name", "start_date"}
     missing = required - set(sites.columns)

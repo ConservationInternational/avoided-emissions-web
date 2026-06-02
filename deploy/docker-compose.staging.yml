@@ -172,7 +172,7 @@ services:
           memory: 4G
         reservations:
           cpus: "0.25"
-          memory: 1G
+          memory: 4G
 
   beat:
     image: ${WEBAPP_IMAGE}

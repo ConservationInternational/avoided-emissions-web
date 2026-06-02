@@ -22,6 +22,7 @@ from botocore.exceptions import ClientError
 from pathlib import Path
 import geopandas as gpd
 import pandas as pd
+from shapely import wkb
 from sqlalchemy import text
 
 from config import Config, report_exception
@@ -2308,15 +2309,9 @@ def get_user_site_set_detail(site_set_id, user_id):
 
 def get_user_site_set_gdf(site_set_id, user_id=None):
     """Load one site set as a GeoDataFrame."""
-    geojson_fc = get_user_site_set_geojson(site_set_id)
-    gdf = gpd.GeoDataFrame.from_features(
-        geojson_fc.get("features", []), crs="EPSG:4326"
-    )
-    if gdf.empty:
-        raise ValueError("Selected site set has no site geometries.")
-    if user_id is not None:
-        db = get_db()
-        try:
+    db = get_db()
+    try:
+        if user_id is not None:
             exists = (
                 db.query(UserSiteSet)
                 .filter(UserSiteSet.id == site_set_id, UserSiteSet.user_id == user_id)
@@ -2324,9 +2319,48 @@ def get_user_site_set_gdf(site_set_id, user_id=None):
             )
             if not exists:
                 raise ValueError("Site set not found.")
-        finally:
-            db.close()
-    return gdf
+
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    f.site_id,
+                    f.site_name,
+                    to_char(f.start_date, 'YYYY-MM-DD') AS start_date,
+                    CASE
+                        WHEN f.end_date IS NULL THEN NULL
+                        ELSE to_char(f.end_date, 'YYYY-MM-DD')
+                    END AS end_date,
+                    f.area_ha,
+                    ST_AsBinary(f.geom) AS geom_wkb
+                FROM user_site_features f
+                WHERE f.site_set_id = :site_set_id
+                ORDER BY f.site_id
+                """
+            ),
+            {"site_set_id": str(site_set_id)},
+        ).fetchall()
+
+        records = [
+            {
+                "site_id": row.site_id,
+                "site_name": row.site_name,
+                "start_date": row.start_date,
+                "end_date": row.end_date,
+                "area_ha": row.area_ha,
+                "geometry": wkb.loads(bytes(row.geom_wkb)),
+            }
+            for row in rows
+            if row.geom_wkb is not None
+        ]
+        gdf = gpd.GeoDataFrame(records, crs="EPSG:4326", geometry="geometry")
+        if gdf.empty:
+            raise ValueError("Selected site set has no site geometries.")
+        gdf["start_date"] = pd.to_datetime(gdf["start_date"])
+        gdf["end_date"] = pd.to_datetime(gdf["end_date"])
+        return gdf
+    finally:
+        db.close()
 
 
 def delete_user_site_set(site_set_id, user_id):
@@ -2452,6 +2486,36 @@ def upload_user_site_set_geojson_to_s3(site_set_id, task_id):
     return f"s3://{Config.S3_BUCKET}/{key}"
 
 
+def upload_sites_parquet_to_s3(gdf, task_id):
+    """Upload a GeoDataFrame as GeoParquet to S3."""
+    s3 = get_s3_client()
+    key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.parquet"
+    with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+        gdf.to_parquet(tmp.name, index=False)
+        with open(tmp.name, "rb") as handle:
+            s3.put_object(
+                Bucket=Config.S3_BUCKET,
+                Key=key,
+                Body=handle.read(),
+                ContentType="application/vnd.apache.parquet",
+                Tagging=S3_COST_TAGGING,
+            )
+    return f"s3://{Config.S3_BUCKET}/{key}"
+
+
+def upload_sites_to_geojson(gdf):
+    """Serialize a GeoDataFrame to GeoJSON text without mutating it."""
+    gdf_json = gdf.copy()
+    for col in gdf_json.columns:
+        if pd.api.types.is_datetime64_any_dtype(gdf_json[col]):
+            gdf_json[col] = gdf_json[col].dt.strftime("%Y-%m-%d")
+        elif gdf_json[col].apply(lambda v: isinstance(v, pd.Timestamp)).any():
+            gdf_json[col] = gdf_json[col].apply(
+                lambda v: v.strftime("%Y-%m-%d") if isinstance(v, pd.Timestamp) else v
+            )
+    return gdf_json.to_json()
+
+
 def upload_sites_to_s3(gdf, task_id):
     """Upload a GeoDataFrame as GeoJSON to S3.
 
@@ -2459,15 +2523,7 @@ def upload_sites_to_s3(gdf, task_id):
     """
     s3 = get_s3_client()
     key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.geojson"
-    # Convert any Timestamp columns to strings to avoid JSON serialization errors
-    for col in gdf.columns:
-        if pd.api.types.is_datetime64_any_dtype(gdf[col]):
-            gdf[col] = gdf[col].dt.strftime("%Y-%m-%d")
-        elif gdf[col].apply(lambda v: isinstance(v, pd.Timestamp)).any():
-            gdf[col] = gdf[col].apply(
-                lambda v: v.strftime("%Y-%m-%d") if isinstance(v, pd.Timestamp) else v
-            )
-    body = gdf.to_json()
+    body = upload_sites_to_geojson(gdf)
     s3.put_object(
         Bucket=Config.S3_BUCKET,
         Key=key,
@@ -2902,6 +2958,7 @@ def queue_analysis_task(
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
     resolution_m=ANALYSIS_DEFAULTS["resolution_m"],
     source_sites_s3_uri=None,
+    source_sites_parquet_s3_uri=None,
 ):
     """Create an analysis task record and queue it for async submission.
 
@@ -2915,7 +2972,8 @@ def queue_analysis_task(
     ``site_set_id`` must be provided when sites are stored in the local
     PostGIS database (the normal path).  ``source_sites_s3_uri`` is an
     S3 fallback used when resubmitting adopted tasks that have no local
-    site set.
+    site set. ``source_sites_parquet_s3_uri`` is the preferred fallback
+    for GeoParquet site artifacts.
 
     Raises ``ValueError`` for validation failures so the caller can
     surface them to the user before any DB work is done.
@@ -3020,6 +3078,11 @@ def queue_analysis_task(
                 **(
                     {"source_sites_s3_uri": source_sites_s3_uri}
                     if source_sites_s3_uri
+                    else {}
+                ),
+                **(
+                    {"source_sites_parquet_s3_uri": source_sites_parquet_s3_uri}
+                    if source_sites_parquet_s3_uri
                     else {}
                 ),
             },
@@ -3127,6 +3190,10 @@ def _complete_analysis_task_submission(task_id, user_id):
         if task.site_set_id:
             gdf = get_user_site_set_gdf(str(task.site_set_id))
         if gdf is None or gdf.empty:
+            source_parquet_uri = config.get("source_sites_parquet_s3_uri")
+            if source_parquet_uri:
+                gdf = _fetch_sites_parquet_from_s3(source_parquet_uri)
+        if gdf is None or gdf.empty:
             source_uri = config.get("source_sites_s3_uri")
             if source_uri:
                 geojson_fc = _fetch_sites_geojson_from_s3(source_uri)
@@ -3230,17 +3297,14 @@ def _complete_analysis_task_submission(task_id, user_id):
 
         # Upload sites to S3.
         _s3_t0 = _time.perf_counter()
-        if group_by_exact_matches:
-            sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
-        elif task.site_set_id:
-            sites_uri = upload_user_site_set_geojson_to_s3(
-                str(task.site_set_id), task_id
-            )
-        else:
+        sites_parquet_uri = upload_sites_parquet_to_s3(gdf_for_db, task_id)
+        sites_uri = None
+        if not task.site_set_id:
             sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
         logger.info(
-            "[SUBMIT-WORKER] Task %s: sites uploaded to %s (%.2fs)",
+            "[SUBMIT-WORKER] Task %s: site artifacts uploaded (parquet=%s, geojson=%s) (%.2fs)",
             task_id,
+            sites_parquet_uri,
             sites_uri,
             _time.perf_counter() - _s3_t0,
         )
@@ -3254,7 +3318,8 @@ def _complete_analysis_task_submission(task_id, user_id):
             "task_id": task_id,
             "task_name": task.name,
             "task_description": task.description,
-            "sites_s3_uri": sites_uri,
+            **({"sites_s3_uri": sites_uri} if sites_uri else {}),
+            "sites_parquet_s3_uri": sites_parquet_uri,
             "cog_bucket": Config.S3_BUCKET,
             "cog_prefix": cog_prefix,
             "resolution_m": resolution_m,
@@ -3392,6 +3457,11 @@ def _complete_analysis_task_submission(task_id, user_id):
         )
 
         task.sites_s3_uri = sites_uri
+        task.config = {
+            **config,
+            **({"sites_s3_uri": sites_uri} if sites_uri else {}),
+            "sites_parquet_s3_uri": sites_parquet_uri,
+        }
         task.results_s3_uri = params["results_s3_uri"]
         task.status = "submitted"
         task.submitted_at = datetime.now(timezone.utc)
@@ -3681,15 +3751,14 @@ def submit_analysis_task(
         # uploaded so Batch uses the same site/sub-site geometry used to build
         # exact_match_group_mapping.
         _s3_t0 = _time.perf_counter()
-        if group_by_exact_matches:
-            sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
-        elif site_set_id:
-            sites_uri = upload_user_site_set_geojson_to_s3(site_set_id, task_id)
-        else:
+        sites_parquet_uri = upload_sites_parquet_to_s3(gdf_for_db, task_id)
+        sites_uri = None
+        if not site_set_id:
             sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
         logger.info(
-            "[SUBMIT] Task %s: sites uploaded to %s (%.2fs)",
+            "[SUBMIT] Task %s: site artifacts uploaded (parquet=%s, geojson=%s) (%.2fs)",
             task_id,
+            sites_parquet_uri,
             sites_uri,
             _time.perf_counter() - _s3_t0,
         )
@@ -3705,7 +3774,8 @@ def submit_analysis_task(
             "task_id": task_id,
             "task_name": task_name,
             "task_description": description,
-            "sites_s3_uri": sites_uri,
+            **({"sites_s3_uri": sites_uri} if sites_uri else {}),
+            "sites_parquet_s3_uri": sites_parquet_uri,
             "cog_bucket": Config.S3_BUCKET,
             "cog_prefix": cog_prefix,
             "resolution_m": resolution_m,
@@ -3852,6 +3922,11 @@ def submit_analysis_task(
             list(exec_data.keys()),
         )
         task.sites_s3_uri = sites_uri
+        task.config = {
+            **(task.config or {}),
+            **({"sites_s3_uri": sites_uri} if sites_uri else {}),
+            "sites_parquet_s3_uri": sites_parquet_uri,
+        }
         task.results_s3_uri = params["results_s3_uri"]
         task.status = "submitted"
         task.submitted_at = datetime.now(timezone.utc)
@@ -3995,10 +4070,7 @@ def _fetch_sites_geojson_from_s3(sites_s3_uri):
     if not sites_s3_uri or not sites_s3_uri.startswith("s3://"):
         return None
     try:
-        without_scheme = sites_s3_uri[5:]
-        bucket, _, key = without_scheme.partition("/")
-        if not bucket or not key:
-            return None
+        bucket, key = _split_s3_uri(sites_s3_uri)
         s3 = get_s3_client()
         response = s3.get_object(Bucket=bucket, Key=key)
         return json.loads(response["Body"].read().decode("utf-8"))
@@ -4007,6 +4079,36 @@ def _fetch_sites_geojson_from_s3(sites_s3_uri):
             "Failed to download sites GeoJSON from %s", sites_s3_uri, exc_info=True
         )
         return None
+
+
+def _fetch_sites_parquet_from_s3(sites_s3_uri):
+    """Download a sites GeoParquet file from S3 into a GeoDataFrame."""
+    if not sites_s3_uri or not sites_s3_uri.startswith("s3://"):
+        return None
+    try:
+        bucket, key = _split_s3_uri(sites_s3_uri)
+        s3 = get_s3_client()
+        response = s3.get_object(Bucket=bucket, Key=key)
+        with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+            tmp.write(response["Body"].read())
+            tmp.flush()
+            return gpd.read_parquet(tmp.name)
+    except Exception:
+        logger.warning(
+            "Failed to download sites GeoParquet from %s",
+            sites_s3_uri,
+            exc_info=True,
+        )
+        return None
+
+
+def _split_s3_uri(s3_uri):
+    """Split an S3 URI into ``(bucket, key)``."""
+    without_scheme = s3_uri[5:]
+    bucket, _, key = without_scheme.partition("/")
+    if not bucket or not key:
+        raise ValueError(f"Invalid S3 URI: {s3_uri}")
+    return bucket, key
 
 
 def update_task_info(task_id, name=None, description=None, user_id=None):
@@ -4072,6 +4174,12 @@ def get_task_detail(task_id):
                 s3_uri = (task.config or {}).get("sites_s3_uri")
             if s3_uri:
                 sites_geojson = _fetch_sites_geojson_from_s3(s3_uri)
+            else:
+                parquet_uri = (task.config or {}).get("sites_parquet_s3_uri")
+                if parquet_uri:
+                    parquet_gdf = _fetch_sites_parquet_from_s3(parquet_uri)
+                    if parquet_gdf is not None and not parquet_gdf.empty:
+                        sites_geojson = json.loads(upload_sites_to_geojson(parquet_gdf))
 
         return {
             "task": task,
@@ -6136,11 +6244,12 @@ def resubmit_analysis_task(task_id, user_id):
         # site set or an S3 URI.  We don't load the GDF here; the Celery
         # worker will do that.
         source_sites_s3_uri = None
+        source_sites_parquet_s3_uri = (task.config or {}).get("sites_parquet_s3_uri")
         if not task.site_set_id:
             source_sites_s3_uri = task.sites_s3_uri or (task.config or {}).get(
                 "sites_s3_uri"
             )
-            if not source_sites_s3_uri:
+            if not source_sites_s3_uri and not source_sites_parquet_s3_uri:
                 raise ValueError(
                     "Cannot recover sites for this task. The original site "
                     "data is no longer available."
@@ -6176,6 +6285,7 @@ def resubmit_analysis_task(task_id, user_id):
             matching_job_queue=config.get("matching_job_queue", "ae-spot-gp3"),
             resolution_m=config.get("resolution_m", ANALYSIS_DEFAULTS["resolution_m"]),
             source_sites_s3_uri=source_sites_s3_uri,
+            source_sites_parquet_s3_uri=source_sites_parquet_s3_uri,
         )
     finally:
         db.close()

@@ -21,6 +21,7 @@ google-auth>=2.0.0,<3
 pyjwt>=2.8.0,<3
 shapely>=2.0.0,<3
 fiona>=1.9.0,<2
+pyarrow>=16.0.0,<22
 rollbar>=1.0.0,<2
 requests>=2.31.0,<3
 blinker>=1.6.0,<2

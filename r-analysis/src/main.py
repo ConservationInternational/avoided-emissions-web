@@ -114,7 +114,8 @@ def run(params, log=None):
     ----------
     params : dict
         Execution parameters provided by ``gefcore.runner``.
-        Required keys: ``sites_s3_uri``, ``cog_bucket``, ``cog_prefix``.
+        Required keys: ``cog_bucket``, ``cog_prefix``, and one of
+        ``sites_parquet_s3_uri`` or ``sites_s3_uri``.
     log : logging.Logger, optional
         Logger instance (falls back to module-level logger).
 
@@ -147,7 +148,7 @@ def run(params, log=None):
         params.get("cog_bucket", "?"),
         params.get("cog_prefix", "?"),
         params.get("resolution_m", "?"),
-        params.get("sites_s3_uri", "?"),
+        params.get("sites_parquet_s3_uri") or params.get("sites_s3_uri", "?"),
         len(params.get("covariates", [])),
     )
 
@@ -181,9 +182,18 @@ def run(params, log=None):
         _download_s3_prefix(intermediate_uri + "/matches", matches_dir, log)
 
     # ----- download sites file from S3 -----
-    sites_s3_uri = params["sites_s3_uri"]
-    sites_local = os.path.join(input_dir, "sites.geojson")
-    _download_s3(sites_s3_uri, sites_local, log)
+    sites_artifact_uri = params.get("sites_parquet_s3_uri") or params.get(
+        "sites_s3_uri"
+    )
+    if not sites_artifact_uri:
+        raise KeyError(
+            "Missing required parameter: sites_parquet_s3_uri or sites_s3_uri"
+        )
+    sites_extension = (
+        ".parquet" if sites_artifact_uri.endswith(".parquet") else ".geojson"
+    )
+    sites_local = os.path.join(input_dir, f"sites{sites_extension}")
+    _download_s3(sites_artifact_uri, sites_local, log)
 
     # ----- write config JSON consumed by the R scripts -----
     config = {
