@@ -2307,6 +2307,131 @@ def get_user_site_set_detail(site_set_id, user_id):
         db.close()
 
 
+def _get_site_set_min_start_year(site_set_id, db):
+    """Return the earliest start_date year across all features in a site set.
+
+    Used by the submit worker to compute ``fc_years`` without loading a full
+    GeoDataFrame.  Returns ``None`` when the site set has no features.
+    """
+    row = db.execute(
+        text(
+            "SELECT EXTRACT(YEAR FROM MIN(start_date))::int AS min_year "
+            "FROM user_site_features "
+            "WHERE site_set_id = :site_set_id"
+        ),
+        {"site_set_id": str(site_set_id)},
+    ).fetchone()
+    return row.min_year if row and row.min_year is not None else None
+
+
+def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
+    """Stream site geometries from PostGIS to an in-memory GeoParquet buffer.
+
+    Uses server-side cursor iteration (``stream_results=True``) so that
+    only *batch_size* rows are decoded at once in Python.  Each batch is
+    converted to a tiny GeoDataFrame, serialised to an Arrow table via
+    ``GeoDataFrame.to_arrow()``, and appended to a ``ParquetWriter``.
+    The batch GeoDataFrame is released after each write, keeping peak
+    Python memory at O(batch_size) geometry rows + O(n_sites) Parquet
+    buffer — substantially less than the old O(n_sites) GeoDataFrame +
+    O(n_sites) Parquet approach.
+
+    Returns
+    -------
+    buf : io.BytesIO
+        Seeked-to-0 in-memory GeoParquet file.  Callers that need a
+        GeoDataFrame afterwards can do ``gpd.read_parquet(buf)`` then
+        ``buf.seek(0)`` again for the S3 upload.
+    row_count : int
+        Total number of site features written.
+    """
+    import pyarrow.parquet as pq
+
+    buf = io.BytesIO()
+    writer = None
+    total_rows = 0
+
+    result = db.execute(
+        text(
+            """
+            SELECT
+                f.site_id,
+                f.site_name,
+                to_char(f.start_date, 'YYYY-MM-DD') AS start_date,
+                CASE
+                    WHEN f.end_date IS NULL THEN NULL
+                    ELSE to_char(f.end_date, 'YYYY-MM-DD')
+                END AS end_date,
+                f.area_ha,
+                ST_AsBinary(f.geom) AS geom_wkb
+            FROM user_site_features f
+            WHERE f.site_set_id = :site_set_id
+            ORDER BY f.site_id
+            """
+        ),
+        {"site_set_id": str(site_set_id)},
+    ).execution_options(stream_results=True, max_row_buffer=batch_size)
+
+    batch = []
+    for row in result:
+        if row.geom_wkb is None:
+            continue
+        batch.append(row)
+        if len(batch) >= batch_size:
+            records = [
+                {
+                    "site_id": r.site_id,
+                    "site_name": r.site_name,
+                    "start_date": r.start_date,
+                    "end_date": r.end_date,
+                    "area_ha": r.area_ha,
+                    "geometry": wkb.loads(bytes(r.geom_wkb)),
+                }
+                for r in batch
+            ]
+            gdf_batch = gpd.GeoDataFrame(records, crs="EPSG:4326", geometry="geometry")
+            gdf_batch["start_date"] = pd.to_datetime(gdf_batch["start_date"])
+            gdf_batch["end_date"] = pd.to_datetime(gdf_batch["end_date"])
+            arrow_batch = gdf_batch.to_arrow()
+            if writer is None:
+                writer = pq.ParquetWriter(buf, arrow_batch.schema)
+            writer.write_table(arrow_batch)
+            total_rows += len(batch)
+            batch = []  # release batch GDF and rows
+
+    if batch:
+        records = [
+            {
+                "site_id": r.site_id,
+                "site_name": r.site_name,
+                "start_date": r.start_date,
+                "end_date": r.end_date,
+                "area_ha": r.area_ha,
+                "geometry": wkb.loads(bytes(r.geom_wkb)),
+            }
+            for r in batch
+        ]
+        gdf_batch = gpd.GeoDataFrame(records, crs="EPSG:4326", geometry="geometry")
+        gdf_batch["start_date"] = pd.to_datetime(gdf_batch["start_date"])
+        gdf_batch["end_date"] = pd.to_datetime(gdf_batch["end_date"])
+        arrow_batch = gdf_batch.to_arrow()
+        if writer is None:
+            writer = pq.ParquetWriter(buf, arrow_batch.schema)
+        writer.write_table(arrow_batch)
+        total_rows += len(batch)
+
+    if writer:
+        writer.close()
+
+    if total_rows == 0:
+        raise ValueError(
+            f"Site set {site_set_id} has no valid geometries — cannot stream to Parquet."
+        )
+
+    buf.seek(0)
+    return buf, total_rows
+
+
 def get_user_site_set_gdf(site_set_id, user_id=None):
     """Load one site set as a GeoDataFrame."""
     db = get_db()
@@ -3234,67 +3359,144 @@ def _complete_analysis_task_submission(task_id, user_id):
         )
         resolution_m = config.get("resolution_m", ANALYSIS_DEFAULTS["resolution_m"])
 
-        # Load the sites GeoDataFrame from the site set (primary) or S3 (fallback).
-        gdf = None
-        if task.site_set_id:
-            gdf = get_user_site_set_gdf(str(task.site_set_id))
-        if gdf is None or gdf.empty:
+        _site_set_id = str(task.site_set_id) if task.site_set_id else None
+
+        # ── OOM-safe path for DB-linked site sets ────────────────────────────
+        # When the task is linked to a site_set_id we can derive everything we
+        # need from PostGIS *before* loading any geometry into Python.  This
+        # means the worker never holds the full GDF + the matching-extent query
+        # result + the Parquet buffer simultaneously.
+        #
+        # 1. fc_years  — SELECT MIN(start_date) from user_site_features (scalar)
+        # 2. matching_extent  — PostGIS aggregate via ST_Collect subquery
+        # 3. exclusion_buffer — PostGIS aggregate via ST_Collect subquery
+        # 4. sites Parquet    — streamed in batches; GDF batches are released
+        #                       after each write; peak = O(batch) + O(parquet)
+        # 5. GDF for splitting / TaskSite — read back from in-memory Parquet
+        #                       buffer only when needed; Parquet is ~4–8× smaller
+        #                       than the equivalent GeoDataFrame.
+        #
+        # For adopted tasks loaded from S3 (no site_set_id) we fall through to
+        # the legacy path that fetches the GDF from S3 directly.
+        # ─────────────────────────────────────────────────────────────────────
+
+        parquet_buf = None  # holds the in-memory GeoParquet buffer
+        gdf = None  # populated lazily from parquet_buf when needed
+
+        if _site_set_id:
+            # Step 1 — forest-cover year range via scalar DB query.
+            _db_meta = get_db()
+            try:
+                min_year = _get_site_set_min_start_year(_site_set_id, _db_meta)
+            finally:
+                _db_meta.close()
+            if min_year is None:
+                raise ValueError(
+                    f"Task {task_id}: site set {_site_set_id} has no features."
+                )
+
+            # Step 2 & 3 — matching extent and exclusion buffer (DB subqueries).
+            _pe_t0 = _time.perf_counter()
+            matching_extent = compute_matching_extent(
+                None, exact_match_vars, site_set_id=_site_set_id
+            )
+            logger.info(
+                "[SUBMIT-WORKER] Task %s: matching extent computed in %.2fs",
+                task_id,
+                _time.perf_counter() - _pe_t0,
+            )
+
+            _buf_t0 = _time.perf_counter()
+            sites_exclusion_buffer = compute_sites_exclusion_buffer(
+                None, min_control_distance_km, site_set_id=_site_set_id
+            )
+            logger.info(
+                "[SUBMIT-WORKER] Task %s: exclusion buffer computed in %.2fs",
+                task_id,
+                _time.perf_counter() - _buf_t0,
+            )
+
+            # Step 4 — stream site set to in-memory Parquet (batch-at-a-time).
+            _stream_t0 = _time.perf_counter()
+            _db_stream = get_db()
+            try:
+                parquet_buf, n_sites_streamed = _stream_site_set_to_parquet_buf(
+                    _site_set_id, _db_stream
+                )
+            finally:
+                _db_stream.close()
+            logger.info(
+                "[SUBMIT-WORKER] Task %s: streamed %d sites to Parquet in %.2fs",
+                task_id,
+                n_sites_streamed,
+                _time.perf_counter() - _stream_t0,
+            )
+
+            fc_min = max(ANALYSIS_DEFAULTS["fc_year_start"], min_year - 5)
+            fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
+            fc_years = list(range(fc_min, fc_max))
+
+        else:
+            # Legacy path — adopted task; load GDF from S3.
             source_parquet_uri = config.get("source_sites_parquet_s3_uri")
             if source_parquet_uri:
                 gdf = _fetch_sites_parquet_from_s3(source_parquet_uri)
-        if gdf is None or gdf.empty:
-            source_uri = config.get("source_sites_s3_uri")
-            if source_uri:
-                geojson_fc = _fetch_sites_geojson_from_s3(source_uri)
-                if geojson_fc and geojson_fc.get("features"):
-                    gdf = gpd.GeoDataFrame.from_features(
-                        geojson_fc["features"], crs="EPSG:4326"
-                    )
+            if gdf is None or gdf.empty:
+                source_uri = config.get("source_sites_s3_uri")
+                if source_uri:
+                    geojson_fc = _fetch_sites_geojson_from_s3(source_uri)
+                    if geojson_fc and geojson_fc.get("features"):
+                        gdf = gpd.GeoDataFrame.from_features(
+                            geojson_fc["features"], crs="EPSG:4326"
+                        )
+            if gdf is None or gdf.empty:
+                raise ValueError(
+                    f"Task {task_id}: could not load site data from the linked "
+                    "site set or S3 URI. Cannot complete submission."
+                )
+
+            start_dates = pd.to_datetime(gdf["start_date"])
+            fc_min = max(
+                ANALYSIS_DEFAULTS["fc_year_start"],
+                int(start_dates.dt.year.min()) - 5,
+            )
+            fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
+            fc_years = list(range(fc_min, fc_max))
+
+            _pe_t0 = _time.perf_counter()
+            matching_extent = compute_matching_extent(gdf, exact_match_vars)
+            logger.info(
+                "[SUBMIT-WORKER] Task %s: matching extent computed in %.2fs",
+                task_id,
+                _time.perf_counter() - _pe_t0,
+            )
+            _buf_t0 = _time.perf_counter()
+            sites_exclusion_buffer = compute_sites_exclusion_buffer(
+                gdf, min_control_distance_km
+            )
+            logger.info(
+                "[SUBMIT-WORKER] Task %s: exclusion buffer computed in %.2fs",
+                task_id,
+                _time.perf_counter() - _buf_t0,
+            )
+
+        # Step 5 — load GDF only now (from Parquet buffer or existing gdf).
+        # For the DB path the GDF is read from the compact in-memory Parquet;
+        # for the S3 fallback path the GDF is already loaded above.
+        if parquet_buf is not None and gdf is None:
+            gdf = gpd.read_parquet(parquet_buf)
+            parquet_buf.seek(0)  # rewind so we can upload the same buffer to S3
+
         if gdf is None or gdf.empty:
             raise ValueError(
-                f"Task {task_id}: could not load site data from the linked "
-                "site set or S3 URI. Cannot complete submission."
+                f"Task {task_id}: could not load site data. Cannot complete submission."
             )
 
         logger.info(
-            "[SUBMIT-WORKER] Task %s: loaded %d sites (%.2fs so far)",
+            "[SUBMIT-WORKER] Task %s: %d sites ready (%.2fs so far)",
             task_id,
             len(gdf),
             _time.perf_counter() - _t0,
-        )
-
-        # Derive forest cover year range from site dates.
-        start_dates = pd.to_datetime(gdf["start_date"])
-        fc_min = max(
-            ANALYSIS_DEFAULTS["fc_year_start"],
-            int(start_dates.dt.year.min()) - 5,
-        )
-        fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
-        fc_years = list(range(fc_min, fc_max))
-
-        # Compute matching extent via PostGIS.
-        # Pass site_set_id so the function can query site geometries directly
-        # from user_site_features, avoiding a Python-side unary_union.
-        _pe_t0 = _time.perf_counter()
-        _site_set_id = str(task.site_set_id) if task.site_set_id else None
-        matching_extent = compute_matching_extent(
-            gdf, exact_match_vars, site_set_id=_site_set_id
-        )
-        logger.info(
-            "[SUBMIT-WORKER] Task %s: matching extent computed in %.2fs",
-            task_id,
-            _time.perf_counter() - _pe_t0,
-        )
-
-        # Compute sites exclusion buffer via PostGIS.
-        _buf_t0 = _time.perf_counter()
-        sites_exclusion_buffer = compute_sites_exclusion_buffer(
-            gdf, min_control_distance_km, site_set_id=_site_set_id
-        )
-        logger.info(
-            "[SUBMIT-WORKER] Task %s: exclusion buffer computed in %.2fs",
-            task_id,
-            _time.perf_counter() - _buf_t0,
         )
 
         # Optionally split sites across exact-match boundaries.
@@ -3353,8 +3555,25 @@ def _complete_analysis_task_submission(task_id, user_id):
         )
 
         # Upload sites to S3.
+        # When parquet_buf is available (DB-linked path) the buffer was produced
+        # by _stream_site_set_to_parquet_buf and is already seeked to 0; upload
+        # it directly to avoid re-encoding the GDF a second time.
         _s3_t0 = _time.perf_counter()
-        sites_parquet_uri = upload_sites_parquet_to_s3(gdf_for_db, task_id)
+        if parquet_buf is not None and not group_by_exact_matches:
+            # Fast path: upload the streaming buffer directly.
+            s3_client = get_s3_client()
+            parquet_key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.parquet"
+            s3_client.put_object(
+                Bucket=Config.S3_BUCKET,
+                Key=parquet_key,
+                Body=parquet_buf,
+                ContentType="application/vnd.apache.parquet",
+                Tagging=S3_COST_TAGGING,
+            )
+            sites_parquet_uri = f"s3://{Config.S3_BUCKET}/{parquet_key}"
+        else:
+            # gdf_for_db may differ from original (splitting), or no buffer.
+            sites_parquet_uri = upload_sites_parquet_to_s3(gdf_for_db, task_id)
         sites_uri = None
         if not task.site_set_id:
             sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
