@@ -1307,8 +1307,6 @@ def register_callbacks(app, limiter=None):
             Output("admin-site-sets-total-count", "children"),
             Output("admin-site-upload-table", "rowData"),
             Output("admin-site-upload-total-count", "children"),
-            Output("admin-site-set-selector", "options"),
-            Output("admin-site-set-selector", "value"),
         ],
         [
             Input("admin-refresh-interval", "n_intervals"),
@@ -1328,13 +1326,6 @@ def register_callbacks(app, limiter=None):
         running_count = sum(1 for row in uploads if row.get("status") == "running")
         queued_count = sum(1 for row in uploads if row.get("status") == "pending")
         cancelled_count = sum(1 for row in uploads if row.get("status") == "cancelled")
-        selector_options = [
-            {
-                "label": row.get("name") or "Untitled site set",
-                "value": str(row.get("id")),
-            }
-            for row in site_sets
-        ]
 
         return (
             site_sets,
@@ -1343,8 +1334,6 @@ def register_callbacks(app, limiter=None):
             "Total: "
             f"{len(uploads)} | Pending: {queued_count} | Running: {running_count} "
             f"| Cancelled: {cancelled_count}",
-            selector_options,
-            selector_options[0]["value"] if selector_options else None,
         )
 
     @app.callback(
