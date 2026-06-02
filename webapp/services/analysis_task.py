@@ -509,6 +509,22 @@ def _complete_analysis_task_submission(task_id, user_id):
         _gdf_cea = gdf_for_db.to_crs("ESRI:54009")
         _areas_ha = _gdf_cea.geometry.area / 10_000.0
 
+        # Delete any TaskSite rows left by a previous interrupted attempt so
+        # this step is idempotent on Celery retry (acks_late + reject_on_worker_lost
+        # can re-queue the task after a partial commit was rolled back by Postgres,
+        # but some rows may have been flushed before the connection was lost).
+        existing_site_count = (
+            db.query(TaskSite).filter(TaskSite.task_id == task_id).delete()
+        )
+        if existing_site_count:
+            db.flush()
+            logger.warning(
+                "[SUBMIT-WORKER] Task %s: deleted %d TaskSite rows from a "
+                "previous interrupted attempt before re-inserting",
+                task_id,
+                existing_site_count,
+            )
+
         # Create TaskSite rows and update n_sites on the task.
         task.n_sites = len(gdf)
         for i, (_, row) in enumerate(gdf_for_db.iterrows()):

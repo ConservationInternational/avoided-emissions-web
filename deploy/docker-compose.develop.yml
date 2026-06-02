@@ -149,6 +149,7 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
     volumes:
       - ../webapp:/app
+      - ../gee_export:/app/gee_export
     depends_on:
       migrate:
         condition: service_completed_successfully
