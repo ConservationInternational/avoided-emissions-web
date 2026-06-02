@@ -74,6 +74,9 @@ celery_app.conf.update(
         "tasks.import_user_site_upload": {"queue": "merge"},
         "tasks.ingest_sdg_cog": {"queue": "merge"},
         "tasks.generate_match_quality_summary": {"queue": "merge"},
+        # submit_analysis_task_worker does heavy PostGIS + geopandas work
+        # and must run on the higher-memory merge worker.
+        "tasks.submit_analysis_task_worker": {"queue": "merge"},
     },
 )
 
@@ -107,16 +110,67 @@ def handle_task_failure(sender=None, task_id=None, exception=None, einfo=None, *
     Uses ``sys.exc_info()`` when available (i.e. inside the failing
     worker process) and falls back to the exception/einfo provided by
     the signal for maximum reliability.
+
+    Also marks ``submitting`` analysis tasks as ``failed`` when the
+    ``submit_analysis_task_worker`` task fails so they are never left
+    stuck in the ``submitting`` state (e.g. after an OOM SIGKILL).
     """
-    if not Config.ROLLBAR_ACCESS_TOKEN:
-        return
-    exc_info = sys.exc_info()
-    # If sys.exc_info() returns (None, None, None) we are outside the
-    # original exception context — reconstruct from signal kwargs.
-    if exc_info[0] is None and exception is not None:
-        exc_info = (type(exception), exception, getattr(einfo, "tb", None))
-    extra = {
-        "task_name": sender.name if sender else kw.get("sender"),
-        "task_id": task_id,
-    }
-    rollbar.report_exc_info(exc_info, extra_data=extra)
+    if Config.ROLLBAR_ACCESS_TOKEN:
+        exc_info = sys.exc_info()
+        # If sys.exc_info() returns (None, None, None) we are outside the
+        # original exception context — reconstruct from signal kwargs.
+        if exc_info[0] is None and exception is not None:
+            exc_info = (type(exception), exception, getattr(einfo, "tb", None))
+        extra = {
+            "task_name": sender.name if sender else kw.get("sender"),
+            "task_id": task_id,
+        }
+        rollbar.report_exc_info(exc_info, extra_data=extra)
+
+    # When submit_analysis_task_worker fails after all retries are exhausted
+    # (or is killed by the OOM killer), mark the analysis task as failed so
+    # it is not left stuck in 'submitting'.  The kwargs passed to the signal
+    # contain the Celery task args.
+    task_name = sender.name if sender else None
+    if task_name == "tasks.submit_analysis_task_worker":
+        try:
+            args = kw.get("args", ())
+            analysis_task_id = args[0] if args else None
+            if analysis_task_id:
+                from models import AnalysisTask, get_db
+
+                db = get_db()
+                try:
+                    record = (
+                        db.query(AnalysisTask)
+                        .filter(
+                            AnalysisTask.id == analysis_task_id,
+                            AnalysisTask.status == "submitting",
+                        )
+                        .first()
+                    )
+                    if record:
+                        record.status = "failed"
+                        record.error_message = (
+                            f"Worker killed before submission completed "
+                            f"({type(exception).__name__}: {exception})"
+                        )
+                        db.commit()
+                        logger.error(
+                            "submit_analysis_task_worker: marked task %s as "
+                            "failed after terminal worker failure",
+                            analysis_task_id,
+                        )
+                except Exception as db_exc:
+                    db.rollback()
+                    logger.error(
+                        "handle_task_failure: could not mark task %s failed: %s",
+                        analysis_task_id,
+                        db_exc,
+                    )
+                finally:
+                    db.close()
+        except Exception as signal_exc:
+            logger.error(
+                "handle_task_failure cleanup raised: %s", signal_exc, exc_info=True
+            )

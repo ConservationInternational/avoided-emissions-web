@@ -1899,7 +1899,10 @@ def poll_batch_tasks() -> dict:
 @celery_app.task(
     name="tasks.submit_analysis_task_worker",
     bind=True,
-    max_retries=0,
+    # Limit retries: if the worker is OOM-killed the message is nacked and
+    # re-queued (acks_late + reject_on_worker_lost), but we cap at 2 retries
+    # so a persistently memory-constrained submission doesn't loop forever.
+    max_retries=2,
     acks_late=True,
     reject_on_worker_lost=True,
     soft_time_limit=1800,  # 30 minutes
