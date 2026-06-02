@@ -65,18 +65,18 @@ celery_app.conf.update(
     result_expires=86400,
     # Autodiscover tasks in the 'tasks' module
     imports=["tasks"],
-    # Route CPU/IO-heavy tasks to the merge queue (higher memory limit)
+    # Route CPU/IO-heavy tasks to the heavy queue (higher memory limit)
     # so they never starve the lightweight polling tasks on the default queue.
     task_routes={
-        "tasks.run_cog_merge": {"queue": "merge"},
-        "tasks.rasterize_vectors": {"queue": "merge"},
-        "tasks.import_vector_data": {"queue": "merge"},
-        "tasks.import_user_site_upload": {"queue": "merge"},
-        "tasks.ingest_sdg_cog": {"queue": "merge"},
-        "tasks.generate_match_quality_summary": {"queue": "merge"},
+        "tasks.run_cog_merge": {"queue": "heavy"},
+        "tasks.rasterize_vectors": {"queue": "heavy"},
+        "tasks.import_vector_data": {"queue": "heavy"},
+        "tasks.import_user_site_upload": {"queue": "heavy"},
+        "tasks.ingest_sdg_cog": {"queue": "heavy"},
+        "tasks.generate_match_quality_summary": {"queue": "heavy"},
         # submit_analysis_task_worker does heavy PostGIS + geopandas work
-        # and must run on the higher-memory merge worker.
-        "tasks.submit_analysis_task_worker": {"queue": "merge"},
+        # and must run on the higher-memory heavy worker.
+        "tasks.submit_analysis_task_worker": {"queue": "heavy"},
     },
 )
 

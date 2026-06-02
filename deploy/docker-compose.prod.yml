@@ -188,7 +188,7 @@ services:
           cpus: "0.25"
           memory: 256M
 
-  merge-worker:
+  heavy-worker:
     image: ${WEBAPP_IMAGE}
     env_file:
       - ../.env
@@ -197,7 +197,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       TMPDIR: /scratch
-    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=1", "-Q", "merge"]
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=1", "-Q", "heavy"]
     # Kill fast — acks_late=True means Celery re-delivers unfinished
     # tasks to the replacement worker automatically.
     stop_grace_period: 5s
