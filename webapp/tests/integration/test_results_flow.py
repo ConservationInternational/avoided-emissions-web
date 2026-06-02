@@ -15,7 +15,6 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-@pytest.mark.skip(reason="requires Docker PostgreSQL — run with: pytest -m integration")
 class TestResultsFlowIntegration:
     """End-to-end: get_task_detail and get_task_site_results read real DB rows."""
 

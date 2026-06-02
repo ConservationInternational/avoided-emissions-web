@@ -15,7 +15,6 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-@pytest.mark.skip(reason="requires Docker PostgreSQL — run with: pytest -m integration")
 class TestProcessingFlowIntegration:
     """End-to-end: import_execution_results writes real DB rows."""
 

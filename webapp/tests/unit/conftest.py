@@ -1,12 +1,8 @@
 """Shared fixtures for unit tests."""
 
-import json
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
-FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
 
 # Stable IDs reused across tests for predictable assertions.
 SAMPLE_TASK_ID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
@@ -21,12 +17,6 @@ def sample_task_id():
 @pytest.fixture
 def sample_user_id():
     return SAMPLE_USER_ID
-
-
-@pytest.fixture
-def sample_results_payload():
-    with open(FIXTURE_DIR / "results_payload.json") as f:
-        return json.load(f)
 
 
 @pytest.fixture

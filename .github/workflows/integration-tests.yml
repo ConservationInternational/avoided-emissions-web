@@ -1,0 +1,76 @@
+name: Integration Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - staging
+  pull_request:
+    branches:
+      - main
+      - develop
+      - staging
+  workflow_dispatch:
+
+jobs:
+  integration-tests:
+    name: Run integration tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgis/postgis:18-3.6-alpine
+        env:
+          POSTGRES_USER: ae_user
+          POSTGRES_PASSWORD: ae_password
+          POSTGRES_DB: avoided_emissions_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ae_user -d avoided_emissions_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build webapp Docker image
+        run: |
+          docker build \
+            -f webapp/Dockerfile \
+            -t avoided-emissions-webapp:ci \
+            .
+
+      - name: Run Alembic migrations
+        # Bypass entrypoint.sh (which waits for Postgres and dispatches Celery
+        # tasks) and run alembic directly.  --network host lets the container
+        # reach the postgres service running on the Actions runner's localhost.
+        run: |
+          docker run --rm \
+            --network host \
+            --user root \
+            --entrypoint bash \
+            -e DATABASE_URL=postgresql://ae_user:ae_password@localhost:5432/avoided_emissions_test \
+            -e SECRET_KEY=ci-integration-test-secret-key-at-least-32-chars \
+            -e ENCRYPTION_KEY=ci-integration-test-encryption-key-32c \
+            -e CELERY_BROKER_URL=redis://localhost:6379/0 \
+            -e CELERY_RESULT_BACKEND=redis://localhost:6379/0 \
+            -e ROLLBAR_ACCESS_TOKEN="" \
+            -e ENVIRONMENT=test \
+            avoided-emissions-webapp:ci \
+            -c "alembic upgrade head"
+
+      - name: Run integration tests
+        # tests/conftest.py sets DATABASE_URL to localhost:5432/avoided_emissions_test
+        # by default, which matches the postgres service above when --network host
+        # is used.  All other required env vars are also handled by conftest.py.
+        run: |
+          docker run --rm \
+            --network host \
+            --user root \
+            --entrypoint bash \
+            avoided-emissions-webapp:ci \
+            -c "pip install -q -r requirements-dev.txt && python -m pytest tests/integration/ -v -m integration --tb=short"

@@ -9,28 +9,34 @@
 #
 # Requirements:
 #   - Docker and Docker Compose must be available on the host.
-#   - The webapp service must be running (or will be started implicitly by exec).
-#     Start with:  docker compose -f deploy/docker-compose.develop.yml up -d
+#   - The webapp service does NOT need to be running; this script uses
+#     `docker compose run` to start a fresh one-shot container.
 #
-# The script installs dev dependencies on first run (adds pytest, pytest-mock,
-# etc. into the already-running container without rebuilding the image).
+# The --entrypoint override bypasses entrypoint.sh (which waits for Postgres
+# and runs Alembic) so unit tests run immediately without any live services.
 
 set -euo pipefail
 
 COMPOSE_FILE="deploy/docker-compose.develop.yml"
 SERVICE="webapp"
 
-# Install dev requirements inside the container if not already present.
-# This is fast (pip no-ops if everything is installed) and avoids a rebuild.
-docker compose -f "$COMPOSE_FILE" exec "$SERVICE" \
-    pip install -q -r requirements-dev.txt
+# Build the image if it is not already present (fast no-op when up to date).
+docker compose -f "$COMPOSE_FILE" build --quiet "$SERVICE"
 
-# Run pytest.  All positional args and flags are forwarded to pytest.
+# Run pytest in a fresh, disposable container.  --entrypoint bash bypasses
+# entrypoint.sh; --user root allows pip to write to the system site-packages.
+# All positional args and flags are forwarded to pytest.
 # Default: run unit tests only.  Pass -m integration to run integration tests.
 if [ $# -eq 0 ]; then
-    docker compose -f "$COMPOSE_FILE" exec "$SERVICE" \
-        python -m pytest tests/unit/ -v
+    docker compose -f "$COMPOSE_FILE" run --rm \
+        --entrypoint bash \
+        --user root \
+        "$SERVICE" \
+        -c "pip install -q -r requirements-dev.txt && python -m pytest tests/unit/ -v"
 else
-    docker compose -f "$COMPOSE_FILE" exec "$SERVICE" \
-        python -m pytest "$@"
+    docker compose -f "$COMPOSE_FILE" run --rm \
+        --entrypoint bash \
+        --user root \
+        "$SERVICE" \
+        -c "pip install -q -r requirements-dev.txt && python -m pytest $*"
 fi

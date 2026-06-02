@@ -33,9 +33,6 @@ jobs:
         run: |
           docker run --rm \
             --user root \
-            --name webapp-test \
+            --entrypoint bash \
             avoided-emissions-webapp:ci \
-            bash -c "
-              pip install -q -r requirements-dev.txt &&
-              python -m pytest tests/unit/ -v --tb=short
-            "
+            -c "pip install -q -r requirements-dev.txt && python -m pytest tests/unit/ -v --tb=short"

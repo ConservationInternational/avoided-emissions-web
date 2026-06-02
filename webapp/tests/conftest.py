@@ -6,7 +6,11 @@ so these assignments must come before any ``from models import …`` or
 ``from services import …`` statements run in test files or fixtures.
 """
 
+import json
 import os
+from pathlib import Path
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Provide test-safe defaults for every env var the app reads at import time.
@@ -46,3 +50,12 @@ _TEST_DEFAULTS = {
 
 for _key, _value in _TEST_DEFAULTS.items():
     os.environ.setdefault(_key, _value)
+
+_FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def sample_results_payload():
+    """Load the representative 2-site × 5-year results fixture."""
+    with open(_FIXTURE_DIR / "results_payload.json") as f:
+        return json.load(f)

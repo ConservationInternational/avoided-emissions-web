@@ -15,7 +15,6 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-@pytest.mark.skip(reason="requires Docker PostgreSQL — run with: pytest -m integration")
 class TestSubmissionFlowIntegration:
     """End-to-end: queue_analysis_task creates a real DB record."""
 
