@@ -4,7 +4,6 @@ Creates the Dash app, configures Flask-Login authentication, registers
 callbacks, and sets up URL routing between pages.
 """
 
-import json
 import logging
 import os
 import sys
@@ -18,7 +17,7 @@ import flask_login
 import rollbar
 import rollbar.contrib.flask
 from dash import Input, Output, State, dcc, html
-from flask import got_request_exception, jsonify, request
+from flask import got_request_exception, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_wtf.csrf import CSRFProtect
@@ -38,7 +37,6 @@ import tasks as _webapp_tasks  # noqa: F401 — side-effect: registers Celery ta
 
 from callbacks import register_callbacks
 from config import Config
-from gee_export import gee_config
 from layouts import (
     admin_layout,
     dashboard_layout,
@@ -52,10 +50,7 @@ from layouts import (
     submit_layout,
     task_detail_layout,
 )
-from services import (
-    get_site_upload_mapping_preview_from_staged,
-    stream_stage_site_upload,
-)
+from api_routes import create_api_blueprint
 
 # ---------------------------------------------------------------------------
 # Logging — configure the root logger so that all application loggers (auth,
@@ -204,66 +199,8 @@ if Config.ROLLBAR_ACCESS_TOKEN:
 else:
     logger.warning("ROLLBAR_ACCESS_TOKEN not set — error tracking disabled")
 
-
-# Health endpoint (used by Docker healthcheck to confirm app + migrations are ready)
-@server.route("/health")
-def health_check():
-    return "ok", 200
-
-
-# -- Session-check endpoint (called by client-side interval) -----------------
-@server.route("/api/session-check")
-def session_check():
-    """Return whether the current user is still authenticated.
-
-    Called by a ``dcc.Interval`` in the client to detect inactivity
-    logouts and redirect to ``/login``.
-    """
-    if flask_login.current_user.is_authenticated:
-        return jsonify({"authenticated": True})
-    return jsonify({"authenticated": False}), 401
-
-
-@server.route("/api/site-upload/stream-preview", methods=["POST"])
-@flask_login.login_required
-@limiter.limit("20 per minute")
-def site_upload_stream_preview():
-    """Receive a streamed multipart upload and return mapping preview + token."""
-    file = request.files.get("file")
-    if not file or not file.filename:
-        return jsonify({"ok": False, "errors": ["No file was provided."]}), 400
-
-    filename = file.filename
-
-    # Stream directly to disk in 1 MB chunks — never buffer the full file in
-    # Python memory so that large uploads (100 MB+) don't exhaust the worker.
-    try:
-        upload_token = stream_stage_site_upload(
-            file_stream=file.stream,
-            filename=filename,
-            user_id=flask_login.current_user.id,
-        )
-    except ValueError as exc:
-        return jsonify({"ok": False, "errors": [str(exc)]}), 400
-
-    # Read only the first 10 rows for the column-mapping preview.
-    preview, errors = get_site_upload_mapping_preview_from_staged(
-        upload_token, flask_login.current_user.id
-    )
-    if errors:
-        from services import discard_staged_site_upload
-
-        discard_staged_site_upload(upload_token, flask_login.current_user.id)
-        return jsonify({"ok": False, "errors": errors}), 400
-
-    return jsonify(
-        {
-            "ok": True,
-            "filename": filename,
-            "upload_token": upload_token,
-            "preview": preview,
-        }
-    )
+# Register API Blueprint (all /health, /api/* routes)
+server.register_blueprint(create_api_blueprint(limiter))
 
 
 # -- Refresh-token based session management -----------------------------------
@@ -362,313 +299,6 @@ def _set_security_headers(response):
     ]
     response.headers["Content-Security-Policy"] = "; ".join(csp_parts)
     return response
-
-
-# -- COG layer API -----------------------------------------------------------
-# Returns available covariate COG layers with pre-signed S3 URLs and style
-# config so the OpenLayers map can render them as toggleable overlays.
-
-
-@server.route("/api/cog-layers")
-@flask_login.login_required
-def cog_layers():
-    """Return merged covariate layers with pre-signed URLs and styles.
-
-    Accepts an optional ``resolution`` query parameter (1000 or 250) to
-    return COGs for a specific resolution.  Defaults to 1000 (1 km).
-    """
-    import boto3
-    from flask import request as flask_request
-
-    from layer_config import get_style
-    from models import Covariate, get_db
-
-    # Determine requested resolution
-    try:
-        resolution_m = int(flask_request.args.get("resolution", "1000"))
-    except (ValueError, TypeError):
-        resolution_m = 1000
-    if resolution_m not in (1000, 250):
-        resolution_m = 1000
-
-    _cog_suffixes = {1000: "_1km", 250: "_250m"}
-    cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
-
-    # Load gee-export config for descriptions and categories
-    # gee_config already imported at module level
-    cog_prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}"
-    # Backwards-compat: legacy COGs without a suffix are treated as 1 km.
-    legacy_cog_prefix = f"{Config.S3_PREFIX}/cog" if resolution_m == 1000 else None
-
-    # Get latest merged covariates from DB
-    db = get_db()
-    try:
-        latest: dict[str, Covariate] = {}
-        for rec in db.query(Covariate).filter(Covariate.status == "merged").all():
-            existing = latest.get(rec.covariate_name)
-            if existing is None or (
-                rec.started_at
-                and (
-                    existing.started_at is None or rec.started_at > existing.started_at
-                )
-            ):
-                latest[rec.covariate_name] = rec
-    finally:
-        db.close()
-
-    if not Config.S3_BUCKET:
-        return jsonify({"layers": []})
-
-    s3 = boto3.client("s3", region_name=Config.AWS_REGION)
-    layers = []
-
-    for name, rec in sorted(latest.items()):
-        if not rec.merged_url:
-            continue
-        cfg = gee_config.COVARIATES.get(name, {})
-        category = cfg.get("category", "")
-
-        # Generate a 1-hour pre-signed URL for the COG.
-        # Try the resolution-specific key first; for 1 km fall back to
-        # the legacy prefix (cog/) if the new key (cog_1km/) is missing.
-        s3_key = f"{cog_prefix}/{name}.tif"
-        try:
-            s3.head_object(Bucket=Config.S3_BUCKET, Key=s3_key)
-        except Exception:
-            if legacy_cog_prefix:
-                s3_key = f"{legacy_cog_prefix}/{name}.tif"
-                try:
-                    s3.head_object(Bucket=Config.S3_BUCKET, Key=s3_key)
-                except Exception:
-                    continue
-            else:
-                continue
-        try:
-            url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": Config.S3_BUCKET, "Key": s3_key},
-                ExpiresIn=3600,
-            )
-        except Exception:
-            continue
-
-        style = get_style(name, category)
-        layers.append(
-            {
-                "name": name,
-                "description": cfg.get("description", name),
-                "category": category,
-                "url": url,
-                "style": style,
-            }
-        )
-
-    return jsonify({"layers": layers, "resolution_m": resolution_m})
-
-
-# Vector overlay layer configuration: maps layer name to DB table and
-# the column that contains the human-readable label for each polygon.
-# "limit" controls max features returned (lower for complex geometries).
-_VECTOR_LAYERS = {
-    "admin0": {
-        "table": "geoboundaries_adm0",
-        "label_col": "shape_name",
-        "description": "Country boundaries (ADM0)",
-        "category": "boundaries",
-        "limit": 200,
-    },
-    "admin1": {
-        "table": "geoboundaries_adm1",
-        "label_col": "shape_name",
-        "description": "Admin level 1 boundaries",
-        "category": "boundaries",
-        "limit": 300,
-    },
-    "admin2": {
-        "table": "geoboundaries_adm2",
-        "label_col": "shape_name",
-        "description": "Admin level 2 boundaries",
-        "category": "boundaries",
-        "limit": 500,
-    },
-    "ecoregion": {
-        "table": "ecoregions",
-        "label_col": "eco_name",
-        "description": "RESOLVE Ecoregions",
-        "category": "ecological",
-        "limit": 150,  # Ecoregions have very complex geometries
-    },
-    "pa": {
-        "table": "wdpa",
-        "label_col": "name_eng",
-        "description": "Protected Areas (WDPA)",
-        "category": "ecological",
-        "limit": 300,
-    },
-}
-
-
-@server.route("/api/vector-layer/<layer_name>")
-@flask_login.login_required
-def vector_layer(layer_name):
-    """Return simplified GeoJSON for a vector overlay within a bounding box.
-
-    Query parameters:
-        bbox  – comma-separated west,south,east,north in EPSG:4326
-        simplify – optional tolerance in degrees (default 0.01)
-    """
-    from sqlalchemy import text as sa_text
-    from sqlalchemy.exc import OperationalError
-
-    from models import get_db
-
-    cfg = _VECTOR_LAYERS.get(layer_name)
-    if not cfg:
-        return jsonify({"error": "Unknown layer"}), 404
-
-    bbox_str = request.args.get("bbox")
-    if not bbox_str:
-        return jsonify({"error": "bbox parameter required"}), 400
-
-    try:
-        west, south, east, north = (float(v) for v in bbox_str.split(","))
-    except (ValueError, TypeError):
-        return jsonify({"error": "Invalid bbox format"}), 400
-
-    simplify = float(request.args.get("simplify", "0.01"))
-    table = cfg["table"]
-    label_col = cfg["label_col"]
-
-    # Safety: table and label_col come from the hardcoded _VECTOR_LAYERS
-    # dict (never from user input).  Assert this to prevent future
-    # regressions if the dict is ever populated dynamically.
-    _SAFE_IDENTIFIER = __import__("re").compile(r"^[a-z_][a-z0-9_]*$")
-    assert _SAFE_IDENTIFIER.match(table), f"Unsafe table name: {table}"
-    assert _SAFE_IDENTIFIER.match(label_col), f"Unsafe column name: {label_col}"
-
-    # Lower limit for layers with complex geometries to reduce memory usage.
-    # Ecoregions in particular have very detailed polygons.
-    limit = cfg.get("limit", 500)
-
-    # Use ST_Simplify (faster, Douglas-Peucker) instead of
-    # ST_SimplifyPreserveTopology for better performance on large geometries.
-    # Clip geometries to bbox first to reduce data volume before simplification.
-    sql = sa_text(
-        f"""
-        SELECT
-            {label_col} AS name,
-            ST_AsGeoJSON(
-                ST_Simplify(
-                    ST_Intersection(geom, ST_MakeEnvelope(:w, :s, :e, :n, 4326)),
-                    :tol
-                ),
-                5
-            ) AS geojson
-        FROM {table}
-        WHERE geom && ST_MakeEnvelope(:w, :s, :e, :n, 4326)
-        LIMIT :lim
-        """
-    )
-
-    db = get_db()
-    try:
-        # Set statement timeout to prevent runaway queries (15 seconds)
-        db.execute(sa_text("SET LOCAL statement_timeout = '15s'"))
-        rows = db.execute(
-            sql,
-            {
-                "tol": simplify,
-                "w": west,
-                "s": south,
-                "e": east,
-                "n": north,
-                "lim": limit,
-            },
-        ).fetchall()
-    except OperationalError as e:
-        app.logger.warning(f"Vector layer query failed for {layer_name}: {e}")
-        db.rollback()
-        return jsonify({"error": "Query timeout or server error"}), 503
-    finally:
-        db.close()
-
-    features = []
-    for row in rows:
-        geom = json.loads(row.geojson) if row.geojson else None
-        if not geom:
-            continue
-        features.append(
-            {
-                "type": "Feature",
-                "properties": {"name": row.name or ""},
-                "geometry": geom,
-            }
-        )
-
-    return jsonify({"type": "FeatureCollection", "features": features})
-
-
-@server.route("/api/vector-layers")
-@flask_login.login_required
-def vector_layers_list():
-    """Return the list of available vector overlay layers."""
-    layers = []
-    for name, cfg in _VECTOR_LAYERS.items():
-        layers.append(
-            {
-                "name": name,
-                "description": cfg["description"],
-                "category": cfg["category"],
-            }
-        )
-    return jsonify({"layers": layers})
-
-
-@server.route("/api/matched-pixels/<task_id>")
-@flask_login.login_required
-def matched_pixels(task_id):
-    """Return matched treatment/control pixel locations as GeoJSON.
-
-    Reads ``results_pixel_locations.csv`` from S3 for the given task and
-    returns a GeoJSON FeatureCollection of Point features.  Each feature
-    has properties ``site_id``, ``treatment`` (bool), and ``match_group``.
-
-    Query parameters:
-        site_id – optional, filter to a single site.
-    """
-    import csv as csv_mod
-    import io
-
-    from services import download_results_csv
-
-    csv_text = download_results_csv(task_id, "matched_pixels")
-    if not csv_text:
-        return jsonify({"type": "FeatureCollection", "features": []})
-
-    site_filter = request.args.get("site_id")
-    features = []
-    reader = csv_mod.DictReader(io.StringIO(csv_text))
-    for row in reader:
-        if site_filter and row.get("site_id") != site_filter:
-            continue
-        try:
-            lon = float(row["lon"])
-            lat = float(row["lat"])
-        except (ValueError, KeyError):
-            continue
-        features.append(
-            {
-                "type": "Feature",
-                "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                "properties": {
-                    "site_id": row.get("site_id", ""),
-                    "treatment": row.get("treatment", "").upper() == "TRUE",
-                    "match_group": row.get("match_group", ""),
-                },
-            }
-        )
-
-    return jsonify({"type": "FeatureCollection", "features": features})
 
 
 # Initialize Flask-Login
