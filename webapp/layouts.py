@@ -606,6 +606,21 @@ USER_SITE_UPLOAD_COLUMNS = [
         "filter": "agNumberColumnFilter",
     },
     {
+        "headerName": "Skipped",
+        "field": "ingest_stats",
+        "flex": 0.7,
+        "minWidth": 90,
+        "type": "numericColumn",
+        "filter": "agNumberColumnFilter",
+        "valueGetter": {
+            "function": "params.data.ingest_stats ? (params.data.ingest_stats.skipped_total || null) : null"
+        },
+        "valueFormatter": {"function": "params.value != null ? params.value : ''"},
+        "tooltipValueGetter": {
+            "function": "params.data.ingest_stats && params.data.ingest_stats.skipped_total ? 'Missing required fields: ' + (params.data.ingest_stats.skipped_missing_required || 0) + ', Bad start date: ' + (params.data.ingest_stats.skipped_bad_start_date || 0) + ', Bad geometry: ' + (params.data.ingest_stats.skipped_bad_geometry || 0) : null"
+        },
+    },
+    {
         "headerName": "Site Set",
         "field": "site_set_name",
         "flex": 1.4,

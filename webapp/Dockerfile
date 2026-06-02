@@ -29,4 +29,7 @@ USER appuser
 EXPOSE 8050
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["gunicorn", "--bind", "0.0.0.0:8050", "--workers", "2", "--timeout", "120", "--max-requests", "200", "--max-requests-jitter", "30", "--worker-tmp-dir", "/run/gunicorn", "app:server"]
+# Increased timeout from 120 to 600 seconds to handle large site datasets (>100k polygons)
+# Large GeoJSON serialization can take several minutes; timeout is per-request
+# Keep workers=2 to limit memory for concurrent large requests
+CMD ["gunicorn", "--bind", "0.0.0.0:8050", "--workers", "2", "--timeout", "600", "--max-requests", "200", "--max-requests-jitter", "30", "--worker-tmp-dir", "/run/gunicorn", "--max-requests-jitter", "40", "--limit-request-line", "8190", "--limit-request-fields", "100", "--limit-request-field-size", "16384", "app:server"]

@@ -56,6 +56,7 @@ from services import (
     get_task_detail,
     get_task_list,
     get_user_site_set_detail,
+    get_user_site_set_gdf,
     grant_te_script_access,
     list_share_links,
     list_task_s3_files,
@@ -1490,6 +1491,11 @@ def register_callbacks(app, limiter=None):
         prevent_initial_call=False,
     )
     def load_selected_site_set(site_set_id, resolution_m_str):
+        """Load and display selected site set, with resilience for large datasets.
+        
+        For datasets with >5000 features, loads a simplified preview to prevent
+        504 Gateway Timeouts. The full dataset is used for task submission.
+        """
         resolution_m = int(resolution_m_str) if resolution_m_str else 1000
         if not site_set_id:
             return (
@@ -1506,47 +1512,58 @@ def register_callbacks(app, limiter=None):
         if not user:
             raise PreventUpdate
 
-        detail = get_user_site_set_detail(site_set_id, user.id)
-        if not detail:
-            return (
-                None,
-                html.P("Selected site set was not found.", className="text-danger"),
-                html.P("No map to display.", className="text-muted small"),
-                html.Small("Site set unavailable.", className="text-danger"),
+        try:
+            detail = get_user_site_set_detail(site_set_id, user.id)
+            if not detail:
+                return (
+                    None,
+                    html.P("Selected site set was not found.", className="text-danger"),
+                    html.P("No map to display.", className="text-muted small"),
+                    html.Small("Site set unavailable.", className="text-danger"),
+                )
+
+            preview_cols = [
+                {"headerName": "Site ID", "field": "site_id", "flex": 1, "minWidth": 110},
+                {
+                    "headerName": "Site Name",
+                    "field": "site_name",
+                    "flex": 2,
+                    "minWidth": 160,
+                },
+                {
+                    "headerName": "Start Date",
+                    "field": "start_date",
+                    "flex": 1,
+                    "minWidth": 120,
+                },
+                {"headerName": "End Date", "field": "end_date", "flex": 1, "minWidth": 120},
+            ]
+            preview_table = _make_ag_grid(
+                "site-preview-table",
+                preview_cols,
+                row_data=detail["preview_rows"],
+                height="320px",
+                grid_options_extra={
+                    "rowSelection": {
+                        "mode": "singleRow",
+                        "enableClickSelection": True,
+                    },
+                    "getRowId": {"function": "params.data.site_id"},
+                },
             )
 
-        preview_cols = [
-            {"headerName": "Site ID", "field": "site_id", "flex": 1, "minWidth": 110},
-            {
-                "headerName": "Site Name",
-                "field": "site_name",
-                "flex": 2,
-                "minWidth": 160,
-            },
-            {
-                "headerName": "Start Date",
-                "field": "start_date",
-                "flex": 1,
-                "minWidth": 120,
-            },
-            {"headerName": "End Date", "field": "end_date", "flex": 1, "minWidth": 120},
-        ]
-        preview_table = _make_ag_grid(
-            "site-preview-table",
-            preview_cols,
-            row_data=detail["preview_rows"],
-            height="320px",
-            grid_options_extra={
-                "rowSelection": {
-                    "mode": "singleRow",
-                    "enableClickSelection": True,
-                },
-                "getRowId": {"function": "params.data.site_id"},
-            },
-        )
+            # Build metadata with indicator for sampled data
+            is_sampled = detail.get("geojson") and "_is_sample" in detail.get("geojson", "{}")
+            sample_note = (
+                html.Br() if not is_sampled else None
+            )
+            if is_sampled:
+                sample_note = html.Small(
+                    "⚠ Map shows simplified preview. Full dataset will be used for analysis.",
+                    className="d-block text-warning mt-2",
+                )
 
-        metadata = html.Div(
-            [
+            metadata_items = [
                 html.Small(f"Name: {detail['name']}", className="d-block text-muted"),
                 html.Small(
                     f"Source file: {detail['filename']} ({detail['file_size_bytes']:,} bytes)",
@@ -1557,28 +1574,43 @@ def register_callbacks(app, limiter=None):
                     className="d-block text-muted",
                 ),
             ]
-        )
+            if sample_note:
+                metadata_items.append(sample_note)
 
-        store_data = {
-            "site_set_id": detail["id"],
-            "geojson": detail["geojson"],
-            "n_sites": detail["n_sites"],
-            "filename": detail["filename"],
-            "name": detail["name"],
-        }
+            metadata = html.Div(metadata_items)
 
-        return (
-            store_data,
-            preview_table,
-            _openlayers_map_component(
-                "submit-sites-map",
-                detail["geojson"],
-                height="500px",
-                enable_cog_layers=True,
-                resolution_m=resolution_m,
-            ),
-            metadata,
-        )
+            store_data = {
+                "site_set_id": detail["id"],
+                "geojson": detail["geojson"],
+                "n_sites": detail["n_sites"],
+                "filename": detail["filename"],
+                "name": detail["name"],
+            }
+
+            return (
+                store_data,
+                preview_table,
+                _openlayers_map_component(
+                    "submit-sites-map",
+                    detail["geojson"],
+                    height="500px",
+                    enable_cog_layers=True,
+                    resolution_m=resolution_m,
+                ),
+                metadata,
+            )
+        except Exception as exc:
+            logger.exception("Error loading site set %s", site_set_id)
+            error_msg = str(exc)[:200]  # Truncate long error messages
+            return (
+                None,
+                html.P(
+                    f"Error loading site set: {error_msg}",
+                    className="text-danger",
+                ),
+                html.P("No map to display.", className="text-muted small"),
+                html.Small("Site set load failed.", className="text-danger"),
+            )
 
     # -- Task submission -----------------------------------------------------
 
@@ -1725,11 +1757,16 @@ def register_callbacks(app, limiter=None):
             return _error_alert("Please log in first.")
 
         try:
-            geojson_fc = json.loads(sites_data["geojson"])
-            gdf = gpd.GeoDataFrame.from_features(
-                geojson_fc.get("features", []),
-                crs="EPSG:4326",
-            )
+            site_set_id = sites_data.get("site_set_id") if sites_data else None
+            if not site_set_id:
+                return _error_alert("Site set information is missing. Please reload and try again.")
+
+            # Load the FULL site set from the database, not the sampled preview
+            # This ensures all sites are used for analysis, even if preview was simplified
+            try:
+                gdf = get_user_site_set_gdf(site_set_id, user_id=user.id)
+            except ValueError as exc:
+                return _error_alert(f"Site set error: {str(exc)}")
 
             # Auto-derive forest cover year range from site dates.
             # Need years back to (earliest start_year - 5) for the

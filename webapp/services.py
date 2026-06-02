@@ -91,9 +91,11 @@ SITE_UPLOAD_PROGRESS_BATCH_SIZE = 250
 SITE_UPLOAD_PROGRESS_CHECK_ROW_INTERVAL = 25
 SITE_UPLOAD_PROGRESS_INTERVAL_SECONDS = 10
 
-REQUIRED_SITE_FIELDS = ("site_id", "site_name", "start_date")
-OPTIONAL_SITE_FIELDS = ("end_date",)
-ALL_SITE_FIELDS = REQUIRED_SITE_FIELDS + OPTIONAL_SITE_FIELDS
+# start_date is the only truly required field for analysis
+# site_id and site_name can be auto-assigned if missing
+REQUIRED_SITE_FIELDS = ("start_date",)
+OPTIONAL_SITE_FIELDS = ("site_id", "site_name", "end_date")
+ALL_SITE_FIELDS = ("site_id", "site_name", "start_date", "end_date")
 
 
 def _site_upload_stage_paths(upload_token):
@@ -1059,21 +1061,8 @@ def apply_site_column_mapping(gdf, column_mapping):
     mapped["site_id"] = mapped["site_id"].astype("string").str.strip()
     mapped["site_name"] = mapped["site_name"].astype("string").str.strip()
 
-    blank_id = mapped["site_id"].isna() | mapped["site_id"].eq("")
-    if blank_id.any():
-        feature_nums = [i + 1 for i in mapped[blank_id].index[:10]]
-        errors.append(
-            "Mapped 'site_id' contains empty values. "
-            f"Affected features (first 10): {feature_nums}"
-        )
-
-    blank_name = mapped["site_name"].isna() | mapped["site_name"].eq("")
-    if blank_name.any():
-        feature_nums = [i + 1 for i in mapped[blank_name].index[:10]]
-        errors.append(
-            "Mapped 'site_name' contains empty values. "
-            f"Affected features (first 10): {feature_nums}"
-        )
+    # Note: Blank site_id and site_name values will be auto-assigned during import
+    # (site_id → "MissingID{n}", site_name → "Site_{n}"), so no validation error needed
 
     start_raw = mapped["start_date"].astype("string").str.strip()
     start_blank = start_raw.isna() | start_raw.eq("")
@@ -1606,10 +1595,26 @@ def save_user_site_set_from_staged(
                     and now - last_progress_at < SITE_UPLOAD_PROGRESS_INTERVAL_SECONDS
                 ):
                     return
+                skipped_total = (
+                    skipped_missing_required
+                    + skipped_bad_start_date
+                    + skipped_bad_geometry
+                )
+                ingest_stats = (
+                    {
+                        "skipped_total": int(skipped_total),
+                        "skipped_missing_required": int(skipped_missing_required),
+                        "skipped_bad_start_date": int(skipped_bad_start_date),
+                        "skipped_bad_geometry": int(skipped_bad_geometry),
+                    }
+                    if skipped_total > 0
+                    else None
+                )
                 update_user_site_upload_status(
                     upload_id,
                     status="running",
                     n_sites_imported=n_sites,
+                    ingest_stats=ingest_stats,
                 )
                 last_progress_sites = n_sites
                 last_progress_at = now
@@ -1679,6 +1684,10 @@ def save_user_site_set_from_staged(
                         # If CRS is unavailable/unparseable, trust source geometry.
                         to_wgs84 = None
 
+                    # Counters for auto-assigned IDs
+                    missing_site_id_count = 0
+                    missing_site_name_count = 0
+
                     for feature_index, feature in enumerate(src, start=1):
                         props = feature.get("properties") or {}
                         raw_site_id = props.get(mapping_to_apply["site_id"])
@@ -1698,18 +1707,35 @@ def save_user_site_set_from_staged(
                             if raw_site_name is not None
                             else ""
                         )
+
+                        # Auto-assign missing site_id
                         if not site_id:
-                            skipped_missing_required += 1
+                            missing_site_id_count += 1
+                            site_id = f"MissingID{missing_site_id_count}"
                             if len(skipped_examples) < 10:
                                 skipped_examples.append(
-                                    f"Feature {feature_index}: mapped 'site_id' is empty."
+                                    f"Feature {feature_index}: auto-assigned site_id to '{site_id}'."
                                 )
+
+                        # Auto-assign missing site_name
                         if not site_name:
+                            missing_site_name_count += 1
+                            site_name = (
+                                f"Missing_Site_Name_{missing_site_name_count}"
+                            )
+                            if len(skipped_examples) < 10:
+                                skipped_examples.append(
+                                    f"Feature {feature_index}: auto-assigned site_name to '{site_name}'."
+                                )
+
+                        # Only check for missing start_date (required for analysis)
+                        if raw_start is None:
                             skipped_missing_required += 1
                             if len(skipped_examples) < 10:
                                 skipped_examples.append(
-                                    f"Feature {feature_index}: mapped 'site_name' is empty."
+                                    f"Feature {feature_index}: mapped 'start_date' is missing."
                                 )
+                            continue
 
                         start_dt = pd.to_datetime(raw_start, errors="coerce")
                         if pd.isna(start_dt):
@@ -1719,18 +1745,15 @@ def save_user_site_set_from_staged(
                                     "Feature "
                                     f"{feature_index}: mapped 'start_date' is missing or unparseable."
                                 )
-                            start_date = None
-                        else:
-                            start_date = start_dt.date()
+                            continue
+
+                        start_date = start_dt.date()
 
                         if raw_end is None or str(raw_end).strip() == "":
                             end_date = None
                         else:
                             end_dt = pd.to_datetime(raw_end, errors="coerce")
                             end_date = None if pd.isna(end_dt) else end_dt.date()
-
-                        if not site_id or not site_name or start_date is None:
-                            continue
 
                         geom_json = feature.get("geometry")
                         if not geom_json:
@@ -2018,8 +2041,113 @@ def get_user_site_set_geojson(site_set_id):
         db.close()
 
 
+def _get_user_site_set_geojson_simplified(site_set_id, max_features=None, simplify_tolerance=0.01):
+    """Load simplified GeoJSON for large datasets, either by sampling or simplification.
+    
+    For datasets with more than max_features (default 5000), returns either:
+    - A sample of evenly-spaced features if available
+    - All features with simplified geometries to reduce payload size
+    
+    This prevents 504 Gateway Timeouts when loading very large site sets (>100k features).
+    
+    Parameters
+    ----------
+    site_set_id : UUID | str
+        Site set to load
+    max_features : int, optional
+        If set, limit visualization to this many features (samples or simplified)
+    simplify_tolerance : float, optional
+        Simplification tolerance for geometries (degrees, ~111km per degree at equator)
+    
+    Returns
+    -------
+    dict
+        GeoJSON FeatureCollection with sampled/simplified features
+    """
+    if max_features is None:
+        max_features = 5000
+    
+    db = get_db()
+    try:
+        # First, get the total count
+        count_result = db.execute(
+            text("SELECT COUNT(*) as cnt FROM user_site_features WHERE site_set_id = :site_set_id"),
+            {"site_set_id": str(site_set_id)},
+        ).fetchone()
+        total_count = count_result.cnt if count_result else 0
+        
+        if total_count <= max_features:
+            # Dataset is small enough, load full fidelity
+            return get_user_site_set_geojson(site_set_id)
+        
+        # Dataset is large - use sampling to show representative subset
+        logger.info(
+            f"Large site set detected: {total_count} features (max_features={max_features}). "
+            "Loading simplified preview."
+        )
+        
+        # Sample every nth feature to get approximately max_features
+        sample_interval = max(1, total_count // max_features)
+        
+        rows = db.execute(
+            text(
+                f"""
+                WITH ranked_features AS (
+                    SELECT
+                        ROW_NUMBER() OVER (ORDER BY site_id) as row_num,
+                        site_id,
+                        site_name,
+                        to_char(start_date, 'YYYY-MM-DD') AS start_date,
+                        CASE WHEN end_date IS NULL THEN NULL
+                             ELSE to_char(end_date, 'YYYY-MM-DD')
+                        END AS end_date,
+                        area_ha,
+                        ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, :simplify_tolerance)) AS geom_json
+                    FROM user_site_features
+                    WHERE site_set_id = :site_set_id
+                )
+                SELECT * FROM ranked_features WHERE row_num % :sample_interval = 1
+                ORDER BY site_id
+                """
+            ),
+            {
+                "site_set_id": str(site_set_id),
+                "simplify_tolerance": simplify_tolerance,
+                "sample_interval": sample_interval,
+            },
+        ).fetchall()
+        
+        features = [
+            {
+                "type": "Feature",
+                "geometry": json.loads(r.geom_json),
+                "properties": {
+                    "site_id": r.site_id,
+                    "site_name": r.site_name,
+                    "start_date": r.start_date,
+                    "end_date": r.end_date,
+                    "area_ha": r.area_ha,
+                    "_is_sample": True,  # Mark as sampled
+                },
+            }
+            for r in rows
+            if r.geom_json is not None
+        ]
+        
+        result = {"type": "FeatureCollection", "features": features}
+        logger.info(f"Loaded {len(features)} sampled features (from {total_count})")
+        return result
+    finally:
+        db.close()
+
+
 def get_user_site_set_detail(site_set_id, user_id):
-    """Return full details for one user-owned site set, including preview rows."""
+    """Return full details for one user-owned site set, including preview rows.
+    
+    For large datasets (>5000 features), returns a simplified/sampled GeoJSON
+    preview to prevent 504 Gateway Timeouts. The full dataset can still be
+    used for task submission via get_user_site_set_gdf().
+    """
     db = get_db()
     try:
         site_set = (
@@ -2052,7 +2180,8 @@ def get_user_site_set_detail(site_set_id, user_id):
             for r in rows
         ]
 
-        geojson_fc = get_user_site_set_geojson(site_set_id)
+        # Use simplified GeoJSON for map preview to avoid timeout on large datasets
+        geojson_fc = _get_user_site_set_geojson_simplified(site_set_id)
 
         return {
             **_site_set_summary_row(site_set),
