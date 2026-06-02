@@ -2490,16 +2490,16 @@ def upload_sites_parquet_to_s3(gdf, task_id):
     """Upload a GeoDataFrame as GeoParquet to S3."""
     s3 = get_s3_client()
     key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.parquet"
-    with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
-        gdf.to_parquet(tmp.name, index=False)
-        with open(tmp.name, "rb") as handle:
-            s3.put_object(
-                Bucket=Config.S3_BUCKET,
-                Key=key,
-                Body=handle.read(),
-                ContentType="application/vnd.apache.parquet",
-                Tagging=S3_COST_TAGGING,
-            )
+    buf = io.BytesIO()
+    gdf.to_parquet(buf, index=False)
+    buf.seek(0)
+    s3.put_object(
+        Bucket=Config.S3_BUCKET,
+        Key=key,
+        Body=buf,
+        ContentType="application/vnd.apache.parquet",
+        Tagging=S3_COST_TAGGING,
+    )
     return f"s3://{Config.S3_BUCKET}/{key}"
 
 
@@ -2554,8 +2554,9 @@ _SAFE_TABLE_RE = __import__("re").compile(r"^[a-z_][a-z0-9_]*$")
 
 
 def compute_matching_extent(
-    gdf: gpd.GeoDataFrame,
+    gdf: gpd.GeoDataFrame | None,
     exact_match_vars: list[str],
+    site_set_id: str | None = None,
 ) -> dict | None:
     """Compute the spatial extent for control-pixel selection.
 
@@ -2595,12 +2596,21 @@ def compute_matching_extent(
     if not polygon_vars:
         return None
 
-    # Validate the sites geometry once in Python so we can skip
-    # ST_MakeValid on the GeoJSON parameter in every query.
-    sites_union = gdf.unary_union
-    if not sites_union.is_valid:
-        sites_union = make_valid(sites_union)
-    sites_geojson = json.dumps(mapping(sites_union))
+    # When site_set_id is available, use a DB subquery so no site geometry
+    # is materialised in Python — avoids the O(n²) unary_union topology
+    # merge which is the primary OOM risk for large or complex site sets.
+    # Falls back to GeoJSON for adopted tasks loaded from S3 (rare path).
+    use_db_subquery = site_set_id is not None
+    if not use_db_subquery:
+        # Validate each geometry individually before union to avoid
+        # GEOSException / TopologyException from invalid input geometries.
+        valid_geoms = gdf.geometry.apply(
+            lambda g: make_valid(g) if not g.is_valid else g
+        )
+        sites_union = valid_geoms.unary_union
+        if not sites_union.is_valid:
+            sites_union = make_valid(sites_union)
+        sites_geojson = json.dumps(mapping(sites_union))
 
     t0 = _time.perf_counter()
 
@@ -2614,19 +2624,35 @@ def compute_matching_extent(
             # injection if the dict is ever populated from external input.
             assert _SAFE_TABLE_RE.match(table), f"Unsafe table name: {table}"
             t1 = _time.perf_counter()
-            result = db.execute(
-                text(
-                    f"SELECT ST_AsGeoJSON("
-                    f"  ST_Buffer(ST_Collect(geom), 0)"
-                    f") "
-                    f"FROM {table} "
-                    f"WHERE ST_Intersects("
-                    f"  geom, "
-                    f"  ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326)"
-                    f")"
-                ),
-                {"sites": sites_geojson},
-            )
+            if use_db_subquery:
+                result = db.execute(
+                    text(
+                        f"SELECT ST_AsGeoJSON("
+                        f"  ST_Buffer(ST_Collect(t.geom), 0)"
+                        f") "
+                        f"FROM {table} t "
+                        f"WHERE ST_Intersects("
+                        f"  t.geom, "
+                        f"  (SELECT ST_Collect(geom) FROM user_site_features"
+                        f"   WHERE site_set_id = :site_set_id)"
+                        f")"
+                    ),
+                    {"site_set_id": str(site_set_id)},
+                )
+            else:
+                result = db.execute(
+                    text(
+                        f"SELECT ST_AsGeoJSON("
+                        f"  ST_Buffer(ST_Collect(geom), 0)"
+                        f") "
+                        f"FROM {table} "
+                        f"WHERE ST_Intersects("
+                        f"  geom, "
+                        f"  ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326)"
+                        f")"
+                    ),
+                    {"sites": sites_geojson},
+                )
             row = result.fetchone()
             elapsed = _time.perf_counter() - t1
             logger.info(
@@ -2662,7 +2688,7 @@ def compute_matching_extent(
         db.close()
 
 
-def compute_sites_exclusion_buffer(gdf, distance_km):
+def compute_sites_exclusion_buffer(gdf, distance_km, site_set_id=None):
     """Compute a buffer around all site geometries using PostGIS geography.
 
     Uses ``ST_Buffer`` on a geography cast so the *distance_km* is
@@ -2676,24 +2702,47 @@ def compute_sites_exclusion_buffer(gdf, distance_km):
     from shapely.geometry import mapping
     from shapely.validation import make_valid
 
-    sites_union = gdf.unary_union
-    if not sites_union.is_valid:
-        sites_union = make_valid(sites_union)
-    sites_geojson = json.dumps(mapping(sites_union))
+    # Same OOM-safe strategy as compute_matching_extent: use a DB subquery
+    # when site_set_id is available to avoid Python-side unary_union.
+    use_db_subquery = site_set_id is not None
+    if not use_db_subquery:
+        # Validate each geometry individually before union to avoid
+        # GEOSException / TopologyException from invalid input geometries.
+        valid_geoms = gdf.geometry.apply(
+            lambda g: make_valid(g) if not g.is_valid else g
+        )
+        sites_union = valid_geoms.unary_union
+        if not sites_union.is_valid:
+            sites_union = make_valid(sites_union)
+        sites_geojson = json.dumps(mapping(sites_union))
 
     db = get_db()
     try:
-        row = db.execute(
-            text(
-                "SELECT ST_AsGeoJSON("
-                "  ST_Buffer("
-                "    ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326)::geography,"
-                "    :dist_m"
-                "  )::geometry"
-                ")"
-            ),
-            {"sites": sites_geojson, "dist_m": distance_km * 1000},
-        ).fetchone()
+        if use_db_subquery:
+            row = db.execute(
+                text(
+                    "SELECT ST_AsGeoJSON("
+                    "  ST_Buffer("
+                    "    (SELECT ST_Collect(geom) FROM user_site_features"
+                    "     WHERE site_set_id = :site_set_id)::geography,"
+                    "    :dist_m"
+                    "  )::geometry"
+                    ")"
+                ),
+                {"site_set_id": str(site_set_id), "dist_m": distance_km * 1000},
+            ).fetchone()
+        else:
+            row = db.execute(
+                text(
+                    "SELECT ST_AsGeoJSON("
+                    "  ST_Buffer("
+                    "    ST_SetSRID(ST_GeomFromGeoJSON(:sites), 4326)::geography,"
+                    "    :dist_m"
+                    "  )::geometry"
+                    ")"
+                ),
+                {"sites": sites_geojson, "dist_m": distance_km * 1000},
+            ).fetchone()
         if row and row[0]:
             return json.loads(row[0])
         return None
@@ -3224,8 +3273,13 @@ def _complete_analysis_task_submission(task_id, user_id):
         fc_years = list(range(fc_min, fc_max))
 
         # Compute matching extent via PostGIS.
+        # Pass site_set_id so the function can query site geometries directly
+        # from user_site_features, avoiding a Python-side unary_union.
         _pe_t0 = _time.perf_counter()
-        matching_extent = compute_matching_extent(gdf, exact_match_vars)
+        _site_set_id = str(task.site_set_id) if task.site_set_id else None
+        matching_extent = compute_matching_extent(
+            gdf, exact_match_vars, site_set_id=_site_set_id
+        )
         logger.info(
             "[SUBMIT-WORKER] Task %s: matching extent computed in %.2fs",
             task_id,
@@ -3235,7 +3289,7 @@ def _complete_analysis_task_submission(task_id, user_id):
         # Compute sites exclusion buffer via PostGIS.
         _buf_t0 = _time.perf_counter()
         sites_exclusion_buffer = compute_sites_exclusion_buffer(
-            gdf, min_control_distance_km
+            gdf, min_control_distance_km, site_set_id=_site_set_id
         )
         logger.info(
             "[SUBMIT-WORKER] Task %s: exclusion buffer computed in %.2fs",
@@ -3261,17 +3315,20 @@ def _complete_analysis_task_submission(task_id, user_id):
             gdf_for_db = gdf
             group_mapping = None
 
+        # Vectorize CRS reprojection: project the whole GDF once instead of
+        # creating a new single-row GeoDataFrame per site (O(n) allocations).
+        _gdf_cea = gdf_for_db.to_crs("ESRI:54009")
+        _areas_ha = _gdf_cea.geometry.area / 10_000.0
+
         # Create TaskSite rows and update n_sites on the task.
         task.n_sites = len(gdf)
-        for _, row in gdf_for_db.iterrows():
+        for i, (_, row) in enumerate(gdf_for_db.iterrows()):
             geom = row.geometry
-            if geom is not None and not geom.is_empty:
-                area_gdf = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326").to_crs(
-                    "ESRI:54009"
-                )
-                area_ha = area_gdf.geometry.iloc[0].area / 10_000.0
-            else:
-                area_ha = None
+            area_ha = (
+                float(_areas_ha.iloc[i])
+                if (geom is not None and not geom.is_empty)
+                else None
+            )
 
             site = TaskSite(
                 task_id=task_id,
@@ -3623,8 +3680,13 @@ def submit_analysis_task(
 
     _submit_t0 = _time.perf_counter()
 
-    # Compute the matching extent polygon from PostGIS
-    matching_extent = compute_matching_extent(gdf, exact_match_vars)
+    # Compute the matching extent polygon from PostGIS.
+    # Pass site_set_id so the function can query site geometries directly
+    # from user_site_features, avoiding a Python-side unary_union.
+    _site_set_id = str(site_set_id) if site_set_id else None
+    matching_extent = compute_matching_extent(
+        gdf, exact_match_vars, site_set_id=_site_set_id
+    )
     logger.info(
         "[SUBMIT] matching extent computed in %.2fs",
         _time.perf_counter() - _submit_t0,
@@ -3634,7 +3696,7 @@ def submit_analysis_task(
     # (geography-based, so distance is correct on the sphere).
     _buf_t0 = _time.perf_counter()
     sites_exclusion_buffer = compute_sites_exclusion_buffer(
-        gdf, min_control_distance_km
+        gdf, min_control_distance_km, site_set_id=_site_set_id
     )
     logger.info(
         "[SUBMIT] sites exclusion buffer computed in %.2fs",
