@@ -235,7 +235,17 @@ def poll_batch_tasks() -> dict:
                                                 results_payload,
                                                 db=db,
                                             )
-                                    adopted += 1
+                                # Commit each adoption individually so that
+                                # rows added by import_execution_results are
+                                # flushed and committed before the next
+                                # iteration's queries trigger an autoflush.
+                                # Batching all adoptions in a single commit
+                                # leaves rows as "pending" in the session,
+                                # which causes Query-invoked autoflush to
+                                # attempt duplicate INSERTs when the next
+                                # adoption fires a SELECT.
+                                db.commit()
+                                adopted += 1
                             except Exception as adopt_exc:
                                 db.rollback()
                                 logger.warning(
@@ -246,7 +256,6 @@ def poll_batch_tasks() -> dict:
                                 report_exception(extra_data={"exec_id": eid})
 
                 if adopted:
-                    db.commit()
                     logger.info("Discovery: adopted %d new API execution(s)", adopted)
         except Exception as disc_exc:
             logger.warning("API execution discovery failed: %s", disc_exc)
