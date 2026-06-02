@@ -911,6 +911,28 @@ class RefreshToken(Base):
         db.flush()
 
 
+class ReferenceLayerExport(Base):
+    """Tracks S3 GeoParquet exports of PostGIS reference layers.
+
+    One row per layer name (unique constraint).  Updated in place each
+    time the export task re-runs so there is at most one current
+    artifact per layer.
+    """
+
+    __tablename__ = "reference_layer_exports"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Matches the keys of _EXTENT_TABLE_MAP in services.py
+    # (e.g. "admin0", "admin1", "admin2", "ecoregion")
+    layer_name = Column(String(100), nullable=False, unique=True, index=True)
+    s3_uri = Column(String(500), nullable=False)
+    feature_count = Column(Integer)
+    # Monotonically increasing schema version — bump when the GeoParquet
+    # schema changes so downstream consumers can detect stale artifacts.
+    schema_version = Column(Integer, nullable=False, default=1)
+    exported_at = Column(DateTime(timezone=True), nullable=False)
+
+
 # Database session management
 engine = create_engine(
     Config.DATABASE_URL,

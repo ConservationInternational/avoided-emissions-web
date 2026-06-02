@@ -31,6 +31,7 @@ from models import (
     Covariate,
     CovariatePreset,
     MatchingSettingsPreset,
+    ReferenceLayerExport,
     TaskResult,
     TaskResultTotal,
     TaskSite,
@@ -2678,6 +2679,136 @@ _EXTENT_TABLE_MAP: dict[str, str] = {
 _SAFE_TABLE_RE = __import__("re").compile(r"^[a-z_][a-z0-9_]*$")
 
 
+def export_reference_layers_to_s3() -> dict[str, str]:
+    """Export PostGIS reference layers to S3 as GeoParquet files.
+
+    Queries each table in :data:`_EXTENT_TABLE_MAP` from PostGIS, writes
+    the result (with geometries simplified to ~100 m tolerance) to a
+    temporary GeoParquet file, uploads it to S3, and upserts a
+    :class:`~models.ReferenceLayerExport` row so subsequent runs know
+    the current S3 URI.
+
+    The exported GeoParquets are consumed by the Batch ``prep`` step to
+    compute matching extents and exclusion buffers without accessing
+    PostGIS at all.
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping of *layer_name* → *s3_uri* for each exported layer.
+    """
+    import os as _os
+    import tempfile
+
+    from shapely.geometry import shape as _shape
+
+    exported: dict[str, str] = {}
+    s3 = get_s3_client()
+    now = datetime.now(timezone.utc)
+
+    for layer_name, table in _EXTENT_TABLE_MAP.items():
+        assert _SAFE_TABLE_RE.match(table), f"Unsafe table name: {table}"  # nosec B101
+
+        logger.info("[EXPORT-REF] Exporting layer %s (table=%s)", layer_name, table)
+
+        db = get_db()
+        try:
+            # Stream all rows with simplified geometry (one row at a time via
+            # yield_per to keep peak Python memory near O(batch) not O(total)).
+            result = db.execute(
+                text(
+                    f"SELECT "
+                    f"  ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, 0.001)) AS geojson,"
+                    f"  geom IS NOT NULL AS has_geom "
+                    f"FROM {table}"
+                )
+            )
+            geoms = []
+            for row in result:
+                if row[0]:
+                    geoms.append(_shape(json.loads(row[0])))
+        finally:
+            db.close()
+
+        if not geoms:
+            logger.warning("[EXPORT-REF] Table %s is empty — skipping", table)
+            continue
+
+        gdf = gpd.GeoDataFrame(geometry=geoms, crs="EPSG:4326")
+        feature_count = len(gdf)
+        logger.info(
+            "[EXPORT-REF] Layer %s: %d features, writing GeoParquet",
+            layer_name,
+            feature_count,
+        )
+
+        # Write to a temporary file, then upload to S3.
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".parquet")
+        try:
+            _os.close(tmp_fd)
+            gdf.to_parquet(tmp_path)
+            parquet_key = f"{Config.S3_PREFIX}/reference/{layer_name}.parquet"
+            s3.upload_file(
+                tmp_path,
+                Config.S3_BUCKET,
+                parquet_key,
+                ExtraArgs={"Tagging": S3_COST_TAGGING},
+            )
+        finally:
+            _os.unlink(tmp_path)
+
+        s3_uri = f"s3://{Config.S3_BUCKET}/{parquet_key}"
+        exported[layer_name] = s3_uri
+
+        # Upsert ReferenceLayerExport row.
+        db2 = get_db()
+        try:
+            existing = (
+                db2.query(ReferenceLayerExport)
+                .filter(ReferenceLayerExport.layer_name == layer_name)
+                .first()
+            )
+            if existing:
+                existing.s3_uri = s3_uri
+                existing.feature_count = feature_count
+                existing.exported_at = now
+            else:
+                db2.add(
+                    ReferenceLayerExport(
+                        layer_name=layer_name,
+                        s3_uri=s3_uri,
+                        feature_count=feature_count,
+                        exported_at=now,
+                    )
+                )
+            db2.commit()
+        finally:
+            db2.close()
+
+        logger.info(
+            "[EXPORT-REF] Layer %s: %d features → %s",
+            layer_name,
+            feature_count,
+            s3_uri,
+        )
+
+    return exported
+
+
+def get_reference_layer_uris() -> dict[str, str]:
+    """Return the current S3 URIs for all exported reference layers.
+
+    Reads from the ``reference_layer_exports`` table.  Returns an empty
+    dict when no layers have been exported yet.
+    """
+    db = get_db()
+    try:
+        rows = db.query(ReferenceLayerExport).all()
+        return {r.layer_name: r.s3_uri for r in rows}
+    finally:
+        db.close()
+
+
 def compute_matching_extent(
     gdf: gpd.GeoDataFrame | None,
     exact_match_vars: list[str],
@@ -2750,10 +2881,19 @@ def compute_matching_extent(
             assert _SAFE_TABLE_RE.match(table), f"Unsafe table name: {table}"
             t1 = _time.perf_counter()
             if use_db_subquery:
+                # Stream one simplified polygon per matching reference row.
+                # No ST_Collect aggregate means PostgreSQL memory stays O(1) —
+                # each row is processed and sent individually.  We apply
+                # ST_SimplifyPreserveTopology(geom, 0.001) (~100 m tolerance)
+                # in PostGIS before streaming to reduce vertex count; the
+                # resulting shapes are still the actual polygon boundaries, not
+                # bounding boxes.  Python then unions them with unary_union.
+                from shapely.ops import unary_union as _unary_union
+
                 result = db.execute(
                     text(
                         f"SELECT ST_AsGeoJSON("
-                        f"  ST_Buffer(ST_Collect(t.geom), 0)"
+                        f"  ST_SimplifyPreserveTopology(t.geom, 0.001)"
                         f") "
                         f"FROM {table} t "
                         f"WHERE ST_Intersects("
@@ -2764,6 +2904,16 @@ def compute_matching_extent(
                     ),
                     {"site_set_id": str(site_set_id)},
                 )
+                geoms = [shape(json.loads(r[0])) for r in result if r[0]]
+                elapsed = _time.perf_counter() - t1
+                logger.info(
+                    "[EXTENT] %s query took %.2fs (%d polygons)",
+                    table,
+                    elapsed,
+                    len(geoms),
+                )
+                if geoms:
+                    layer_extents.append(_unary_union(geoms))
             else:
                 result = db.execute(
                     text(
@@ -2778,15 +2928,15 @@ def compute_matching_extent(
                     ),
                     {"sites": sites_geojson},
                 )
-            row = result.fetchone()
-            elapsed = _time.perf_counter() - t1
-            logger.info(
-                "[EXTENT] %s query took %.2fs",
-                table,
-                elapsed,
-            )
-            if row and row[0]:
-                layer_extents.append(shape(json.loads(row[0])))
+                row = result.fetchone()
+                elapsed = _time.perf_counter() - t1
+                logger.info(
+                    "[EXTENT] %s query took %.2fs",
+                    table,
+                    elapsed,
+                )
+                if row and row[0]:
+                    layer_extents.append(shape(json.loads(row[0])))
 
         if not layer_extents:
             return None
@@ -3395,28 +3545,43 @@ def _complete_analysis_task_submission(task_id, user_id):
                     f"Task {task_id}: site set {_site_set_id} has no features."
                 )
 
-            # Step 2 & 3 — matching extent and exclusion buffer (DB subqueries).
-            _pe_t0 = _time.perf_counter()
-            matching_extent = compute_matching_extent(
-                None, exact_match_vars, site_set_id=_site_set_id
-            )
-            logger.info(
-                "[SUBMIT-WORKER] Task %s: matching extent computed in %.2fs",
-                task_id,
-                _time.perf_counter() - _pe_t0,
-            )
+            # Step 2 — load reference layer S3 URIs for the Batch prep step.
+            # matching_extent and sites_exclusion_buffer are now computed
+            # by the dedicated Batch ``prep`` step from the exported
+            # GeoParquets, keeping all heavy PostGIS work out of this worker.
+            reference_layer_uris = get_reference_layer_uris()
+            matching_extent = None
+            sites_exclusion_buffer = None
 
-            _buf_t0 = _time.perf_counter()
-            sites_exclusion_buffer = compute_sites_exclusion_buffer(
-                None, min_control_distance_km, site_set_id=_site_set_id
-            )
-            logger.info(
-                "[SUBMIT-WORKER] Task %s: exclusion buffer computed in %.2fs",
-                task_id,
-                _time.perf_counter() - _buf_t0,
-            )
+            if not reference_layer_uris:
+                # Reference layers not yet exported — fall back to PostGIS path
+                # so that the task can still be submitted (e.g. during initial
+                # deployment before the export task has run).
+                logger.warning(
+                    "[SUBMIT-WORKER] Task %s: reference layers not exported to S3 yet "
+                    "— falling back to PostGIS matching-extent computation",
+                    task_id,
+                )
+                _pe_t0 = _time.perf_counter()
+                matching_extent = compute_matching_extent(
+                    None, exact_match_vars, site_set_id=_site_set_id
+                )
+                logger.info(
+                    "[SUBMIT-WORKER] Task %s: matching extent computed in %.2fs",
+                    task_id,
+                    _time.perf_counter() - _pe_t0,
+                )
+                _buf_t0 = _time.perf_counter()
+                sites_exclusion_buffer = compute_sites_exclusion_buffer(
+                    None, min_control_distance_km, site_set_id=_site_set_id
+                )
+                logger.info(
+                    "[SUBMIT-WORKER] Task %s: exclusion buffer computed in %.2fs",
+                    task_id,
+                    _time.perf_counter() - _buf_t0,
+                )
 
-            # Step 4 — stream site set to in-memory Parquet (batch-at-a-time).
+            # Step 3 — stream site set to in-memory Parquet (batch-at-a-time).
             _stream_t0 = _time.perf_counter()
             _db_stream = get_db()
             try:
@@ -3479,6 +3644,8 @@ def _complete_analysis_task_submission(task_id, user_id):
                 task_id,
                 _time.perf_counter() - _buf_t0,
             )
+            # Legacy path: no reference layer GeoParquets — prep step is skipped.
+            reference_layer_uris = {}
 
         # Step 5 — load GDF only now (from Parquet buffer or existing gdf).
         # For the DB path the GDF is read from the compact in-memory Parquet;
@@ -3621,6 +3788,11 @@ def _complete_analysis_task_submission(task_id, user_id):
             ),
             **({"exact_match_group_mapping": group_mapping} if group_mapping else {}),
             **({"random_seed": random_seed} if random_seed is not None else {}),
+            **(
+                {"reference_layer_uris": reference_layer_uris}
+                if reference_layer_uris
+                else {}
+            ),
             "results_s3_uri": (
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
             ),
@@ -3631,6 +3803,23 @@ def _complete_analysis_task_submission(task_id, user_id):
             **(
                 {
                     "pipeline": [
+                        # Prep step: compute matching_extent + exclusion_buffer
+                        # from exported reference GeoParquets on S3.
+                        # Only included when reference layers have been exported.
+                        *(
+                            [
+                                {
+                                    "name": "prep",
+                                    "command": ["prep"],
+                                    "timeout_seconds": 3600,  # 1 h
+                                    "memory_mib": 8192,
+                                    "vcpus": 2,
+                                    "retry_attempts": 2,
+                                }
+                            ]
+                            if reference_layer_uris
+                            else []
+                        ),
                         {
                             "name": "extract",
                             "command": ["extract"],

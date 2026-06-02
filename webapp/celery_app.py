@@ -77,6 +77,9 @@ celery_app.conf.update(
         # submit_analysis_task_worker does heavy PostGIS + geopandas work
         # and must run on the higher-memory heavy worker.
         "tasks.submit_analysis_task_worker": {"queue": "heavy"},
+        # export_reference_layers streams PostGIS → GeoParquet → S3 and may
+        # use several hundred MB for large admin-boundary tables.
+        "tasks.export_reference_layers": {"queue": "heavy"},
     },
 )
 
@@ -95,6 +98,12 @@ celery_app.conf.beat_schedule = {
     "auto-merge-unmerged": {
         "task": "tasks.auto_merge_unmerged",
         "schedule": 120.0,  # every 2 minutes
+    },
+    # Re-export reference layers weekly so that any re-imports (e.g. after a
+    # geoboundaries update) are reflected in S3 without manual intervention.
+    "export-reference-layers": {
+        "task": "tasks.export_reference_layers",
+        "schedule": 604800.0,  # every 7 days
     },
 }
 

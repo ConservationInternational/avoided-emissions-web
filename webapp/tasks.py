@@ -152,6 +152,10 @@ def import_vector_data_task(self) -> dict:
         rasterize_vectors_task.delay()
         logger.info("Dispatched rasterize_vectors_task after successful import")
 
+        # Export reference layers to S3 so the Batch prep step can use them.
+        export_reference_layers_task.delay()
+        logger.info("Dispatched export_reference_layers_task after successful import")
+
         return {"status": "complete"}
     except Exception as exc:
         logger.exception("Vector data import failed")
@@ -389,6 +393,45 @@ def rasterize_vectors_task(self) -> dict:
 
     except Exception as exc:
         logger.exception("Vector rasterization failed")
+        report_exception()
+        raise self.retry(exc=exc, countdown=120)
+
+
+@celery_app.task(
+    name="tasks.export_reference_layers",
+    bind=True,
+    max_retries=2,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    soft_time_limit=7200,
+    time_limit=7500,
+)
+def export_reference_layers_task(self) -> dict:
+    """Export PostGIS reference layers (admin boundaries, ecoregions) to S3.
+
+    Writes each reference layer as a GeoParquet file so that the AWS Batch
+    ``prep`` step can compute matching extents and exclusion buffers without
+    accessing PostGIS at all.
+
+    Skips tables that are not yet populated (e.g., before the first vector
+    import completes).  Safe to call repeatedly — each run overwrites the
+    previous artifact at the same S3 key.
+
+    Typically dispatched after :func:`import_vector_data_task` completes
+    and also run on a weekly beat schedule to pick up any re-imports.
+
+    Returns
+    -------
+    dict
+        ``{"status": "complete", "exported": {layer_name: s3_uri, ...}}``
+    """
+    try:
+        from services import export_reference_layers_to_s3
+
+        exported = export_reference_layers_to_s3()
+        return {"status": "complete", "exported": exported}
+    except Exception as exc:
+        logger.exception("Reference layer export failed")
         report_exception()
         raise self.retry(exc=exc, countdown=120)
 
