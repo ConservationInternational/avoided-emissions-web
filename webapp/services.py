@@ -2141,6 +2141,113 @@ def _get_user_site_set_geojson_simplified(site_set_id, max_features=None, simpli
         db.close()
 
 
+def get_user_site_set_geojson_by_bounds_and_zoom(site_set_id, zoom, bounds_minx, bounds_miny, bounds_maxx, bounds_maxy):
+    """Load GeoJSON sampled adaptively based on zoom level and map bounds.
+    
+    Implements progressive refinement: as user zooms in, more detailed data is loaded
+    within the current map bounds. This prevents rendering thousands of features at
+    low zoom while still providing full detail when zoomed in.
+    
+    Sampling strategy:
+    - Zoom 0-8 (world/continent): Heavy sampling (1 in 50)
+    - Zoom 8-14 (region/province): Medium sampling (1 in 5)  
+    - Zoom 14+ (detailed): Minimal/no sampling, full geometry detail
+    
+    Parameters
+    ----------
+    site_set_id : UUID | str
+        Site set to load
+    zoom : int
+        Current map zoom level (0-28)
+    bounds_minx, bounds_miny, bounds_maxx, bounds_maxy : float
+        Map bounds in EPSG:4326 (lon/lat)
+    
+    Returns
+    -------
+    dict
+        GeoJSON FeatureCollection with zoom-adaptive sampled features
+    """
+    db = get_db()
+    try:
+        # Determine sampling rate and simplification based on zoom level
+        if zoom <= 8:
+            # Low zoom (world/continent view): heavy sampling, heavy simplification
+            sample_interval = 50
+            simplify_tolerance = 0.1  # ~11 km
+        elif zoom <= 12:
+            # Medium zoom (region view): moderate sampling, moderate simplification
+            sample_interval = 5
+            simplify_tolerance = 0.02  # ~2 km
+        elif zoom <= 15:
+            # High zoom (province/city view): light sampling, minimal simplification
+            sample_interval = 2
+            simplify_tolerance = 0.005  # ~500 m
+        else:
+            # Very high zoom (street level): no sampling, minimal simplification
+            sample_interval = 1
+            simplify_tolerance = 0.001  # ~100 m
+        
+        # Create a bounding box geometry in PostGIS
+        bbox_wkt = f"POLYGON(({bounds_minx} {bounds_miny}, {bounds_maxx} {bounds_miny}, {bounds_maxx} {bounds_maxy}, {bounds_minx} {bounds_maxy}, {bounds_minx} {bounds_miny}))"
+        
+        rows = db.execute(
+            text(
+                f"""
+                WITH ranked_features AS (
+                    SELECT
+                        ROW_NUMBER() OVER (ORDER BY site_id) as row_num,
+                        site_id,
+                        site_name,
+                        to_char(start_date, 'YYYY-MM-DD') AS start_date,
+                        CASE WHEN end_date IS NULL THEN NULL
+                             ELSE to_char(end_date, 'YYYY-MM-DD')
+                        END AS end_date,
+                        area_ha,
+                        ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, :simplify_tolerance)) AS geom_json
+                    FROM user_site_features
+                    WHERE site_set_id = :site_set_id
+                      AND ST_Intersects(geom, ST_GeomFromText(:bbox_wkt, 4326))
+                )
+                SELECT * FROM ranked_features WHERE row_num % :sample_interval = 1
+                ORDER BY site_id
+                """
+            ),
+            {
+                "site_set_id": str(site_set_id),
+                "bbox_wkt": bbox_wkt,
+                "simplify_tolerance": simplify_tolerance,
+                "sample_interval": sample_interval,
+            },
+        ).fetchall()
+        
+        features = [
+            {
+                "type": "Feature",
+                "geometry": json.loads(r.geom_json),
+                "properties": {
+                    "site_id": r.site_id,
+                    "site_name": r.site_name,
+                    "start_date": r.start_date,
+                    "end_date": r.end_date,
+                    "area_ha": r.area_ha,
+                    "_is_sample": sample_interval > 1,  # Mark as sampled if sampling applied
+                    "_zoom_level": zoom,
+                },
+            }
+            for r in rows
+            if r.geom_json is not None
+        ]
+        
+        result = {"type": "FeatureCollection", "features": features}
+        logger.info(
+            f"Loaded {len(features)} features at zoom {zoom} within bounds "
+            f"(sampling 1:{sample_interval}, simplification {simplify_tolerance})"
+        )
+        return result
+    finally:
+        db.close()
+
+
 def get_user_site_set_detail(site_set_id, user_id):
     """Return full details for one user-owned site set, including preview rows.
     

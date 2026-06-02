@@ -57,6 +57,7 @@ from services import (
     get_task_list,
     get_user_site_set_detail,
     get_user_site_set_gdf,
+    get_user_site_set_geojson_by_bounds_and_zoom,
     grant_te_script_access,
     list_share_links,
     list_task_s3_files,
@@ -1611,6 +1612,79 @@ def register_callbacks(app, limiter=None):
                 html.P("No map to display.", className="text-muted small"),
                 html.Small("Site set load failed.", className="text-danger"),
             )
+
+    app.clientside_callback(
+        """
+        function(n_intervals) {
+            if (!window._submitSitesMapState) {
+                return dash_clientside.no_update;
+            }
+            if (!window._submitSitesMapState.hasUpdate) {
+                return dash_clientside.no_update;
+            }
+            
+            // Reset the flag so we don't keep firing the callback
+            window._submitSitesMapState.hasUpdate = false;
+            
+            // Return the zoom/bounds data to update the store
+            return {
+                zoom: window._submitSitesMapState.zoom,
+                bounds: window._submitSitesMapState.bounds
+            };
+        }
+        """,
+        Output("zoom-bounds-store", "data"),
+        Input("zoom-bounds-poll", "n_intervals"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("site-preview-map", "children", allow_duplicate=True),
+        Input("zoom-bounds-store", "data"),
+        State("parsed-sites-store", "data"),
+        State("resolution-m", "value"),
+        prevent_initial_call=True,
+    )
+    def update_map_on_zoom(zoom_bounds_data, sites_data, resolution_m_str):
+        """Update map GeoJSON when user zooms/pans, using zoom-aware sampling.
+        
+        This callback is triggered when the map emits a zoom/bounds change event.
+        It fetches new sampled data at the appropriate detail level for the current
+        zoom, preventing unnecessary rendering of thousands of features at low zoom.
+        """
+        if not zoom_bounds_data or not sites_data:
+            raise PreventUpdate
+        
+        site_set_id = sites_data.get("site_set_id")
+        if not site_set_id:
+            raise PreventUpdate
+        
+        try:
+            zoom = zoom_bounds_data.get("zoom", 2)
+            bounds = zoom_bounds_data.get("bounds", {})
+            minx = bounds.get("minx")
+            miny = bounds.get("miny")
+            maxx = bounds.get("maxx")
+            maxy = bounds.get("maxy")
+            
+            if None in (minx, miny, maxx, maxy):
+                raise PreventUpdate
+            
+            resolution_m = int(resolution_m_str) if resolution_m_str else 1000
+            geojson_fc = get_user_site_set_geojson_by_bounds_and_zoom(
+                site_set_id, zoom, minx, miny, maxx, maxy
+            )
+            
+            return _openlayers_map_component(
+                "submit-sites-map",
+                json.dumps(geojson_fc),
+                height="500px",
+                enable_cog_layers=True,
+                resolution_m=resolution_m,
+            )
+        except Exception as exc:
+            logger.exception("Error updating map on zoom")
+            raise PreventUpdate
 
     # -- Task submission -----------------------------------------------------
 

@@ -447,6 +447,68 @@
             filterPixelsBySite(el, siteId);
         });
 
+        // Add zoom/bounds listener with debounce to emit zoom-aware sampling updates.
+        // Only emits for the submit-sites-map to avoid duplicate requests.
+        var zoomBoundsTimeout = null;
+        var lastEmittedZoom = null;
+        var lastEmittedBounds = null;
+
+        function emitZoomBoundsChange() {
+            var view = map.getView();
+            var zoom = Math.round(view.getZoom());
+            var extent = view.calculateExtent(map.getSize());
+            var [minx, miny, maxx, maxy] = ol.proj.transformExtent(
+                extent,
+                "EPSG:3857",
+                "EPSG:4326"
+            );
+
+            // Only emit if zoom or bounds have meaningfully changed
+            var boundsChanged =
+                lastEmittedBounds === null ||
+                Math.abs(minx - lastEmittedBounds.minx) > 0.01 ||
+                Math.abs(miny - lastEmittedBounds.miny) > 0.01 ||
+                Math.abs(maxx - lastEmittedBounds.maxx) > 0.01 ||
+                Math.abs(maxy - lastEmittedBounds.maxy) > 0.01;
+            var zoomChanged = lastEmittedZoom !== zoom;
+
+            if (boundsChanged || zoomChanged) {
+                lastEmittedZoom = zoom;
+                lastEmittedBounds = { minx: minx, miny: miny, maxx: maxx, maxy: maxy };
+
+                // Find the Dash zoom-bounds-store and emit event
+                var store = document.getElementById("zoom-bounds-store");
+                if (store && store.dataset) {
+                    // Emit a custom event that Dash can listen for
+                    el.dispatchEvent(
+                        new CustomEvent("map-zoom-bounds-changed", {
+                            bubbles: true,
+                            detail: {
+                                zoom: zoom,
+                                bounds: lastEmittedBounds,
+                            },
+                        })
+                    );
+                }
+            }
+        }
+
+        map.getView().on("change:resolution", function () {
+            // Clear existing timeout and set a new one (debounce)
+            if (zoomBoundsTimeout !== null) {
+                clearTimeout(zoomBoundsTimeout);
+            }
+            zoomBoundsTimeout = setTimeout(emitZoomBoundsChange, 500); // 500ms debounce
+        });
+
+        map.on("moveend", function () {
+            // Also fire immediately on moveend in case user just stopped panning
+            if (zoomBoundsTimeout !== null) {
+                clearTimeout(zoomBoundsTimeout);
+            }
+            zoomBoundsTimeout = setTimeout(emitZoomBoundsChange, 300); // 300ms debounce
+        });
+
         // Notify other scripts (e.g. COG layer control) that a map is ready.
         el.dispatchEvent(
             new CustomEvent("ol-map-ready", { bubbles: true, detail: { map: map } })

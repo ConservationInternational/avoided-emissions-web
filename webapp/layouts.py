@@ -1722,9 +1722,14 @@ def submit_layout(user, recompute_config=None):
                                                                 value=False,
                                                                 className="mb-2",
                                                             ),
-                                                            html.Div(
-                                                                id="site-set-metadata"
-                                                            ),
+                                                                dcc.Loading(
+                                                                    html.Div(
+                                                                        id="site-set-metadata"
+                                                                    ),
+                                                                    type="circle",
+                                                                    delay_show=250,
+                                                                    color="#0d6efd",
+                                                                ),
                                                         ]
                                                     ),
                                                 ],
@@ -1734,13 +1739,18 @@ def submit_layout(user, recompute_config=None):
                                                 [
                                                     dbc.CardHeader("Site Preview"),
                                                     dbc.CardBody(
-                                                        [
-                                                            html.Div(
-                                                                id="site-preview-map",
-                                                                className="mb-3",
-                                                            ),
-                                                            html.Div(id="site-preview"),
-                                                        ]
+                                                        dcc.Loading(
+                                                            [
+                                                                html.Div(
+                                                                    id="site-preview-map",
+                                                                    className="mb-3",
+                                                                ),
+                                                                html.Div(id="site-preview"),
+                                                            ],
+                                                            type="circle",
+                                                            delay_show=250,
+                                                            color="#0d6efd",
+                                                        )
                                                     ),
                                                 ],
                                                 className="ae-section-card mb-3",
@@ -2440,6 +2450,8 @@ def submit_layout(user, recompute_config=None):
             ),
             # Hidden stores
             dcc.Store(id="parsed-sites-store"),
+            dcc.Store(id="zoom-bounds-store"),
+            dcc.Interval(id="zoom-bounds-poll", interval=300),  # Check every 300ms
             dcc.Store(id="presets-store"),
             dcc.Store(id="site-set-refresh-store"),
             dcc.Store(id="site-upload-columns-store"),
