@@ -749,12 +749,18 @@ DATASETS = [
 ]
 
 
-def run_import(check_only: bool = False) -> None:
+def run_import(check_only: bool = False) -> bool:
     """Check each table and import data where missing.
 
     Tables that contain rows but were never marked as fully imported
     (e.g. the worker was OOM-killed mid-import) are automatically
     truncated and re-imported.
+
+    Returns
+    -------
+    bool
+        ``True`` if at least one table was (re-)imported, ``False`` if all
+        tables were already fully populated and nothing was done.
     """
     engine = create_engine(Config.DATABASE_URL)
 
@@ -789,11 +795,11 @@ def run_import(check_only: bool = False) -> None:
             log.info("Tables needing import: %s", [t for t, _ in needed])
         else:
             log.info("All tables already populated")
-        return
+        return bool(needed)
 
     if not needed:
         log.info("All vector reference tables already populated – nothing to do")
-        return
+        return False
 
     tmpdir = Path(tempfile.mkdtemp(prefix="vector_import_"))
     failed: list[str] = []
@@ -828,6 +834,8 @@ def run_import(check_only: bool = False) -> None:
 
     if failed:
         raise RuntimeError(f"Vector data import failed for: {', '.join(failed)}")
+
+    return bool(needed)
 
     log.info("Vector data import complete")
 

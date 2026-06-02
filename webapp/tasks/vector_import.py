@@ -33,15 +33,25 @@ def import_vector_data_task(self) -> dict:
     try:
         from import_vector_data import run_import
 
-        run_import(check_only=False)
+        imported = run_import(check_only=False)
 
         # Chain rasterization of the imported vector layers.
         rasterize_vectors_task.delay()
         logger.info("Dispatched rasterize_vectors_task after successful import")
 
-        # Export reference layers to S3 so the Batch prep step can use them.
-        export_reference_layers_task.delay()
-        logger.info("Dispatched export_reference_layers_task after successful import")
+        # Only export reference layers when fresh data was actually imported.
+        # If the tables were already populated nothing changed, so there is no
+        # need to re-export — the monthly beat schedule covers routine refreshes.
+        if imported:
+            export_reference_layers_task.delay()
+            logger.info(
+                "Dispatched export_reference_layers_task after successful import"
+            )
+        else:
+            logger.info(
+                "Skipping export_reference_layers dispatch — "
+                "all vector tables were already populated"
+            )
 
         return {"status": "complete"}
     except Exception as exc:

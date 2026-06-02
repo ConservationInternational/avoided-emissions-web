@@ -31,7 +31,7 @@ def export_reference_layers_task(self) -> dict:
     previous artifact at the same S3 key.
 
     Typically dispatched after :func:`import_vector_data_task` completes
-    and also run on a weekly beat schedule to pick up any re-imports.
+    and also run on a monthly beat schedule to pick up any re-imports.
 
     Returns
     -------

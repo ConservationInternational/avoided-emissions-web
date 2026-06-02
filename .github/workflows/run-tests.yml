@@ -1,0 +1,41 @@
+name: Unit Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - staging
+  pull_request:
+    branches:
+      - main
+      - develop
+      - staging
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Build webapp Docker image
+        run: |
+          docker build \
+            -f webapp/Dockerfile \
+            -t avoided-emissions-webapp:ci \
+            .
+
+      - name: Run unit tests
+        run: |
+          docker run --rm \
+            --user root \
+            --name webapp-test \
+            avoided-emissions-webapp:ci \
+            bash -c "
+              pip install -q -r requirements-dev.txt &&
+              python -m pytest tests/unit/ -v --tb=short
+            "

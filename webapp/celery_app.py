@@ -99,11 +99,13 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.auto_merge_unmerged",
         "schedule": 120.0,  # every 2 minutes
     },
-    # Re-export reference layers weekly so that any re-imports (e.g. after a
+    # Re-export reference layers monthly so that any re-imports (e.g. after a
     # geoboundaries update) are reflected in S3 without manual intervention.
+    # Layers are also exported immediately after each vector import, so a
+    # monthly beat is sufficient when they are already present on S3.
     "export-reference-layers": {
         "task": "tasks.export_reference_layers",
-        "schedule": 604800.0,  # every 7 days
+        "schedule": 2592000.0,  # every 30 days
     },
 }
 
