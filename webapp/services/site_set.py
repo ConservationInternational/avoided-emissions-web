@@ -431,9 +431,9 @@ def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
             WHERE f.site_set_id = :site_set_id
             ORDER BY f.site_id
             """
-        ),
+        ).execution_options(stream_results=True, max_row_buffer=batch_size),
         {"site_set_id": str(site_set_id)},
-    ).execution_options(stream_results=True, max_row_buffer=batch_size)
+    )
 
     batch = []
     for row in result:
