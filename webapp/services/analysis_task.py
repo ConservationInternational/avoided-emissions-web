@@ -1673,6 +1673,28 @@ def import_execution_results(task_id, results_payload, db=None):
         # stored and distinguished correctly.
         time_series = results_payload.get("time_series") or []
 
+        # Deduplicate by (entity_id, sub_site_index, year) — the API
+        # payload can occasionally contain duplicate rows for the same key
+        # (e.g. when the R script emits two replicates for the same site/year).
+        # Keep the last occurrence so we get a deterministic single row per key.
+        _seen_ts: dict = {}
+        for ts in time_series:
+            meta = ts.get("metadata", {})
+            key = (
+                ts.get("entity_id"),
+                int(meta.get("sub_site_index", 0)),
+                ts.get("year"),
+            )
+            _seen_ts[key] = ts
+        if len(_seen_ts) < len(time_series):
+            logger.warning(
+                "import_execution_results(%s): dropped %d duplicate time-series "
+                "row(s) from results payload",
+                task_id,
+                len(time_series) - len(_seen_ts),
+            )
+        time_series = list(_seen_ts.values())
+
         for ts in time_series:
             values = ts.get("values", {})
             metadata = ts.get("metadata", {})
