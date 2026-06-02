@@ -4612,44 +4612,157 @@ def update_task_info(task_id, name=None, description=None, user_id=None):
         db.close()
 
 
+# Tasks with more sites than this threshold use aggregated DB queries for the
+# results/plots view instead of loading every per-site-year row into Python.
+# This prevents OOM and serialization timeouts in the Dash process.
+LARGE_TASK_THRESHOLD = 200
+
+
+def _get_task_results_aggregated(task_id, db):
+    """Return per-year aggregate of task_results rows as a list of plain dicts.
+
+    Performs a single SQL GROUP BY query rather than loading every row, so it
+    is safe to call for tasks with thousands of sites.
+    """
+    sql = text(
+        """
+        SELECT
+            year,
+            SUM(extrapolated_treatment_defor_ha)               AS treatment_defor_ha,
+            SUM(extrapolated_control_defor_ha)                 AS control_defor_ha,
+            SUM(extrapolated_emissions_avoided_mgco2e)         AS emissions_avoided_mgco2e,
+            SUM(extrapolated_forest_loss_avoided_ha)           AS forest_loss_avoided_ha,
+            SUM(extrapolated_treatment_emissions_mgco2e)       AS treatment_emissions_mgco2e,
+            SUM(extrapolated_control_emissions_mgco2e)         AS control_emissions_mgco2e,
+            SUM(extrapolated_treatment_defor_ha_ci_lower)      AS treatment_defor_ha_ci_lower,
+            SUM(extrapolated_treatment_defor_ha_ci_upper)      AS treatment_defor_ha_ci_upper,
+            SUM(extrapolated_control_defor_ha_ci_lower)        AS control_defor_ha_ci_lower,
+            SUM(extrapolated_control_defor_ha_ci_upper)        AS control_defor_ha_ci_upper,
+            SUM(extrapolated_emissions_avoided_mgco2e_ci_lower)  AS emissions_avoided_mgco2e_ci_lower,
+            SUM(extrapolated_emissions_avoided_mgco2e_ci_upper)  AS emissions_avoided_mgco2e_ci_upper,
+            SUM(extrapolated_forest_loss_avoided_ha_ci_lower)    AS forest_loss_avoided_ha_ci_lower,
+            SUM(extrapolated_forest_loss_avoided_ha_ci_upper)    AS forest_loss_avoided_ha_ci_upper,
+            COUNT(DISTINCT site_id)                            AS n_sites
+        FROM task_results
+        WHERE task_id = :task_id
+        GROUP BY year
+        ORDER BY year
+        """
+    )
+    result = db.execute(sql, {"task_id": str(task_id)})
+    return [dict(r._mapping) for r in result.fetchall()]
+
+
+def get_task_site_results(task_id, site_id):
+    """Return per-year TaskResult rows for a single site as a list of dicts.
+
+    Used by the site drill-down callback on large tasks so the full result
+    set does not need to be loaded into memory upfront.
+    """
+    db = get_db()
+    try:
+        rows = (
+            db.query(TaskResult)
+            .filter(TaskResult.task_id == task_id, TaskResult.site_id == site_id)
+            .order_by(TaskResult.year)
+            .all()
+        )
+        return [
+            {
+                "site_id": r.site_id,
+                "year": r.year,
+                "treatment_defor_ha": r.extrapolated_treatment_defor_ha or 0,
+                "control_defor_ha": r.extrapolated_control_defor_ha or 0,
+                "emissions_avoided_mgco2e": r.extrapolated_emissions_avoided_mgco2e
+                or 0,
+                "forest_loss_avoided_ha": r.extrapolated_forest_loss_avoided_ha or 0,
+                "treatment_emissions_mgco2e": r.extrapolated_treatment_emissions_mgco2e
+                or 0,
+                "control_emissions_mgco2e": r.extrapolated_control_emissions_mgco2e
+                or 0,
+                "is_pre_intervention": bool(r.is_pre_intervention),
+                "is_post_intervention": bool(getattr(r, "is_post_intervention", False)),
+                "treatment_defor_ha_ci_lower": r.extrapolated_treatment_defor_ha_ci_lower,
+                "treatment_defor_ha_ci_upper": r.extrapolated_treatment_defor_ha_ci_upper,
+                "control_defor_ha_ci_lower": r.extrapolated_control_defor_ha_ci_lower,
+                "control_defor_ha_ci_upper": r.extrapolated_control_defor_ha_ci_upper,
+                "emissions_avoided_mgco2e_ci_lower": r.extrapolated_emissions_avoided_mgco2e_ci_lower,
+                "emissions_avoided_mgco2e_ci_upper": r.extrapolated_emissions_avoided_mgco2e_ci_upper,
+                "forest_loss_avoided_ha_ci_lower": r.extrapolated_forest_loss_avoided_ha_ci_lower,
+                "forest_loss_avoided_ha_ci_upper": r.extrapolated_forest_loss_avoided_ha_ci_upper,
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
 def get_task_detail(task_id):
-    """Get full task details including sites and results."""
+    """Get full task details including sites and results.
+
+    For tasks with more than ``LARGE_TASK_THRESHOLD`` sites the per-site-year
+    ``TaskResult`` rows and ``TaskSite`` rows are **not** loaded into Python.
+    Instead a pre-aggregated yearly summary is returned in ``agg_yearly`` so
+    the Dash process never has to hold tens of thousands of ORM objects in
+    memory.  The ``is_large`` flag tells callers which path was taken.
+    """
     db = get_db()
     try:
         task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
         if not task:
             return None
 
-        sites = db.query(TaskSite).filter(TaskSite.task_id == task_id).all()
+        n_sites = task.n_sites or 0
+        is_large = n_sites > LARGE_TASK_THRESHOLD
 
-        results = (
-            db.query(TaskResult)
-            .filter(TaskResult.task_id == task_id)
-            .order_by(TaskResult.site_id, TaskResult.year)
-            .all()
-        )
-
+        # Always load per-site totals — one row per site, manageable even at
+        # thousands of sites, and needed for the overview summary cards.
         totals = (
             db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).all()
         )
 
-        sites_geojson = None
-        if task.site_set_id:
-            sites_geojson = get_user_site_set_geojson(task.site_set_id)
-        if not sites_geojson or not sites_geojson.get("features"):
-            # Adopted tasks have no local site set — fall back to S3
-            s3_uri = task.sites_s3_uri
-            if not s3_uri:
-                # Also check inside config/params (older adopted tasks)
-                s3_uri = (task.config or {}).get("sites_s3_uri")
-            if s3_uri:
-                sites_geojson = _fetch_sites_geojson_from_s3(s3_uri)
-            else:
-                parquet_uri = (task.config or {}).get("sites_parquet_s3_uri")
-                if parquet_uri:
-                    parquet_gdf = _fetch_sites_parquet_from_s3(parquet_uri)
-                    if parquet_gdf is not None and not parquet_gdf.empty:
-                        sites_geojson = json.loads(upload_sites_to_geojson(parquet_gdf))
+        # Aggregated yearly summary — always computed; used by plots for
+        # large tasks and as a cheap cross-check for small ones.
+        agg_yearly = _get_task_results_aggregated(task_id, db)
+
+        if is_large:
+            # Avoid loading tens of thousands of per-site-year rows.
+            sites = []
+            results = None
+            sites_geojson = None
+            logger.info(
+                "get_task_detail: task %s has %d sites (> threshold %d) — "
+                "using aggregated path",
+                task_id,
+                n_sites,
+                LARGE_TASK_THRESHOLD,
+            )
+        else:
+            sites = db.query(TaskSite).filter(TaskSite.task_id == task_id).all()
+            results = (
+                db.query(TaskResult)
+                .filter(TaskResult.task_id == task_id)
+                .order_by(TaskResult.site_id, TaskResult.year)
+                .all()
+            )
+            sites_geojson = None
+            if task.site_set_id:
+                sites_geojson = get_user_site_set_geojson(task.site_set_id)
+            if not sites_geojson or not sites_geojson.get("features"):
+                # Adopted tasks have no local site set — fall back to S3
+                s3_uri = task.sites_s3_uri
+                if not s3_uri:
+                    s3_uri = (task.config or {}).get("sites_s3_uri")
+                if s3_uri:
+                    sites_geojson = _fetch_sites_geojson_from_s3(s3_uri)
+                else:
+                    parquet_uri = (task.config or {}).get("sites_parquet_s3_uri")
+                    if parquet_uri:
+                        parquet_gdf = _fetch_sites_parquet_from_s3(parquet_uri)
+                        if parquet_gdf is not None and not parquet_gdf.empty:
+                            sites_geojson = json.loads(
+                                upload_sites_to_geojson(parquet_gdf)
+                            )
 
         return {
             "task": task,
@@ -4657,6 +4770,8 @@ def get_task_detail(task_id):
             "results": results,
             "totals": totals,
             "sites_geojson": sites_geojson,
+            "is_large": is_large,
+            "agg_yearly": agg_yearly,
         }
     finally:
         db.close()
