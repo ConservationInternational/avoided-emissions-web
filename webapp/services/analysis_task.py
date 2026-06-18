@@ -526,7 +526,13 @@ def _complete_analysis_task_submission(task_id, user_id):
             )
 
         # Create TaskSite rows and update n_sites on the task.
+        # sub_site_index is derived from a per-site_id counter rather than
+        # reading a column so that duplicate site_ids in the source data
+        # (multiple features sharing the same site_id) each get a unique
+        # sequential index instead of all defaulting to 0 and violating
+        # the task_sites_task_id_site_id_sub_site_index_key constraint.
         task.n_sites = len(gdf)
+        _sub_site_counters: dict[str, int] = {}
         for i, (_, row) in enumerate(gdf_for_db.iterrows()):
             geom = row.geometry
             area_ha = (
@@ -535,17 +541,21 @@ def _complete_analysis_task_submission(task_id, user_id):
                 else None
             )
 
+            sid = str(row["site_id"])
+            sub_site_index = _sub_site_counters.get(sid, 0)
+            _sub_site_counters[sid] = sub_site_index + 1
+
             site = TaskSite(
                 task_id=task_id,
-                site_id=str(row["site_id"]),
+                site_id=sid,
                 site_name=str(row.get("site_name", "")),
                 start_date=pd.to_datetime(row["start_date"]),
                 end_date=pd.to_datetime(row["end_date"])
                 if pd.notna(row.get("end_date"))
                 else None,
                 area_ha=area_ha,
-                sub_site_index=row.get("sub_site_index", 0),
-                is_sub_site=row.get("is_sub_site", False),
+                sub_site_index=sub_site_index,
+                is_sub_site=sub_site_index > 0 or bool(row.get("is_sub_site", False)),
                 original_area_ha=row.get("original_area_ha"),
             )
             db.add(site)
@@ -1020,6 +1030,7 @@ def submit_analysis_task(
         )
         db.add(task)
 
+        _sub_site_counters: dict[str, int] = {}
         for _, row in gdf_for_db.iterrows():
             # Compute area in hectares from the polygon geometry using
             # an equal-area projection (Mollweide).
@@ -1032,17 +1043,21 @@ def submit_analysis_task(
             else:
                 area_ha = None
 
+            sid = str(row["site_id"])
+            sub_site_index = _sub_site_counters.get(sid, 0)
+            _sub_site_counters[sid] = sub_site_index + 1
+
             site = TaskSite(
                 task_id=task_id,
-                site_id=str(row["site_id"]),
+                site_id=sid,
                 site_name=str(row.get("site_name", "")),
                 start_date=pd.to_datetime(row["start_date"]),
                 end_date=pd.to_datetime(row["end_date"])
                 if pd.notna(row.get("end_date"))
                 else None,
                 area_ha=area_ha,
-                sub_site_index=row.get("sub_site_index", 0),
-                is_sub_site=row.get("is_sub_site", False),
+                sub_site_index=sub_site_index,
+                is_sub_site=sub_site_index > 0 or bool(row.get("is_sub_site", False)),
                 original_area_ha=row.get("original_area_ha"),
             )
             db.add(site)
