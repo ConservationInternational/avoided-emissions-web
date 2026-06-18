@@ -1192,6 +1192,44 @@ def list_user_site_uploads(user_id, limit=50):
         db.close()
 
 
+def delete_user_site_upload(upload_id, user_id):
+    """Delete a terminal (cancelled or failed) upload job record.
+
+    Only uploads in ``cancelled`` or ``failed`` state with no associated site
+    set can be deleted.  Completed uploads are managed via their site set.
+    """
+    db = get_db()
+    try:
+        upload = (
+            db.query(UserSiteUpload)
+            .filter(UserSiteUpload.id == upload_id, UserSiteUpload.user_id == user_id)
+            .first()
+        )
+        if not upload:
+            return False, "Upload job not found."
+
+        if upload.status not in {"cancelled", "failed"}:
+            return (
+                False,
+                f"Only cancelled or failed uploads can be deleted (current status: '{upload.status}').",
+            )
+
+        if upload.site_set_id:
+            return (
+                False,
+                "This upload has an associated site set. Delete the site set instead.",
+            )
+
+        db.delete(upload)
+        db.commit()
+        return True, "Upload record deleted."
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def cancel_user_site_upload(upload_id, user_id):
     """Cancel a user-owned background site import job.
 

@@ -67,6 +67,7 @@ from services import (
     cancel_user_site_upload,
     create_user_site_upload,
     delete_user_site_set,
+    delete_user_site_upload,
     list_user_site_uploads,
     rename_user_site_set,
 )
@@ -1153,6 +1154,11 @@ def register_callbacks(app, limiter=None):
                 if not site_set_id:
                     raise PreventUpdate
                 success, message = delete_user_site_set(site_set_id, user.id)
+            elif action == "delete_upload":
+                upload_id = value.get("upload_id")
+                if not upload_id:
+                    raise PreventUpdate
+                success, message = delete_user_site_upload(upload_id, user.id)
             else:
                 raise PreventUpdate
 

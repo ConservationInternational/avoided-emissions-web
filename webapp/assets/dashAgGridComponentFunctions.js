@@ -505,6 +505,8 @@ dagcomponentfuncs.SiteSetAndUploadActions = function (props) {
 
     var canCancel = ["pending", "running"].indexOf(status) >= 0 && !pending;
     var canManage = hasSiteSet && !pending;
+    var isTerminal = ["cancelled", "failed"].indexOf(status) >= 0;
+    var canDeleteUpload = isTerminal && !hasSiteSet && !pending;
 
     var btnStyle = {
         padding: "1px 6px",
@@ -624,6 +626,33 @@ dagcomponentfuncs.SiteSetAndUploadActions = function (props) {
                         props.setData({
                             action: "delete_site_set",
                             site_set_id: data.site_set_id,
+                            _actionTs: Date.now(),
+                        });
+                    },
+                },
+                pending ? "Working..." : "Delete"
+            )
+        );
+    }
+
+    if (canDeleteUpload) {
+        buttons.push(
+            React.createElement(
+                "button",
+                {
+                    key: "delete-upload",
+                    style: Object.assign({}, btnStyle, {
+                        border: "1px solid #dc3545",
+                        color: "#842029",
+                    }),
+                    title: "Delete this upload record",
+                    onClick: function (e) {
+                        e.stopPropagation();
+                        if (!window.confirm("Delete this upload record? This cannot be undone.")) return;
+                        setPending(true);
+                        props.setData({
+                            action: "delete_upload",
+                            upload_id: data.id,
                             _actionTs: Date.now(),
                         });
                     },
