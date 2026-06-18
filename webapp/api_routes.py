@@ -529,7 +529,7 @@ def create_api_blueprint(limiter):
                 db.query(AnalysisTask)
                 .filter(
                     AnalysisTask.id == task_id,
-                    AnalysisTask.user_id == flask_login.current_user.id,
+                    AnalysisTask.submitted_by == flask_login.current_user.id,
                 )
                 .first()
             )
