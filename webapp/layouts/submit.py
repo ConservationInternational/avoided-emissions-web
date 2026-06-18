@@ -214,35 +214,7 @@ def submit_layout(user, recompute_config=None):
                                                 ],
                                                 className="ae-section-card mb-3",
                                             ),
-                                            dbc.Card(
-                                                [
-                                                    dbc.CardHeader(
-                                                        "Need to add more sites?"
-                                                    ),
-                                                    dbc.CardBody(
-                                                        [
-                                                            html.P(
-                                                                "Site uploads are now managed asynchronously from the Admin page.",
-                                                                className="mb-2",
-                                                            ),
-                                                            dbc.Button(
-                                                                "Open Admin Site Uploads",
-                                                                href="/admin",
-                                                                color="secondary",
-                                                                outline=True,
-                                                                disabled=not user.is_admin,
-                                                            ),
-                                                        ]
-                                                    ),
-                                                    dbc.CardFooter(
-                                                        html.Small(
-                                                            "After selecting a site set, continue to the Matching Setup tab.",
-                                                            className="text-muted",
-                                                        )
-                                                    ),
-                                                ],
-                                                className="ae-section-card",
-                                            ),
+
                                         ],
                                         className="pt-3",
                                     )
