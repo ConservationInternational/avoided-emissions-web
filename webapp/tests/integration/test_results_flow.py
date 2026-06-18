@@ -57,7 +57,7 @@ class TestResultsFlowIntegration:
         detail = get_task_detail(task_id)
 
         assert detail is not None
-        assert detail["task"].id == task_id
+        assert str(detail["task"].id) == task_id
 
     def test_get_task_detail_loads_totals(self, clean_db, sample_results_payload):
         from services.analysis_task import get_task_detail

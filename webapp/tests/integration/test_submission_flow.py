@@ -38,7 +38,7 @@ class TestSubmissionFlowIntegration:
             is_approved=True,
         )
         clean_db.add(user)
-        clean_db.flush()
+        clean_db.commit()
         user_id = str(user.id)
         task_id = queue_analysis_task(
             task_name="Integration Test Task",
@@ -76,7 +76,7 @@ class TestSubmissionFlowIntegration:
             is_approved=True,
         )
         clean_db.add(user)
-        clean_db.flush()
+        clean_db.commit()
         task_id = queue_analysis_task(
             task_name="Config Test",
             description="",
