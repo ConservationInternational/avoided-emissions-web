@@ -1339,11 +1339,13 @@ def cancel_task(task_id, user):
         db.close()
 
 
-def get_task_list(user_id=None, limit=50):
-    """Get recent analysis tasks, optionally filtered by user.
+def get_task_list(user_id=None, limit=None):
+    """Get analysis tasks, optionally filtered by user.
 
     Uses ``load_only`` to skip the heavy ``extra_metadata`` JSON column
-    that the task list view never reads.
+    that the task list view never reads.  Pass ``limit`` to cap results;
+    defaults to no limit so the full history is available for
+    client-side sort/filter in the dashboard.
     """
     from sqlalchemy.orm import joinedload, load_only
 
@@ -1371,7 +1373,9 @@ def get_task_list(user_id=None, limit=50):
         )
         if user_id:
             query = query.filter(AnalysisTask.submitted_by == user_id)
-        return query.limit(limit).all()
+        if limit is not None:
+            query = query.limit(limit)
+        return query.all()
     finally:
         db.close()
 
