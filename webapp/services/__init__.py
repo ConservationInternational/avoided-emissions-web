@@ -52,6 +52,7 @@ from services.site_upload import (
 from services.site_set import (
     archive_user_site_set,
     delete_user_site_set,
+    get_user_site_set_centroids_geojson,
     get_user_site_set_detail,
     get_user_site_set_geojson,
     get_user_site_set_geojson_by_bounds_and_zoom,
@@ -173,6 +174,7 @@ __all__ = [
     # site_set
     "archive_user_site_set",
     "delete_user_site_set",
+    "get_user_site_set_centroids_geojson",
     "get_user_site_set_detail",
     "get_user_site_set_geojson",
     "get_user_site_set_geojson_by_bounds_and_zoom",

@@ -12,16 +12,18 @@ import re
 
 import boto3
 import flask_login
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
+from sqlalchemy import text as sa_text
 
 from config import Config
 from gee_export import gee_config
 from layer_config import get_style
-from models import Covariate, get_db
+from models import AnalysisTask, Covariate, UserSiteSet, get_db
 from services import (
     discard_staged_site_upload,
     download_results_csv,
     get_site_upload_mapping_preview_from_staged,
+    get_user_site_set_centroids_geojson,
     stream_stage_site_upload,
 )
 
@@ -388,5 +390,184 @@ def create_api_blueprint(limiter):
             )
 
         return jsonify({"type": "FeatureCollection", "features": features})
+
+    # -- MVT tile endpoints --------------------------------------------------
+    # Serve Mapbox Vector Tiles for site geometries.  The rendering layer in
+    # OpenLayers fetches these directly; no Dash callback round-trip is needed
+    # for zoom/pan.  At zoom < 12 the endpoint returns centroid Points for all
+    # sites in the tile; at zoom >= 12 it returns simplified Polygons.
+
+    def _mvt_simplify_tol(z):
+        """Geometry simplification tolerance in degrees, halving each zoom level."""
+        return max(0.0001, 0.00001 * (2 ** (18 - z)))
+
+    _MVT_SQL_SITE_SET = sa_text(
+        """
+        WITH tile AS (SELECT ST_TileEnvelope(:z, :x, :y) AS env)
+        SELECT ST_AsMVT(q, 'sites', 4096, 'geom') AS mvt
+        FROM (
+            SELECT
+                f.site_id,
+                f.site_name,
+                f.area_ha,
+                CASE WHEN :z < 12
+                    THEN ST_AsMVTGeom(ST_Centroid(f.geom), t.env, 4096, 256, true)
+                    ELSE ST_AsMVTGeom(
+                             ST_SimplifyPreserveTopology(f.geom, :simplify_tol),
+                             t.env, 4096, 256, true)
+                END AS geom
+            FROM user_site_features f, tile t
+            WHERE f.site_set_id = :site_set_id
+              AND f.geom && t.env
+        ) q
+        WHERE q.geom IS NOT NULL
+        """
+    )
+
+    _MVT_SQL_TASK = sa_text(
+        """
+        WITH tile AS (SELECT ST_TileEnvelope(:z, :x, :y) AS env)
+        SELECT ST_AsMVT(q, 'sites', 4096, 'geom') AS mvt
+        FROM (
+            SELECT
+                f.site_id,
+                f.site_name,
+                f.area_ha,
+                tr.extrapolated_emissions_avoided_mgco2e AS emissions_avoided_mgco2e,
+                tr.extrapolated_forest_loss_avoided_ha  AS forest_loss_avoided_ha,
+                CASE WHEN :z < 12
+                    THEN ST_AsMVTGeom(ST_Centroid(f.geom), t.env, 4096, 256, true)
+                    ELSE ST_AsMVTGeom(
+                             ST_SimplifyPreserveTopology(f.geom, :simplify_tol),
+                             t.env, 4096, 256, true)
+                END AS geom
+            FROM user_site_features f
+            CROSS JOIN tile t
+            LEFT JOIN task_results_total tr
+                   ON tr.site_id = f.site_id AND tr.task_id = :task_id
+            WHERE f.site_set_id = :site_set_id
+              AND f.geom && t.env
+        ) q
+        WHERE q.geom IS NOT NULL
+        """
+    )
+
+    def _mvt_response(mvt_bytes):
+        resp = Response(mvt_bytes, status=200)
+        resp.headers["Content-Type"] = "application/vnd.mapbox-vector-tile"
+        resp.headers["Cache-Control"] = "private, max-age=300"
+        return resp
+
+    @api_bp.route("/api/sites-tiles/<site_set_id>/<int:z>/<int:x>/<int:y>")
+    @flask_login.login_required
+    @limiter.limit("300 per minute")
+    def sites_tiles(site_set_id, z, x, y):
+        """Serve MVT tiles for a user-owned site set.
+
+        Returns centroid Points at zoom < 12; simplified Polygons at zoom >= 12.
+        The tile is empty (zero-length body) when no sites intersect the tile.
+        """
+        db = get_db()
+        try:
+            exists = (
+                db.query(UserSiteSet)
+                .filter(
+                    UserSiteSet.id == site_set_id,
+                    UserSiteSet.user_id == flask_login.current_user.id,
+                )
+                .first()
+            )
+            if not exists:
+                return jsonify({"error": "Site set not found"}), 404
+
+            row = db.execute(
+                _MVT_SQL_SITE_SET,
+                {
+                    "z": z,
+                    "x": x,
+                    "y": y,
+                    "site_set_id": str(site_set_id),
+                    "simplify_tol": _mvt_simplify_tol(z),
+                },
+            ).fetchone()
+        finally:
+            db.close()
+
+        mvt_bytes = bytes(row.mvt) if row and row.mvt else b""
+        return _mvt_response(mvt_bytes)
+
+    @api_bp.route("/api/task-sites-tiles/<task_id>/<int:z>/<int:x>/<int:y>")
+    @flask_login.login_required
+    @limiter.limit("300 per minute")
+    def task_sites_tiles(task_id, z, x, y):
+        """Serve MVT tiles for a task's sites with per-site emissions properties.
+
+        Joins ``task_results_total`` so that ``emissions_avoided_mgco2e`` and
+        ``forest_loss_avoided_ha`` are available as tile feature properties for
+        colour-coding in the results map.  Returns 204 when the task has no
+        linked site set (adopted tasks with geometry only in S3 parquet).
+        """
+        db = get_db()
+        try:
+            task = (
+                db.query(AnalysisTask)
+                .filter(
+                    AnalysisTask.id == task_id,
+                    AnalysisTask.user_id == flask_login.current_user.id,
+                )
+                .first()
+            )
+            if not task:
+                return jsonify({"error": "Task not found"}), 404
+            if not task.site_set_id:
+                # Adopted task — geometry only in S3 parquet; no tiles available.
+                return Response(status=204)
+
+            row = db.execute(
+                _MVT_SQL_TASK,
+                {
+                    "z": z,
+                    "x": x,
+                    "y": y,
+                    "site_set_id": str(task.site_set_id),
+                    "task_id": str(task_id),
+                    "simplify_tol": _mvt_simplify_tol(z),
+                },
+            ).fetchone()
+        finally:
+            db.close()
+
+        mvt_bytes = bytes(row.mvt) if row and row.mvt else b""
+        return _mvt_response(mvt_bytes)
+
+    @api_bp.route("/api/site-centroids/<site_set_id>")
+    @flask_login.login_required
+    @limiter.limit("30 per minute")
+    def site_centroids(site_set_id):
+        """Return all sites as centroid Point GeoJSON for the companion vector source.
+
+        Used by the OpenLayers map to populate ``_featureBySiteId`` for
+        click-to-zoom and table\u2194map selection.  Returns every site’s centroid
+        regardless of dataset size; points are tiny so even 50 k sites is
+        only ~4 MB of JSON.
+        """
+        db = get_db()
+        try:
+            exists = (
+                db.query(UserSiteSet)
+                .filter(
+                    UserSiteSet.id == site_set_id,
+                    UserSiteSet.user_id == flask_login.current_user.id,
+                )
+                .first()
+            )
+        finally:
+            db.close()
+
+        if not exists:
+            return jsonify({"error": "Site set not found"}), 404
+
+        fc = get_user_site_set_centroids_geojson(site_set_id)
+        return jsonify(fc)
 
     return api_bp

@@ -34,6 +34,7 @@ from services.s3 import S3_COST_TAGGING, get_s3_client
 from services.site_set import (
     _get_site_set_min_start_year,
     _stream_site_set_to_parquet_buf,
+    get_user_site_set_centroids_geojson,
     get_user_site_set_geojson,
     upload_sites_parquet_to_s3,
     upload_sites_to_geojson,
@@ -1580,7 +1581,20 @@ def get_task_detail(task_id):
             # Avoid loading tens of thousands of per-site-year rows.
             sites = []
             results = None
+            # Load centroid GeoJSON for the results map so that all sites are
+            # shown as emission-coloured circles regardless of dataset size.
             sites_geojson = None
+            if task.site_set_id:
+                try:
+                    sites_geojson = get_user_site_set_centroids_geojson(
+                        task.site_set_id
+                    )
+                except Exception:
+                    logger.warning(
+                        "get_task_detail: could not load centroids for site set %s",
+                        task.site_set_id,
+                        exc_info=True,
+                    )
             logger.info(
                 "get_task_detail: task %s has %d sites (> threshold %d) — "
                 "using aggregated path",

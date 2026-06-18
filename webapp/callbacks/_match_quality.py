@@ -1558,6 +1558,11 @@ def _build_map(
         site_options.append({"label": label, "value": sid})
     site_options_by_name = sorted(site_options, key=lambda o: o["label"].lower())
 
+    # Build tile URL when task_id is available so the rendering layer fetches
+    # MVT tiles directly (no Dash round-trip on pan/zoom).  The enriched_geojson
+    # (centroid points + emissions) is still passed as data-geojson; the JS uses
+    # it to build _emissionsBySiteId for colouring circles on task-scoped tiles.
+    tile_url = f"/api/task-sites-tiles/{task_id}/{{z}}/{{x}}/{{y}}" if task_id else None
     map_component = _openlayers_map_component(
         "task-sites-map",
         enriched_geojson,
@@ -1566,6 +1571,7 @@ def _build_map(
         cog_filter_covariates=covariates,
         task_id=task_id,
         resolution_m=resolution_m,
+        tile_url=tile_url,
     )
 
     controls = html.Div(

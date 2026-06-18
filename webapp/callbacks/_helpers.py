@@ -192,7 +192,27 @@ def _openlayers_map_component(
     cog_filter_covariates=None,
     task_id=None,
     resolution_m=None,
+    tile_url=None,
+    centroids_url=None,
+    bounds=None,
 ):
+    """Build an ``ol-sites-map`` div for the OpenLayers site map.
+
+    When *tile_url* is provided the JS switches to an ``ol.layer.VectorTile``
+    rendering layer that fetches MVT tiles directly from the server without any
+    Dash callback round-trip on pan/zoom.  *centroids_url* points to the async
+    endpoint that populates the hidden companion ``ol.layer.Vector`` used for
+    ``_featureBySiteId`` lookups and zoom-to-feature.  *bounds* (a
+    ``{west, south, east, north}`` dict or the ``UserSiteSet.bounds`` JSON
+    column value) is used for the initial view fit instead of computing it from
+    the loaded feature extent.
+
+    *geojson_text* is still accepted; on the results map it carries a small
+    centroid+emissions FeatureCollection that the JS uses to build
+    ``_emissionsBySiteId`` for colour-coding circles on task-scoped tiles.
+    """
+    import json as _json
+
     attrs = {
         "data-geojson": geojson_text or "",
         "data-height": height,
@@ -205,6 +225,14 @@ def _openlayers_map_component(
         attrs["data-task-id"] = str(task_id)
     if resolution_m is not None:
         attrs["data-resolution"] = str(resolution_m)
+    if tile_url:
+        attrs["data-tile-url"] = tile_url
+    if centroids_url:
+        attrs["data-centroids-url"] = centroids_url
+    if bounds:
+        attrs["data-bounds"] = (
+            bounds if isinstance(bounds, str) else _json.dumps(bounds)
+        )
     return html.Div(
         id=map_id,
         className="ol-sites-map",

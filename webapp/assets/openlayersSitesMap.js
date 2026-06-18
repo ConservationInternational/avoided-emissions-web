@@ -100,6 +100,9 @@
         if (mapEl?._olSource && typeof mapEl._olSource.changed === "function") {
             mapEl._olSource.changed();
         }
+        if (mapEl?._olVtLayer && typeof mapEl._olVtLayer.changed === "function") {
+            mapEl._olVtLayer.changed();
+        }
     }
 
     function bindMapTableSync(mapEl, map, config) {
@@ -180,14 +183,42 @@
         });
     }
 
+    function mapStylePoint(areaHa, siteId, selectedSiteId) {
+        const isSelected = siteId && siteId === selectedSiteId;
+        // Log-scale radius: 3 px for tiny sites, up to 12 px for large ones.
+        // log10(1) → 3 px; log10(10000) → ~12 px.
+        const radius =
+            areaHa > 0
+                ? Math.min(12, Math.max(3, 2.25 * Math.log10(areaHa) + 3))
+                : 4;
+        return new ol.style.Style({
+            image: new ol.style.Circle({
+                radius: radius,
+                fill: new ol.style.Fill({
+                    color: isSelected ? "rgba(245, 124, 0, 0.70)" : "rgba(38, 166, 91, 0.60)",
+                }),
+                stroke: new ol.style.Stroke({
+                    color: isSelected ? "#ef6c00" : "#2e7d32",
+                    width: isSelected ? 2 : 1.5,
+                }),
+            }),
+        });
+    }
+
     function featureStyle(mapEl) {
         const styleCache = {};
         return function (feature) {
+            const geomType = feature.getGeometry()?.getType();
             const siteId = normalizeSiteId(feature.get("site_id"));
             const selectedSiteId = normalizeSiteId(mapEl._selectedSiteId);
-            const key = siteId + "|" + selectedSiteId;
+            const key = geomType + "|" + siteId + "|" + selectedSiteId;
             if (!styleCache[key]) {
-                styleCache[key] = mapStyle(siteId, selectedSiteId);
+                if (geomType === "Point") {
+                    const areaHa = feature.get("area_ha") || 0;
+                    styleCache[key] = mapStylePoint(areaHa, siteId, selectedSiteId);
+                } else {
+                    styleCache[key] = mapStyle(siteId, selectedSiteId);
+                }
             }
             return styleCache[key];
         };
@@ -412,19 +443,73 @@
         }
     }
 
+    // Custom tileLoadFunction so that session cookies are always forwarded
+    // (same-origin fetch) and 204 No Content responses are handled gracefully.
+    function makeMvtTileLoadFunction() {
+        return function (tile, url) {
+            tile.setLoader(function (extent, resolution, projection) {
+                fetch(url, { credentials: "same-origin" })
+                    .then(function (response) {
+                        if (!response.ok || response.status === 204) {
+                            tile.setFeatures([]);
+                            return null;
+                        }
+                        return response.arrayBuffer();
+                    })
+                    .then(function (data) {
+                        if (!data) {
+                            return;
+                        }
+                        const format = tile.getFormat();
+                        const features = format.readFeatures(data, {
+                            extent: extent,
+                            featureProjection: projection,
+                        });
+                        tile.setFeatures(features);
+                    })
+                    .catch(function () {
+                        tile.setFeatures([]);
+                    });
+            });
+        };
+    }
+
     function ensureMap(el) {
         if (el._olMap) {
             return el._olMap;
         }
 
+        // Companion vector source: holds centroid Points fetched asynchronously
+        // from data-centroids-url.  Used exclusively for _featureBySiteId lookups
+        // and zoom-to-feature — never rendered visibly when tile-url is set.
         const source = new ol.source.Vector();
-        const vectorLayer = new ol.layer.Vector({ source: source, style: featureStyle(el) });
+        const tileUrl = el.getAttribute("data-tile-url");
+
+        const layers = [new ol.layer.Tile({ source: new ol.source.OSM() })];
+        let vtLayer = null;
+
+        if (tileUrl) {
+            // MVT rendering layer — tiles served directly by Flask/PostGIS.
+            vtLayer = new ol.layer.VectorTile({
+                source: new ol.source.VectorTile({
+                    format: new ol.format.MVT(),
+                    url: tileUrl,
+                    tileLoadFunction: makeMvtTileLoadFunction(),
+                }),
+                style: featureStyle(el),
+            });
+            el._olVtLayer = vtLayer;
+            layers.push(vtLayer);
+            // Companion source is hidden — used only for lookups.
+            layers.push(new ol.layer.Vector({ source: source, visible: false }));
+        } else {
+            // Legacy GeoJSON path: companion source IS the visible layer.
+            layers.push(new ol.layer.Vector({ source: source, style: featureStyle(el) }));
+        }
+
         const map = new ol.Map({
             target: el,
-            layers: [
-                new ol.layer.Tile({ source: new ol.source.OSM() }),
-                vectorLayer,
-            ],
+            layers: layers,
             view: new ol.View({ center: ol.proj.fromLonLat([0, 0]), zoom: 2 }),
         });
 
@@ -445,68 +530,6 @@
                 fitToAllSites(el, map);
             }
             filterPixelsBySite(el, siteId);
-        });
-
-        // Add zoom/bounds listener with debounce to emit zoom-aware sampling updates.
-        // Only emits for the submit-sites-map to avoid duplicate requests.
-        var zoomBoundsTimeout = null;
-        var lastEmittedZoom = null;
-        var lastEmittedBounds = null;
-
-        function emitZoomBoundsChange() {
-            var view = map.getView();
-            var zoom = Math.round(view.getZoom());
-            var extent = view.calculateExtent(map.getSize());
-            var [minx, miny, maxx, maxy] = ol.proj.transformExtent(
-                extent,
-                "EPSG:3857",
-                "EPSG:4326"
-            );
-
-            // Only emit if zoom or bounds have meaningfully changed
-            var boundsChanged =
-                lastEmittedBounds === null ||
-                Math.abs(minx - lastEmittedBounds.minx) > 0.01 ||
-                Math.abs(miny - lastEmittedBounds.miny) > 0.01 ||
-                Math.abs(maxx - lastEmittedBounds.maxx) > 0.01 ||
-                Math.abs(maxy - lastEmittedBounds.maxy) > 0.01;
-            var zoomChanged = lastEmittedZoom !== zoom;
-
-            if (boundsChanged || zoomChanged) {
-                lastEmittedZoom = zoom;
-                lastEmittedBounds = { minx: minx, miny: miny, maxx: maxx, maxy: maxy };
-
-                // Find the Dash zoom-bounds-store and emit event
-                var store = document.getElementById("zoom-bounds-store");
-                if (store && store.dataset) {
-                    // Emit a custom event that Dash can listen for
-                    el.dispatchEvent(
-                        new CustomEvent("map-zoom-bounds-changed", {
-                            bubbles: true,
-                            detail: {
-                                zoom: zoom,
-                                bounds: lastEmittedBounds,
-                            },
-                        })
-                    );
-                }
-            }
-        }
-
-        map.getView().on("change:resolution", function () {
-            // Clear existing timeout and set a new one (debounce)
-            if (zoomBoundsTimeout !== null) {
-                clearTimeout(zoomBoundsTimeout);
-            }
-            zoomBoundsTimeout = setTimeout(emitZoomBoundsChange, 500); // 500ms debounce
-        });
-
-        map.on("moveend", function () {
-            // Also fire immediately on moveend in case user just stopped panning
-            if (zoomBoundsTimeout !== null) {
-                clearTimeout(zoomBoundsTimeout);
-            }
-            zoomBoundsTimeout = setTimeout(emitZoomBoundsChange, 300); // 300ms debounce
         });
 
         // Notify other scripts (e.g. COG layer control) that a map is ready.
@@ -538,33 +561,172 @@
             });
             ro.observe(el);
         }
-        const source = el._olSource;
-        const rawGeojson = getRawGeoJson(el);
-        const dataChanged = el._lastGeojsonRaw !== rawGeojson;
-        el._lastGeojsonRaw = rawGeojson;
-        source.clear();
 
-        const fc = parseGeoJson(el);
-        const features = new ol.format.GeoJSON().readFeatures(fc, {
-            dataProjection: "EPSG:4326",
-            featureProjection: "EPSG:3857",
-        });
-        source.addFeatures(features);
+        const tileUrl = el.getAttribute("data-tile-url");
 
-        const featureBySiteId = {};
-        features.forEach(function (feature) {
-            const siteId = normalizeSiteId(feature.get("site_id"));
-            if (siteId) {
-                featureBySiteId[siteId] = feature;
+        if (tileUrl) {
+            // ── MVT tile path ─────────────────────────────────────────────────
+            // The VectorTile layer fetches tiles directly; the companion hidden
+            // source provides _featureBySiteId lookups (centroid Points loaded
+            // asynchronously from data-centroids-url).
+
+            // Detect tile URL change (e.g. user selected a different site set).
+            // Re-initialise the VectorTile source and reset companion state.
+            if (tileUrl !== el._lastTileUrl) {
+                el._lastTileUrl = tileUrl;
+                el._initialFitDone = false;
+                el._lastCentroidsUrl = null;
+                el._featureBySiteId = {};
+                el._emissionsBySiteId = {};
+                el._olSource.clear();
+                if (el._olVtLayer) {
+                    el._olVtLayer.setSource(
+                        new ol.source.VectorTile({
+                            format: new ol.format.MVT(),
+                            url: tileUrl,
+                            tileLoadFunction: makeMvtTileLoadFunction(),
+                        })
+                    );
+                }
             }
-        });
-        el._featureBySiteId = featureBySiteId;
 
-        const currentSelected = normalizeSiteId(el._selectedSiteId);
-        if (currentSelected && !featureBySiteId[currentSelected]) {
-            setSelectedSite(el, "");
-        } else if (currentSelected) {
-            setSelectedSite(el, currentSelected);
+            // Build _emissionsBySiteId from the companion data-geojson attribute
+            // (centroid GeoJSON with emissions for the results map).
+            const rawGeoJson = getRawGeoJson(el);
+            if (rawGeoJson && rawGeoJson !== el._lastEmissionsGeojson) {
+                el._lastEmissionsGeojson = rawGeoJson;
+                try {
+                    const fc = JSON.parse(rawGeoJson);
+                    const emissionsBySiteId = {};
+                    for (const feat of fc.features || []) {
+                        const sid = normalizeSiteId(feat.properties?.site_id);
+                        if (sid) {
+                            emissionsBySiteId[sid] = feat.properties;
+                        }
+                    }
+                    el._emissionsBySiteId = emissionsBySiteId;
+                } catch (_e) {
+                    el._emissionsBySiteId = {};
+                }
+            }
+
+            // Load centroids asynchronously into the hidden companion source.
+            const centroidsUrl = el.getAttribute("data-centroids-url");
+            if (centroidsUrl && centroidsUrl !== el._lastCentroidsUrl) {
+                el._lastCentroidsUrl = centroidsUrl;
+                el._featureBySiteId = {};
+                const source = el._olSource;
+                source.clear();
+
+                fetch(centroidsUrl, { credentials: "same-origin" })
+                    .then(function (resp) {
+                        if (!resp.ok) {
+                            return null;
+                        }
+                        return resp.json();
+                    })
+                    .then(function (fc) {
+                        if (!fc || !fc.features) {
+                            return;
+                        }
+                        const features = new ol.format.GeoJSON().readFeatures(fc, {
+                            dataProjection: "EPSG:4326",
+                            featureProjection: "EPSG:3857",
+                        });
+                        source.clear();
+                        source.addFeatures(features);
+                        const featureBySiteId = {};
+                        features.forEach(function (f) {
+                            const sid = normalizeSiteId(f.get("site_id"));
+                            if (sid) {
+                                featureBySiteId[sid] = f;
+                            }
+                        });
+                        el._featureBySiteId = featureBySiteId;
+
+                        // Restore any pending selection.
+                        const currentSelected = normalizeSiteId(el._selectedSiteId);
+                        if (currentSelected && featureBySiteId[currentSelected]) {
+                            setSelectedSite(el, currentSelected);
+                        }
+
+                        // Fit view to bounds once (on first load or site-set change).
+                        if (!el._initialFitDone) {
+                            el._initialFitDone = true;
+                            const boundsAttr = el.getAttribute("data-bounds");
+                            if (boundsAttr) {
+                                try {
+                                    const b = JSON.parse(boundsAttr);
+                                    const extent4326 = [
+                                        b.west ?? b.minx ?? -180,
+                                        b.south ?? b.miny ?? -90,
+                                        b.east ?? b.maxx ?? 180,
+                                        b.north ?? b.maxy ?? 90,
+                                    ];
+                                    const extent3857 = ol.proj.transformExtent(
+                                        extent4326,
+                                        "EPSG:4326",
+                                        "EPSG:3857"
+                                    );
+                                    map.getView().fit(extent3857, {
+                                        padding: [20, 20, 20, 20],
+                                        duration: 250,
+                                        maxZoom: 12,
+                                    });
+                                } catch (_e) {
+                                    fitToAllSites(el, map);
+                                }
+                            } else if (features.length > 0) {
+                                fitToAllSites(el, map);
+                            }
+                        }
+                    })
+                    .catch(function () {
+                        // Silently ignore; map still renders via MVT tiles.
+                    });
+            }
+        } else {
+            // ── Legacy GeoJSON path ───────────────────────────────────────────
+            // Used when no tile URL is set (e.g. adopted tasks with no site_set_id).
+            const source = el._olSource;
+            const rawGeojson = getRawGeoJson(el);
+            const dataChanged = el._lastGeojsonRaw !== rawGeojson;
+            el._lastGeojsonRaw = rawGeojson;
+            source.clear();
+
+            const fc = parseGeoJson(el);
+            const features = new ol.format.GeoJSON().readFeatures(fc, {
+                dataProjection: "EPSG:4326",
+                featureProjection: "EPSG:3857",
+            });
+            source.addFeatures(features);
+
+            const featureBySiteId = {};
+            features.forEach(function (feature) {
+                const siteId = normalizeSiteId(feature.get("site_id"));
+                if (siteId) {
+                    featureBySiteId[siteId] = feature;
+                }
+            });
+            el._featureBySiteId = featureBySiteId;
+
+            const currentSelected = normalizeSiteId(el._selectedSiteId);
+            if (currentSelected && !featureBySiteId[currentSelected]) {
+                setSelectedSite(el, "");
+            } else if (currentSelected) {
+                setSelectedSite(el, currentSelected);
+            }
+
+            if (dataChanged && features.length > 0) {
+                map.getView().fit(source.getExtent(), {
+                    padding: [20, 20, 20, 20],
+                    duration: 250,
+                    maxZoom: 12,
+                });
+            } else if (dataChanged) {
+                map.getView().setCenter(ol.proj.fromLonLat([0, 0]));
+                map.getView().setZoom(2);
+            }
         }
 
         bindMapTableSync(el, map, {
@@ -577,17 +739,6 @@
             tableId: "results-totals-table",
             boundFlag: "_resultsSyncBound",
         });
-
-        if (dataChanged && features.length > 0) {
-            map.getView().fit(source.getExtent(), {
-                padding: [20, 20, 20, 20],
-                duration: 250,
-                maxZoom: 12,
-            });
-        } else if (dataChanged) {
-            map.getView().setCenter(ol.proj.fromLonLat([0, 0]));
-            map.getView().setZoom(2);
-        }
 
         setTimeout(function () {
             map.updateSize();
@@ -620,7 +771,10 @@
             }
             if (
                 mutation.type === "attributes" &&
-                (mutation.attributeName === "data-geojson" || mutation.attributeName === "data-height")
+                (mutation.attributeName === "data-geojson" ||
+                    mutation.attributeName === "data-tile-url" ||
+                    mutation.attributeName === "data-centroids-url" ||
+                    mutation.attributeName === "data-height")
             ) {
                 shouldRender = true;
                 break;
@@ -637,7 +791,7 @@
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ["data-geojson", "data-height"],
+            attributeFilter: ["data-geojson", "data-tile-url", "data-centroids-url", "data-height"],
         });
     }
 

@@ -32,6 +32,7 @@ def _site_set_summary_row(row):
         "file_size_bytes": int(row.file_size_bytes or 0),
         "file_format": row.file_format,
         "is_archived": bool(row.is_archived),
+        "bounds": row.bounds,
         "ingest_stats": meta.get("ingest_stats") if meta else None,
     }
 
@@ -98,6 +99,50 @@ def get_user_site_set_geojson(site_set_id):
             }
             for r in rows
             if r.geom_json is not None
+        ]
+        return {"type": "FeatureCollection", "features": features}
+    finally:
+        db.close()
+
+
+def get_user_site_set_centroids_geojson(site_set_id):
+    """Return all sites as lightweight centroid Point features.
+
+    Returns every site in the set as a GeoJSON Point (``ST_Centroid``) with
+    ``site_id`` and ``area_ha`` properties.  No sampling — all sites are
+    returned regardless of dataset size.  This is used to populate the
+    companion vector source in the OpenLayers MVT map so that
+    ``_featureBySiteId`` lookups and zoom-to-feature work correctly even
+    when the rendering layer uses server-side tiles.
+    """
+    db = get_db()
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    f.site_id,
+                    f.area_ha,
+                    ST_AsGeoJSON(ST_Centroid(f.geom)) AS centroid_json
+                FROM user_site_features f
+                WHERE f.site_set_id = :site_set_id
+                ORDER BY f.site_id
+                """
+            ),
+            {"site_set_id": str(site_set_id)},
+        ).fetchall()
+        features = [
+            {
+                "type": "Feature",
+                "geometry": json.loads(r.centroid_json),
+                "properties": {
+                    "site_id": r.site_id,
+                    "area_ha": r.area_ha,
+                    "_is_centroid": True,
+                },
+            }
+            for r in rows
+            if r.centroid_json is not None
         ]
         return {"type": "FeatureCollection", "features": features}
     finally:

@@ -977,8 +977,6 @@ def submit_layout(user, recompute_config=None):
             ),
             # Hidden stores
             dcc.Store(id="parsed-sites-store"),
-            dcc.Store(id="zoom-bounds-store"),
-            dcc.Interval(id="zoom-bounds-poll", interval=300),  # Check every 300ms
             dcc.Store(id="presets-store"),
             dcc.Store(id="matching-settings-presets-store"),
             dcc.Store(id="site-set-refresh-store"),
