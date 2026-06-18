@@ -36,9 +36,10 @@ def db_session():
 def clean_db(db_session):
     """Truncate test-relevant tables before each integration test."""
     yield db_session
+    db_session.rollback()  # reset any failed transaction before cleanup
     db_session.execute(
         text(
-            "TRUNCATE task_results, task_result_totals, analysis_tasks RESTART IDENTITY CASCADE"
+            "TRUNCATE users, task_results, task_result_totals, analysis_tasks RESTART IDENTITY CASCADE"
         )
     )
     db_session.commit()
