@@ -82,27 +82,27 @@ def _site_upload_card(footer_text):
             dbc.CardHeader("Upload New Sites (GeoJSON, GeoPackage, or Archive)"),
             dbc.CardBody(
                 [
-                    html.P(
+                    dbc.Collapse(
                         [
-                            "Upload a ",
-                            html.Strong("GeoJSON"),
-                            " or ",
-                            html.Strong("GeoPackage"),
-                            " file, or a ",
-                            html.Strong(".zip/.tar.gz"),
-                            " archive containing exactly one ",
-                            html.Strong("Shapefile"),
-                            ", ",
-                            html.Strong("GeoJSON"),
-                            ", or ",
-                            html.Strong("GeoPackage"),
-                            " dataset with site polygons. Geometries must be valid "
-                            "Polygons or MultiPolygons in EPSG:4326 (WGS 84).",
-                        ],
-                        className="mb-2 small",
-                    ),
-                    html.Div(
-                        [
+                            html.P(
+                                [
+                                    "Upload a ",
+                                    html.Strong("GeoJSON"),
+                                    " or ",
+                                    html.Strong("GeoPackage"),
+                                    " file, or a ",
+                                    html.Strong(".zip/.tar.gz"),
+                                    " archive containing exactly one ",
+                                    html.Strong("Shapefile"),
+                                    ", ",
+                                    html.Strong("GeoJSON"),
+                                    ", or ",
+                                    html.Strong("GeoPackage"),
+                                    " dataset with site polygons. Geometries must be valid "
+                                    "Polygons or MultiPolygons in EPSG:4326 (WGS 84).",
+                                ],
+                                className="mb-2 small",
+                            ),
                             dbc.Button(
                                 "Click to Upload",
                                 id="upload-sites-stream-btn",
@@ -114,13 +114,15 @@ def _site_upload_card(footer_text):
                                 "All uploads use streamed transfer for reliability on large and small files.",
                                 className="small text-muted mb-2",
                             ),
-                            dcc.Input(
-                                id="site-upload-stream-payload",
-                                type="text",
-                                value="",
-                                style={"display": "none"},
-                            ),
-                        ]
+                        ],
+                        id="site-upload-controls",
+                        is_open=True,
+                    ),
+                    dcc.Input(
+                        id="site-upload-stream-payload",
+                        type="text",
+                        value="",
+                        style={"display": "none"},
                     ),
                     html.Div(id="upload-status"),
                     dbc.Collapse(

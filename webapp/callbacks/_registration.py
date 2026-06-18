@@ -768,6 +768,7 @@ def register_callbacks(app, limiter=None):
             Output("upload-status", "children"),
             Output("site-set-refresh-store", "data", allow_duplicate=True),
             Output("site-upload-mapping-panel", "is_open"),
+            Output("site-upload-controls", "is_open"),
             Output("site-upload-columns-store", "data"),
             Output("mapping-site-id", "options"),
             Output("mapping-site-id", "value"),
@@ -841,6 +842,7 @@ def register_callbacks(app, limiter=None):
                 dbc.Alert("Admin access required.", color="danger"),
                 no_update,
                 False,
+                True,
                 None,
                 [],
                 None,
@@ -865,6 +867,7 @@ def register_callbacks(app, limiter=None):
                     ),
                     no_update,
                     False,
+                    True,
                     None,
                     [],
                     None,
@@ -883,6 +886,7 @@ def register_callbacks(app, limiter=None):
                     dbc.Alert("\n".join(str(e) for e in errors), color="danger"),
                     no_update,
                     False,
+                    True,
                     None,
                     [],
                     None,
@@ -921,6 +925,7 @@ def register_callbacks(app, limiter=None):
                 ),
                 no_update,
                 True,
+                False,
                 pending_data,
                 options,
                 suggested.get("site_id"),
@@ -945,6 +950,7 @@ def register_callbacks(app, limiter=None):
                 dbc.Alert("Upload mapping cancelled.", color="secondary"),
                 no_update,
                 False,
+                True,
                 None,
                 [],
                 None,
@@ -965,6 +971,7 @@ def register_callbacks(app, limiter=None):
                     ),
                     no_update,
                     False,
+                    True,
                     None,
                     [],
                     None,
@@ -986,14 +993,7 @@ def register_callbacks(app, limiter=None):
                         ),
                         no_update,
                         False,
-                        None,
-                        [],
-                        None,
-                        [],
-                        None,
-                        [],
-                        None,
-                        [{"label": "(none)", "value": ""}],
+                        True,
                         "",
                     )
 
@@ -1014,12 +1014,13 @@ def register_callbacks(app, limiter=None):
                     dbc.Alert(
                         (
                             f"Queued background import for '{upload['filename']}'. "
-                            "Track progress in the Admin site upload tables below."
+                            "Track progress in the Site Imports table below."
                         ),
                         color="success",
                     ),
                     str(_uuid.uuid4()),
                     False,
+                    True,
                     None,
                     [],
                     None,
@@ -1044,6 +1045,7 @@ def register_callbacks(app, limiter=None):
                     no_update,
                     no_update,
                     no_update,
+                    no_update,
                 )
             except Exception:
                 logger.exception("Failed to queue mapped site upload")
@@ -1052,6 +1054,7 @@ def register_callbacks(app, limiter=None):
                     dbc.Alert("Failed to queue mapped site upload.", color="danger"),
                     no_update,
                     True,
+                    no_update,
                     no_update,
                     no_update,
                     no_update,
