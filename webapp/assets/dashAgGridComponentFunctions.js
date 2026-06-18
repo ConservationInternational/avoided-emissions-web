@@ -490,6 +490,157 @@ dagcomponentfuncs.SiteUploadActions = function (props) {
 };
 
 /**
+ * SiteSetAndUploadActions – combined renderer for the merged site uploads table.
+ * Shows Cancel for pending/running imports; Rename/Archive/Delete for completed
+ * imports that have an associated site set.
+ */
+dagcomponentfuncs.SiteSetAndUploadActions = function (props) {
+    var data = props.data || {};
+    var status = (data.status || "").toLowerCase();
+    var isArchived = !!data.is_archived;
+    var hasSiteSet = !!data.site_set_id;
+    var useStateResult = React.useState(false);
+    var pending = useStateResult[0];
+    var setPending = useStateResult[1];
+
+    var canCancel = ["pending", "running"].indexOf(status) >= 0 && !pending;
+    var canManage = hasSiteSet && !pending;
+
+    var btnStyle = {
+        padding: "1px 6px",
+        fontSize: "10px",
+        fontWeight: 600,
+        borderRadius: "3px",
+        backgroundColor: pending ? "#e9ecef" : "#fff",
+        cursor: pending ? "not-allowed" : "pointer",
+    };
+
+    var buttons = [];
+
+    if (["pending", "running"].indexOf(status) >= 0) {
+        buttons.push(
+            React.createElement(
+                "button",
+                {
+                    key: "cancel",
+                    style: Object.assign({}, btnStyle, {
+                        border: "1px solid #dc3545",
+                        color: canCancel ? "#842029" : "#6c757d",
+                    }),
+                    disabled: !canCancel,
+                    title: canCancel ? "Cancel this import" : "Only pending/running imports can be cancelled",
+                    onClick: function (e) {
+                        e.stopPropagation();
+                        if (!canCancel) return;
+                        if (!window.confirm("Cancel this background site import?")) return;
+                        setPending(true);
+                        props.setData({
+                            action: "cancel_import",
+                            upload_id: data.id,
+                            _actionTs: Date.now(),
+                        });
+                    },
+                },
+                pending ? "Cancelling..." : "\u2715 Cancel"
+            )
+        );
+    }
+
+    if (hasSiteSet) {
+        buttons.push(
+            React.createElement(
+                "button",
+                {
+                    key: "rename",
+                    style: Object.assign({}, btnStyle, {
+                        border: "1px solid #0d6efd",
+                        color: canManage ? "#0d6efd" : "#6c757d",
+                    }),
+                    disabled: !canManage,
+                    title: "Rename this site set",
+                    onClick: function (e) {
+                        e.stopPropagation();
+                        if (!canManage) return;
+                        var currentName = data.site_set_name || "";
+                        var nextName = window.prompt("Rename site set:", currentName);
+                        if (nextName === null) return;
+                        nextName = String(nextName).trim();
+                        if (!nextName || nextName === currentName) return;
+                        setPending(true);
+                        props.setData({
+                            action: "rename_site_set",
+                            site_set_id: data.site_set_id,
+                            new_name: nextName,
+                            _actionTs: Date.now(),
+                        });
+                    },
+                },
+                pending ? "Working..." : "Rename"
+            )
+        );
+        buttons.push(
+            React.createElement(
+                "button",
+                {
+                    key: "archive",
+                    style: Object.assign({}, btnStyle, {
+                        border: "1px solid #ffc107",
+                        color: canManage ? "#664d03" : "#6c757d",
+                    }),
+                    disabled: !canManage,
+                    title: isArchived ? "Restore this site set" : "Archive this site set",
+                    onClick: function (e) {
+                        e.stopPropagation();
+                        if (!canManage) return;
+                        var actionLabel = isArchived ? "restore" : "archive";
+                        if (!window.confirm("Are you sure you want to " + actionLabel + " this site set?")) return;
+                        setPending(true);
+                        props.setData({
+                            action: "toggle_archive_site_set",
+                            site_set_id: data.site_set_id,
+                            _actionTs: Date.now(),
+                        });
+                    },
+                },
+                pending ? "Working..." : (isArchived ? "Restore" : "Archive")
+            )
+        );
+        buttons.push(
+            React.createElement(
+                "button",
+                {
+                    key: "delete",
+                    style: Object.assign({}, btnStyle, {
+                        border: "1px solid #dc3545",
+                        color: canManage ? "#842029" : "#6c757d",
+                    }),
+                    disabled: !canManage,
+                    title: "Delete this site set",
+                    onClick: function (e) {
+                        e.stopPropagation();
+                        if (!canManage) return;
+                        if (!window.confirm("Delete this site set? This cannot be undone.")) return;
+                        setPending(true);
+                        props.setData({
+                            action: "delete_site_set",
+                            site_set_id: data.site_set_id,
+                            _actionTs: Date.now(),
+                        });
+                    },
+                },
+                pending ? "Working..." : "Delete"
+            )
+        );
+    }
+
+    return React.createElement(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: "4px" } },
+        buttons
+    );
+};
+
+/**
  * SiteSetActions – renders per-row rename/archive/delete buttons.
  */
 dagcomponentfuncs.SiteSetActions = function (props) {

@@ -7,9 +7,8 @@ from gee_export import gee_config
 from layouts.common import (
     COVARIATE_COLUMNS,
     COVARIATE_STATUS_ROW_STYLES,
+    COMBINED_SITE_UPLOAD_COLUMNS,
     USER_MANAGEMENT_COLUMNS,
-    USER_SITE_SET_COLUMNS,
-    USER_SITE_UPLOAD_COLUMNS,
     USER_SITE_UPLOAD_ROW_STYLES,
     _make_ag_grid,
     navbar,
@@ -101,68 +100,6 @@ def _site_upload_card(footer_text):
                             "Polygons or MultiPolygons in EPSG:4326 (WGS 84).",
                         ],
                         className="mb-2 small",
-                    ),
-                    html.P(
-                        "After upload, map your file columns to required fields before starting the background import.",
-                        className="mb-2 small text-muted",
-                    ),
-                    dbc.Table(
-                        [
-                            html.Thead(
-                                html.Tr(
-                                    [
-                                        html.Th("Field"),
-                                        html.Th("Type"),
-                                        html.Th("Required"),
-                                        html.Th("Description"),
-                                    ]
-                                )
-                            ),
-                            html.Tbody(
-                                [
-                                    html.Tr(
-                                        [
-                                            html.Td(html.Code("site_id")),
-                                            html.Td("string"),
-                                            html.Td("Yes"),
-                                            html.Td("Unique site identifier"),
-                                        ]
-                                    ),
-                                    html.Tr(
-                                        [
-                                            html.Td(html.Code("site_name")),
-                                            html.Td("string"),
-                                            html.Td("Yes"),
-                                            html.Td("Human-readable site name"),
-                                        ]
-                                    ),
-                                    html.Tr(
-                                        [
-                                            html.Td(html.Code("start_date")),
-                                            html.Td("date"),
-                                            html.Td("Yes"),
-                                            html.Td(
-                                                "Intervention start date (YYYY-MM-DD)"
-                                            ),
-                                        ]
-                                    ),
-                                    html.Tr(
-                                        [
-                                            html.Td(html.Code("end_date")),
-                                            html.Td("date"),
-                                            html.Td("No"),
-                                            html.Td(
-                                                "Intervention end date (optional; omit if ongoing)"
-                                            ),
-                                        ]
-                                    ),
-                                ]
-                            ),
-                        ],
-                        bordered=True,
-                        hover=True,
-                        size="sm",
-                        className="mb-3",
                     ),
                     html.Div(
                         [
@@ -332,6 +269,67 @@ def admin_layout(user):
             dbc.Tabs(
                 [
                     dbc.Tab(
+                        label="Site Uploads",
+                        tab_id="tab-site-uploads",
+                        children=[
+                            html.Div(
+                                [
+                                    _site_upload_card(
+                                        "After the mapping is confirmed, a background Celery worker imports the staged site file into the database."
+                                    ),
+                                    dbc.Card(
+                                        [
+                                            dbc.CardBody(
+                                                [
+                                                    dbc.Row(
+                                                        [
+                                                            dbc.Col(
+                                                                html.H5(
+                                                                    "Site Imports",
+                                                                    className="mb-0",
+                                                                ),
+                                                                width="auto",
+                                                            ),
+                                                            dbc.Col(
+                                                                html.Span(
+                                                                    id="admin-combined-site-count",
+                                                                    children="Total: 0",
+                                                                    className="text-muted fw-bold",
+                                                                ),
+                                                                width=True,
+                                                                className="text-end",
+                                                            ),
+                                                        ],
+                                                        className="ae-action-bar align-items-center mb-3",
+                                                    ),
+                                                    dbc.Checkbox(
+                                                        id="admin-show-archived-site-sets",
+                                                        label="Show archived site sets",
+                                                        value=False,
+                                                        className="mb-2",
+                                                    ),
+                                                    _make_ag_grid(
+                                                        table_id="admin-combined-site-table",
+                                                        column_defs=COMBINED_SITE_UPLOAD_COLUMNS,
+                                                        row_model="clientSide",
+                                                        height="420px",
+                                                        style_conditions=USER_SITE_UPLOAD_ROW_STYLES,
+                                                    ),
+                                                    html.Div(
+                                                        id="admin-combined-site-action-status",
+                                                        className="mt-2",
+                                                    ),
+                                                ]
+                                            )
+                                        ],
+                                        className="ae-section-card",
+                                    ),
+                                ],
+                                className="pt-3",
+                            ),
+                        ],
+                    ),
+                    dbc.Tab(
                         label="Covariates",
                         tab_id="tab-covariates",
                         children=[
@@ -488,107 +486,6 @@ def admin_layout(user):
                                                     ),
                                                     html.Div(
                                                         id="covariate-action-result",
-                                                        className="mt-2",
-                                                    ),
-                                                ]
-                                            )
-                                        ],
-                                        className="ae-section-card",
-                                    ),
-                                ],
-                                className="pt-3",
-                            ),
-                        ],
-                    ),
-                    dbc.Tab(
-                        label="Site Uploads",
-                        tab_id="tab-site-uploads",
-                        children=[
-                            html.Div(
-                                [
-                                    _site_upload_card(
-                                        "After the mapping is confirmed, a background Celery worker imports the staged site file into the database."
-                                    ),
-                                    dbc.Card(
-                                        [
-                                            dbc.CardBody(
-                                                [
-                                                    dbc.Row(
-                                                        [
-                                                            dbc.Col(
-                                                                html.H5(
-                                                                    "Uploaded Site Sets",
-                                                                    className="mb-0",
-                                                                ),
-                                                                width="auto",
-                                                            ),
-                                                            dbc.Col(
-                                                                html.Span(
-                                                                    id="admin-site-sets-total-count",
-                                                                    children="Total: 0",
-                                                                    className="text-muted fw-bold",
-                                                                ),
-                                                                width=True,
-                                                                className="text-end",
-                                                            ),
-                                                        ],
-                                                        className="ae-action-bar align-items-center mb-3",
-                                                    ),
-                                                    dbc.Checkbox(
-                                                        id="admin-show-archived-site-sets",
-                                                        label="Show archived site sets",
-                                                        value=False,
-                                                        className="mb-2",
-                                                    ),
-                                                    _make_ag_grid(
-                                                        table_id="admin-site-sets-table",
-                                                        column_defs=USER_SITE_SET_COLUMNS,
-                                                        row_model="clientSide",
-                                                        height="360px",
-                                                    ),
-                                                    html.Div(
-                                                        id="admin-site-set-row-action-status",
-                                                        className="mt-2",
-                                                    ),
-                                                ]
-                                            )
-                                        ],
-                                        className="ae-section-card mb-3",
-                                    ),
-                                    dbc.Card(
-                                        [
-                                            dbc.CardBody(
-                                                [
-                                                    dbc.Row(
-                                                        [
-                                                            dbc.Col(
-                                                                html.H5(
-                                                                    "Background Site Import Status",
-                                                                    className="mb-0",
-                                                                ),
-                                                                width="auto",
-                                                            ),
-                                                            dbc.Col(
-                                                                html.Span(
-                                                                    id="admin-site-upload-total-count",
-                                                                    children="Total: 0",
-                                                                    className="text-muted fw-bold",
-                                                                ),
-                                                                width=True,
-                                                                className="text-end",
-                                                            ),
-                                                        ],
-                                                        className="ae-action-bar align-items-center mb-3",
-                                                    ),
-                                                    _make_ag_grid(
-                                                        table_id="admin-site-upload-table",
-                                                        column_defs=USER_SITE_UPLOAD_COLUMNS,
-                                                        row_model="clientSide",
-                                                        height="360px",
-                                                        style_conditions=USER_SITE_UPLOAD_ROW_STYLES,
-                                                    ),
-                                                    html.Div(
-                                                        id="admin-site-upload-action-status",
                                                         className="mt-2",
                                                     ),
                                                 ]
@@ -774,7 +671,7 @@ def admin_layout(user):
                     ),
                 ],
                 id="admin-tabs",
-                active_tab="tab-covariates",
+                active_tab="tab-site-uploads",
                 className="ae-content-tabs",
             ),
             dcc.Interval(id="admin-refresh-interval", interval=30000, n_intervals=0),

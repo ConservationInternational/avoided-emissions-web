@@ -693,6 +693,98 @@ USER_SITE_UPLOAD_ROW_STYLES = [
     },
 ]
 
+COMBINED_SITE_UPLOAD_COLUMNS = [
+    {
+        "headerName": "Name",
+        "field": "site_set_name",
+        "flex": 1.5,
+        "minWidth": 160,
+        "cellStyle": {**TRUNCATED_CELL},
+        "tooltipField": "site_set_name",
+    },
+    {
+        "headerName": "Source File",
+        "field": "filename",
+        "flex": 1.8,
+        "minWidth": 200,
+        "cellStyle": {**TRUNCATED_CELL},
+        "tooltipField": "filename",
+    },
+    {
+        "headerName": "Status",
+        "field": "status",
+        "flex": 0.9,
+        "minWidth": 110,
+        "cellRenderer": "StatusBadge",
+    },
+    {
+        "headerName": "Sites Imported",
+        "field": "n_sites_imported",
+        "flex": 0.9,
+        "minWidth": 130,
+        "type": "numericColumn",
+        "filter": "agNumberColumnFilter",
+    },
+    {
+        "headerName": "Skipped",
+        "field": "ingest_stats",
+        "flex": 0.7,
+        "minWidth": 90,
+        "type": "numericColumn",
+        "filter": "agNumberColumnFilter",
+        "valueGetter": {
+            "function": "params.data.ingest_stats ? (params.data.ingest_stats.skipped_total || null) : null"
+        },
+        "valueFormatter": {"function": "params.value != null ? params.value : ''"},
+        "tooltipValueGetter": {
+            "function": "params.data.ingest_stats && params.data.ingest_stats.skipped_total ? 'Missing required fields: ' + (params.data.ingest_stats.skipped_missing_required || 0) + ', Bad start date: ' + (params.data.ingest_stats.skipped_bad_start_date || 0) + ', Bad geometry: ' + (params.data.ingest_stats.skipped_bad_geometry || 0) : null"
+        },
+    },
+    {
+        "headerName": "Archived",
+        "field": "is_archived",
+        "flex": 0.7,
+        "minWidth": 90,
+        "valueFormatter": {"function": "params.value ? 'Yes' : ''"},
+    },
+    {
+        "headerName": "Queued",
+        "field": "created_at",
+        "flex": 1.2,
+        "minWidth": 165,
+        "sort": "desc",
+        "sortIndex": 0,
+        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "cellRenderer": "LocalDateTime",
+    },
+    {
+        "headerName": "Completed",
+        "field": "completed_at",
+        "flex": 1.2,
+        "minWidth": 165,
+        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
+        "cellRenderer": "LocalDateTime",
+    },
+    {
+        "headerName": "Error",
+        "field": "error_message",
+        "flex": 1.8,
+        "minWidth": 220,
+        "cellStyle": {**TRUNCATED_CELL},
+        "tooltipField": "error_message",
+    },
+    {
+        "headerName": "Actions",
+        "field": "id",
+        "flex": 1.5,
+        "minWidth": 240,
+        "sortable": False,
+        "filter": False,
+        "pinned": "right",
+        "cellRenderer": "SiteSetAndUploadActions",
+    },
+]
+
 
 # -- AG Grid defaults (mirroring api-ui patterns) ---------------------------
 
