@@ -183,8 +183,9 @@ f <- as.formula(formula_json$formula_str)
 
 # Check for cross-site grouping mode
 GROUP_BY_EXACT_MATCHES <- isTRUE(config$group_by_exact_matches)
+BATCH_GROUP_SITES <- isTRUE(config$batch_group_sites)
 GROUP_MAPPING <- NULL
-if (GROUP_BY_EXACT_MATCHES) {
+if (BATCH_GROUP_SITES || GROUP_BY_EXACT_MATCHES) {
     group_file <- file.path(config$output_dir, "exact_match_groups.json")
     if (file.exists(group_file)) {
         GROUP_MAPPING <- fromJSON(group_file, simplifyVector = FALSE)
@@ -193,8 +194,9 @@ if (GROUP_BY_EXACT_MATCHES) {
             length(GROUP_MAPPING), " exact-match groups"
         )
     } else {
-        warning("group_by_exact_matches=true but exact_match_groups.json not found")
+        warning("Group mapping file not found: exact_match_groups.json")
         GROUP_BY_EXACT_MATCHES <- FALSE
+        BATCH_GROUP_SITES <- FALSE
     }
 }
 
@@ -216,7 +218,7 @@ if (!is.null(config$site_id)) {
     if (array_index != "") {
         ai <- as.integer(array_index)
 
-        if (GROUP_BY_EXACT_MATCHES && !is.null(GROUP_MAPPING)) {
+        if ((BATCH_GROUP_SITES || GROUP_BY_EXACT_MATCHES) && !is.null(GROUP_MAPPING)) {
             # Cross-site grouping: array index maps to (group_id, replicate)
             group_ids <- as.integer(names(GROUP_MAPPING))
             n_groups <- length(group_ids)
@@ -939,7 +941,7 @@ for (this_id in site_ids) {
 
     # Determine sub_site_index if in cross-site grouping mode
     this_sub_site_index <- 0L
-    if (GROUP_BY_EXACT_MATCHES && !is.null(GROUP_MAPPING)) {
+    if ((BATCH_GROUP_SITES || GROUP_BY_EXACT_MATCHES) && !is.null(GROUP_MAPPING)) {
         # Find this site in the group mapping
         for (gid in names(GROUP_MAPPING)) {
             group_members <- GROUP_MAPPING[[gid]]

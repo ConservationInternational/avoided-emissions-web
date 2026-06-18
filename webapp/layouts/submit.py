@@ -214,7 +214,6 @@ def submit_layout(user, recompute_config=None):
                                                 ],
                                                 className="ae-section-card mb-3",
                                             ),
-
                                         ],
                                         className="pt-3",
                                     )

@@ -163,8 +163,9 @@ def run(params, log=None):
     # ---- pipeline-aware progress boundaries ----
     # When running a single step inside a pipeline, map progress to the
     # step's position in the overall pipeline (0-33-66-100 for 3 steps).
-    if pipeline_mode and step in PIPELINE_STEP_ORDER:
-        p_idx = PIPELINE_STEP_ORDER.index(step)
+    _step_for_progress = "match" if step.startswith("match_chunk_") else step
+    if pipeline_mode and _step_for_progress in PIPELINE_STEP_ORDER:
+        p_idx = PIPELINE_STEP_ORDER.index(_step_for_progress)
         p_total = len(PIPELINE_STEP_ORDER)
         progress_start = int(p_idx / p_total * 100)
         progress_end = int((p_idx + 1) / p_total * 100)
@@ -182,7 +183,9 @@ def run(params, log=None):
     os.makedirs(matches_dir, exist_ok=True)
 
     # ----- pipeline: download intermediate data from S3 -----
-    if pipeline_mode and step in ("match", "summarize"):
+    if pipeline_mode and (
+        step in ("match", "summarize") or step.startswith("match_chunk_")
+    ):
         log.info("Downloading intermediate extract outputs from S3")
         _download_s3_files(intermediate_uri, output_dir, EXTRACT_OUTPUT_FILES, log)
     if pipeline_mode and step == "summarize":
@@ -257,6 +260,8 @@ def run(params, log=None):
         config["min_control_distance_km"] = float(params["min_control_distance_km"])
     if params.get("group_by_exact_matches") is not None:
         config["group_by_exact_matches"] = bool(params["group_by_exact_matches"])
+    if params.get("batch_group_sites") is not None:
+        config["batch_group_sites"] = bool(params["batch_group_sites"])
     if params.get("separation_fallback_mahalanobis") is not None:
         config["separation_fallback_mahalanobis"] = bool(
             params["separation_fallback_mahalanobis"]
@@ -281,7 +286,10 @@ def run(params, log=None):
         len(steps),
     )
     for step_idx, s in enumerate(steps, 1):
-        script_path = os.path.join(R_SCRIPTS_DIR, STEP_SCRIPTS[s])
+        script_path = os.path.join(
+            R_SCRIPTS_DIR,
+            STEP_SCRIPTS[s] if s in STEP_SCRIPTS else STEP_SCRIPTS["match"],
+        )
         # Map local step progress [0, 1] onto the pipeline-aware range.
         local_frac_start = (step_idx - 1) / len(steps)
         local_frac_end = step_idx / len(steps)
@@ -303,7 +311,26 @@ def run(params, log=None):
             f"Step {step_idx}/{len(steps)}: {label} (starting)",
         )
 
-        if pipeline_mode and s == "match":
+        # Before running a match or match_chunk step, write the group
+        # mapping to exact_match_groups.json so the R script can find it.
+        # For match_chunk_N steps, only the chunk's groups are written,
+        # re-indexed 1..N so the array index maps correctly.
+        if s == "match" or s.startswith("match_chunk_"):
+            _group_mapping = params.get("exact_match_group_mapping")
+            if _group_mapping is not None:
+                if s.startswith("match_chunk_"):
+                    _chunk_idx = int(s.split("_")[-1])
+                    _match_chunks = params.get("match_chunks", [])
+                    if _chunk_idx < len(_match_chunks):
+                        _group_mapping = _make_chunk_group_mapping(
+                            _group_mapping, _match_chunks[_chunk_idx]
+                        )
+                _groups_path = os.path.join(output_dir, "exact_match_groups.json")
+                with open(_groups_path, "w") as _fh:
+                    json.dump(_group_mapping, _fh)
+                log.info("Wrote exact_match_groups.json to %s", _groups_path)
+
+        if pipeline_mode and (s == "match" or s.startswith("match_chunk_")):
             # In pipeline mode the match step runs as an AWS Batch array
             # job — one child per site.  If the R subprocess crashes
             # (e.g. OOM-killed, exit -9) we must NOT propagate the error
@@ -357,7 +384,7 @@ def run(params, log=None):
         log.info("avoided_emissions: extract step complete (task %s)", task_id)
         return None  # no final results yet
 
-    if pipeline_mode and step == "match":
+    if pipeline_mode and (step == "match" or step.startswith("match_chunk_")):
         log.info("Uploading match results to S3")
         _upload_to_s3_prefix(matches_dir, intermediate_uri + "/matches", log)
         log.info("avoided_emissions: match step complete (task %s)", task_id)
@@ -386,6 +413,22 @@ def run(params, log=None):
 # ---------------------------------------------------------------------------
 
 
+def _make_chunk_group_mapping(full_mapping, chunk_group_ids):
+    """Build a positional group mapping containing only *chunk_group_ids*.
+
+    *full_mapping* is ``params["exact_match_group_mapping"]`` — a dict
+    keyed by stringified group IDs.  Returns a new dict keyed ``"1"``,
+    ``"2"``, … so that the R script can access entries by 1-based position
+    (``GROUP_MAPPING[[group_idx]]``).
+    """
+    result = {}
+    for local_idx, gid in enumerate(chunk_group_ids):
+        key = str(gid)
+        if key in full_mapping:
+            result[str(local_idx + 1)] = full_mapping[key]
+    return result
+
+
 def _expand_steps(step):
     """Map the *step* parameter to a list of script names to run."""
     if step == "all":
@@ -393,6 +436,8 @@ def _expand_steps(step):
         # matching_extent and sites_exclusion_buffer come from params.
         return ["extract", "match", "summarize"]
     if step in ("prep", "extract", "match", "summarize"):
+        return [step]
+    if step.startswith("match_chunk_"):
         return [step]
     raise ValueError(f"Unknown step: {step!r}")
 

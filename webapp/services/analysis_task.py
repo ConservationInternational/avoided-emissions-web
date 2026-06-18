@@ -53,6 +53,10 @@ ALLOWED_MATCHING_JOB_QUEUES = {
 
 DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-gp3"
 
+# Maximum number of elements in an AWS Batch array job.
+# Submitting more than this causes a ClientException at SubmitJob time.
+BATCH_MAX_ARRAY_SIZE = 10_000
+
 # -- Analysis task default settings ------------------------------------------
 # Single source of truth for matching parameter defaults.  Imported by
 # layouts.py (UI form pre-fill) and callbacks.py (server-side fallbacks).
@@ -487,8 +491,11 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _t0,
         )
 
-        # Optionally split sites across exact-match boundaries.
-        if group_by_exact_matches:
+        # Always split sites across exact-match boundaries when exact_match_vars
+        # are specified.  Group-based batching (batch_group_sites) is always
+        # applied for efficiency; the matching methodology (joint vs per-site)
+        # is controlled separately by group_by_exact_matches.
+        if exact_match_vars:
             _split_t0 = _time.perf_counter()
             split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
                 gdf, exact_match_vars
@@ -599,6 +606,61 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _s3_t0,
         )
 
+        # Determine batch-grouping strategy and pre-compute match pipeline steps.
+        # batch_group_sites: True when exact_match_vars are present — each Batch
+        # array element processes one (group × replicate) with data loaded once
+        # per group.  This is independent of group_by_exact_matches, which
+        # controls whether sites within a group are matched jointly or independently.
+        _batch_group_sites = bool(group_mapping)
+        _n_match_units = len(group_mapping) if _batch_group_sites else len(gdf_for_db)
+        _raw_array_size = _n_match_units * n_replicates
+        _match_step_base = {
+            "timeout_seconds": 14400,  # 4 h per element
+            "memory_mib": match_memory_mib,
+            "vcpus": 2,
+            "retry_attempts": 5,
+        }
+        if _raw_array_size <= BATCH_MAX_ARRAY_SIZE:
+            _match_steps = [
+                {
+                    "name": "match",
+                    "command": ["match"],
+                    "array_size": _raw_array_size,
+                    **_match_step_base,
+                }
+            ]
+            _match_chunks = None
+        else:
+            _groups_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // max(1, n_replicates))
+            _unit_ids = (
+                list(group_mapping.keys())
+                if _batch_group_sites
+                else list(range(_n_match_units))
+            )
+            _chunks = [
+                _unit_ids[i : i + _groups_per_chunk]
+                for i in range(0, len(_unit_ids), _groups_per_chunk)
+            ]
+            _match_steps = [
+                {
+                    "name": f"match_chunk_{i}",
+                    "command": [f"match_chunk_{i}"],
+                    "array_size": len(chunk) * n_replicates,
+                    **_match_step_base,
+                }
+                for i, chunk in enumerate(_chunks)
+            ]
+            _match_chunks = _chunks
+            logger.warning(
+                "[SUBMIT-WORKER] Task %s: array size %d exceeds limit %d; "
+                "splitting match into %d chunks of \u2264%d units",
+                task_id,
+                _raw_array_size,
+                BATCH_MAX_ARRAY_SIZE,
+                len(_chunks),
+                _groups_per_chunk,
+            )
+
         # Build params matching AvoidedEmissionsParams schema.
         _cog_suffixes = {1000: "_1km", 250: "_250m"}
         _cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
@@ -633,7 +695,9 @@ def _complete_analysis_task_submission(task_id, user_id):
                 if sites_exclusion_buffer
                 else {}
             ),
+            "batch_group_sites": _batch_group_sites,
             **({"exact_match_group_mapping": group_mapping} if group_mapping else {}),
+            **({"match_chunks": _match_chunks} if _match_chunks is not None else {}),
             **({"random_seed": random_seed} if random_seed is not None else {}),
             **(
                 {"reference_layer_uris": reference_layer_uris}
@@ -677,19 +741,7 @@ def _complete_analysis_task_submission(task_id, user_id):
                             "vcpus": 4,
                             "retry_attempts": 3,
                         },
-                        {
-                            "name": "match",
-                            "command": ["match"],
-                            "array_size": (
-                                len(group_mapping) * n_replicates
-                                if group_by_exact_matches and group_mapping
-                                else len(gdf_for_db) * n_replicates
-                            ),
-                            "timeout_seconds": 14400,  # 4 h per element
-                            "memory_mib": match_memory_mib,
-                            "vcpus": 2,
-                            "retry_attempts": 5,
-                        },
+                        *_match_steps,
                         {
                             "name": "summarize",
                             "command": ["summarize"],
@@ -700,15 +752,7 @@ def _complete_analysis_task_submission(task_id, user_id):
                         },
                     ],
                 }
-                if (
-                    (
-                        group_by_exact_matches
-                        and group_mapping
-                        and len(group_mapping) > 1
-                    )
-                    or (not group_by_exact_matches and len(gdf) > 1)
-                    or n_replicates > 1
-                )
+                if _raw_array_size > 1
                 else {}
             ),
         }
@@ -958,8 +1002,11 @@ def submit_analysis_task(
         _time.perf_counter() - _buf_t0,
     )
 
-    # Optionally split sites crossing exact-match boundaries
-    if group_by_exact_matches:
+    # Always split sites across exact-match boundaries when exact_match_vars
+    # are specified.  Group-based batching (batch_group_sites) is always
+    # applied for efficiency; the matching methodology (joint vs per-site)
+    # is controlled separately by group_by_exact_matches.
+    if exact_match_vars:
         _split_t0 = _time.perf_counter()
         split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
             gdf, exact_match_vars
@@ -1085,6 +1132,61 @@ def submit_analysis_task(
             _time.perf_counter() - _s3_t0,
         )
 
+        # Determine batch-grouping strategy and pre-compute match pipeline steps.
+        # batch_group_sites: True when exact_match_vars are present — each Batch
+        # array element processes one (group × replicate) with data loaded once
+        # per group.  This is independent of group_by_exact_matches, which
+        # controls whether sites within a group are matched jointly or independently.
+        _batch_group_sites = bool(group_mapping)
+        _n_match_units = len(group_mapping) if _batch_group_sites else len(gdf_for_db)
+        _raw_array_size = _n_match_units * n_replicates
+        _match_step_base = {
+            "timeout_seconds": 14400,  # 4 h per element
+            "memory_mib": match_memory_mib,
+            "vcpus": 2,
+            "retry_attempts": 5,
+        }
+        if _raw_array_size <= BATCH_MAX_ARRAY_SIZE:
+            _match_steps = [
+                {
+                    "name": "match",
+                    "command": ["match"],
+                    "array_size": _raw_array_size,
+                    **_match_step_base,
+                }
+            ]
+            _match_chunks = None
+        else:
+            _groups_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // max(1, n_replicates))
+            _unit_ids = (
+                list(group_mapping.keys())
+                if _batch_group_sites
+                else list(range(_n_match_units))
+            )
+            _chunks = [
+                _unit_ids[i : i + _groups_per_chunk]
+                for i in range(0, len(_unit_ids), _groups_per_chunk)
+            ]
+            _match_steps = [
+                {
+                    "name": f"match_chunk_{i}",
+                    "command": [f"match_chunk_{i}"],
+                    "array_size": len(chunk) * n_replicates,
+                    **_match_step_base,
+                }
+                for i, chunk in enumerate(_chunks)
+            ]
+            _match_chunks = _chunks
+            logger.warning(
+                "[SUBMIT] Task %s: array size %d exceeds limit %d; "
+                "splitting match into %d chunks of \u2264%d units",
+                task_id,
+                _raw_array_size,
+                BATCH_MAX_ARRAY_SIZE,
+                len(_chunks),
+                _groups_per_chunk,
+            )
+
         # Build params matching AvoidedEmissionsParams schema
         # Resolve the COG prefix for the chosen resolution.
         # Both resolutions have an explicit suffix (_1km / _250m).
@@ -1121,7 +1223,9 @@ def submit_analysis_task(
                 if sites_exclusion_buffer
                 else {}
             ),
+            "batch_group_sites": _batch_group_sites,
             **({"exact_match_group_mapping": group_mapping} if group_mapping else {}),
+            **({"match_chunks": _match_chunks} if _match_chunks is not None else {}),
             **({"random_seed": random_seed} if random_seed is not None else {}),
             "results_s3_uri": (
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
@@ -1151,19 +1255,7 @@ def submit_analysis_task(
                             "vcpus": 4,
                             "retry_attempts": 3,
                         },
-                        {
-                            "name": "match",
-                            "command": ["match"],
-                            "array_size": (
-                                len(group_mapping) * n_replicates
-                                if group_by_exact_matches and group_mapping
-                                else len(gdf_for_db) * n_replicates
-                            ),
-                            "timeout_seconds": 14400,  # 4 h per element
-                            "memory_mib": match_memory_mib,
-                            "vcpus": 2,
-                            "retry_attempts": 5,
-                        },
+                        *_match_steps,
                         {
                             "name": "summarize",
                             "command": ["summarize"],
@@ -1174,15 +1266,7 @@ def submit_analysis_task(
                         },
                     ],
                 }
-                if (
-                    (
-                        group_by_exact_matches
-                        and group_mapping
-                        and len(group_mapping) > 1
-                    )
-                    or (not group_by_exact_matches and len(gdf) > 1)
-                    or n_replicates > 1
-                )
+                if _raw_array_size > 1
                 else {}
             ),
         }
