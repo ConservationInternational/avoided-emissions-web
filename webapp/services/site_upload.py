@@ -1899,7 +1899,10 @@ def save_user_site_set_from_staged(
             site_set.n_sites = n_sites
             if bounds_minx is not None:
                 site_set.bounds = {
-                    "bbox": [bounds_minx, bounds_miny, bounds_maxx, bounds_maxy]
+                    "west": bounds_minx,
+                    "south": bounds_miny,
+                    "east": bounds_maxx,
+                    "north": bounds_maxy,
                 }
 
             db.execute(

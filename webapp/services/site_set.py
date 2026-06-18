@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 def _site_set_summary_row(row):
     meta = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
+    # Normalise ``bounds`` to ``{west, south, east, north}`` regardless of
+    # the historical ``{"bbox": [w, s, e, n]}`` storage format.
+    bounds = row.bounds
+    if isinstance(bounds, dict) and "bbox" in bounds:
+        b = bounds["bbox"]
+        if isinstance(b, (list, tuple)) and len(b) == 4:
+            bounds = {"west": b[0], "south": b[1], "east": b[2], "north": b[3]}
     return {
         "id": str(row.id),
         "name": row.name,
@@ -32,7 +39,7 @@ def _site_set_summary_row(row):
         "file_size_bytes": int(row.file_size_bytes or 0),
         "file_format": row.file_format,
         "is_archived": bool(row.is_archived),
-        "bounds": row.bounds,
+        "bounds": bounds,
         "ingest_stats": meta.get("ingest_stats") if meta else None,
     }
 
@@ -380,37 +387,128 @@ def get_user_site_set_detail(site_set_id, user_id):
         if not site_set:
             return None
 
-        rows = db.execute(
-            text(
-                """
-                SELECT site_id, site_name, start_date, end_date
-                FROM user_site_features
-                WHERE site_set_id = :site_set_id
-                ORDER BY site_id
-                """
-            ),
-            {"site_set_id": str(site_set_id)},
-        ).fetchall()
-
-        preview_rows = [
-            {
-                "preview_row_id": f"{idx}:{r.site_id}:{r.start_date.isoformat() if r.start_date else ''}:{r.end_date.isoformat() if r.end_date else ''}",
-                "site_id": r.site_id,
-                "site_name": r.site_name,
-                "start_date": r.start_date.isoformat() if r.start_date else "",
-                "end_date": r.end_date.isoformat() if r.end_date else "",
-            }
-            for idx, r in enumerate(rows)
-        ]
-
         # Use simplified GeoJSON for map preview to avoid timeout on large datasets
         geojson_fc = _get_user_site_set_geojson_simplified(site_set_id)
 
         return {
             **_site_set_summary_row(site_set),
             "geojson": json.dumps(geojson_fc),
-            "preview_rows": preview_rows,
         }
+    finally:
+        db.close()
+
+
+def get_user_site_set_preview_rows(
+    site_set_id, start_row=0, end_row=100, filter_model=None, sort_model=None
+):
+    """Return a paginated slice of site rows for the AG Grid preview table.
+
+    Supports AG Grid Infinite Row Model with server-side sort and filter.
+    ``filter_model`` and ``sort_model`` follow the AG Grid wire format.
+
+    Column names are validated against an allow-list before interpolation;
+    all user-supplied filter values are bound parameters — no SQL injection
+    risk.
+    """
+    # Columns allowed in WHERE / ORDER BY expressions.
+    _ALLOWED = frozenset({"site_id", "site_name", "start_date", "end_date"})
+
+    params = {
+        "site_set_id": str(site_set_id),
+        "limit": max(1, end_row - start_row),
+        "offset": start_row,
+    }
+
+    # ── Build WHERE fragments from filterModel ──────────────────────────────
+    where_frags = []
+    for col, spec in (filter_model or {}).items():
+        if col not in _ALLOWED:
+            continue
+        ftype = spec.get("filterType", "text")
+        op = spec.get("type", "contains")
+
+        if ftype == "text":
+            val = spec.get("filter", "")
+            if not val:
+                continue
+            p = f"flt_{col}"
+            col_expr = f"CAST({col} AS text)"
+            if op == "contains":
+                params[p] = f"%{val}%"
+                where_frags.append(f"{col_expr} ILIKE :{p}")
+            elif op == "notContains":
+                params[p] = f"%{val}%"
+                where_frags.append(f"{col_expr} NOT ILIKE :{p}")
+            elif op == "equals":
+                params[p] = val
+                where_frags.append(f"{col_expr} ILIKE :{p}")
+            elif op == "startsWith":
+                params[p] = f"{val}%"
+                where_frags.append(f"{col_expr} ILIKE :{p}")
+            elif op == "endsWith":
+                params[p] = f"%{val}"
+                where_frags.append(f"{col_expr} ILIKE :{p}")
+
+        elif ftype == "date":
+            date_from = spec.get("dateFrom") or spec.get("filter") or ""
+            date_to = spec.get("dateTo") or ""
+            if op == "inRange" and date_from and date_to:
+                params[f"flt_{col}_f"] = date_from
+                params[f"flt_{col}_t"] = date_to
+                where_frags.append(
+                    f"{col} BETWEEN :flt_{col}_f::date AND :flt_{col}_t::date"
+                )
+            elif date_from:
+                sql_op = {
+                    "equals": "=",
+                    "greaterThan": ">",
+                    "lessThan": "<",
+                    "greaterThanOrEqual": ">=",
+                    "lessThanOrEqual": "<=",
+                    "notEqual": "<>",
+                }.get(op, "=")
+                params[f"flt_{col}"] = date_from
+                where_frags.append(f"{col} {sql_op} :flt_{col}::date")
+
+    # ── Build ORDER BY from sortModel ────────────────────────────────────────
+    order_parts = []
+    for item in sort_model or []:
+        col = item.get("colId", "")
+        direction = "DESC" if str(item.get("sort", "asc")).lower() == "desc" else "ASC"
+        if col in _ALLOWED:
+            order_parts.append(f"{col} {direction}")
+    order_sql = (
+        "ORDER BY " + ", ".join(order_parts) if order_parts else "ORDER BY site_id"
+    )
+
+    # ── Assemble and execute ─────────────────────────────────────────────────
+    where_sql = ""
+    if where_frags:
+        where_sql = "AND " + "\nAND ".join(where_frags)
+
+    sql = text(
+        f"""
+        SELECT site_id, site_name, start_date, end_date
+        FROM user_site_features
+        WHERE site_set_id = :site_set_id
+        {where_sql}
+        {order_sql}
+        LIMIT :limit OFFSET :offset
+        """
+    )
+
+    db = get_db()
+    try:
+        rows = db.execute(sql, params).fetchall()
+        return [
+            {
+                "site_id": r.site_id,
+                "site_name": r.site_name,
+                "start_date": r.start_date.isoformat() if r.start_date else "",
+                "end_date": r.end_date.isoformat() if r.end_date else "",
+            }
+            for r in rows
+        ]
     finally:
         db.close()
 

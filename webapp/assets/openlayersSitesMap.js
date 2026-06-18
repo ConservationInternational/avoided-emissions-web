@@ -41,28 +41,31 @@
         }
 
         const api = getGridApi(tableId);
-        if (api && typeof api.forEachNode === "function") {
-            let targetNode = null;
-            api.forEachNode(function (node) {
-                if (normalizeSiteId(node?.data?.site_id) === normalized) {
-                    targetNode = node;
-                }
-            });
-            if (targetNode) {
+        if (api) {
+            // With Infinite Row Model the grid uses getRowId (= site_id) so
+            // getRowNode() is an O(1) lookup into the loaded block cache.
+            // If the row is not yet loaded (outside the current virtual window)
+            // the node is undefined — we deselect and return silently rather
+            // than scanning 150 k rows with forEachNode.
+            const node =
+                typeof api.getRowNode === "function" ? api.getRowNode(normalized) : null;
+            if (node) {
                 if (typeof api.ensureIndexVisible === "function") {
-                    api.ensureIndexVisible(targetNode.rowIndex, "middle");
+                    api.ensureIndexVisible(node.rowIndex, "middle");
                 }
                 if (typeof api.deselectAll === "function") {
                     api.deselectAll();
                 }
-                if (typeof targetNode.setSelected === "function") {
-                    targetNode.setSelected(true, true);
+                if (typeof node.setSelected === "function") {
+                    node.setSelected(true, true);
                 }
-                return;
+            } else if (typeof api.deselectAll === "function") {
+                api.deselectAll();
             }
+            return;
         }
 
-        // Fallback: visible rows only.
+        // Fallback: visible rows only (no AG Grid API available).
         const rows = document.querySelectorAll("#" + tableId + " .ag-row");
         rows.forEach(function (rowEl) {
             const isMatch = extractSiteIdFromRowEl(rowEl) === normalized;

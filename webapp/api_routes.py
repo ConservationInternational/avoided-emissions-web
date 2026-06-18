@@ -403,7 +403,11 @@ def create_api_blueprint(limiter):
 
     _MVT_SQL_SITE_SET = sa_text(
         """
-        WITH tile AS (SELECT ST_TileEnvelope(:z, :x, :y) AS env)
+        WITH tile AS (
+            SELECT
+                ST_TileEnvelope(:z, :x, :y)                          AS env3857,
+                ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326)      AS env4326
+        )
         SELECT ST_AsMVT(q, 'sites', 4096, 'geom') AS mvt
         FROM (
             SELECT
@@ -411,14 +415,18 @@ def create_api_blueprint(limiter):
                 f.site_name,
                 f.area_ha,
                 CASE WHEN :z < 12
-                    THEN ST_AsMVTGeom(ST_Centroid(f.geom), t.env, 4096, 256, true)
+                    THEN ST_AsMVTGeom(
+                             ST_Transform(ST_Centroid(f.geom), 3857),
+                             t.env3857, 4096, 256, true)
                     ELSE ST_AsMVTGeom(
-                             ST_SimplifyPreserveTopology(f.geom, :simplify_tol),
-                             t.env, 4096, 256, true)
+                             ST_Transform(
+                                 ST_SimplifyPreserveTopology(f.geom, :simplify_tol),
+                                 3857),
+                             t.env3857, 4096, 256, true)
                 END AS geom
             FROM user_site_features f, tile t
             WHERE f.site_set_id = :site_set_id
-              AND f.geom && t.env
+              AND f.geom && t.env4326
         ) q
         WHERE q.geom IS NOT NULL
         """
@@ -426,7 +434,11 @@ def create_api_blueprint(limiter):
 
     _MVT_SQL_TASK = sa_text(
         """
-        WITH tile AS (SELECT ST_TileEnvelope(:z, :x, :y) AS env)
+        WITH tile AS (
+            SELECT
+                ST_TileEnvelope(:z, :x, :y)                          AS env3857,
+                ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326)      AS env4326
+        )
         SELECT ST_AsMVT(q, 'sites', 4096, 'geom') AS mvt
         FROM (
             SELECT
@@ -436,17 +448,21 @@ def create_api_blueprint(limiter):
                 tr.extrapolated_emissions_avoided_mgco2e AS emissions_avoided_mgco2e,
                 tr.extrapolated_forest_loss_avoided_ha  AS forest_loss_avoided_ha,
                 CASE WHEN :z < 12
-                    THEN ST_AsMVTGeom(ST_Centroid(f.geom), t.env, 4096, 256, true)
+                    THEN ST_AsMVTGeom(
+                             ST_Transform(ST_Centroid(f.geom), 3857),
+                             t.env3857, 4096, 256, true)
                     ELSE ST_AsMVTGeom(
-                             ST_SimplifyPreserveTopology(f.geom, :simplify_tol),
-                             t.env, 4096, 256, true)
+                             ST_Transform(
+                                 ST_SimplifyPreserveTopology(f.geom, :simplify_tol),
+                                 3857),
+                             t.env3857, 4096, 256, true)
                 END AS geom
             FROM user_site_features f
-            CROSS JOIN tile t
+            JOIN tile t ON true
             LEFT JOIN task_results_total tr
                    ON tr.site_id = f.site_id AND tr.task_id = :task_id
             WHERE f.site_set_id = :site_set_id
-              AND f.geom && t.env
+              AND f.geom && t.env4326
         ) q
         WHERE q.geom IS NOT NULL
         """

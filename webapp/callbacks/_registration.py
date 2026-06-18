@@ -50,6 +50,7 @@ from services import (
     get_task_list,
     get_task_site_results,
     get_user_site_set_detail,
+    get_user_site_set_preview_rows,
     grant_te_script_access,
     list_share_links,
     list_user_site_sets,
@@ -1281,37 +1282,47 @@ def register_callbacks(app, limiter=None):
                     "field": "site_id",
                     "flex": 1,
                     "minWidth": 110,
+                    "filter": "agTextColumnFilter",
+                    "sortable": True,
                 },
                 {
                     "headerName": "Site Name",
                     "field": "site_name",
                     "flex": 2,
                     "minWidth": 160,
+                    "filter": "agTextColumnFilter",
+                    "sortable": True,
                 },
                 {
                     "headerName": "Start Date",
                     "field": "start_date",
                     "flex": 1,
                     "minWidth": 120,
+                    "filter": "agTextColumnFilter",
+                    "sortable": True,
                 },
                 {
                     "headerName": "End Date",
                     "field": "end_date",
                     "flex": 1,
                     "minWidth": 120,
+                    "filter": "agTextColumnFilter",
+                    "sortable": True,
                 },
             ]
             preview_table = _make_ag_grid(
                 "site-preview-table",
                 preview_cols,
-                row_data=detail["preview_rows"],
+                row_model="infinite",
                 height="320px",
                 grid_options_extra={
                     "rowSelection": {
                         "mode": "singleRow",
                         "enableClickSelection": True,
                     },
-                    "getRowId": {"function": "params.data.preview_row_id"},
+                    # site_id is the stable row key used by getRowsResponse
+                    # and focusTableRow in the JS.
+                    "getRowId": {"function": "params.data.site_id"},
                 },
             )
 
@@ -1369,6 +1380,45 @@ def register_callbacks(app, limiter=None):
             )
 
     # -- Task submission -----------------------------------------------------
+
+    @app.callback(
+        Output("site-preview-table", "getRowsResponse"),
+        Input("site-preview-table", "getRowsRequest"),
+        State("parsed-sites-store", "data"),
+        prevent_initial_call=True,
+    )
+    def supply_preview_rows(request, sites_data):
+        """Feed paginated rows to the site-preview AG Grid (Infinite Row Model).
+
+        The grid requests a block of rows as the user scrolls; this callback
+        queries only that block from the database so the full 150 K+ row set
+        never lands in a single Dash response.  Sort and filter state from
+        the AG Grid request are forwarded to the database query.
+        """
+        if not request or not sites_data:
+            raise PreventUpdate
+        site_set_id = sites_data.get("site_set_id")
+        if not site_set_id:
+            raise PreventUpdate
+        user = get_current_user()
+        if not user:
+            raise PreventUpdate
+
+        start = request.get("startRow", 0)
+        end = request.get("endRow", 100)
+        filter_model = request.get("filterModel") or {}
+        sort_model = request.get("sortModel") or []
+        rows = get_user_site_set_preview_rows(
+            site_set_id,
+            start_row=start,
+            end_row=end,
+            filter_model=filter_model,
+            sort_model=sort_model,
+        )
+        # Use known total when unfiltered for accurate scrollbar; pass -1 when
+        # filters are active so AG Grid determines the end from the data.
+        row_count = sites_data.get("n_sites", -1) if not filter_model else -1
+        return {"rowData": rows, "rowCount": row_count}
 
     @app.callback(
         Output("submit-lock-store", "data", allow_duplicate=True),
