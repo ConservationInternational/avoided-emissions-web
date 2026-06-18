@@ -503,8 +503,20 @@ def compute_exact_match_groups_with_splitting(
                         if intersection_geom.is_empty:
                             continue
 
+                        # Ensure both geometries are topologically valid before
+                        # calling intersection() — ST_Intersection results from
+                        # PostGIS and prior overlap fragments can carry slight
+                        # precision errors that cause GEOSException.
+                        if not intersection_geom.is_valid:
+                            intersection_geom = make_valid(intersection_geom)
+                        _piece_geom = (
+                            make_valid(piece_geom)
+                            if not piece_geom.is_valid
+                            else piece_geom
+                        )
+
                         # Check if this intersection overlaps the piece
-                        overlap = piece_geom.intersection(intersection_geom)
+                        overlap = _piece_geom.intersection(intersection_geom)
                         if not overlap.is_empty and overlap.area > 0:
                             new_piece = piece["exact_match_values"].copy()
                             new_piece[var_name] = region_id

@@ -1,7 +1,7 @@
 """Celery tasks: Batch polling, analysis task submission, and match quality."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 from celery_app import celery_app
@@ -262,6 +262,76 @@ def poll_batch_tasks() -> dict:
             db.rollback()
 
         return {"checked": len(active), "updated": updated, "adopted": adopted}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(name="tasks.expire_stale_submitting_tasks")
+def expire_stale_submitting_tasks() -> dict:
+    """Mark analysis tasks stuck in ``submitting`` as ``failed``.
+
+    A task enters ``submitting`` when the user presses Submit and a Celery
+    worker is dispatched to complete the slow submission work.  Normally the
+    worker transitions the task to ``submitted`` (success) or ``failed``
+    (error) within a few minutes.
+
+    When a worker is killed mid-task (e.g. during a rolling deploy) and the
+    Redis broker has already popped the message, the task is permanently lost
+    and the DB record is left stuck in ``submitting``.  This periodic cleanup
+    detects such records and marks them ``failed`` so users can resubmit.
+
+    The threshold is set to 40 minutes — safely above the per-attempt
+    ``soft_time_limit`` (30 min) × ``max_retries + 1`` (3 attempts), so only
+    genuinely orphaned tasks are touched.
+
+    Returns
+    -------
+    dict
+        ``{"expired": N}`` — number of tasks marked failed.
+    """
+    from models import AnalysisTask, get_db
+
+    # Tasks legitimately in progress should finish within 3 × 30 min = 90 min.
+    # 40 minutes is deliberately conservative: it catches tasks lost during
+    # a single-attempt worker restart without interfering with valid retries.
+    stale_threshold = timedelta(minutes=40)
+
+    db = get_db()
+    expired = 0
+    try:
+        cutoff = datetime.now(timezone.utc) - stale_threshold
+        stale = (
+            db.query(AnalysisTask)
+            .filter(
+                AnalysisTask.status == "submitting",
+                AnalysisTask.created_at < cutoff,
+            )
+            .all()
+        )
+        for task in stale:
+            task.status = "failed"
+            task.error_message = (
+                "Submission worker was lost before completing (killed during "
+                "deploy or OOM). Please resubmit."
+            )
+            expired += 1
+            logger.warning(
+                "expire_stale_submitting_tasks: marked task %s as failed "
+                "(stuck in submitting since %s)",
+                task.id,
+                task.created_at,
+            )
+        if expired:
+            db.commit()
+            report_message(
+                f"Expired {expired} stale submitting task(s)",
+                level="warning",
+                expired_count=expired,
+            )
+        return {"expired": expired}
     except Exception:
         db.rollback()
         raise

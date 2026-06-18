@@ -107,6 +107,12 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.export_reference_layers",
         "schedule": 2592000.0,  # every 30 days
     },
+    # Expire tasks stuck in 'submitting' due to worker death (e.g. rolling
+    # deploy or OOM kill).  Threshold is 40 min — see task docstring.
+    "expire-stale-submitting-tasks": {
+        "task": "tasks.expire_stale_submitting_tasks",
+        "schedule": 300.0,  # every 5 minutes
+    },
 }
 
 
