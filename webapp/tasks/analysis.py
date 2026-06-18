@@ -283,9 +283,17 @@ def expire_stale_submitting_tasks() -> dict:
     and the DB record is left stuck in ``submitting``.  This periodic cleanup
     detects such records and marks them ``failed`` so users can resubmit.
 
-    The threshold is set to 40 minutes — safely above the per-attempt
-    ``soft_time_limit`` (30 min) × ``max_retries + 1`` (3 attempts), so only
-    genuinely orphaned tasks are touched.
+    Two expiry thresholds are used:
+
+    * **5 minutes** — for tasks where the worker never set a
+      ``worker_started_at`` heartbeat in ``config``.  The submission worker
+      writes this key within seconds of picking up the message, so its
+      absence after 5 min means the Celery message was lost before any worker
+      could start (e.g. killed during a rolling deploy).
+    * **40 minutes** — for tasks where a worker did start but never completed.
+      Safely above the per-attempt ``soft_time_limit`` (30 min) ×
+      ``max_retries + 1`` (3 attempts), so only genuinely orphaned tasks are
+      touched.
 
     Returns
     -------
@@ -294,35 +302,50 @@ def expire_stale_submitting_tasks() -> dict:
     """
     from models import AnalysisTask, get_db
 
-    # Tasks legitimately in progress should finish within 3 × 30 min = 90 min.
-    # 40 minutes is deliberately conservative: it catches tasks lost during
-    # a single-attempt worker restart without interfering with valid retries.
-    stale_threshold = timedelta(minutes=40)
+    now = datetime.now(timezone.utc)
+    # Fetch all tasks stuck in submitting for more than 5 minutes.
+    # (Tasks younger than 5 min are still within normal dispatch latency.)
+    lost_cutoff = now - timedelta(minutes=5)
+    stuck_cutoff = now - timedelta(minutes=40)
 
     db = get_db()
     expired = 0
     try:
-        cutoff = datetime.now(timezone.utc) - stale_threshold
-        stale = (
+        candidates = (
             db.query(AnalysisTask)
             .filter(
                 AnalysisTask.status == "submitting",
-                AnalysisTask.created_at < cutoff,
+                AnalysisTask.created_at < lost_cutoff,
             )
             .all()
         )
-        for task in stale:
+        for task in candidates:
+            worker_started_at = (task.config or {}).get("worker_started_at")
+            if worker_started_at is None:
+                # Worker never started: Celery message was lost during deploy.
+                error_msg = (
+                    "Celery task message was lost before a worker could start "
+                    "(likely killed during a rolling deploy). Please resubmit."
+                )
+            elif task.created_at < stuck_cutoff:
+                # Worker started but never completed within the allowed time.
+                error_msg = (
+                    "Submission worker started but did not complete within the "
+                    "expected time (soft_time_limit exceeded or worker OOM). "
+                    "Please resubmit."
+                )
+            else:
+                # Worker is still within its soft_time_limit — leave it alone.
+                continue
             task.status = "failed"
-            task.error_message = (
-                "Submission worker was lost before completing (killed during "
-                "deploy or OOM). Please resubmit."
-            )
+            task.error_message = error_msg
             expired += 1
             logger.warning(
                 "expire_stale_submitting_tasks: marked task %s as failed "
-                "(stuck in submitting since %s)",
+                "(stuck in submitting since %s, worker_started_at=%s)",
                 task.id,
                 task.created_at,
+                worker_started_at,
             )
         if expired:
             db.commit()

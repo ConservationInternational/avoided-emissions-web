@@ -295,7 +295,17 @@ def _complete_analysis_task_submission(task_id, user_id):
             )
             return
 
+        # ── Heartbeat ─────────────────────────────────────────────────────────
+        # Record that this worker has started so expire_stale_submitting_tasks
+        # can distinguish "message lost before pickup" (no heartbeat after 5 min)
+        # from "worker started but stalled" (heartbeat present but >40 min old).
         config = task.config or {}
+        task.config = {
+            **config,
+            "worker_started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        db.commit()
+        # ─────────────────────────────────────────────────────────────────────
         exact_match_vars = config.get("exact_match_vars", [])
         max_treatment_pixels = config.get(
             "max_treatment_pixels", ANALYSIS_DEFAULTS["max_treatment_pixels"]
