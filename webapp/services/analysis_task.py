@@ -82,6 +82,12 @@ ANALYSIS_DEFAULTS = {
 }
 
 
+def _should_split_sites_for_exact_matches(
+    exact_match_vars: list[str], group_by_exact_matches: bool
+) -> bool:
+    return bool(exact_match_vars) and bool(group_by_exact_matches)
+
+
 def queue_analysis_task(
     task_name,
     description,
@@ -501,11 +507,11 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _t0,
         )
 
-        # Always split sites across exact-match boundaries when exact_match_vars
-        # are specified. Group-based batching (batch_group_sites) is always
-        # applied for efficiency; the matching methodology (joint vs per-site)
-        # is controlled separately by group_by_exact_matches.
-        if exact_match_vars:
+        # Split only for grouped exact-match matching. Exact-match vars are
+        # still always passed through config to the matching job.
+        if _should_split_sites_for_exact_matches(
+            exact_match_vars, group_by_exact_matches
+        ):
             _split_t0 = _time.perf_counter()
             split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
                 gdf, exact_match_vars
@@ -1015,11 +1021,9 @@ def submit_analysis_task(
         _time.perf_counter() - _buf_t0,
     )
 
-    # Always split sites across exact-match boundaries when exact_match_vars
-    # are specified. Group-based batching (batch_group_sites) is always
-    # applied for efficiency; the matching methodology (joint vs per-site)
-    # is controlled separately by group_by_exact_matches.
-    if exact_match_vars:
+    # Split only for grouped exact-match matching. Exact-match vars are still
+    # always passed through config to the matching job.
+    if _should_split_sites_for_exact_matches(exact_match_vars, group_by_exact_matches):
         _split_t0 = _time.perf_counter()
         split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
             gdf, exact_match_vars
