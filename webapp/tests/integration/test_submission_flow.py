@@ -92,7 +92,9 @@ class TestSubmissionFlowIntegration:
         assert row.config["n_replicates"] == 7
         assert row.config["exact_match_vars"] == ["admin0"]
 
-    def test_task_config_defaults_group_by_exact_matches_to_false(self, clean_db, mocker):
+    def test_task_config_defaults_group_by_exact_matches_to_false(
+        self, clean_db, mocker
+    ):
         from models import AnalysisTask, User
         from services.analysis_task import queue_analysis_task
 
