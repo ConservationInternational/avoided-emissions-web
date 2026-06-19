@@ -591,7 +591,9 @@ def _complete_analysis_task_submission(task_id, user_id):
         # it directly to avoid re-encoding the GDF a second time.
         _s3_t0 = _time.perf_counter()
         if parquet_buf is not None and group_mapping is None:
-            # Fast path: upload the streaming buffer directly.
+            # Fast path: upload the streaming buffer directly only when sites
+            # were not split. If splitting produced a group mapping we must
+            # upload gdf_for_db so the parquet rows match that mapping.
             s3_client = get_s3_client()
             parquet_key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.parquet"
             s3_client.put_object(
