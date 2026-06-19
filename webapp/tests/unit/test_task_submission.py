@@ -14,7 +14,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from services.analysis_task import queue_analysis_task
+from services.analysis_task import (
+    _should_split_sites_for_exact_matches,
+    queue_analysis_task,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -27,6 +30,33 @@ _BASE_KWARGS = {
     "covariates": ["elev", "precip"],
     "exact_match_vars": ["admin0"],
 }
+
+
+@pytest.mark.unit
+class TestShouldSplitSitesForExactMatches:
+    def test_returns_false_when_grouping_disabled(self):
+        assert (
+            _should_split_sites_for_exact_matches(
+                exact_match_vars=["admin0"], group_by_exact_matches=False
+            )
+            is False
+        )
+
+    def test_returns_false_when_no_exact_match_vars(self):
+        assert (
+            _should_split_sites_for_exact_matches(
+                exact_match_vars=[], group_by_exact_matches=True
+            )
+            is False
+        )
+
+    def test_returns_true_when_grouping_enabled_and_exact_match_vars_present(self):
+        assert (
+            _should_split_sites_for_exact_matches(
+                exact_match_vars=["admin0"], group_by_exact_matches=True
+            )
+            is True
+        )
 
 
 def _setup_happy_path(mocker, creds=("cid", "csecret")):
