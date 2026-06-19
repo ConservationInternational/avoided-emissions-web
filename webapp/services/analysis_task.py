@@ -82,13 +82,6 @@ ANALYSIS_DEFAULTS = {
 }
 
 
-def _should_split_sites_for_exact_matches(
-    exact_match_vars: list[str], group_by_exact_matches: bool
-) -> bool:
-    """Return whether submission should run exact-match site splitting."""
-    return bool(exact_match_vars) and bool(group_by_exact_matches)
-
-
 def queue_analysis_task(
     task_name,
     description,
@@ -508,12 +501,11 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _t0,
         )
 
-        # Splitting is only required for the grouped matching mode. Running
-        # site-by-site matching does not require splitting and it is expensive
-        # for very large site sets.
-        if _should_split_sites_for_exact_matches(
-            exact_match_vars, group_by_exact_matches
-        ):
+        # Always split sites across exact-match boundaries when exact_match_vars
+        # are specified. Group-based batching (batch_group_sites) is always
+        # applied for efficiency; the matching methodology (joint vs per-site)
+        # is controlled separately by group_by_exact_matches.
+        if exact_match_vars:
             _split_t0 = _time.perf_counter()
             split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
                 gdf, exact_match_vars
@@ -598,7 +590,7 @@ def _complete_analysis_task_submission(task_id, user_id):
         # by _stream_site_set_to_parquet_buf and is already seeked to 0; upload
         # it directly to avoid re-encoding the GDF a second time.
         _s3_t0 = _time.perf_counter()
-        if parquet_buf is not None and not group_by_exact_matches:
+        if parquet_buf is not None and group_mapping is None:
             # Fast path: upload the streaming buffer directly.
             s3_client = get_s3_client()
             parquet_key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.parquet"
@@ -1020,10 +1012,11 @@ def submit_analysis_task(
         _time.perf_counter() - _buf_t0,
     )
 
-    # Splitting is only required for the grouped matching mode. Running
-    # site-by-site matching does not require splitting and it is expensive
-    # for very large site sets.
-    if _should_split_sites_for_exact_matches(exact_match_vars, group_by_exact_matches):
+    # Always split sites across exact-match boundaries when exact_match_vars
+    # are specified. Group-based batching (batch_group_sites) is always
+    # applied for efficiency; the matching methodology (joint vs per-site)
+    # is controlled separately by group_by_exact_matches.
+    if exact_match_vars:
         _split_t0 = _time.perf_counter()
         split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
             gdf, exact_match_vars
