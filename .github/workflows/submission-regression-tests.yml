@@ -17,6 +17,8 @@ jobs:
   submission-regression-unit:
     name: Submission unit regression
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout code
@@ -34,12 +36,18 @@ jobs:
           docker run --rm \
             --user root \
             --entrypoint bash \
+            -e SECRET_KEY=ci-unit-test-secret-key-at-least-32-chars \
+            -e ENCRYPTION_KEY=ci-unit-test-encryption-key-32ch \
+            -e ROLLBAR_ACCESS_TOKEN="" \
+            -e ENVIRONMENT=test \
             avoided-emissions-webapp:ci \
             -c "pip install -q -r requirements-dev.txt && python -m pytest tests/unit/test_task_submission.py -v --tb=short"
 
   submission-regression-integration:
     name: Submission integration regression
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     services:
       postgres:
@@ -93,5 +101,16 @@ jobs:
             --network host \
             --user root \
             --entrypoint bash \
+            -e POSTGRES_USER=ae_user \
+            -e POSTGRES_PASSWORD=ae_password \
+            -e POSTGRES_DB=avoided_emissions_test \
+            -e POSTGRES_HOST=localhost \
+            -e POSTGRES_PORT=5432 \
+            -e SECRET_KEY=ci-integration-test-secret-key-at-least-32-chars \
+            -e ENCRYPTION_KEY=ci-integration-test-encryption-key-32c \
+            -e CELERY_BROKER_URL=redis://localhost:6379/0 \
+            -e CELERY_RESULT_BACKEND=redis://localhost:6379/0 \
+            -e ROLLBAR_ACCESS_TOKEN="" \
+            -e ENVIRONMENT=test \
             avoided-emissions-webapp:ci \
             -c "pip install -q -r requirements-dev.txt && python -m pytest tests/integration/test_submission_flow.py -v -m integration --tb=short"
