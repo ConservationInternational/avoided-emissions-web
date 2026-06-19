@@ -87,7 +87,7 @@ jobs:
             -e POSTGRES_HOST=localhost \
             -e POSTGRES_PORT=5432 \
             -e SECRET_KEY=ci-integration-test-secret-key-at-least-32-chars \
-            -e ENCRYPTION_KEY=ci-integration-test-encryption-key-32c \
+            -e ENCRYPTION_KEY=ci-integration-test-encryption-key-32ch \
             -e CELERY_BROKER_URL=redis://localhost:6379/0 \
             -e CELERY_RESULT_BACKEND=redis://localhost:6379/0 \
             -e ROLLBAR_ACCESS_TOKEN="" \
@@ -107,7 +107,7 @@ jobs:
             -e POSTGRES_HOST=localhost \
             -e POSTGRES_PORT=5432 \
             -e SECRET_KEY=ci-integration-test-secret-key-at-least-32-chars \
-            -e ENCRYPTION_KEY=ci-integration-test-encryption-key-32c \
+            -e ENCRYPTION_KEY=ci-integration-test-encryption-key-32ch \
             -e CELERY_BROKER_URL=redis://localhost:6379/0 \
             -e CELERY_RESULT_BACKEND=redis://localhost:6379/0 \
             -e ROLLBAR_ACCESS_TOKEN="" \
