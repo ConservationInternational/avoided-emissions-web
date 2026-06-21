@@ -4,7 +4,7 @@ These tests verify import_execution_results and the poll_batch_tasks Celery
 task using a real PostgreSQL + PostGIS database.
 
 Run locally (from the repo root):
-    pytest tests/integration/test_processing_flow.py -v -m integration
+    python -m pytest tests/integration/test_processing_flow.py -v -m integration
 """
 
 import uuid

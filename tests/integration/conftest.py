@@ -3,7 +3,7 @@
 Integration tests require a running PostgreSQL + PostGIS instance.
 
 Run locally (from the repo root):
-    pytest tests/integration/ -v -m integration
+    python -m pytest tests/integration/ -v -m integration
 """
 
 import pytest

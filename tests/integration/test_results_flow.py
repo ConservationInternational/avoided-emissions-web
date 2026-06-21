@@ -4,7 +4,7 @@ These tests verify get_task_detail and get_task_site_results using a real
 PostgreSQL + PostGIS database with actual rows inserted.
 
 Run locally (from the repo root):
-    pytest tests/integration/test_results_flow.py -v -m integration
+    python -m pytest tests/integration/test_results_flow.py -v -m integration
 """
 
 import uuid
