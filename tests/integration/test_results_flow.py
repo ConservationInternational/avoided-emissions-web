@@ -3,8 +3,8 @@
 These tests verify get_task_detail and get_task_site_results using a real
 PostgreSQL + PostGIS database with actual rows inserted.
 
-Run inside the webapp Docker container:
-    python -m pytest tests/integration/test_results_flow.py -v -m integration
+Run locally (from the repo root):
+    pytest tests/integration/test_results_flow.py -v -m integration
 """
 
 import uuid

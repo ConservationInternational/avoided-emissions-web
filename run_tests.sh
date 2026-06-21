@@ -1,42 +1,27 @@
 #!/usr/bin/env bash
-# run_tests.sh — run the webapp test suite inside the Docker Compose webapp container.
+# run_tests.sh — run the webapp test suite locally using the host Python.
 #
 # Usage:
-#   ./run_tests.sh                         # run all unit tests
-#   ./run_tests.sh tests/unit/test_auth.py # run a single file
-#   ./run_tests.sh -m integration          # run integration tests (need DB)
-#   ./run_tests.sh -v --tb=long            # pass extra pytest flags
+#   ./run_tests.sh                                  # run all unit tests
+#   ./run_tests.sh tests/unit/test_auth.py          # run a single file
+#   ./run_tests.sh -m integration                   # run integration tests (need DB)
+#   ./run_tests.sh -v --tb=long                     # pass extra pytest flags
 #
 # Requirements:
-#   - Docker and Docker Compose must be available on the host.
-#   - The webapp service does NOT need to be running; this script uses
-#     `docker compose run` to start a fresh one-shot container.
+#   - Python 3.13 with webapp/requirements.txt and webapp/requirements-dev.txt
+#     installed (pip install -r webapp/requirements.txt -r webapp/requirements-dev.txt).
+#   - For integration tests (-m integration), a PostgreSQL + PostGIS instance
+#     must be reachable (e.g. start with:
+#       docker compose -f deploy/docker-compose.develop.yml up postgres).
 #
-# The --entrypoint override bypasses entrypoint.sh (which waits for Postgres
-# and runs Alembic) so unit tests run immediately without any live services.
+# pytest is configured via pytest.ini at the repo root, which adds webapp/ to
+# sys.path so all app imports resolve without any PYTHONPATH manipulation.
 
 set -euo pipefail
 
-COMPOSE_FILE="deploy/docker-compose.develop.yml"
-SERVICE="webapp"
-
-# Build the image if it is not already present (fast no-op when up to date).
-docker compose -f "$COMPOSE_FILE" build --quiet "$SERVICE"
-
-# Run pytest in a fresh, disposable container.  --entrypoint bash bypasses
-# entrypoint.sh; --user root allows pip to write to the system site-packages.
-# All positional args and flags are forwarded to pytest.
 # Default: run unit tests only.  Pass -m integration to run integration tests.
 if [ $# -eq 0 ]; then
-    docker compose -f "$COMPOSE_FILE" run --rm \
-        --entrypoint bash \
-        --user root \
-        "$SERVICE" \
-        -c "pip install -q -r requirements-dev.txt && python -m pytest tests/unit/ -v"
+    python -m pytest tests/unit/ -v
 else
-    docker compose -f "$COMPOSE_FILE" run --rm \
-        --entrypoint bash \
-        --user root \
-        "$SERVICE" \
-        -c "pip install -q -r requirements-dev.txt && python -m pytest $*"
+    python -m pytest "$@"
 fi

@@ -3,8 +3,8 @@
 These tests verify the complete path from queue_analysis_task through to
 the DB record using a real PostgreSQL + PostGIS database.
 
-Run inside the webapp Docker container:
-    python -m pytest tests/integration/test_submission_flow.py -v -m integration
+Run locally (from the repo root):
+    pytest tests/integration/test_submission_flow.py -v -m integration
 """
 
 import pytest
