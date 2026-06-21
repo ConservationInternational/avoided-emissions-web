@@ -383,14 +383,21 @@ def compute_exact_match_groups_with_splitting(
 ) -> tuple[gpd.GeoDataFrame, dict[int, list[tuple[str, int]]]]:
     """Split sites crossing exact-match boundaries and build group mapping.
 
-    When ``group_by_exact_matches`` is enabled, sites spanning multiple
-    exact-match regions (e.g., admin boundaries) are split into
-    sub-polygons.  Each sub-polygon is assigned a separate exact-match
-    group ID based on the combination of all polygon-type exact-match
-    values it falls within.
+    Sites spanning multiple exact-match regions (e.g., admin boundaries) are
+    split into sub-polygons.  Each sub-polygon is assigned a separate
+    exact-match group ID based on the combination of all polygon-type
+    exact-match values it falls within.
 
-    Small slivers (<10% of original site area) are merged into the
-    largest sub-polygon of the same site to reduce fragmentation.
+    Small slivers (<10% of original site area) are merged into the largest
+    sub-polygon of the same site to reduce fragmentation.
+
+    Performance
+    -----------
+    Executes exactly **one PostGIS query per polygon-type exact-match
+    variable** (regardless of site count), then performs all intersection
+    math with Shapely using an in-memory STRtree.  This replaces the prior
+    O(N × M) query pattern (one query per site per variable) that stalled
+    submissions with large site sets.
 
     Returns
     -------
@@ -410,12 +417,10 @@ def compute_exact_match_groups_with_splitting(
       splitting because they don't define discrete spatial regions.
     - Sites that don't intersect any exact-match layers are assigned to
       group 0 (ungrouped).
-    - The function uses PostGIS ``ST_Intersection`` to split site
-      geometries along exact-match boundaries in a single SQL query
-      per layer, minimizing roundtrips.
     """
     import time as _time
 
+    from shapely import STRtree
     from shapely.geometry import mapping, shape
     from shapely.validation import make_valid
 
@@ -432,190 +437,226 @@ def compute_exact_match_groups_with_splitting(
         return gdf_out, group_mapping
 
     t0 = _time.perf_counter()
+
+    # ── Step 1: bulk-load reference regions (one query per polygon var) ──────
+    # Compute the bounding envelope of all sites to filter the reference
+    # layers: only regions that could possibly intersect any site are loaded.
+    valid_site_geoms = [
+        make_valid(g) if g is not None and not g.is_valid else g
+        for g in gdf.geometry
+        if g is not None and not g.is_empty
+    ]
+    if not valid_site_geoms:
+        # Edge case: no valid geometries — return the input unchanged.
+        gdf_out = gdf.copy()
+        gdf_out["sub_site_index"] = 0
+        gdf_out["is_sub_site"] = False
+        gdf_out["original_area_ha"] = None
+        group_mapping = {1: [(row["site_id"], 0) for _, row in gdf_out.iterrows()]}
+        return gdf_out, group_mapping
+
+    from shapely.ops import unary_union as _unary_union
+
+    sites_envelope_geojson = json.dumps(
+        mapping(_unary_union(valid_site_geoms).envelope)
+    )
+
+    # var_regions maps var_name → (region_ids list, region_geoms list, STRtree)
+    var_regions: dict[str, tuple[list, list, STRtree | None]] = {}
     db = get_db()
-
     try:
-        # For each site, do a spatial overlay with each exact-match layer
-        # to split the geometry and assign region IDs
-        split_records = []
-
-        for idx, site_row in gdf.iterrows():
-            site_id = site_row["site_id"]
-            site_geom = site_row["geometry"]
-
-            # Validate geometry
-            if not site_geom.is_valid:
-                site_geom = make_valid(site_geom)
-
-            site_geojson = json.dumps(mapping(site_geom))
-            original_area_ha = site_row.get("area_ha") or (
-                site_geom.area * 111_000 * 111_000 / 10_000
-            )
-
-            # Start with the site geometry as a single piece
-            # We'll iteratively intersect with each exact-match layer
-            pieces = [{"geometry": site_geom, "exact_match_values": {}}]
-
-            for var_name in polygon_vars:
-                table = _EXTENT_TABLE_MAP[var_name]
-                assert _SAFE_TABLE_RE.match(table), f"Unsafe table name: {table}"
-
-                # Query for all regions that intersect this site
-                # Return the intersection geometry and the region identifier
-                # Use shapely_name or region_id column depending on table
-                id_col = (
-                    "shape_name" if table.startswith("geoboundaries") else "eco_name"
+        for var_name in polygon_vars:
+            table = _EXTENT_TABLE_MAP[var_name]
+            # table comes from the hardcoded _EXTENT_TABLE_MAP constant dict,
+            # never from user input.  The check below is a defence-in-depth
+            # guard against accidental misconfiguration; raise an explicit
+            # error so it can't be silently skipped with python -O.
+            if not _SAFE_TABLE_RE.match(table):
+                raise ValueError(
+                    f"Table name {table!r} does not match the expected safe "
+                    f"identifier pattern (lowercase letters, digits, underscores, "
+                    f"must start with a letter or underscore)."
                 )
+            id_col = "shape_name" if table.startswith("geoboundaries") else "eco_name"
 
-                result = db.execute(
-                    text(
-                        f"SELECT {id_col}, ST_AsGeoJSON(ST_Intersection("
-                        f"  geom, "
-                        f"  ST_SetSRID(ST_GeomFromGeoJSON(:site), 4326)"
-                        f")) "
-                        f"FROM {table} "
-                        f"WHERE ST_Intersects("
-                        f"  geom, "
-                        f"  ST_SetSRID(ST_GeomFromGeoJSON(:site), 4326)"
-                        f")"
-                    ),
-                    {"site": site_geojson},
-                )
+            # Single bulk query: all regions whose bounding box overlaps the
+            # sites envelope.  Using the sites envelope (rather than a precise
+            # union) keeps the SQL simple and PostGIS can use a GiST index.
+            # table and id_col are both derived from _EXTENT_TABLE_MAP (a
+            # hardcoded constant) and validated above, so f-string interpolation
+            # is safe here.  Only user-supplied data (:bbox) is parameterized.
+            rows = db.execute(
+                text(
+                    f"SELECT {id_col}, ST_AsGeoJSON(geom) "  # noqa: S608
+                    f"FROM {table} "
+                    f"WHERE ST_Intersects("
+                    f"  geom, ST_SetSRID(ST_GeomFromGeoJSON(:bbox), 4326)"
+                    f")"
+                ),
+                {"bbox": sites_envelope_geojson},
+            ).fetchall()
 
-                intersections = result.fetchall()
-
-                if not intersections:
-                    # Site doesn't intersect this layer
-                    # All pieces get NULL for this variable
-                    for piece in pieces:
-                        piece["exact_match_values"][var_name] = None
+            region_ids: list[str] = []
+            region_geoms: list = []
+            for rid, geojson_str in rows:
+                if not geojson_str:
                     continue
+                g = shape(json.loads(geojson_str))
+                if not g.is_valid:
+                    g = make_valid(g)
+                region_ids.append(rid)
+                region_geoms.append(g)
 
-                # For each existing piece, intersect it with each region
-                # This can fragment pieces further
-                new_pieces = []
-                for piece in pieces:
-                    piece_geom = piece["geometry"]
-                    piece_covered = False
+            # An empty list is falsy in Python; the explicit length check makes
+            # the intent clear: no regions → no tree, queries return no hits.
+            tree: STRtree | None = (
+                STRtree(region_geoms) if len(region_geoms) > 0 else None
+            )
+            var_regions[var_name] = (region_ids, region_geoms, tree)
 
-                    for region_id, intersection_geojson in intersections:
-                        intersection_geom = shape(json.loads(intersection_geojson))
-                        if intersection_geom.is_empty:
-                            continue
-
-                        # Ensure both geometries are topologically valid before
-                        # calling intersection() — ST_Intersection results from
-                        # PostGIS and prior overlap fragments can carry slight
-                        # precision errors that cause GEOSException.
-                        if not intersection_geom.is_valid:
-                            intersection_geom = make_valid(intersection_geom)
-                        _piece_geom = (
-                            make_valid(piece_geom)
-                            if not piece_geom.is_valid
-                            else piece_geom
-                        )
-
-                        # Check if this intersection overlaps the piece
-                        overlap = _piece_geom.intersection(intersection_geom)
-                        if not overlap.is_empty and overlap.area > 0:
-                            new_piece = piece["exact_match_values"].copy()
-                            new_piece[var_name] = region_id
-                            new_pieces.append(
-                                {
-                                    "geometry": overlap,
-                                    "exact_match_values": new_piece,
-                                }
-                            )
-                            piece_covered = True
-
-                    # If piece wasn't covered by any region, keep it with NULL
-                    if not piece_covered:
-                        piece["exact_match_values"][var_name] = None
-                        new_pieces.append(piece)
-
-                pieces = new_pieces
-
-            # Now merge small slivers (<10% of original area)
-            if len(pieces) > 1:
-                # Sort pieces by area descending
-                pieces.sort(key=lambda p: p["geometry"].area, reverse=True)
-
-                threshold_area = site_geom.area * 0.1  # 10% of original area
-                main_pieces = []
-                slivers = []
-
-                for piece in pieces:
-                    if piece["geometry"].area >= threshold_area:
-                        main_pieces.append(piece)
-                    else:
-                        slivers.append(piece)
-
-                # Merge slivers into the largest piece
-                if slivers and main_pieces:
-                    largest = main_pieces[0]
-                    for sliver in slivers:
-                        largest["geometry"] = largest["geometry"].union(
-                            sliver["geometry"]
-                        )
-
-                    pieces = main_pieces
-                elif not main_pieces:
-                    # All pieces are slivers, keep the largest one
-                    pieces = [pieces[0]]
-
-            # Convert pieces to records
-            for sub_idx, piece in enumerate(pieces):
-                record = {
-                    "site_id": site_id,
-                    "site_name": site_row.get("site_name", site_id),
-                    "start_date": site_row.get("start_date"),
-                    "end_date": site_row.get("end_date"),
-                    "geometry": piece["geometry"],
-                    "area_ha": piece["geometry"].area * 111_000 * 111_000 / 10_000,
-                    "sub_site_index": sub_idx,
-                    "is_sub_site": len(pieces) > 1,
-                    "original_area_ha": original_area_ha if len(pieces) > 1 else None,
-                }
-                # Add exact-match values
-                record.update(piece["exact_match_values"])
-                split_records.append(record)
-
-        # Create output GeoDataFrame
-        split_gdf = gpd.GeoDataFrame(split_records, crs=gdf.crs, geometry="geometry")
-
-        # Build group mapping based on unique combinations of exact-match values
-        # Group 0 is reserved for sites with all NULL exact-match values
-        group_key_to_id = {}
-        next_group_id = 1
-        group_mapping = {}
-
-        for _, row in split_gdf.iterrows():
-            # Build a tuple of exact-match values for this site/sub-site
-            key_values = tuple(row.get(var_name) for var_name in polygon_vars)
-
-            # Check if all NULL
-            if all(v is None for v in key_values):
-                group_id = 0
-            else:
-                if key_values not in group_key_to_id:
-                    group_key_to_id[key_values] = next_group_id
-                    next_group_id += 1
-                group_id = group_key_to_id[key_values]
-
-            if group_id not in group_mapping:
-                group_mapping[group_id] = []
-            group_mapping[group_id].append((row["site_id"], row["sub_site_index"]))
-
-        elapsed = _time.perf_counter() - t0
-        logger.info(
-            "[SPLIT] Exact-match site splitting: %d sites → %d pieces in %.2fs",
-            len(gdf),
-            len(split_gdf),
-            elapsed,
-        )
-        logger.info("[SPLIT] Created %d exact-match groups", len(group_mapping))
-
-        return split_gdf, group_mapping
-
+            logger.info(
+                "[SPLIT] Loaded %d regions for %s from %s in %.2fs",
+                len(region_ids),
+                var_name,
+                table,
+                _time.perf_counter() - t0,
+            )
     finally:
         db.close()
+
+    # ── Step 2: per-site splitting using the pre-loaded regions ──────────────
+    # All intersection math is done with Shapely (no additional DB queries).
+    split_records = []
+
+    for idx, site_row in gdf.iterrows():
+        site_id = site_row["site_id"]
+        site_geom = site_row["geometry"]
+
+        # Validate geometry
+        if site_geom is None or site_geom.is_empty:
+            continue
+        if not site_geom.is_valid:
+            site_geom = make_valid(site_geom)
+
+        original_area_ha = site_row.get("area_ha") or (
+            site_geom.area * 111_000 * 111_000 / 10_000
+        )
+
+        # Start with the site geometry as a single piece.
+        # We'll iteratively split against each exact-match layer.
+        pieces = [{"geometry": site_geom, "exact_match_values": {}}]
+
+        for var_name in polygon_vars:
+            region_ids, region_geoms, tree = var_regions[var_name]
+
+            if tree is None:
+                # No regions loaded for this variable — mark all pieces NULL.
+                for piece in pieces:
+                    piece["exact_match_values"][var_name] = None
+                continue
+
+            new_pieces = []
+            for piece in pieces:
+                piece_geom = piece["geometry"]
+                if not piece_geom.is_valid:
+                    piece_geom = make_valid(piece_geom)
+                piece_covered = False
+
+                # STRtree query returns indices of regions whose bounding boxes
+                # intersect piece_geom; predicate="intersects" applies the full
+                # GEOS intersection test so only true hits are returned.
+                candidate_idxs = tree.query(piece_geom, predicate="intersects")
+
+                for cidx in candidate_idxs:
+                    region_id = region_ids[cidx]
+                    region_geom = region_geoms[cidx]
+
+                    overlap = piece_geom.intersection(region_geom)
+                    if overlap.is_empty or overlap.area <= 0:
+                        continue
+                    if not overlap.is_valid:
+                        overlap = make_valid(overlap)
+                    new_piece = piece["exact_match_values"].copy()
+                    new_piece[var_name] = region_id
+                    new_pieces.append(
+                        {
+                            "geometry": overlap,
+                            "exact_match_values": new_piece,
+                        }
+                    )
+                    piece_covered = True
+
+                # If piece wasn't covered by any region, keep it with NULL.
+                if not piece_covered:
+                    piece["exact_match_values"][var_name] = None
+                    new_pieces.append(piece)
+
+            pieces = new_pieces
+
+        # Merge small slivers (<10% of original area).
+        if len(pieces) > 1:
+            pieces.sort(key=lambda p: p["geometry"].area, reverse=True)
+            threshold_area = site_geom.area * 0.1
+            main_pieces = []
+            slivers = []
+            for piece in pieces:
+                if piece["geometry"].area >= threshold_area:
+                    main_pieces.append(piece)
+                else:
+                    slivers.append(piece)
+            if slivers and main_pieces:
+                largest = main_pieces[0]
+                for sliver in slivers:
+                    largest["geometry"] = largest["geometry"].union(sliver["geometry"])
+                pieces = main_pieces
+            elif not main_pieces:
+                pieces = [pieces[0]]  # All slivers: keep the largest.
+
+        # Convert pieces to records.
+        for sub_idx, piece in enumerate(pieces):
+            record = {
+                "site_id": site_id,
+                "site_name": site_row.get("site_name", site_id),
+                "start_date": site_row.get("start_date"),
+                "end_date": site_row.get("end_date"),
+                "geometry": piece["geometry"],
+                "area_ha": piece["geometry"].area * 111_000 * 111_000 / 10_000,
+                "sub_site_index": sub_idx,
+                "is_sub_site": len(pieces) > 1,
+                "original_area_ha": original_area_ha if len(pieces) > 1 else None,
+            }
+            record.update(piece["exact_match_values"])
+            split_records.append(record)
+
+    # Create output GeoDataFrame.
+    split_gdf = gpd.GeoDataFrame(split_records, crs=gdf.crs, geometry="geometry")
+
+    # Build group mapping based on unique combinations of exact-match values.
+    # Group 0 is reserved for sites with all NULL exact-match values.
+    group_key_to_id: dict = {}
+    next_group_id = 1
+    group_mapping: dict[int, list[tuple[str, int]]] = {}
+
+    for _, row in split_gdf.iterrows():
+        key_values = tuple(row.get(var_name) for var_name in polygon_vars)
+        if all(v is None for v in key_values):
+            group_id = 0
+        else:
+            if key_values not in group_key_to_id:
+                group_key_to_id[key_values] = next_group_id
+                next_group_id += 1
+            group_id = group_key_to_id[key_values]
+        if group_id not in group_mapping:
+            group_mapping[group_id] = []
+        group_mapping[group_id].append((row["site_id"], row["sub_site_index"]))
+
+    elapsed = _time.perf_counter() - t0
+    logger.info(
+        "[SPLIT] Exact-match site splitting: %d sites → %d pieces in %.2fs",
+        len(gdf),
+        len(split_gdf),
+        elapsed,
+    )
+    logger.info("[SPLIT] Created %d exact-match groups", len(group_mapping))
+
+    return split_gdf, group_mapping

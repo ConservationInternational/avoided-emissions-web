@@ -3,7 +3,7 @@
 These tests verify import_execution_results and the poll_batch_tasks Celery
 task using a real PostgreSQL + PostGIS database.
 
-Run inside the webapp Docker container:
+Run locally (from the repo root):
     python -m pytest tests/integration/test_processing_flow.py -v -m integration
 """
 

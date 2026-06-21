@@ -1,12 +1,9 @@
 """Integration test fixtures.
 
-Integration tests require a running PostgreSQL + PostGIS instance and are
-intended to run inside the webapp Docker container where all services are
-available.
+Integration tests require a running PostgreSQL + PostGIS instance.
 
-Run with:
-    docker compose -f deploy/docker-compose.develop.yml exec webapp \
-        python -m pytest tests/integration/ -v -m integration
+Run locally (from the repo root):
+    python -m pytest tests/integration/ -v -m integration
 """
 
 import pytest

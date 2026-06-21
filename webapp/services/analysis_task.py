@@ -501,10 +501,11 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _t0,
         )
 
-        # Always split sites across exact-match boundaries when exact_match_vars
-        # are specified.  Group-based batching (batch_group_sites) is always
-        # applied for efficiency; the matching methodology (joint vs per-site)
-        # is controlled separately by group_by_exact_matches.
+        # Always split sites across exact-match boundaries when polygon-type
+        # exact_match_vars are specified.  Splitting assigns each site piece
+        # to a unique region combination so Batch can process one group at a
+        # time.  group_by_exact_matches controls whether sites within a group
+        # are matched jointly or independently (a separate concept).
         if exact_match_vars:
             _split_t0 = _time.perf_counter()
             split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
@@ -590,8 +591,11 @@ def _complete_analysis_task_submission(task_id, user_id):
         # by _stream_site_set_to_parquet_buf and is already seeked to 0; upload
         # it directly to avoid re-encoding the GDF a second time.
         _s3_t0 = _time.perf_counter()
-        if parquet_buf is not None and not group_by_exact_matches:
-            # Fast path: upload the streaming buffer directly.
+        if parquet_buf is not None and group_mapping is None:
+            # Fast path: upload the streaming buffer directly only when sites
+            # were not split. If splitting produced a group mapping, the else
+            # branch uploads gdf_for_db via upload_sites_parquet_to_s3(...) so
+            # parquet rows match that mapping.
             s3_client = get_s3_client()
             parquet_key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.parquet"
             s3_client.put_object(
@@ -1012,10 +1016,11 @@ def submit_analysis_task(
         _time.perf_counter() - _buf_t0,
     )
 
-    # Always split sites across exact-match boundaries when exact_match_vars
-    # are specified.  Group-based batching (batch_group_sites) is always
-    # applied for efficiency; the matching methodology (joint vs per-site)
-    # is controlled separately by group_by_exact_matches.
+    # Always split sites across exact-match boundaries when polygon-type
+    # exact_match_vars are specified.  Splitting assigns each site piece
+    # to a unique region combination so Batch can process one group at a
+    # time.  group_by_exact_matches controls whether sites within a group
+    # are matched jointly or independently (a separate concept).
     if exact_match_vars:
         _split_t0 = _time.perf_counter()
         split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
@@ -1088,18 +1093,21 @@ def submit_analysis_task(
         )
         db.add(task)
 
+        # Vectorize CRS reprojection: project the whole GDF once instead of
+        # creating a new single-row GeoDataFrame per site (O(n) allocations).
+        # GeoPandas returns NaN area for None/empty geometries after to_crs,
+        # so the per-row guard below discards those values and stores None.
+        gdf_equal_area = gdf_for_db.to_crs("ESRI:54009")
+        areas_ha = gdf_equal_area.geometry.area / 10_000.0
+
         _sub_site_counters: dict[str, int] = {}
-        for _, row in gdf_for_db.iterrows():
-            # Compute area in hectares from the polygon geometry using
-            # an equal-area projection (Mollweide).
+        for i, (_, row) in enumerate(gdf_for_db.iterrows()):
             geom = row.geometry
-            if geom is not None and not geom.is_empty:
-                area_gdf = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326").to_crs(
-                    "ESRI:54009"
-                )
-                area_ha = area_gdf.geometry.iloc[0].area / 10_000.0
-            else:
-                area_ha = None
+            area_ha = (
+                float(areas_ha.iloc[i])
+                if (geom is not None and not geom.is_empty)
+                else None
+            )
 
             sid = str(row["site_id"])
             sub_site_index = _sub_site_counters.get(sid, 0)
