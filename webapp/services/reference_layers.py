@@ -467,15 +467,23 @@ def compute_exact_match_groups_with_splitting(
     try:
         for var_name in polygon_vars:
             table = _EXTENT_TABLE_MAP[var_name]
-            assert _SAFE_TABLE_RE.match(table), f"Unsafe table name: {table}"  # nosec B101
+            # table comes from the hardcoded _EXTENT_TABLE_MAP constant dict,
+            # never from user input.  The check below is a defence-in-depth
+            # guard against accidental misconfiguration; raise an explicit
+            # error so it can't be silently skipped with python -O.
+            if not _SAFE_TABLE_RE.match(table):
+                raise ValueError(f"Unsafe table name: {table!r}")
             id_col = "shape_name" if table.startswith("geoboundaries") else "eco_name"
 
             # Single bulk query: all regions whose bounding box overlaps the
             # sites envelope.  Using the sites envelope (rather than a precise
             # union) keeps the SQL simple and PostGIS can use a GiST index.
+            # table and id_col are both derived from _EXTENT_TABLE_MAP (a
+            # hardcoded constant) and validated above, so f-string interpolation
+            # is safe here.  Only user-supplied data (:bbox) is parameterized.
             rows = db.execute(
                 text(
-                    f"SELECT {id_col}, ST_AsGeoJSON(geom) "
+                    f"SELECT {id_col}, ST_AsGeoJSON(geom) "  # noqa: S608
                     f"FROM {table} "
                     f"WHERE ST_Intersects("
                     f"  geom, ST_SetSRID(ST_GeomFromGeoJSON(:bbox), 4326)"

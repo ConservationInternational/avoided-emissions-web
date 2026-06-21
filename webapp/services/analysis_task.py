@@ -1095,14 +1095,14 @@ def submit_analysis_task(
 
         # Vectorize CRS reprojection: project the whole GDF once instead of
         # creating a new single-row GeoDataFrame per site (O(n) allocations).
-        _gdf_cea = gdf_for_db.to_crs("ESRI:54009")
-        _areas_ha = _gdf_cea.geometry.area / 10_000.0
+        gdf_equal_area = gdf_for_db.to_crs("ESRI:54009")
+        areas_ha = gdf_equal_area.geometry.area / 10_000.0
 
         _sub_site_counters: dict[str, int] = {}
         for i, (_, row) in enumerate(gdf_for_db.iterrows()):
             geom = row.geometry
             area_ha = (
-                float(_areas_ha.iloc[i])
+                float(areas_ha.iloc[i])
                 if (geom is not None and not geom.is_empty)
                 else None
             )
