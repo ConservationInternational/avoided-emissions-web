@@ -472,7 +472,11 @@ def compute_exact_match_groups_with_splitting(
             # guard against accidental misconfiguration; raise an explicit
             # error so it can't be silently skipped with python -O.
             if not _SAFE_TABLE_RE.match(table):
-                raise ValueError(f"Unsafe table name: {table!r}")
+                raise ValueError(
+                    f"Table name {table!r} does not match the expected safe "
+                    f"identifier pattern (lowercase letters, digits, underscores, "
+                    f"must start with a letter or underscore)."
+                )
             id_col = "shape_name" if table.startswith("geoboundaries") else "eco_name"
 
             # Single bulk query: all regions whose bounding box overlaps the
@@ -503,7 +507,11 @@ def compute_exact_match_groups_with_splitting(
                 region_ids.append(rid)
                 region_geoms.append(g)
 
-            tree: STRtree | None = STRtree(region_geoms) if region_geoms else None
+            # An empty list is falsy in Python; the explicit length check makes
+            # the intent clear: no regions → no tree, queries return no hits.
+            tree: STRtree | None = (
+                STRtree(region_geoms) if len(region_geoms) > 0 else None
+            )
             var_regions[var_name] = (region_ids, region_geoms, tree)
 
             logger.info(

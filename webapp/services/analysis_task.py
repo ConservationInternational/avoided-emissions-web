@@ -1095,6 +1095,8 @@ def submit_analysis_task(
 
         # Vectorize CRS reprojection: project the whole GDF once instead of
         # creating a new single-row GeoDataFrame per site (O(n) allocations).
+        # GeoPandas returns NaN area for None/empty geometries after to_crs,
+        # so the per-row guard below discards those values and stores None.
         gdf_equal_area = gdf_for_db.to_crs("ESRI:54009")
         areas_ha = gdf_equal_area.geometry.area / 10_000.0
 
