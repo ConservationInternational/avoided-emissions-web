@@ -82,12 +82,6 @@ ANALYSIS_DEFAULTS = {
 }
 
 
-def _should_split_sites_for_exact_matches(
-    exact_match_vars: list[str], group_by_exact_matches: bool
-) -> bool:
-    return bool(exact_match_vars) and bool(group_by_exact_matches)
-
-
 def queue_analysis_task(
     task_name,
     description,
@@ -507,11 +501,12 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _t0,
         )
 
-        # Split only for grouped exact-match matching. Exact-match vars are
-        # still always passed through config to the matching job.
-        if _should_split_sites_for_exact_matches(
-            exact_match_vars, group_by_exact_matches
-        ):
+        # Always split sites across exact-match boundaries when polygon-type
+        # exact_match_vars are specified.  Splitting assigns each site piece
+        # to a unique region combination so Batch can process one group at a
+        # time.  group_by_exact_matches controls whether sites within a group
+        # are matched jointly or independently (a separate concept).
+        if exact_match_vars:
             _split_t0 = _time.perf_counter()
             split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
                 gdf, exact_match_vars
@@ -1021,9 +1016,12 @@ def submit_analysis_task(
         _time.perf_counter() - _buf_t0,
     )
 
-    # Split only for grouped exact-match matching. Exact-match vars are still
-    # always passed through config to the matching job.
-    if _should_split_sites_for_exact_matches(exact_match_vars, group_by_exact_matches):
+    # Always split sites across exact-match boundaries when polygon-type
+    # exact_match_vars are specified.  Splitting assigns each site piece
+    # to a unique region combination so Batch can process one group at a
+    # time.  group_by_exact_matches controls whether sites within a group
+    # are matched jointly or independently (a separate concept).
+    if exact_match_vars:
         _split_t0 = _time.perf_counter()
         split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
             gdf, exact_match_vars
@@ -1095,18 +1093,19 @@ def submit_analysis_task(
         )
         db.add(task)
 
+        # Vectorize CRS reprojection: project the whole GDF once instead of
+        # creating a new single-row GeoDataFrame per site (O(n) allocations).
+        _gdf_cea = gdf_for_db.to_crs("ESRI:54009")
+        _areas_ha = _gdf_cea.geometry.area / 10_000.0
+
         _sub_site_counters: dict[str, int] = {}
-        for _, row in gdf_for_db.iterrows():
-            # Compute area in hectares from the polygon geometry using
-            # an equal-area projection (Mollweide).
+        for i, (_, row) in enumerate(gdf_for_db.iterrows()):
             geom = row.geometry
-            if geom is not None and not geom.is_empty:
-                area_gdf = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326").to_crs(
-                    "ESRI:54009"
-                )
-                area_ha = area_gdf.geometry.iloc[0].area / 10_000.0
-            else:
-                area_ha = None
+            area_ha = (
+                float(_areas_ha.iloc[i])
+                if (geom is not None and not geom.is_empty)
+                else None
+            )
 
             sid = str(row["site_id"])
             sub_site_index = _sub_site_counters.get(sid, 0)

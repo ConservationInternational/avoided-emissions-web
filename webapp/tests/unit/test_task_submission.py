@@ -14,10 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from services.analysis_task import (
-    _should_split_sites_for_exact_matches,
-    queue_analysis_task,
-)
+from services.analysis_task import queue_analysis_task
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,28 +27,6 @@ _BASE_KWARGS = {
     "covariates": ["elev", "precip"],
     "exact_match_vars": ["admin0"],
 }
-
-
-@pytest.mark.unit
-class TestSplitDecision:
-    @pytest.mark.parametrize(
-        ("exact_match_vars", "group_by_exact_matches", "expected"),
-        [
-            (["admin0"], True, True),
-            (["admin0"], False, False),
-            ([], True, False),
-            ([], False, False),
-        ],
-    )
-    def test_should_split_sites_for_exact_matches(
-        self, exact_match_vars, group_by_exact_matches, expected
-    ):
-        assert (
-            _should_split_sites_for_exact_matches(
-                exact_match_vars, group_by_exact_matches
-            )
-            is expected
-        )
 
 
 def _setup_happy_path(mocker, creds=("cid", "csecret")):
