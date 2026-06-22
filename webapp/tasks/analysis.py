@@ -291,9 +291,9 @@ def expire_stale_submitting_tasks() -> dict:
       absence after 5 min means the Celery message was lost before any worker
       could start (e.g. killed during a rolling deploy).
     * **40 minutes** — for tasks where a worker did start but never completed.
-      Safely above the per-attempt ``soft_time_limit`` (30 min) ×
-      ``max_retries + 1`` (3 attempts), so only genuinely orphaned tasks are
-      touched.
+      Safely above the per-attempt ``soft_time_limit`` (10 min) ×
+      ``max_retries + 1`` (3 attempts = 30 min total), so only genuinely
+      orphaned tasks are touched.
 
     Returns
     -------
@@ -371,8 +371,8 @@ def expire_stale_submitting_tasks() -> dict:
     max_retries=2,
     acks_late=True,
     reject_on_worker_lost=True,
-    soft_time_limit=1800,  # 30 minutes
-    time_limit=1900,
+    soft_time_limit=600,  # 10 minutes
+    time_limit=700,
 )
 def submit_analysis_task_worker(self, task_id: str, user_id: str) -> None:
     """Complete the async submission of an analysis task.
