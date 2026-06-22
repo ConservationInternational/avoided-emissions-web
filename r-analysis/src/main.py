@@ -235,7 +235,11 @@ def run(params, log=None):
     config = {
         "task_id": task_id,
         "data_dir": data_dir,
+        "output_dir": output_dir,
         "sites_file": sites_local,
+        # 00_prep.py runs as a subprocess and needs the S3 URI to download the
+        # sites file itself (it doesn't share main.py's in-process state).
+        "sites_parquet_s3_uri": sites_artifact_uri,
         "cog_bucket": params["cog_bucket"],
         "cog_prefix": params["cog_prefix"],
         "covariates": params["covariates"],
@@ -272,6 +276,8 @@ def run(params, log=None):
         config["site_id"] = params["site_id"]
     if params.get("resolution_m") is not None:
         config["resolution_m"] = int(params["resolution_m"])
+    if params.get("reference_layer_uris"):
+        config["reference_layer_uris"] = params["reference_layer_uris"]
 
     config_path = os.path.join(data_dir, "config.json")
     with open(config_path, "w") as f:
