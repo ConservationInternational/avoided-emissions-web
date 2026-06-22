@@ -2015,8 +2015,18 @@ def save_user_site_set_from_staged(
                 }
                 if skipped_total > 0 and _skip_csv_path is not None:
                     s3_key = _upload_skip_errors_csv(upload_id, _skip_csv_path)
-                    if s3_key:
-                        metadata["skip_errors_s3_key"] = s3_key
+                    if s3_key and upload_id is not None:
+                        # Write the key to the upload row so _site_upload_summary_row
+                        # can surface the download button in the admin grid.
+                        upload_row = (
+                            db.query(UserSiteUpload)
+                            .filter(UserSiteUpload.id == upload_id)
+                            .first()
+                        )
+                        if upload_row is not None:
+                            upload_meta = dict(upload_row.extra_metadata or {})
+                            upload_meta["skip_errors_s3_key"] = s3_key
+                            upload_row.extra_metadata = upload_meta
                 site_set.extra_metadata = metadata
 
             site_set.n_sites = n_sites
