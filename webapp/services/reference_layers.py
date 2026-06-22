@@ -478,16 +478,18 @@ def compute_exact_match_groups_with_splitting(
             id_col = "shape_name" if table.startswith("geoboundaries") else "eco_name"
 
             # Single bulk query: all regions whose bounding box overlaps the
-            # sites envelope.  Geometries are simplified to 0.005° (~550 m)
-            # tolerance to reduce vertex count 10-100× for complex boundaries
-            # while retaining region-assignment fidelity.
+            # sites envelope.  Uses the pre-simplified geom_simp column
+            # (added by migration 0028a1b2c3ef, ~500 m tolerance) instead of
+            # computing ST_SimplifyPreserveTopology on the fly.  The GIST index
+            # on geom_simp handles the spatial filter; no per-query
+            # simplification cost.
             rows = db.execute(
                 text(
                     f"SELECT {id_col}, "  # noqa: S608
-                    f"  ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, 0.005)) "
+                    f"  ST_AsGeoJSON(geom_simp) "
                     f"FROM {table} "
                     f"WHERE ST_Intersects("
-                    f"  geom, ST_SetSRID(ST_GeomFromGeoJSON(:bbox), 4326)"
+                    f"  geom_simp, ST_SetSRID(ST_GeomFromGeoJSON(:bbox), 4326)"
                     f")"
                 ),
                 {"bbox": sites_envelope_geojson},
