@@ -550,7 +550,7 @@ USER_SITE_SET_COLUMNS = [
         },
         "valueFormatter": {"function": "params.value != null ? params.value : ''"},
         "tooltipValueGetter": {
-            "function": "params.data.ingest_stats && params.data.ingest_stats.skipped_total ? 'Missing required fields: ' + (params.data.ingest_stats.skipped_missing_required || 0) + ', Bad start date: ' + (params.data.ingest_stats.skipped_bad_start_date || 0) + ', Bad geometry: ' + (params.data.ingest_stats.skipped_bad_geometry || 0) : null"
+            "function": "params.data.ingest_stats && params.data.ingest_stats.skipped_total ? 'Missing start date: ' + (params.data.ingest_stats.skipped_missing_required || 0) + ', Bad start date: ' + (params.data.ingest_stats.skipped_bad_start_date || 0) + ', Bad geometry: ' + (params.data.ingest_stats.skipped_bad_geometry || 0) : null"
         },
     },
     {
@@ -632,7 +632,7 @@ USER_SITE_UPLOAD_COLUMNS = [
         },
         "valueFormatter": {"function": "params.value != null ? params.value : ''"},
         "tooltipValueGetter": {
-            "function": "params.data.ingest_stats && params.data.ingest_stats.skipped_total ? 'Missing required fields: ' + (params.data.ingest_stats.skipped_missing_required || 0) + ', Bad start date: ' + (params.data.ingest_stats.skipped_bad_start_date || 0) + ', Bad geometry: ' + (params.data.ingest_stats.skipped_bad_geometry || 0) : null"
+            "function": "params.data.ingest_stats && params.data.ingest_stats.skipped_total ? 'Missing start date: ' + (params.data.ingest_stats.skipped_missing_required || 0) + ', Bad start date: ' + (params.data.ingest_stats.skipped_bad_start_date || 0) + ', Bad geometry: ' + (params.data.ingest_stats.skipped_bad_geometry || 0) : null"
         },
     },
     {
@@ -756,7 +756,7 @@ COMBINED_SITE_UPLOAD_COLUMNS = [
         },
         "valueFormatter": {"function": "params.value != null ? params.value : ''"},
         "tooltipValueGetter": {
-            "function": "params.data.ingest_stats && params.data.ingest_stats.skipped_total ? 'Missing required fields: ' + (params.data.ingest_stats.skipped_missing_required || 0) + ', Bad start date: ' + (params.data.ingest_stats.skipped_bad_start_date || 0) + ', Bad geometry: ' + (params.data.ingest_stats.skipped_bad_geometry || 0) : null"
+            "function": "params.data.ingest_stats && params.data.ingest_stats.skipped_total ? 'Missing start date: ' + (params.data.ingest_stats.skipped_missing_required || 0) + ', Bad start date: ' + (params.data.ingest_stats.skipped_bad_start_date || 0) + ', Bad geometry: ' + (params.data.ingest_stats.skipped_bad_geometry || 0) : null"
         },
     },
     {

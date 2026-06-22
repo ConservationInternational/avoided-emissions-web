@@ -12,13 +12,13 @@ import re
 
 import boto3
 import flask_login
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, jsonify, redirect, request
 from sqlalchemy import text as sa_text
 
 from config import Config
 from gee_export import gee_config
 from layer_config import get_style
-from models import AnalysisTask, Covariate, UserSiteSet, get_db
+from models import AnalysisTask, Covariate, UserSiteSet, UserSiteUpload, get_db
 from services import (
     discard_staged_site_upload,
     download_results_csv,
@@ -585,5 +585,61 @@ def create_api_blueprint(limiter):
 
         fc = get_user_site_set_centroids_geojson(site_set_id)
         return jsonify(fc)
+
+    @api_bp.route("/api/site-uploads/<upload_id>/skip-errors")
+    @flask_login.login_required
+    def site_upload_skip_errors(upload_id):
+        """Redirect to a pre-signed S3 URL for downloading the skip-errors CSV.
+
+        The CSV contains one row per feature that was skipped during import,
+        with columns: row_number, site_id, site_name, reason, value.
+        Returns 404 if no error CSV was generated (e.g. zero skipped rows).
+        """
+        try:
+            import uuid as _uuid_mod
+
+            _uuid_mod.UUID(upload_id)
+        except (ValueError, AttributeError):
+            return jsonify({"error": "Invalid upload ID."}), 400
+
+        db = get_db()
+        try:
+            upload = (
+                db.query(UserSiteUpload).filter(UserSiteUpload.id == upload_id).first()
+            )
+        finally:
+            db.close()
+
+        if not upload:
+            return jsonify({"error": "Upload not found."}), 404
+
+        current_user = flask_login.current_user
+        if str(upload.user_id) != str(current_user.id) and not current_user.is_admin:
+            return jsonify({"error": "Access denied."}), 403
+
+        meta = upload.extra_metadata if isinstance(upload.extra_metadata, dict) else {}
+        s3_key = meta.get("skip_errors_s3_key")
+        if not s3_key:
+            return jsonify(
+                {"error": "No skip-errors CSV available for this upload."}
+            ), 404
+
+        if not Config.S3_BUCKET:
+            return jsonify({"error": "S3 not configured."}), 503
+
+        try:
+            s3 = boto3.client("s3", region_name=Config.AWS_REGION)
+            url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": Config.S3_BUCKET, "Key": s3_key},
+                ExpiresIn=3600,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to generate presigned URL for skip errors: %s", s3_key
+            )
+            return jsonify({"error": "Could not generate download URL."}), 503
+
+        return redirect(url)
 
     return api_bp

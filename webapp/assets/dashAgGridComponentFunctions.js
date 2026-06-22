@@ -455,38 +455,73 @@ dagcomponentfuncs.SiteUploadActions = function (props) {
     var setPending = useStateResult[1];
     var statusAllowsCancel = ["pending", "running"].indexOf(status) >= 0;
     var canCancel = statusAllowsCancel && !pending;
+    var canDownloadErrors =
+        !!data.skip_errors_available &&
+        !!(data.ingest_stats && data.ingest_stats.skipped_total > 0);
 
-    return React.createElement(
-        "button",
-        {
-            style: {
-                padding: "1px 6px",
-                fontSize: "10px",
-                fontWeight: 600,
-                border: "1px solid #dc3545",
-                borderRadius: "3px",
-                backgroundColor: canCancel ? "#fff" : "#e9ecef",
-                color: canCancel ? "#842029" : "#6c757d",
-                cursor: canCancel ? "pointer" : "not-allowed",
+    var btnBase = {
+        padding: "1px 6px",
+        fontSize: "10px",
+        fontWeight: 600,
+        borderRadius: "3px",
+        marginRight: "4px",
+    };
+
+    var buttons = [
+        React.createElement(
+            "button",
+            {
+                key: "cancel",
+                style: Object.assign({}, btnBase, {
+                    border: "1px solid #dc3545",
+                    backgroundColor: canCancel ? "#fff" : "#e9ecef",
+                    color: canCancel ? "#842029" : "#6c757d",
+                    cursor: canCancel ? "pointer" : "not-allowed",
+                }),
+                disabled: !canCancel,
+                title: canCancel
+                    ? "Cancel this import"
+                    : "Only pending/running imports can be cancelled",
+                onClick: function (e) {
+                    e.stopPropagation();
+                    if (!canCancel) return;
+                    if (!window.confirm("Cancel this background site import?")) return;
+                    setPending(true);
+                    props.setData({
+                        action: "cancel_import",
+                        upload_id: data.id,
+                        _actionTs: Date.now(),
+                    });
+                },
             },
-            disabled: !canCancel,
-            title: canCancel
-                ? "Cancel this import"
-                : "Only pending/running imports can be cancelled",
-            onClick: function (e) {
-                e.stopPropagation();
-                if (!canCancel) return;
-                if (!window.confirm("Cancel this background site import?")) return;
-                setPending(true);
-                props.setData({
-                    action: "cancel_import",
-                    upload_id: data.id,
-                    _actionTs: Date.now(),
-                });
-            },
-        },
-        pending ? "Cancelling..." : "\u2715 Cancel"
-    );
+            pending ? "Cancelling..." : "\u2715 Cancel"
+        ),
+    ];
+
+    if (canDownloadErrors) {
+        buttons.push(
+            React.createElement(
+                "button",
+                {
+                    key: "download-errors",
+                    style: Object.assign({}, btnBase, {
+                        border: "1px solid #6c757d",
+                        backgroundColor: "#fff",
+                        color: "#495057",
+                        cursor: "pointer",
+                    }),
+                    title: "Download CSV of skipped rows with reasons",
+                    onClick: function (e) {
+                        e.stopPropagation();
+                        window.open("/api/site-uploads/" + data.id + "/skip-errors", "_blank");
+                    },
+                },
+                "\u2193 Errors"
+            )
+        );
+    }
+
+    return React.createElement("div", { style: { display: "flex", alignItems: "center" } }, buttons);
 };
 
 /**
@@ -507,6 +542,9 @@ dagcomponentfuncs.SiteSetAndUploadActions = function (props) {
     var canManage = hasSiteSet && !pending;
     var isTerminal = ["cancelled", "failed"].indexOf(status) >= 0;
     var canDeleteUpload = isTerminal && !hasSiteSet && !pending;
+    var canDownloadErrors =
+        !!data.skip_errors_available &&
+        !!(data.ingest_stats && data.ingest_stats.skipped_total > 0);
 
     var btnStyle = {
         padding: "1px 6px",
@@ -658,6 +696,29 @@ dagcomponentfuncs.SiteSetAndUploadActions = function (props) {
                     },
                 },
                 pending ? "Working..." : "Delete"
+            )
+        );
+    }
+
+    if (canDownloadErrors) {
+        buttons.push(
+            React.createElement(
+                "button",
+                {
+                    key: "download-errors",
+                    style: Object.assign({}, btnStyle, {
+                        border: "1px solid #6c757d",
+                        backgroundColor: pending ? "#e9ecef" : "#fff",
+                        color: "#495057",
+                        cursor: "pointer",
+                    }),
+                    title: "Download CSV of skipped rows with reasons",
+                    onClick: function (e) {
+                        e.stopPropagation();
+                        window.open("/api/site-uploads/" + data.id + "/skip-errors", "_blank");
+                    },
+                },
+                "\u2193 Errors"
             )
         );
     }

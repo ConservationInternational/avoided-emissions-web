@@ -1,5 +1,6 @@
 """Site upload staging, file parsing, column mapping, and DB persistence."""
 
+import csv
 import io
 import json
 import logging
@@ -1080,6 +1081,36 @@ def _derive_site_set_name(filename):
     return f"{stem}_{timestamp}"
 
 
+def _write_skip_errors_csv(upload_id, skip_errors):
+    """Write skipped-row errors to S3 as a CSV and return the S3 key, or None on failure."""
+    try:
+        buf = io.StringIO()
+        writer = csv.DictWriter(
+            buf,
+            fieldnames=["row_number", "site_id", "site_name", "reason", "value"],
+        )
+        writer.writeheader()
+        writer.writerows(skip_errors)
+        csv_bytes = buf.getvalue().encode("utf-8")
+        s3_key = f"{Config.S3_PREFIX.rstrip('/')}/site-upload-errors/{upload_id}.csv"
+        s3 = get_s3_client()
+        s3.put_object(
+            Bucket=Config.S3_BUCKET,
+            Key=s3_key,
+            Body=csv_bytes,
+            ContentType="text/csv",
+            ContentDisposition=f'attachment; filename="skip_errors_{upload_id}.csv"',
+        )
+        return s3_key
+    except Exception:
+        logger.warning(
+            "Failed to write skip errors CSV to S3 for upload %s",
+            upload_id,
+            exc_info=True,
+        )
+        return None
+
+
 def _site_upload_summary_row(row):
     meta = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
     return {
@@ -1096,6 +1127,7 @@ def _site_upload_summary_row(row):
         "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         "error_message": row.error_message,
         "ingest_stats": meta.get("ingest_stats"),
+        "skip_errors_available": bool(meta.get("skip_errors_s3_key")),
     }
 
 
@@ -1550,7 +1582,7 @@ def save_user_site_set_from_staged(
             skipped_missing_required = 0
             skipped_bad_start_date = 0
             skipped_bad_geometry = 0
-            skipped_examples = []
+            skip_errors = []
 
             batch_rows = []
             batch_row_bytes = 0
@@ -1684,37 +1716,46 @@ def save_user_site_set_from_staged(
                         if not site_id:
                             missing_site_id_count += 1
                             site_id = f"MissingID{missing_site_id_count}"
-                            if len(skipped_examples) < 10:
-                                skipped_examples.append(
-                                    f"Feature {feature_index}: auto-assigned site_id to '{site_id}'."
-                                )
 
                         # Auto-assign missing site_name
                         if not site_name:
                             missing_site_name_count += 1
                             site_name = f"Missing_Site_Name_{missing_site_name_count}"
-                            if len(skipped_examples) < 10:
-                                skipped_examples.append(
-                                    f"Feature {feature_index}: auto-assigned site_name to '{site_name}'."
-                                )
 
                         # Only check for missing start_date (required for analysis)
                         if raw_start is None:
                             skipped_missing_required += 1
-                            if len(skipped_examples) < 10:
-                                skipped_examples.append(
-                                    f"Feature {feature_index}: mapped 'start_date' is missing."
-                                )
+                            skip_errors.append(
+                                {
+                                    "row_number": feature_index,
+                                    "site_id": str(raw_site_id).strip()
+                                    if raw_site_id is not None
+                                    else "",
+                                    "site_name": str(raw_site_name).strip()
+                                    if raw_site_name is not None
+                                    else "",
+                                    "reason": "Missing start date",
+                                    "value": "",
+                                }
+                            )
                             continue
 
                         start_dt = pd.to_datetime(raw_start, errors="coerce")
                         if pd.isna(start_dt):
                             skipped_bad_start_date += 1
-                            if len(skipped_examples) < 10:
-                                skipped_examples.append(
-                                    "Feature "
-                                    f"{feature_index}: mapped 'start_date' is missing or unparseable."
-                                )
+                            skip_errors.append(
+                                {
+                                    "row_number": feature_index,
+                                    "site_id": str(raw_site_id).strip()
+                                    if raw_site_id is not None
+                                    else "",
+                                    "site_name": str(raw_site_name).strip()
+                                    if raw_site_name is not None
+                                    else "",
+                                    "reason": "Unparseable start date",
+                                    "value": str(raw_start),
+                                }
+                            )
                             continue
 
                         start_date = start_dt.date()
@@ -1728,10 +1769,19 @@ def save_user_site_set_from_staged(
                         geom_json = feature.get("geometry")
                         if not geom_json:
                             skipped_bad_geometry += 1
-                            if len(skipped_examples) < 10:
-                                skipped_examples.append(
-                                    f"Feature {feature_index}: missing geometry."
-                                )
+                            skip_errors.append(
+                                {
+                                    "row_number": feature_index,
+                                    "site_id": str(raw_site_id).strip()
+                                    if raw_site_id is not None
+                                    else "",
+                                    "site_name": str(raw_site_name).strip()
+                                    if raw_site_name is not None
+                                    else "",
+                                    "reason": "Missing geometry",
+                                    "value": "",
+                                }
+                            )
                             continue
 
                         geom = shape(geom_json)
@@ -1741,19 +1791,36 @@ def save_user_site_set_from_staged(
 
                         if geom.is_empty:
                             skipped_bad_geometry += 1
-                            if len(skipped_examples) < 10:
-                                skipped_examples.append(
-                                    f"Feature {feature_index}: empty geometry after repair."
-                                )
+                            skip_errors.append(
+                                {
+                                    "row_number": feature_index,
+                                    "site_id": str(raw_site_id).strip()
+                                    if raw_site_id is not None
+                                    else "",
+                                    "site_name": str(raw_site_name).strip()
+                                    if raw_site_name is not None
+                                    else "",
+                                    "reason": "Empty geometry after repair",
+                                    "value": "",
+                                }
+                            )
                             continue
 
                         if geom.geom_type not in ("Polygon", "MultiPolygon"):
                             skipped_bad_geometry += 1
-                            if len(skipped_examples) < 10:
-                                skipped_examples.append(
-                                    "Feature "
-                                    f"{feature_index}: unsupported geometry type {geom.geom_type}."
-                                )
+                            skip_errors.append(
+                                {
+                                    "row_number": feature_index,
+                                    "site_id": str(raw_site_id).strip()
+                                    if raw_site_id is not None
+                                    else "",
+                                    "site_name": str(raw_site_name).strip()
+                                    if raw_site_name is not None
+                                    else "",
+                                    "reason": "Unsupported geometry type",
+                                    "value": geom.geom_type,
+                                }
+                            )
                             continue
 
                         minx, miny, maxx, maxy = geom.bounds
@@ -1863,12 +1930,17 @@ def save_user_site_set_from_staged(
                 if skipped_total > 0:
                     details = (
                         "No valid features were found after applying the selected mapping. "
-                        f"Skipped checks: missing required={skipped_missing_required}, "
+                        f"Skipped checks: missing start_date={skipped_missing_required}, "
                         f"bad start_date={skipped_bad_start_date}, "
                         f"bad geometry={skipped_bad_geometry}."
                     )
-                    if skipped_examples:
-                        details += " Examples: " + " ".join(skipped_examples)
+                    if skip_errors:
+                        examples = "; ".join(
+                            f"row {e['row_number']}: {e['reason']}"
+                            + (f" ({e['value']!r})" if e["value"] else "")
+                            for e in skip_errors[:5]
+                        )
+                        details += f" First examples: {examples}"
                     raise ValueError(details)
                 raise ValueError("No features were found in the uploaded file.")
 
@@ -1892,8 +1964,10 @@ def save_user_site_set_from_staged(
                     "skipped_bad_start_date": int(skipped_bad_start_date),
                     "skipped_bad_geometry": int(skipped_bad_geometry),
                 }
-                if skipped_examples:
-                    metadata["ingest_skip_examples"] = skipped_examples
+                if skip_errors and upload_id is not None and Config.S3_BUCKET:
+                    s3_key = _write_skip_errors_csv(upload_id, skip_errors)
+                    if s3_key:
+                        metadata["skip_errors_s3_key"] = s3_key
                 site_set.extra_metadata = metadata
 
             site_set.n_sites = n_sites
