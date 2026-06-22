@@ -10,6 +10,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
+from pyproj import Transformer as _ProjTransformer
 from sqlalchemy import text
 
 from config import Config
@@ -32,7 +33,7 @@ from services.reference_layers import (
     compute_sites_exclusion_buffer,
     get_reference_layer_uris,
 )
-from services.s3 import S3_COST_TAGGING, get_s3_client
+from services.s3 import get_s3_client
 from services.site_set import (
     _get_site_set_min_start_year,
     _stream_site_set_to_parquet_buf,
@@ -532,15 +533,17 @@ def _complete_analysis_task_submission(task_id, user_id):
             gdf_for_db = gdf
             group_mapping = None
 
-        # Extract area_ha from the existing column (split_gdf always has it,
-        # computed by reference_layers.py as piece_areas_ha; non-split gdf has
-        # it from the DB query).  Fall back to a degree-coordinate approximation
-        # only when the column is absent (uploaded file without pre-computed areas).
-        if "area_ha" in gdf_for_db.columns:
-            _areas_ha_arr = gdf_for_db["area_ha"].to_numpy(dtype=float)
-        else:
-            _geoms_approx = np.asarray(gdf_for_db.geometry, dtype=object)
-            _areas_ha_arr = shapely.area(_geoms_approx) * 111_000 * 111_000 / 10_000
+        # Reproject to Mollweide equal-area (ESRI:54009) and compute area in ha.
+        # shapely.transform avoids a full GDF copy while guaranteeing the same
+        # accurate value is stored in both the TaskSite DB (web UI) and the S3
+        # Parquet (R analysis pipeline).  Update gdf_for_db so the Parquet upload
+        # carries these values rather than the DB-streamed originals.
+        _ea_tfm = _ProjTransformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
+        _geoms_deg = np.asarray(gdf_for_db.geometry, dtype=object)
+        _geoms_ea = shapely.transform(_geoms_deg, _ea_tfm.transform)
+        _areas_ha_arr = shapely.area(_geoms_ea) / 10_000.0
+        del _geoms_ea
+        gdf_for_db = gdf_for_db.assign(area_ha=_areas_ha_arr)
 
         # Delete any TaskSite rows left by a previous interrupted attempt so
         # this step is idempotent on Celery retry (acks_late + reject_on_worker_lost
@@ -563,8 +566,8 @@ def _complete_analysis_task_submission(task_id, user_id):
         # takes <2s because it avoids per-row Python object instantiation and
         # sends all rows in a single INSERT statement.
         task.n_sites = len(gdf)
-        _geoms_arr = np.asarray(gdf_for_db.geometry, dtype=object)
-        _empty_mask = shapely.is_empty(_geoms_arr) | shapely.is_missing(_geoms_arr)
+        _empty_mask = shapely.is_empty(_geoms_deg) | shapely.is_missing(_geoms_deg)
+        del _geoms_deg
         _sid_arr = gdf_for_db["site_id"].astype(str).tolist()
         _name_col = (
             gdf_for_db["site_name"]
@@ -629,24 +632,9 @@ def _complete_analysis_task_submission(task_id, user_id):
         # by _stream_site_set_to_parquet_buf and is already seeked to 0; upload
         # it directly to avoid re-encoding the GDF a second time.
         _s3_t0 = _time.perf_counter()
-        if parquet_buf is not None and group_mapping is None:
-            # Fast path: upload the streaming buffer directly only when sites
-            # were not split. If splitting produced a group mapping, the else
-            # branch uploads gdf_for_db via upload_sites_parquet_to_s3(...) so
-            # parquet rows match that mapping.
-            s3_client = get_s3_client()
-            parquet_key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.parquet"
-            s3_client.put_object(
-                Bucket=Config.S3_BUCKET,
-                Key=parquet_key,
-                Body=parquet_buf,
-                ContentType="application/vnd.apache.parquet",
-                Tagging=S3_COST_TAGGING,
-            )
-            sites_parquet_uri = f"s3://{Config.S3_BUCKET}/{parquet_key}"
-        else:
-            # gdf_for_db may differ from original (splitting), or no buffer.
-            sites_parquet_uri = upload_sites_parquet_to_s3(gdf_for_db, task_id)
+        # Always encode gdf_for_db to Parquet so the R analysis pipeline reads
+        # the same equal-area area_ha values that were written to TaskSite.
+        sites_parquet_uri = upload_sites_parquet_to_s3(gdf_for_db, task_id)
         sites_uri = None
         if not task.site_set_id:
             sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
@@ -1161,17 +1149,20 @@ def submit_analysis_task(
         )
         db.add(task)
 
-        # Extract area_ha from the existing column (split_gdf has piece_areas_ha;
-        # non-split gdf has it from the DB query).  Fall back to degree-coordinate
-        # approximation only when the column is absent.
-        if "area_ha" in gdf_for_db.columns:
-            _areas_ha_arr = gdf_for_db["area_ha"].to_numpy(dtype=float)
-        else:
-            _geoms_approx = np.asarray(gdf_for_db.geometry, dtype=object)
-            _areas_ha_arr = shapely.area(_geoms_approx) * 111_000 * 111_000 / 10_000
+        # Reproject to Mollweide equal-area (ESRI:54009) and compute area in ha.
+        # shapely.transform avoids a full GDF copy while guaranteeing the same
+        # accurate value is stored in both the TaskSite DB (web UI) and the S3
+        # Parquet (R analysis pipeline).  Update gdf_for_db so the Parquet upload
+        # carries these values.
+        _ea_tfm = _ProjTransformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
+        _geoms_deg = np.asarray(gdf_for_db.geometry, dtype=object)
+        _geoms_ea = shapely.transform(_geoms_deg, _ea_tfm.transform)
+        _areas_ha_arr = shapely.area(_geoms_ea) / 10_000.0
+        del _geoms_ea
+        gdf_for_db = gdf_for_db.assign(area_ha=_areas_ha_arr)
 
-        _geoms_arr = np.asarray(gdf_for_db.geometry, dtype=object)
-        _empty_mask = shapely.is_empty(_geoms_arr) | shapely.is_missing(_geoms_arr)
+        _empty_mask = shapely.is_empty(_geoms_deg) | shapely.is_missing(_geoms_deg)
+        del _geoms_deg
         _sid_arr = gdf_for_db["site_id"].astype(str).tolist()
         _name_col = (
             gdf_for_db["site_name"]

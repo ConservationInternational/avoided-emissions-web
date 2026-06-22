@@ -6,6 +6,7 @@ import tempfile
 from datetime import datetime, timezone
 
 import geopandas as gpd
+from pyproj import Transformer
 from sqlalchemy import text
 
 from config import Config
@@ -680,14 +681,23 @@ def compute_exact_match_groups_with_splitting(
         else np.full(len(curr_geoms), None, dtype=object)
     )
 
-    # Piece areas in ha (approximate degrees² to ha conversion)
-    piece_areas_ha = shapely.area(curr_geoms) * 111_000 * 111_000 / 10_000
+    # Piece areas in ha — reproject to Mollweide equal-area (ESRI:54009) so the
+    # values stored in TaskSite (web UI) and the S3 Parquet (R pipeline) are accurate
+    # and consistent with each other.
+    _ea_tfm = Transformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
+    _pieces_ea = shapely.transform(curr_geoms, _ea_tfm.transform)
+    piece_areas_ha = shapely.area(_pieces_ea) / 10_000.0
+    del _pieces_ea
 
-    # Original site area in ha — populated only for pieces of split sites
+    # Original site area in ha — populated only for pieces of split sites.
     if "area_ha" in gdf.columns:
         orig_site_area_ha = gdf["area_ha"].to_numpy(dtype=float)
     else:
-        orig_site_area_ha = orig_geom_areas * 111_000 * 111_000 / 10_000
+        _orig_ea = shapely.transform(
+            np.asarray(gdf.geometry, dtype=object), _ea_tfm.transform
+        )
+        orig_site_area_ha = shapely.area(_orig_ea) / 10_000.0
+        del _orig_ea
     original_area_ha_arr = np.where(
         is_sub_site_arr, orig_site_area_ha[curr_orig_idxs], np.nan
     )
