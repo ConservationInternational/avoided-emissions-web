@@ -504,13 +504,6 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _t0,
         )
 
-        if gdf["site_id"].duplicated().any():
-            n_dups = int(gdf["site_id"].duplicated().sum())
-            raise ValueError(
-                f"Task {task_id}: site set has {n_dups} duplicate site_id value(s). "
-                "Each site must have a unique site_id."
-            )
-
         # Always split sites across exact-match boundaries when polygon-type
         # exact_match_vars are specified.  Splitting assigns each site piece
         # to a unique region combination so Batch can process one group at a
@@ -1034,15 +1027,6 @@ def submit_analysis_task(
             "TRENDSEARTH_SCRIPT_ID is not configured. Set this "
             "environment variable to the UUID of the avoided-emissions "
             "script registered on the trends.earth API."
-        )
-
-    if gdf is None or gdf.empty:
-        raise ValueError("gdf must be a non-empty GeoDataFrame.")
-    if gdf["site_id"].duplicated().any():
-        n_dups = int(gdf["site_id"].duplicated().sum())
-        raise ValueError(
-            f"Site set has {n_dups} duplicate site_id value(s). "
-            "Each site must have a unique site_id."
         )
 
     import time as _time
