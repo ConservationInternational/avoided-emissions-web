@@ -229,6 +229,47 @@ services:
           cpus: "0.25"
           memory: 4G
 
+  submission-worker:
+    image: ${WEBAPP_IMAGE}
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      TMPDIR: /scratch
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=1", "-Q", "submission"]
+    # Kill fast — acks_late=True means Celery re-delivers unfinished
+    # tasks to the replacement worker automatically.
+    stop_grace_period: 5s
+    tmpfs:
+      - /scratch:size=4G
+    depends_on:
+      - postgres
+      - redis
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "5"
+    networks:
+      - backend
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 4G
+        reservations:
+          cpus: "0.25"
+          memory: 4G
+
   beat:
     image: ${WEBAPP_IMAGE}
     env_file:

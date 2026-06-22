@@ -74,9 +74,10 @@ celery_app.conf.update(
         "tasks.import_user_site_upload": {"queue": "heavy"},
         "tasks.ingest_sdg_cog": {"queue": "heavy"},
         "tasks.generate_match_quality_summary": {"queue": "heavy"},
-        # submit_analysis_task_worker does heavy PostGIS + geopandas work
-        # and must run on the higher-memory heavy worker.
-        "tasks.submit_analysis_task_worker": {"queue": "heavy"},
+        # submit_analysis_task_worker has its own dedicated queue so that
+        # long-running site uploads on the heavy worker cannot delay or
+        # starve pending analysis submissions.
+        "tasks.submit_analysis_task_worker": {"queue": "submission"},
         # export_reference_layers streams PostGIS → GeoParquet → S3 and may
         # use several hundred MB for large admin-boundary tables.
         "tasks.export_reference_layers": {"queue": "heavy"},

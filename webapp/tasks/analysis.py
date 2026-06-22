@@ -285,11 +285,13 @@ def expire_stale_submitting_tasks() -> dict:
 
     Two expiry thresholds are used:
 
-    * **5 minutes** — for tasks where the worker never set a
-      ``worker_started_at`` heartbeat in ``config``.  The submission worker
-      writes this key within seconds of picking up the message, so its
-      absence after 5 min means the Celery message was lost before any worker
-      could start (e.g. killed during a rolling deploy).
+    * **5 minutes + no active worker** — for tasks where the worker never set
+      a ``worker_started_at`` heartbeat AND no other submission is currently
+      running.  The submission worker writes the heartbeat within seconds of
+      picking up the message; if it is absent after 5 min *and* no other
+      worker is active, the Celery message was lost (e.g. worker killed during
+      a rolling deploy).  If another submission *is* actively running, the
+      task is legitimately queued behind it and must not be killed.
     * **70 minutes** — for tasks where a worker did start but never completed.
       Safely above the per-attempt ``soft_time_limit`` (20 min) ×
       ``max_retries + 1`` (3 attempts = 60 min total), so only genuinely
@@ -303,26 +305,40 @@ def expire_stale_submitting_tasks() -> dict:
     from models import AnalysisTask, get_db
 
     now = datetime.now(timezone.utc)
-    # Fetch all tasks stuck in submitting for more than 5 minutes.
-    # (Tasks younger than 5 min are still within normal dispatch latency.)
     lost_cutoff = now - timedelta(minutes=5)
     stuck_cutoff = now - timedelta(minutes=70)
 
     db = get_db()
     expired = 0
     try:
-        candidates = (
-            db.query(AnalysisTask)
-            .filter(
-                AnalysisTask.status == "submitting",
-                AnalysisTask.created_at < lost_cutoff,
-            )
-            .all()
+        # Load ALL currently-submitting tasks (not just old ones) so we can
+        # determine whether the submission worker is actively processing one.
+        all_submitting = (
+            db.query(AnalysisTask).filter(AnalysisTask.status == "submitting").all()
         )
-        for task in candidates:
+
+        # A worker that has started sets worker_started_at within seconds of
+        # picking up the message.  If ANY task has this heartbeat, the
+        # submission-worker is busy — tasks without a heartbeat are
+        # legitimately queued, not lost.
+        any_worker_active = any(
+            (t.config or {}).get("worker_started_at") is not None
+            for t in all_submitting
+        )
+
+        for task in all_submitting:
+            if task.created_at >= lost_cutoff:
+                # Too young to act on — still within normal dispatch latency.
+                continue
+
             worker_started_at = (task.config or {}).get("worker_started_at")
             if worker_started_at is None:
-                # Worker never started: Celery message was lost during deploy.
+                if any_worker_active:
+                    # Another submission is actively running — this task is
+                    # legitimately waiting in the submission queue.
+                    continue
+                # No worker is active and no heartbeat after 5 min:
+                # Celery message was lost before pickup.
                 error_msg = (
                     "Celery task message was lost before a worker could start "
                     "(likely killed during a rolling deploy). Please resubmit."
