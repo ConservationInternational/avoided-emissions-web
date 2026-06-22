@@ -536,6 +536,7 @@ def compute_exact_match_groups_with_splitting(
     processed_vals: dict[str, np.ndarray] = {}
 
     for var_name in polygon_vars:
+        _var_t0 = _time.perf_counter()
         region_ids_list, region_geoms_arr, tree = var_regions[var_name]
         n_curr = len(curr_geoms)
 
@@ -549,10 +550,24 @@ def compute_exact_match_groups_with_splitting(
         # Bulk STRtree query: (piece_indices, region_indices) for every
         # (piece, region) pair that truly intersects.
         piece_idxs, reg_idxs = tree.query(curr_geoms, predicate="intersects")
+        logger.info(
+            "[SPLIT] %s: STRtree query on %d pieces → %d candidate pairs in %.2fs",
+            var_name,
+            n_curr,
+            len(piece_idxs),
+            _time.perf_counter() - _var_t0,
+        )
 
         # Compute all intersections in a single C-level ufunc call
+        _isect_t0 = _time.perf_counter()
         intersections = shapely.intersection(
             curr_geoms[piece_idxs], region_geoms_arr[reg_idxs]
+        )
+        logger.info(
+            "[SPLIT] %s: shapely.intersection on %d pairs in %.2fs",
+            var_name,
+            len(piece_idxs),
+            _time.perf_counter() - _isect_t0,
         )
 
         # Discard empty / zero-area results
@@ -568,6 +583,13 @@ def compute_exact_match_groups_with_splitting(
         no_hit = np.setdiff1d(np.arange(n_curr), hit_pieces)
         n_hits = len(piece_idxs)
         n_miss = len(no_hit)
+        logger.info(
+            "[SPLIT] %s: %d valid intersections, %d hit pieces, %d miss (no region)",
+            var_name,
+            n_hits,
+            len(hit_pieces),
+            n_miss,
+        )
 
         # Build combined arrays: intersecting pieces first, then non-intersecting
         new_orig_idxs = np.empty(n_hits + n_miss, dtype=curr_orig_idxs.dtype)
@@ -596,13 +618,28 @@ def compute_exact_match_groups_with_splitting(
         curr_geoms = new_geoms
         processed_vals = new_processed
 
+        logger.info(
+            "[SPLIT] %s: variable done in %.2fs → %d output pieces total",
+            var_name,
+            _time.perf_counter() - _var_t0,
+            len(curr_geoms),
+        )
+
     # ── Step 3: sliver merging (<10% of original site area) ──────────────────
     piece_areas = shapely.area(curr_geoms)
     piece_orig_areas = orig_geom_areas[curr_orig_idxs]
     area_fractions = np.where(piece_orig_areas > 0, piece_areas / piece_orig_areas, 1.0)
     is_sliver = area_fractions < 0.1
 
+    n_slivers = int(is_sliver.sum())
+    logger.info(
+        "[SPLIT] sliver check: %d/%d pieces are slivers (<10%% of original area)",
+        n_slivers,
+        len(curr_geoms),
+    )
+
     if is_sliver.any():
+        _sliver_t0 = _time.perf_counter()
         piece_df = pd.DataFrame(
             {
                 "orig_idx": curr_orig_idxs,
@@ -612,6 +649,7 @@ def compute_exact_match_groups_with_splitting(
         )
         rows_to_drop: list[int] = []
         geom_updates: dict[int, object] = {}
+        _n_sliver_groups = 0
         for _orig_idx, grp in piece_df.groupby("orig_idx"):
             if len(grp) <= 1:
                 continue  # site was not split — nothing to merge
@@ -619,6 +657,7 @@ def compute_exact_match_groups_with_splitting(
             mains = grp[~grp["is_sliver"]]
             if slivers.empty:
                 continue
+            _n_sliver_groups += 1
             if mains.empty:
                 # All pieces are slivers — keep only the largest
                 keep_idx = int(grp["piece_area"].idxmax())
@@ -635,6 +674,15 @@ def compute_exact_match_groups_with_splitting(
             )
             geom_updates[largest_idx] = shapely.union_all(union_input)
             rows_to_drop.extend(sliver_row_idxs)
+
+        logger.info(
+            "[SPLIT] sliver merge loop: %d groups with slivers, "
+            "%d pieces to drop, %d geom updates in %.2fs",
+            _n_sliver_groups,
+            len(rows_to_drop),
+            len(geom_updates),
+            _time.perf_counter() - _sliver_t0,
+        )
 
         if geom_updates or rows_to_drop:
             for row_i, new_geom in geom_updates.items():

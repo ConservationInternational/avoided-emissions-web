@@ -371,11 +371,11 @@ def get_user_site_set_geojson_by_bounds_and_zoom(
 
 
 def get_user_site_set_detail(site_set_id, user_id):
-    """Return full details for one user-owned site set, including preview rows.
+    """Return metadata for one user-owned site set.
 
-    For large datasets (>5000 features), returns a simplified/sampled GeoJSON
-    preview to prevent 504 Gateway Timeouts. The full dataset can still be
-    used for task submission via get_user_site_set_gdf().
+    Returns the summary row (name, bounds, n_sites, etc.) without loading any
+    site geometries.  Map rendering uses the MVT tile endpoint; the AG Grid
+    preview table uses the paginated ``get_user_site_set_preview_rows`` query.
     """
     db = get_db()
     try:
@@ -387,13 +387,7 @@ def get_user_site_set_detail(site_set_id, user_id):
         if not site_set:
             return None
 
-        # Use simplified GeoJSON for map preview to avoid timeout on large datasets
-        geojson_fc = _get_user_site_set_geojson_simplified(site_set_id)
-
-        return {
-            **_site_set_summary_row(site_set),
-            "geojson": json.dumps(geojson_fc),
-        }
+        return _site_set_summary_row(site_set)
     finally:
         db.close()
 
