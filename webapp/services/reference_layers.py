@@ -495,7 +495,7 @@ def compute_exact_match_groups_with_splitting(
             region_ids: list[str] = []
             region_geom_list: list = []
             for rid, geojson_str in rows:
-                if not geojson_str:
+                if not geojson_str or rid is None:
                     continue
                 g = shape(json.loads(geojson_str))
                 if not g.is_valid:
@@ -528,9 +528,10 @@ def compute_exact_match_groups_with_splitting(
     #   curr_orig_idxs  – index into the original gdf for each piece
     #   curr_geoms      – current piece geometry (numpy object array)
     #   processed_vals  – dict of var_name → numpy object array of region IDs
-    orig_geom_areas = shapely.area(np.asarray(gdf.geometry, dtype=object))
     curr_orig_idxs: np.ndarray = np.arange(len(gdf))
     curr_geoms: np.ndarray = shapely.make_valid(np.asarray(gdf.geometry, dtype=object))
+    # Compute areas from validated geometries so sliver detection uses consistent values.
+    orig_geom_areas = shapely.area(curr_geoms)
     processed_vals: dict[str, np.ndarray] = {}
 
     for var_name in polygon_vars:
@@ -646,17 +647,23 @@ def compute_exact_match_groups_with_splitting(
                     processed_vals[v] = processed_vals[v][keep_mask]
 
     # ── Step 4: build output GeoDataFrame from arrays ─────────────────────────
-    # Assign sub_site_index (0-based sequential within each original site)
-    # and is_sub_site (True when the original site was split into >1 piece).
+    # Retrieve site_id first so sub_site_index_arr can be computed per site_id,
+    # consistent with the _sub_site_counters approach in analysis_task.py and
+    # the (task_id, site_id, sub_site_index) unique constraint in TaskSite.
+    site_id_arr = gdf["site_id"].to_numpy()[curr_orig_idxs]
+
+    # sub_site_index: 0-based sequential per site_id string (not per orig_idx).
+    # This matches _sub_site_counters in analysis_task.py so group_mapping tuples
+    # and TaskSite records always agree, even for duplicate site_id values.
+    site_id_series = pd.Series(site_id_arr)
+    sub_site_index_arr = (
+        site_id_series.groupby(site_id_series, sort=False).cumcount().to_numpy()
+    )
+
+    # is_sub_site: True when the original site produced more than one output piece.
     orig_idx_series = pd.Series(curr_orig_idxs)
     piece_counts = orig_idx_series.value_counts()
-    sub_site_index_arr = (
-        orig_idx_series.groupby(orig_idx_series, sort=False).cumcount().to_numpy()
-    )
     is_sub_site_arr = orig_idx_series.map(piece_counts).gt(1).to_numpy()
-
-    # Retrieve per-site scalar metadata from the original GDF
-    site_id_arr = gdf["site_id"].to_numpy()[curr_orig_idxs]
     site_name_arr = (
         gdf["site_name"].to_numpy()[curr_orig_idxs]
         if "site_name" in gdf.columns

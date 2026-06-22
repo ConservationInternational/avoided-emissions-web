@@ -7,7 +7,9 @@ import uuid
 from datetime import datetime, timezone
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
+import shapely
 from sqlalchemy import text
 
 from config import Config
@@ -501,6 +503,13 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _t0,
         )
 
+        if gdf["site_id"].duplicated().any():
+            n_dups = int(gdf["site_id"].duplicated().sum())
+            raise ValueError(
+                f"Task {task_id}: site set has {n_dups} duplicate site_id value(s). "
+                "Each site must have a unique site_id."
+            )
+
         # Always split sites across exact-match boundaries when polygon-type
         # exact_match_vars are specified.  Splitting assigns each site piece
         # to a unique region combination so Batch can process one group at a
@@ -523,10 +532,15 @@ def _complete_analysis_task_submission(task_id, user_id):
             gdf_for_db = gdf
             group_mapping = None
 
-        # Vectorize CRS reprojection: project the whole GDF once instead of
-        # creating a new single-row GeoDataFrame per site (O(n) allocations).
-        _gdf_cea = gdf_for_db.to_crs("ESRI:54009")
-        _areas_ha = _gdf_cea.geometry.area / 10_000.0
+        # Extract area_ha from the existing column (split_gdf always has it,
+        # computed by reference_layers.py as piece_areas_ha; non-split gdf has
+        # it from the DB query).  Fall back to a degree-coordinate approximation
+        # only when the column is absent (uploaded file without pre-computed areas).
+        if "area_ha" in gdf_for_db.columns:
+            _areas_ha_arr = gdf_for_db["area_ha"].to_numpy(dtype=float)
+        else:
+            _geoms_approx = np.asarray(gdf_for_db.geometry, dtype=object)
+            _areas_ha_arr = shapely.area(_geoms_approx) * 111_000 * 111_000 / 10_000
 
         # Delete any TaskSite rows left by a previous interrupted attempt so
         # this step is idempotent on Celery retry (acks_late + reject_on_worker_lost
@@ -544,40 +558,64 @@ def _complete_analysis_task_submission(task_id, user_id):
                 existing_site_count,
             )
 
-        # Create TaskSite rows and update n_sites on the task.
-        # sub_site_index is derived from a per-site_id counter rather than
-        # reading a column so that duplicate site_ids in the source data
-        # (multiple features sharing the same site_id) each get a unique
-        # sequential index instead of all defaulting to 0 and violating
-        # the task_sites_task_id_site_id_sub_site_index_key constraint.
+        # Bulk-insert TaskSite rows using SQLAlchemy Core (bypasses ORM overhead).
+        # For 200K rows, db.add() in a loop takes 20-70s; execute(insert(), mappings)
+        # takes <2s because it avoids per-row Python object instantiation and
+        # sends all rows in a single INSERT statement.
         task.n_sites = len(gdf)
-        _sub_site_counters: dict[str, int] = {}
-        for i, (_, row) in enumerate(gdf_for_db.iterrows()):
-            geom = row.geometry
-            area_ha = (
-                float(_areas_ha.iloc[i])
-                if (geom is not None and not geom.is_empty)
-                else None
-            )
-
-            sid = str(row["site_id"])
-            sub_site_index = _sub_site_counters.get(sid, 0)
-            _sub_site_counters[sid] = sub_site_index + 1
-
-            site = TaskSite(
-                task_id=task_id,
-                site_id=sid,
-                site_name=str(row.get("site_name", "")),
-                start_date=pd.to_datetime(row["start_date"]),
-                end_date=pd.to_datetime(row["end_date"])
-                if pd.notna(row.get("end_date"))
-                else None,
-                area_ha=area_ha,
-                sub_site_index=sub_site_index,
-                is_sub_site=sub_site_index > 0 or bool(row.get("is_sub_site", False)),
-                original_area_ha=row.get("original_area_ha"),
-            )
-            db.add(site)
+        _geoms_arr = np.asarray(gdf_for_db.geometry, dtype=object)
+        _empty_mask = shapely.is_empty(_geoms_arr) | shapely.is_missing(_geoms_arr)
+        _sid_arr = gdf_for_db["site_id"].astype(str).tolist()
+        _name_col = (
+            gdf_for_db["site_name"]
+            if "site_name" in gdf_for_db.columns
+            else gdf_for_db["site_id"]
+        )
+        _name_arr = _name_col.astype(str).tolist()
+        _start_py = pd.to_datetime(gdf_for_db["start_date"]).tolist()
+        _end_dt = pd.to_datetime(
+            gdf_for_db["end_date"] if "end_date" in gdf_for_db.columns else pd.NaT,
+            errors="coerce",
+        )
+        _end_py = [None if pd.isna(v) else v for v in _end_dt]
+        _sub_idx_arr = (
+            gdf_for_db["sub_site_index"].to_numpy(dtype=int)
+            if "sub_site_index" in gdf_for_db.columns
+            else np.zeros(len(gdf_for_db), dtype=int)
+        )
+        _is_sub_arr = (
+            gdf_for_db["is_sub_site"].to_numpy(dtype=bool)
+            if "is_sub_site" in gdf_for_db.columns
+            else np.zeros(len(gdf_for_db), dtype=bool)
+        )
+        _orig_raw = (
+            gdf_for_db["original_area_ha"].tolist()
+            if "original_area_ha" in gdf_for_db.columns
+            else [None] * len(gdf_for_db)
+        )
+        _orig_py = [
+            None if (v is None or (isinstance(v, float) and np.isnan(v))) else float(v)
+            for v in _orig_raw
+        ]
+        _site_mappings = [
+            {
+                "task_id": task_id,
+                "site_id": _sid_arr[i],
+                "site_name": _name_arr[i],
+                "start_date": _start_py[i],
+                "end_date": _end_py[i],
+                "area_ha": (
+                    None
+                    if (_empty_mask[i] or np.isnan(_areas_ha_arr[i]))
+                    else float(_areas_ha_arr[i])
+                ),
+                "sub_site_index": int(_sub_idx_arr[i]),
+                "is_sub_site": bool(_is_sub_arr[i]) or int(_sub_idx_arr[i]) > 0,
+                "original_area_ha": _orig_py[i],
+            }
+            for i in range(len(gdf_for_db))
+        ]
+        db.execute(TaskSite.__table__.insert(), _site_mappings)
         db.commit()
 
         logger.info(
@@ -625,8 +663,25 @@ def _complete_analysis_task_submission(task_id, user_id):
         # array element processes one (group × replicate) with data loaded once
         # per group.  This is independent of group_by_exact_matches, which
         # controls whether sites within a group are matched jointly or independently.
-        _batch_group_sites = bool(group_mapping)
-        _n_match_units = len(group_mapping) if _batch_group_sites else len(gdf_for_db)
+        #
+        # Group 0 holds sites with no exact-match region assignment (all polygon
+        # exact_match_vars were NULL for that site).  The R script processes group
+        # 0 as a real group, which would run matching without any region constraint.
+        # Exclude group 0 from the Batch array job; these sites will not be matched.
+        if group_mapping and 0 in group_mapping:
+            logger.warning(
+                "[SUBMIT-WORKER] Task %s: %d site(s) had no exact-match region "
+                "assignment (group 0) and will be excluded from matching",
+                task_id,
+                len(group_mapping[0]),
+            )
+            group_mapping_for_batch = {k: v for k, v in group_mapping.items() if k != 0}
+        else:
+            group_mapping_for_batch = group_mapping
+        _batch_group_sites = bool(group_mapping_for_batch)
+        _n_match_units = (
+            len(group_mapping_for_batch) if _batch_group_sites else len(gdf_for_db)
+        )
         _raw_array_size = _n_match_units * n_replicates
         _match_step_base = {
             "timeout_seconds": 14400,  # 4 h per element
@@ -647,7 +702,7 @@ def _complete_analysis_task_submission(task_id, user_id):
         else:
             _groups_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // max(1, n_replicates))
             _unit_ids = (
-                list(group_mapping.keys())
+                list(group_mapping_for_batch.keys())
                 if _batch_group_sites
                 else list(range(_n_match_units))
             )
@@ -710,7 +765,11 @@ def _complete_analysis_task_submission(task_id, user_id):
                 else {}
             ),
             "batch_group_sites": _batch_group_sites,
-            **({"exact_match_group_mapping": group_mapping} if group_mapping else {}),
+            **(
+                {"exact_match_group_mapping": group_mapping_for_batch}
+                if group_mapping_for_batch
+                else {}
+            ),
             **({"match_chunks": _match_chunks} if _match_chunks is not None else {}),
             **({"random_seed": random_seed} if random_seed is not None else {}),
             **(
@@ -989,6 +1048,15 @@ def submit_analysis_task(
             "script registered on the trends.earth API."
         )
 
+    if gdf is None or gdf.empty:
+        raise ValueError("gdf must be a non-empty GeoDataFrame.")
+    if gdf["site_id"].duplicated().any():
+        n_dups = int(gdf["site_id"].duplicated().sum())
+        raise ValueError(
+            f"Site set has {n_dups} duplicate site_id value(s). "
+            "Each site must have a unique site_id."
+        )
+
     import time as _time
 
     _submit_t0 = _time.perf_counter()
@@ -1093,40 +1161,68 @@ def submit_analysis_task(
         )
         db.add(task)
 
-        # Vectorize CRS reprojection: project the whole GDF once instead of
-        # creating a new single-row GeoDataFrame per site (O(n) allocations).
-        # GeoPandas returns NaN area for None/empty geometries after to_crs,
-        # so the per-row guard below discards those values and stores None.
-        gdf_equal_area = gdf_for_db.to_crs("ESRI:54009")
-        areas_ha = gdf_equal_area.geometry.area / 10_000.0
+        # Extract area_ha from the existing column (split_gdf has piece_areas_ha;
+        # non-split gdf has it from the DB query).  Fall back to degree-coordinate
+        # approximation only when the column is absent.
+        if "area_ha" in gdf_for_db.columns:
+            _areas_ha_arr = gdf_for_db["area_ha"].to_numpy(dtype=float)
+        else:
+            _geoms_approx = np.asarray(gdf_for_db.geometry, dtype=object)
+            _areas_ha_arr = shapely.area(_geoms_approx) * 111_000 * 111_000 / 10_000
 
-        _sub_site_counters: dict[str, int] = {}
-        for i, (_, row) in enumerate(gdf_for_db.iterrows()):
-            geom = row.geometry
-            area_ha = (
-                float(areas_ha.iloc[i])
-                if (geom is not None and not geom.is_empty)
-                else None
-            )
-
-            sid = str(row["site_id"])
-            sub_site_index = _sub_site_counters.get(sid, 0)
-            _sub_site_counters[sid] = sub_site_index + 1
-
-            site = TaskSite(
-                task_id=task_id,
-                site_id=sid,
-                site_name=str(row.get("site_name", "")),
-                start_date=pd.to_datetime(row["start_date"]),
-                end_date=pd.to_datetime(row["end_date"])
-                if pd.notna(row.get("end_date"))
-                else None,
-                area_ha=area_ha,
-                sub_site_index=sub_site_index,
-                is_sub_site=sub_site_index > 0 or bool(row.get("is_sub_site", False)),
-                original_area_ha=row.get("original_area_ha"),
-            )
-            db.add(site)
+        _geoms_arr = np.asarray(gdf_for_db.geometry, dtype=object)
+        _empty_mask = shapely.is_empty(_geoms_arr) | shapely.is_missing(_geoms_arr)
+        _sid_arr = gdf_for_db["site_id"].astype(str).tolist()
+        _name_col = (
+            gdf_for_db["site_name"]
+            if "site_name" in gdf_for_db.columns
+            else gdf_for_db["site_id"]
+        )
+        _name_arr = _name_col.astype(str).tolist()
+        _start_py = pd.to_datetime(gdf_for_db["start_date"]).tolist()
+        _end_dt = pd.to_datetime(
+            gdf_for_db["end_date"] if "end_date" in gdf_for_db.columns else pd.NaT,
+            errors="coerce",
+        )
+        _end_py = [None if pd.isna(v) else v for v in _end_dt]
+        _sub_idx_arr = (
+            gdf_for_db["sub_site_index"].to_numpy(dtype=int)
+            if "sub_site_index" in gdf_for_db.columns
+            else np.zeros(len(gdf_for_db), dtype=int)
+        )
+        _is_sub_arr = (
+            gdf_for_db["is_sub_site"].to_numpy(dtype=bool)
+            if "is_sub_site" in gdf_for_db.columns
+            else np.zeros(len(gdf_for_db), dtype=bool)
+        )
+        _orig_raw = (
+            gdf_for_db["original_area_ha"].tolist()
+            if "original_area_ha" in gdf_for_db.columns
+            else [None] * len(gdf_for_db)
+        )
+        _orig_py = [
+            None if (v is None or (isinstance(v, float) and np.isnan(v))) else float(v)
+            for v in _orig_raw
+        ]
+        _site_mappings = [
+            {
+                "task_id": task_id,
+                "site_id": _sid_arr[i],
+                "site_name": _name_arr[i],
+                "start_date": _start_py[i],
+                "end_date": _end_py[i],
+                "area_ha": (
+                    None
+                    if (_empty_mask[i] or np.isnan(_areas_ha_arr[i]))
+                    else float(_areas_ha_arr[i])
+                ),
+                "sub_site_index": int(_sub_idx_arr[i]),
+                "is_sub_site": bool(_is_sub_arr[i]) or int(_sub_idx_arr[i]) > 0,
+                "original_area_ha": _orig_py[i],
+            }
+            for i in range(len(gdf_for_db))
+        ]
+        db.execute(TaskSite.__table__.insert(), _site_mappings)
         db.commit()
 
         logger.info(
@@ -1155,8 +1251,25 @@ def submit_analysis_task(
         # array element processes one (group × replicate) with data loaded once
         # per group.  This is independent of group_by_exact_matches, which
         # controls whether sites within a group are matched jointly or independently.
-        _batch_group_sites = bool(group_mapping)
-        _n_match_units = len(group_mapping) if _batch_group_sites else len(gdf_for_db)
+        #
+        # Group 0 holds sites with no exact-match region assignment (all polygon
+        # exact_match_vars were NULL for that site).  The R script processes group
+        # 0 as a real group, which would run matching without any region constraint.
+        # Exclude group 0 from the Batch array job; these sites will not be matched.
+        if group_mapping and 0 in group_mapping:
+            logger.warning(
+                "[SUBMIT] Task %s: %d site(s) had no exact-match region "
+                "assignment (group 0) and will be excluded from matching",
+                task_id,
+                len(group_mapping[0]),
+            )
+            group_mapping_for_batch = {k: v for k, v in group_mapping.items() if k != 0}
+        else:
+            group_mapping_for_batch = group_mapping
+        _batch_group_sites = bool(group_mapping_for_batch)
+        _n_match_units = (
+            len(group_mapping_for_batch) if _batch_group_sites else len(gdf_for_db)
+        )
         _raw_array_size = _n_match_units * n_replicates
         _match_step_base = {
             "timeout_seconds": 14400,  # 4 h per element
@@ -1177,7 +1290,7 @@ def submit_analysis_task(
         else:
             _groups_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // max(1, n_replicates))
             _unit_ids = (
-                list(group_mapping.keys())
+                list(group_mapping_for_batch.keys())
                 if _batch_group_sites
                 else list(range(_n_match_units))
             )
@@ -1242,7 +1355,11 @@ def submit_analysis_task(
                 else {}
             ),
             "batch_group_sites": _batch_group_sites,
-            **({"exact_match_group_mapping": group_mapping} if group_mapping else {}),
+            **(
+                {"exact_match_group_mapping": group_mapping_for_batch}
+                if group_mapping_for_batch
+                else {}
+            ),
             **({"match_chunks": _match_chunks} if _match_chunks is not None else {}),
             **({"random_seed": random_seed} if random_seed is not None else {}),
             "results_s3_uri": (

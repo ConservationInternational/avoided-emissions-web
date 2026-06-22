@@ -6,7 +6,7 @@ import logging
 
 import geopandas as gpd
 import pandas as pd
-from shapely import wkb
+from shapely import from_wkb, wkb
 from sqlalchemy import text
 
 from config import Config
@@ -579,22 +579,27 @@ def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
             f"Site set {site_set_id} has no valid geometries — cannot stream to Parquet."
         )
 
-    records = [
-        {
-            "site_id": r.site_id,
-            "site_name": r.site_name,
-            "start_date": r.start_date,
-            "end_date": r.end_date,
-            "area_ha": r.area_ha,
-            "geometry": wkb.loads(bytes(r.geom_wkb)),
-        }
-        for r in rows
-    ]
     total_rows = len(rows)
-    del rows  # release DB row objects before building GDF
-
-    gdf = gpd.GeoDataFrame(records, crs="EPSG:4326", geometry="geometry")
-    del records
+    # Vectorized WKB decode: C-level batch decode is ~5-10x faster than
+    # per-row wkb.loads().  Build the GeoDataFrame column-by-column from
+    # individual lists to avoid an intermediate list-of-dicts, which would
+    # hold rows + records + GDF simultaneously (~3x peak RAM).
+    wkb_bytes = [bytes(r.geom_wkb) for r in rows]
+    geoms = from_wkb(wkb_bytes)
+    del wkb_bytes
+    gdf = gpd.GeoDataFrame(
+        {
+            "site_id": [r.site_id for r in rows],
+            "site_name": [r.site_name for r in rows],
+            "start_date": [r.start_date for r in rows],
+            "end_date": [r.end_date for r in rows],
+            "area_ha": [r.area_ha for r in rows],
+            "geometry": geoms,
+        },
+        crs="EPSG:4326",
+        geometry="geometry",
+    )
+    del rows, geoms
     gdf["start_date"] = pd.to_datetime(gdf["start_date"])
     gdf["end_date"] = pd.to_datetime(gdf["end_date"])
     gdf.to_parquet(buf)
