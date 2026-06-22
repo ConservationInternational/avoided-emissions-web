@@ -550,8 +550,13 @@ def compute_exact_match_groups_with_splitting(
         curr_geoms = shapely.make_valid(curr_geoms)
 
         # Bulk STRtree query: (piece_indices, region_indices) for every
-        # (piece, region) pair that truly intersects.
-        piece_idxs, reg_idxs = tree.query(curr_geoms, predicate="intersects")
+        # (piece, region) pair whose bounding boxes overlap.  We deliberately
+        # omit predicate="intersects" here: the PreparedGeometry predicate test
+        # in STRtree is ~175× slower per pair for ecoregion geometries than the
+        # subsequent shapely.intersection ufunc, so it is faster to collect all
+        # bbox candidates and let the valid_mask filter (below) discard non-
+        # intersecting pairs via the same ufunc call.
+        piece_idxs, reg_idxs = tree.query(curr_geoms)
         logger.info(
             "[SPLIT] %s: STRtree query on %d pieces → %d candidate pairs in %.2fs",
             var_name,
@@ -735,7 +740,12 @@ def compute_exact_match_groups_with_splitting(
     # values stored in TaskSite (web UI) and the S3 Parquet (R pipeline) are accurate
     # and consistent with each other.
     _ea_tfm = Transformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
-    _pieces_ea = shapely.transform(curr_geoms, _ea_tfm.transform)
+    # shapely.transform passes a single (N, 2) coordinate array; pyproj
+    # Transformer.transform expects separate (xx, yy) arrays — wrap it.
+    _pieces_ea = shapely.transform(
+        curr_geoms,
+        lambda c: np.column_stack(_ea_tfm.transform(c[:, 0], c[:, 1])),
+    )
     piece_areas_ha = shapely.area(_pieces_ea) / 10_000.0
     del _pieces_ea
 
@@ -744,7 +754,8 @@ def compute_exact_match_groups_with_splitting(
         orig_site_area_ha = gdf["area_ha"].to_numpy(dtype=float)
     else:
         _orig_ea = shapely.transform(
-            np.asarray(gdf.geometry, dtype=object), _ea_tfm.transform
+            np.asarray(gdf.geometry, dtype=object),
+            lambda c: np.column_stack(_ea_tfm.transform(c[:, 0], c[:, 1])),
         )
         orig_site_area_ha = shapely.area(_orig_ea) / 10_000.0
         del _orig_ea

@@ -533,7 +533,11 @@ def _complete_analysis_task_submission(task_id, user_id):
         # carries these values rather than the DB-streamed originals.
         _ea_tfm = _ProjTransformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
         _geoms_deg = np.asarray(gdf_for_db.geometry, dtype=object)
-        _geoms_ea = shapely.transform(_geoms_deg, _ea_tfm.transform)
+        # shapely.transform passes a single (N, 2) array; pyproj expects (xx, yy).
+        _geoms_ea = shapely.transform(
+            _geoms_deg,
+            lambda c: np.column_stack(_ea_tfm.transform(c[:, 0], c[:, 1])),
+        )
         _areas_ha_arr = shapely.area(_geoms_ea) / 10_000.0
         del _geoms_ea
         gdf_for_db = gdf_for_db.assign(area_ha=_areas_ha_arr)
@@ -1140,7 +1144,11 @@ def submit_analysis_task(
         # carries these values.
         _ea_tfm = _ProjTransformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
         _geoms_deg = np.asarray(gdf_for_db.geometry, dtype=object)
-        _geoms_ea = shapely.transform(_geoms_deg, _ea_tfm.transform)
+        # shapely.transform passes a single (N, 2) array; pyproj expects (xx, yy).
+        _geoms_ea = shapely.transform(
+            _geoms_deg,
+            lambda c: np.column_stack(_ea_tfm.transform(c[:, 0], c[:, 1])),
+        )
         _areas_ha_arr = shapely.area(_geoms_ea) / 10_000.0
         del _geoms_ea
         gdf_for_db = gdf_for_db.assign(area_ha=_areas_ha_arr)
