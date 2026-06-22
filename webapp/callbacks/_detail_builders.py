@@ -47,14 +47,12 @@ def _build_overview(task, sites, totals, quality_warnings=None):
 
     caliper_val = config.get("caliper_width")
     caliper_display = (
-        "Disabled" if caliper_val == 0 else (caliper_val if caliper_val else "ΓÇö")
+        "Disabled" if caliper_val == 0 else (caliper_val if caliper_val else "—")
     )
     max_ctrl = config.get("max_controls_per_treatment")
-    max_ctrl_display = (
-        "No limit" if max_ctrl == 0 else (max_ctrl if max_ctrl else "ΓÇö")
-    )
+    max_ctrl_display = "No limit" if max_ctrl == 0 else (max_ctrl if max_ctrl else "—")
     mem_mib = config.get("match_memory_mib")
-    mem_display = f"{mem_mib / 1024:.1f} GB" if mem_mib else "ΓÇö"
+    mem_display = f"{mem_mib / 1024:.1f} GB" if mem_mib else "—"
 
     # Derive API execution ID and batch job names from extract_job_id.
     api_exec_id = None
@@ -107,11 +105,11 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         ),
                         _detail_row(
                             "Covariates",
-                            ", ".join(task.covariates or []) or "ΓÇö",
+                            ", ".join(task.covariates or []) or "—",
                         ),
                         _detail_row(
                             "Exact match variables",
-                            ", ".join(config.get("exact_match_vars", [])) or "ΓÇö",
+                            ", ".join(config.get("exact_match_vars", [])) or "—",
                         ),
                         _detail_row(
                             "Resolution",
@@ -125,25 +123,25 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         ),
                         _detail_row(
                             "Max treatment pixels",
-                            config.get("max_treatment_pixels", "ΓÇö"),
+                            config.get("max_treatment_pixels", "—"),
                         ),
                         _detail_row(
                             "Control multiplier",
-                            config.get("control_multiplier", "ΓÇö"),
+                            config.get("control_multiplier", "—"),
                         ),
                         _detail_row(
                             "Min site area (ha)",
-                            config.get("min_site_area_ha", "ΓÇö"),
+                            config.get("min_site_area_ha", "—"),
                         ),
                         _detail_row(
                             "Min GLM treatment pixels",
-                            config.get("min_glm_treatment_pixels", "ΓÇö"),
+                            config.get("min_glm_treatment_pixels", "—"),
                         ),
                         _detail_row("Caliper width (SD)", caliper_display),
                         _detail_row("Max controls per treatment", max_ctrl_display),
                         _detail_row(
                             "Min control distance (km)",
-                            config.get("min_control_distance_km", "ΓÇö"),
+                            config.get("min_control_distance_km", "—"),
                         ),
                         _detail_row(
                             "Separation fallback",
@@ -174,7 +172,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         _detail_row("Matching memory", mem_display),
                         _detail_row(
                             "Batch job queue",
-                            config.get("matching_job_queue", "ΓÇö"),
+                            config.get("matching_job_queue", "—"),
                         ),
                         html.Hr(className="my-2"),
                         html.H6(
@@ -184,15 +182,15 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         ),
                         _detail_row(
                             "API execution ID",
-                            api_exec_id or "ΓÇö",
+                            api_exec_id or "—",
                         ),
                         _detail_row(
                             "Batch job names",
-                            ", ".join(batch_job_names) if batch_job_names else "ΓÇö",
+                            ", ".join(batch_job_names) if batch_job_names else "—",
                         ),
                         _detail_row(
                             "S3 output path",
-                            task.results_s3_uri or "ΓÇö",
+                            task.results_s3_uri or "—",
                         ),
                         _detail_row(
                             "Internal task ID",
@@ -208,7 +206,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                 ),
                                 (
                                     html.A(
-                                        config.get("code_git_sha", "ΓÇö")[:7],
+                                        config.get("code_git_sha", "—")[:7],
                                         href=(
                                             "https://github.com/ConservationInternational"
                                             "/avoided-emissions-web/commit/"
@@ -222,7 +220,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                         },
                                     )
                                     if config.get("code_git_sha")
-                                    else html.Span("ΓÇö", style={"fontWeight": "500"})
+                                    else html.Span("—", style={"fontWeight": "500"})
                                 ),
                             ],
                             style={
@@ -242,7 +240,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                 (
                                     html.A(
                                         (task.extra_metadata or {}).get(
-                                            "r_analysis_git_sha", "ΓÇö"
+                                            "r_analysis_git_sha", "—"
                                         )[:7],
                                         href=(
                                             "https://github.com/ConservationInternational"
@@ -259,7 +257,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                     if (task.extra_metadata or {}).get(
                                         "r_analysis_git_sha"
                                     )
-                                    else html.Span("ΓÇö", style={"fontWeight": "500"})
+                                    else html.Span("—", style={"fontWeight": "500"})
                                 ),
                             ],
                             style={
@@ -607,7 +605,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                 ),
                                 html.Strong("Match Quality Issues"),
                                 html.Span(
-                                    f" ΓÇö {subtitle}",
+                                    f" — {subtitle}",
                                     className="text-muted ms-1",
                                 ),
                             ]

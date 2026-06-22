@@ -434,7 +434,7 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                             html.P(
                                 [
                                     html.Strong("Critical quality issue"),
-                                    " (red) ΓÇö Results are likely unreliable. "
+                                    " (red) — Results are likely unreliable. "
                                     "Triggers include:",
                                 ],
                                 className="mb-1",
@@ -443,7 +443,7 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                                 [
                                     html.Li(
                                         f"Fewer than {_PCT_MATCHED_CRITICAL}% "
-                                        f"of treatment pixels matched ΓÇö "
+                                        f"of treatment pixels matched — "
                                         f"too few for statistical confidence. "
                                         f"This is often caused by covariate "
                                         f"separation (see group diagnostics "
@@ -451,7 +451,7 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                                     ),
                                     html.Li(
                                         f"One or more covariates with "
-                                        f"|SMD| \u2265 {_SMD_CRITICAL} ΓÇö "
+                                        f"|SMD| \u2265 {_SMD_CRITICAL} — "
                                         f"severe imbalance between treatment "
                                         f"and control groups, meaning matching "
                                         f"failed to find comparable areas."
@@ -462,7 +462,7 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                             html.P(
                                 [
                                     html.Strong("Quality concern"),
-                                    " (yellow) ΓÇö Results may be limited but "
+                                    " (yellow) — Results may be limited but "
                                     "are not necessarily invalid. "
                                     "Triggers include:",
                                 ],
@@ -472,14 +472,14 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                                 [
                                     html.Li(
                                         f"Fewer than {_PCT_MATCHED_WARN}% "
-                                        f"of treatment pixels matched ΓÇö "
+                                        f"of treatment pixels matched — "
                                         f"low sample size that may limit "
                                         f"reliability."
                                     ),
                                     html.Li(
                                         f"More than {_SMD_POOR_FRAC:.0%} of "
                                         f"covariates with |SMD| > {_SMD_WARN} "
-                                        f"ΓÇö overall matching quality is "
+                                        f"— overall matching quality is "
                                         f"imperfect."
                                     ),
                                 ],
@@ -665,10 +665,10 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
 
     Produces:
 
-    * **Love plot** ΓÇö standardized mean differences (uses balance CSV,
+    * **Love plot** — standardized mean differences (uses balance CSV,
       which is always small).
-    * **Propensity score QQ plot** ΓÇö from pre-computed quantiles.
-    * **Covariate histograms** ΓÇö from pre-computed bin counts.
+    * **Propensity score QQ plot** — from pre-computed quantiles.
+    * **Covariate histograms** — from pre-computed bin counts.
 
     Also provides download buttons for the underlying CSVs.
     """
@@ -716,7 +716,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
         if sid is not None:
             site_areas[str(sid)] = area or 0
 
-    # Fetch balance statistics (Love plot data) ΓÇö always small.
+    # Fetch balance statistics (Love plot data) — always small.
     balance_df = None
     balance_csv = download_results_csv(
         task_id, "balance", results_s3_uri=task.results_s3_uri
@@ -726,7 +726,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
         if balance_df.empty:
             balance_df = None
 
-    # Run quality checks (uses balance_df + totals ΓÇö both small).
+    # Run quality checks (uses balance_df + totals — both small).
     quality_warnings = _assess_match_quality(balance_df=balance_df, totals=totals)
 
     # ---- Try loading the pre-computed summary JSON -----------------------
@@ -743,7 +743,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
             summary = None
 
     if not summary or not summary.get("histograms"):
-        # Summary not available ΓÇö try to generate it in the background
+        # Summary not available — try to generate it in the background
         # via a Celery task (routed to the merge queue which has more
         # memory), then show a placeholder for now.
         try:
@@ -797,7 +797,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
 
     content.append(html.H5("Match Quality Diagnostics", className="mt-4 mb-2"))
 
-    # Per-site selector ΓÇö derive from summary stats keys
+    # Per-site selector — derive from summary stats keys
     site_ids = sorted(k for k in summary.get("summary_stats", {}) if k != "__all__")
     site_name_map = {}
     for t in totals or []:
@@ -1310,7 +1310,7 @@ def _build_plots_from_summary(store_data, site_filter=None):
         )
     components.append(dbc.Row(stat_cols, className="mb-4"))
 
-    # --- Love plot (from balance CSV ΓÇö already small) ----------------------
+    # --- Love plot (from balance CSV — already small) ----------------------
     balance_rows = store_data.get("balance_rows")
     if balance_rows:
         balance_df = pd.DataFrame(balance_rows)

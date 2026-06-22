@@ -48,7 +48,7 @@ def _authorize_task_access(task_id, share_token=None):
 
     Returns the task_id (str) if access is granted, or ``None``.
     """
-    # Mode 1: share token (lightweight check ΓÇö access was already
+    # Mode 1: share token (lightweight check — access was already
     # recorded when the page was loaded via display_page)
     if share_token:
         token_task_id = validate_share_token(share_token, record_access=False)
@@ -250,7 +250,7 @@ def _normalize_metadata_list(value):
     converts such dicts to a flat list so callers can always iterate over
     dicts.
 
-    A single-element list may also be unboxed to a flat dict ΓÇö i.e. the
+    A single-element list may also be unboxed to a flat dict — i.e. the
     record itself rather than a dict-of-dicts.  We detect this by checking
     whether the dict values are themselves dicts (nested) or scalars (flat
     record that should be wrapped).

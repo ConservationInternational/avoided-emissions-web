@@ -187,7 +187,7 @@ def register_callbacks(app, limiter=None):
             return "Your account is pending admin approval."
         if result:
             flask_login.login_user(result, remember=True)
-            # Create a refresh token ΓÇö the after_request hook in app.py
+            # Create a refresh token — the after_request hook in app.py
             # reads this from the Flask session and sets the cookie.
             token = create_refresh_token(result.id)
             if token:
@@ -465,7 +465,7 @@ def register_callbacks(app, limiter=None):
         raise PreventUpdate
 
     # ------------------------------------------------------------------
-    # Review summary ΓÇö rendered when the user switches to the Review tab
+    # Review summary — rendered when the user switches to the Review tab
     # ------------------------------------------------------------------
     _EXACT_MATCH_LABELS = {opt["value"]: opt["label"] for opt in EXACT_MATCH_OPTIONS}
 
@@ -604,20 +604,20 @@ def register_callbacks(app, limiter=None):
                     html.Table(
                         html.Tbody(
                             [
-                                _param_row("Name", task_name or "ΓÇö"),
+                                _param_row("Name", task_name or "—"),
                                 _param_row("Description", description or "(none)"),
                                 _param_row(
                                     "Sites",
                                     (
                                         f"{n_sites} site(s)"
                                         + (
-                                            f" ΓÇö {site_set_name}"
+                                            f" \u2014 {site_set_name}"
                                             if site_set_name
                                             else ""
                                         )
                                     )
                                     if sites_data
-                                    else "ΓÇö",
+                                    else "\u2014",
                                 ),
                             ]
                         ),
@@ -729,7 +729,7 @@ def register_callbacks(app, limiter=None):
                                 ),
                                 _param_row(
                                     "Random seed",
-                                    str(random_seed) if random_seed else "ΓÇö",
+                                    str(random_seed) if random_seed else "—",
                                 ),
                                 _param_row(
                                     "Matching memory",
@@ -737,7 +737,7 @@ def register_callbacks(app, limiter=None):
                                 ),
                                 _param_row(
                                     "Batch job queue",
-                                    str(matching_job_queue or "ΓÇö"),
+                                    str(matching_job_queue or "—"),
                                 ),
                             ]
                         ),
@@ -1554,7 +1554,7 @@ def register_callbacks(app, limiter=None):
         if overlap:
             return _error_alert(
                 "The following variables are selected as both covariates "
-                "and exact matches ΓÇö each must be one or the other: "
+                "and exact matches — each must be one or the other: "
                 + ", ".join(sorted(overlap))
             )
 
@@ -1829,7 +1829,7 @@ def register_callbacks(app, limiter=None):
         }.get(task.status, "secondary")
         badge = dbc.Badge(task.status.upper(), color=status_color, className="fs-5")
 
-        # Quality warning banner (above tabs) ΓÇö only for succeeded tasks
+        # Quality warning banner (above tabs) — only for succeeded tasks
         quality_banner = html.Div()
         quality_warnings = []
         if task.status == "succeeded":
@@ -1986,10 +1986,10 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
 
         if is_open:
-            # Closing ΓÇö return empty list to avoid stale data
+            # Closing — return empty list to avoid stale data
             return False, html.Div()
 
-        # Opening ΓÇö fetch existing links
+        # Opening — fetch existing links
         links = list_share_links(task_id, str(user.id))
         return True, _render_share_links_list(links, task_id)
 
@@ -2122,7 +2122,7 @@ def register_callbacks(app, limiter=None):
         if is_open:
             return False, no_update, no_update, html.Div()
 
-        # Opening ΓÇö populate inputs with current values
+        # Opening — populate inputs with current values
         user = get_current_user()
         if not user or not _check_task_access(task_id, user):
             raise PreventUpdate
