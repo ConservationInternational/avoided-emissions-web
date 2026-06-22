@@ -1081,30 +1081,24 @@ def _derive_site_set_name(filename):
     return f"{stem}_{timestamp}"
 
 
-def _write_skip_errors_csv(upload_id, skip_errors):
-    """Write skipped-row errors to S3 as a CSV and return the S3 key, or None on failure."""
+def _upload_skip_errors_csv(upload_id, csv_path):
+    """Upload a local skip-errors CSV file to S3 and return the key, or None on failure."""
     try:
-        buf = io.StringIO()
-        writer = csv.DictWriter(
-            buf,
-            fieldnames=["row_number", "site_id", "site_name", "reason", "value"],
-        )
-        writer.writeheader()
-        writer.writerows(skip_errors)
-        csv_bytes = buf.getvalue().encode("utf-8")
         s3_key = f"{Config.S3_PREFIX.rstrip('/')}/site-upload-errors/{upload_id}.csv"
         s3 = get_s3_client()
-        s3.put_object(
-            Bucket=Config.S3_BUCKET,
-            Key=s3_key,
-            Body=csv_bytes,
-            ContentType="text/csv",
-            ContentDisposition=f'attachment; filename="skip_errors_{upload_id}.csv"',
+        s3.upload_file(
+            csv_path,
+            Config.S3_BUCKET,
+            s3_key,
+            ExtraArgs={
+                "ContentType": "text/csv",
+                "ContentDisposition": f'attachment; filename="skip_errors_{upload_id}.csv"',
+            },
         )
         return s3_key
     except Exception:
         logger.warning(
-            "Failed to write skip errors CSV to S3 for upload %s",
+            "Failed to upload skip errors CSV to S3 for upload %s",
             upload_id,
             exc_info=True,
         )
@@ -1509,6 +1503,12 @@ def save_user_site_set_from_staged(
     """
     local_path = None
     extracted_archive_dir = None
+    _skip_csv_path = (
+        None  # temp file for incremental skip-error CSV; cleaned up in finally
+    )
+    _skip_csv_file = (
+        None  # file handle; kept in outer scope so finally can close on exception
+    )
     try:
         local_path, filename, file_size_bytes = _materialize_staged_upload_path(
             upload_token, user_id
@@ -1582,7 +1582,31 @@ def save_user_site_set_from_staged(
             skipped_missing_required = 0
             skipped_bad_start_date = 0
             skipped_bad_geometry = 0
-            skip_errors = []
+            # Track up to 5 examples for the error message when n_sites == 0.
+            _skip_error_examples = []
+            # Open a temp CSV file for incremental skip-error writing (no in-memory list).
+            _skip_csv_writer = None
+            if upload_id is not None and Config.S3_BUCKET:
+                try:
+                    fd, _skip_csv_path = tempfile.mkstemp(
+                        suffix=".csv", prefix="ae_skip_errors_"
+                    )
+                    _skip_csv_file = os.fdopen(fd, "w", encoding="utf-8", newline="")
+                    _skip_csv_writer = csv.DictWriter(
+                        _skip_csv_file,
+                        fieldnames=[
+                            "row_number",
+                            "site_id",
+                            "site_name",
+                            "reason",
+                            "value",
+                        ],
+                    )
+                    _skip_csv_writer.writeheader()
+                except Exception:
+                    logger.warning(
+                        "Failed to create skip errors temp file", exc_info=True
+                    )
 
             batch_rows = []
             batch_row_bytes = 0
@@ -1725,37 +1749,47 @@ def save_user_site_set_from_staged(
                         # Only check for missing start_date (required for analysis)
                         if raw_start is None:
                             skipped_missing_required += 1
-                            skip_errors.append(
-                                {
-                                    "row_number": feature_index,
-                                    "site_id": str(raw_site_id).strip()
-                                    if raw_site_id is not None
-                                    else "",
-                                    "site_name": str(raw_site_name).strip()
-                                    if raw_site_name is not None
-                                    else "",
-                                    "reason": "Missing start date",
-                                    "value": "",
-                                }
-                            )
+                            if len(_skip_error_examples) < 5:
+                                _skip_error_examples.append(
+                                    f"row {feature_index}: Missing start date"
+                                )
+                            if _skip_csv_writer is not None:
+                                _skip_csv_writer.writerow(
+                                    {
+                                        "row_number": feature_index,
+                                        "site_id": str(raw_site_id).strip()
+                                        if raw_site_id is not None
+                                        else "",
+                                        "site_name": str(raw_site_name).strip()
+                                        if raw_site_name is not None
+                                        else "",
+                                        "reason": "Missing start date",
+                                        "value": "",
+                                    }
+                                )
                             continue
 
                         start_dt = pd.to_datetime(raw_start, errors="coerce")
                         if pd.isna(start_dt):
                             skipped_bad_start_date += 1
-                            skip_errors.append(
-                                {
-                                    "row_number": feature_index,
-                                    "site_id": str(raw_site_id).strip()
-                                    if raw_site_id is not None
-                                    else "",
-                                    "site_name": str(raw_site_name).strip()
-                                    if raw_site_name is not None
-                                    else "",
-                                    "reason": "Unparseable start date",
-                                    "value": str(raw_start),
-                                }
-                            )
+                            if len(_skip_error_examples) < 5:
+                                _skip_error_examples.append(
+                                    f"row {feature_index}: Unparseable start date ({raw_start!r})"
+                                )
+                            if _skip_csv_writer is not None:
+                                _skip_csv_writer.writerow(
+                                    {
+                                        "row_number": feature_index,
+                                        "site_id": str(raw_site_id).strip()
+                                        if raw_site_id is not None
+                                        else "",
+                                        "site_name": str(raw_site_name).strip()
+                                        if raw_site_name is not None
+                                        else "",
+                                        "reason": "Unparseable start date",
+                                        "value": str(raw_start),
+                                    }
+                                )
                             continue
 
                         start_date = start_dt.date()
@@ -1769,19 +1803,24 @@ def save_user_site_set_from_staged(
                         geom_json = feature.get("geometry")
                         if not geom_json:
                             skipped_bad_geometry += 1
-                            skip_errors.append(
-                                {
-                                    "row_number": feature_index,
-                                    "site_id": str(raw_site_id).strip()
-                                    if raw_site_id is not None
-                                    else "",
-                                    "site_name": str(raw_site_name).strip()
-                                    if raw_site_name is not None
-                                    else "",
-                                    "reason": "Missing geometry",
-                                    "value": "",
-                                }
-                            )
+                            if len(_skip_error_examples) < 5:
+                                _skip_error_examples.append(
+                                    f"row {feature_index}: Missing geometry"
+                                )
+                            if _skip_csv_writer is not None:
+                                _skip_csv_writer.writerow(
+                                    {
+                                        "row_number": feature_index,
+                                        "site_id": str(raw_site_id).strip()
+                                        if raw_site_id is not None
+                                        else "",
+                                        "site_name": str(raw_site_name).strip()
+                                        if raw_site_name is not None
+                                        else "",
+                                        "reason": "Missing geometry",
+                                        "value": "",
+                                    }
+                                )
                             continue
 
                         geom = shape(geom_json)
@@ -1791,36 +1830,46 @@ def save_user_site_set_from_staged(
 
                         if geom.is_empty:
                             skipped_bad_geometry += 1
-                            skip_errors.append(
-                                {
-                                    "row_number": feature_index,
-                                    "site_id": str(raw_site_id).strip()
-                                    if raw_site_id is not None
-                                    else "",
-                                    "site_name": str(raw_site_name).strip()
-                                    if raw_site_name is not None
-                                    else "",
-                                    "reason": "Empty geometry after repair",
-                                    "value": "",
-                                }
-                            )
+                            if len(_skip_error_examples) < 5:
+                                _skip_error_examples.append(
+                                    f"row {feature_index}: Empty geometry after repair"
+                                )
+                            if _skip_csv_writer is not None:
+                                _skip_csv_writer.writerow(
+                                    {
+                                        "row_number": feature_index,
+                                        "site_id": str(raw_site_id).strip()
+                                        if raw_site_id is not None
+                                        else "",
+                                        "site_name": str(raw_site_name).strip()
+                                        if raw_site_name is not None
+                                        else "",
+                                        "reason": "Empty geometry after repair",
+                                        "value": "",
+                                    }
+                                )
                             continue
 
                         if geom.geom_type not in ("Polygon", "MultiPolygon"):
                             skipped_bad_geometry += 1
-                            skip_errors.append(
-                                {
-                                    "row_number": feature_index,
-                                    "site_id": str(raw_site_id).strip()
-                                    if raw_site_id is not None
-                                    else "",
-                                    "site_name": str(raw_site_name).strip()
-                                    if raw_site_name is not None
-                                    else "",
-                                    "reason": "Unsupported geometry type",
-                                    "value": geom.geom_type,
-                                }
-                            )
+                            if len(_skip_error_examples) < 5:
+                                _skip_error_examples.append(
+                                    f"row {feature_index}: Unsupported geometry type ({geom.geom_type!r})"
+                                )
+                            if _skip_csv_writer is not None:
+                                _skip_csv_writer.writerow(
+                                    {
+                                        "row_number": feature_index,
+                                        "site_id": str(raw_site_id).strip()
+                                        if raw_site_id is not None
+                                        else "",
+                                        "site_name": str(raw_site_name).strip()
+                                        if raw_site_name is not None
+                                        else "",
+                                        "reason": "Unsupported geometry type",
+                                        "value": geom.geom_type,
+                                    }
+                                )
                             continue
 
                         minx, miny, maxx, maxy = geom.bounds
@@ -1921,6 +1970,11 @@ def save_user_site_set_from_staged(
             _flush_batch_rows()
             _report_upload_progress(force=True)
 
+            # Close the incremental CSV file (if open) before any post-loop logic.
+            if _skip_csv_file is not None:
+                _skip_csv_file.close()
+                _skip_csv_file = None
+
             if n_sites == 0:
                 skipped_total = (
                     skipped_missing_required
@@ -1934,13 +1988,8 @@ def save_user_site_set_from_staged(
                         f"bad start_date={skipped_bad_start_date}, "
                         f"bad geometry={skipped_bad_geometry}."
                     )
-                    if skip_errors:
-                        examples = "; ".join(
-                            f"row {e['row_number']}: {e['reason']}"
-                            + (f" ({e['value']!r})" if e["value"] else "")
-                            for e in skip_errors[:5]
-                        )
-                        details += f" First examples: {examples}"
+                    if _skip_error_examples:
+                        details += f" First examples: {'; '.join(_skip_error_examples)}"
                     raise ValueError(details)
                 raise ValueError("No features were found in the uploaded file.")
 
@@ -1964,8 +2013,8 @@ def save_user_site_set_from_staged(
                     "skipped_bad_start_date": int(skipped_bad_start_date),
                     "skipped_bad_geometry": int(skipped_bad_geometry),
                 }
-                if skip_errors and upload_id is not None and Config.S3_BUCKET:
-                    s3_key = _write_skip_errors_csv(upload_id, skip_errors)
+                if skipped_total > 0 and _skip_csv_path is not None:
+                    s3_key = _upload_skip_errors_csv(upload_id, _skip_csv_path)
                     if s3_key:
                         metadata["skip_errors_s3_key"] = s3_key
                 site_set.extra_metadata = metadata
@@ -2018,3 +2067,16 @@ def save_user_site_set_from_staged(
 
         if extracted_archive_dir:
             shutil.rmtree(extracted_archive_dir, ignore_errors=True)
+
+        if _skip_csv_file is not None:
+            try:
+                _skip_csv_file.close()
+            except Exception:
+                pass
+        if _skip_csv_path and os.path.exists(_skip_csv_path):
+            try:
+                os.unlink(_skip_csv_path)
+            except OSError:
+                logger.debug(
+                    "Failed to remove skip errors temp file: %s", _skip_csv_path
+                )
