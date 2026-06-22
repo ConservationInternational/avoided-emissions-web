@@ -14,6 +14,8 @@ avoided-emissions-web/
   deploy/              CI/CD, Docker Compose, and CodeDeploy configuration
 ```
 
+For in-depth technical documentation see **[docs/](docs/index.md)**.
+
 ## Components
 
 ### 1. GEE Covariate Export (`gee_export/`)
@@ -22,14 +24,17 @@ Python scripts using the Earth Engine Python API to export covariate rasters
 as Cloud-Optimized GeoTIFFs (COGs) to Google Cloud Storage. Each covariate is
 exported as an individual GEE batch task. Covariates include:
 
-- **Climate**: precipitation, temperature
-- **Terrain**: elevation, slope
-- **Accessibility**: distance to cities, friction surface, crop suitability
-- **Demographics**: population (2000, 2005, 2010, 2015, 2020), population growth
-- **Biomass**: above + below ground biomass
-- **Land cover**: ESA CCI 7-class land cover (2015)
-- **Forest cover**: Hansen GFC annual forest cover (2000-2025)
-- **Administrative**: GADM level-1 regions, ecoregions, protected areas
+- **Climate**: precipitation, mean annual temperature
+- **Terrain**: elevation, slope, aspect
+- **Accessibility**: travel time to cities, friction surface
+- **Demographics**: population count (2000–2020 quinquennial), population growth rate
+- **Biomass/Carbon**: aboveground biomass, total biomass (above + belowground), soil organic carbon, irrecoverable carbon
+- **Land use**: GLAD cropland extent (2003–2019 quinquennial), agro-ecological zone
+- **Forest cover**: Hansen GFC annual forest cover fraction (2000–2025)
+
+Administrative, ecoregion, and protected area reference layers are sourced
+from PostGIS (geoBoundaries, WWF Ecoregions, WDPA) and rasterized to the
+same grid. See [docs/covariates.md](docs/covariates.md) for the full list.
 
 ### 2. R Analysis Container (`r-analysis/`)
 
@@ -43,9 +48,13 @@ analysis. Supports:
 
 Pipeline implementation:
 
-- **Step 1 (extract)**: Python (`r-analysis/scripts/01_extract_covariates.py`)
-- **Step 2 (match)**: R (`r-analysis/scripts/02_perform_matching.R`)
-- **Step 3 (summarize)**: R (`r-analysis/scripts/03_summarize_results.R`)
+- **Step 0 (prep, optional)**: Pre-computes spatial buffers used to exclude nearby controls
+- **Step 1 (extract)**: Python — samples COG pixel values for treatment and control areas (`r-analysis/scripts/01_extract_covariates.py`)
+- **Step 2 (match)**: R — propensity score (or Mahalanobis) matching per site (`r-analysis/scripts/02_perform_matching.R`)
+- **Step 3 (summarize)**: R — computes forest loss and avoided CO₂e emissions from matched pairs (`r-analysis/scripts/03_summarize_results.R`)
+
+See [docs/matching.md](docs/matching.md) for matching methodology and parameter reference,
+and [docs/analysis-outputs.md](docs/analysis-outputs.md) for output file schemas.
 
 ### 3. Web Application (`webapp/`)
 
@@ -183,17 +192,15 @@ email and a strong password.
 
 ### Testing
 
-Unit and integration tests live in `webapp/tests/`:
+Unit tests live in `webapp/tests/unit/`. Run them inside the webapp container or
+with the local venv active:
 
 ```bash
-# Run the full test suite (activate the venv or run inside the webapp container)
+# Run the full test suite
 python -m pytest webapp/tests/ -v
 
-# Unit tests only (faster)
+# Unit tests only
 python -m pytest webapp/tests/unit/ -v
-
-# Integration tests
-python -m pytest webapp/tests/integration/ -v
 ```
 
 ## Covariate Configuration
@@ -203,15 +210,16 @@ editing the covariate selection when submitting a task. The default set matches
 the standard formula:
 
 ```
-treatment ~ lc_2015_agriculture + precip + temp + elev + slope +
-  dist_cities + friction_surface + pop_2015 +
-    pop_growth + total_biomass
+treatment ~ precip + temp + elev + slope + dist_cities +
+  friction_surface + pop_2015 + pop_growth + total_biomass_2025
 ```
 
 With exact matching on selected stratification variables (default:
-`admin0`, `admin1`, `admin2`, `ecoregion`, `pa`).
+`admin1`, `ecoregion`, `pa`).
 For sites established after 2005, `defor_pre_intervention` (5-year
 pre-establishment deforestation rate) is added automatically.
+
+See [docs/matching.md](docs/matching.md) for the full parameter reference.
 
 ## Automated Match Quality Checks
 
