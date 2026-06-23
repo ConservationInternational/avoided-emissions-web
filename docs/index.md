@@ -30,7 +30,6 @@ emissions estimates for a set of conservation sites:
                              ┌────────────────────────┐
                              │   R Analysis Container │
                              │   (r-analysis/)        │
-                             │   Step 0: prep         │
                              │   Step 1: extract      │
                              │   Step 2: match        │
                              │   Step 3: summarize    │
@@ -44,7 +43,7 @@ emissions estimates for a set of conservation sites:
 2. A user uploads site polygons through the web app and configures matching
    parameters.
 3. The web app submits a job to AWS Batch via the trends.earth API. The batch
-   container runs the four-step pipeline, writing intermediate and final
+   container runs the three-step pipeline, writing intermediate and final
    outputs to S3.
 4. The web app polls for completion, imports the results from S3 into the
    PostgreSQL database, and displays them interactively.

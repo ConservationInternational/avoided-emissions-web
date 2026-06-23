@@ -31,9 +31,11 @@ import math
 import os
 import random
 import sys
+import tempfile
 import time
 import warnings
 
+import boto3
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -42,6 +44,8 @@ import xarray as xr
 from osgeo import gdal
 from rasterio.features import rasterize
 from shapely.geometry import box, mapping, shape
+from shapely.ops import unary_union
+from shapely.validation import make_valid
 
 from logging_utils import configure_third_party_logging
 
@@ -494,9 +498,8 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     matching_extent_geojson = config.get("matching_extent")
     if not matching_extent_geojson:
         raise RuntimeError(
-            "Config must include 'matching_extent' — the intersection of "
-            "exact-match layers that overlap the sites, "
-            "computed by the webapp via PostGIS."
+            "Config must include 'matching_extent' — computed from the "
+            "intersection of exact-match reference layers within the sites bbox."
         )
     extent_geom = shape(matching_extent_geojson)
     ext_bounds = extent_geom.bounds  # (minx, miny, maxx, maxy)
@@ -700,6 +703,155 @@ def build_matching_formula(covariates: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Spatial prep helpers
+# ---------------------------------------------------------------------------
+
+_POLYGON_VARS = {"admin0", "admin1", "admin2", "ecoregion"}
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    if uri.startswith("s3://"):
+        uri = uri[5:]
+    parts = uri.split("/", 1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
+def _download_ref_parquet(s3_uri: str, local_path: str) -> None:
+    bucket, key = _parse_s3_uri(s3_uri)
+    log.info("Downloading %s → %s", s3_uri, local_path)
+    boto3.client("s3").download_file(bucket, key, local_path)
+
+
+def _load_reference_layer(
+    s3_uri: str, tmp_dir: str, layer_name: str
+) -> gpd.GeoDataFrame:
+    local_path = os.path.join(tmp_dir, f"{layer_name}.parquet")
+    _download_ref_parquet(s3_uri, local_path)
+    gdf = gpd.read_parquet(local_path)
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326")
+    elif gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs("EPSG:4326")
+    return gdf
+
+
+def compute_matching_extent(
+    sites_gdf: gpd.GeoDataFrame,
+    exact_match_vars: list[str],
+    reference_layer_uris: dict[str, str],
+    tmp_dir: str,
+) -> dict | None:
+    """Return the intersection of reference-layer unions within the sites bbox."""
+    polygon_vars = [
+        v for v in exact_match_vars if v in _POLYGON_VARS and v in reference_layer_uris
+    ]
+    if not polygon_vars:
+        log.info("No polygon exact-match vars — skipping matching_extent computation")
+        return None
+
+    minx, miny, maxx, maxy = sites_gdf.total_bounds
+    pad = 0.1
+    sites_bbox = box(minx - pad, miny - pad, maxx + pad, maxy + pad)
+
+    layer_unions: list = []
+    for var_name in polygon_vars:
+        ref_gdf = _load_reference_layer(
+            reference_layer_uris[var_name], tmp_dir, var_name
+        )
+        filtered = ref_gdf[ref_gdf.intersects(sites_bbox)].copy()
+        log.info(
+            "Reference layer '%s': %d/%d features intersect sites bbox",
+            var_name,
+            len(filtered),
+            len(ref_gdf),
+        )
+        if filtered.empty:
+            log.warning(
+                "No features from '%s' intersect bbox — matching_extent=None", var_name
+            )
+            return None
+        geoms = [
+            make_valid(g) if not g.is_valid else g
+            for g in filtered.geometry
+            if g is not None and not g.is_empty
+        ]
+        layer_union = unary_union(geoms)
+        if not layer_union.is_valid:
+            layer_union = make_valid(layer_union)
+        layer_unions.append(layer_union)
+        log.info("Reference layer '%s': union complete", var_name)
+
+    if not layer_unions:
+        return None
+
+    result = layer_unions[0]
+    for union in layer_unions[1:]:
+        result = result.intersection(union)
+        if result.is_empty:
+            log.warning(
+                "Intersection of reference layers is empty — matching_extent=None"
+            )
+            return None
+        if not result.is_valid:
+            result = make_valid(result)
+
+    log.info("matching_extent computed (type=%s)", result.geom_type)
+    return mapping(result)
+
+
+def compute_sites_exclusion_buffer(
+    sites_gdf: gpd.GeoDataFrame,
+    distance_km: float,
+) -> dict | None:
+    """Buffer the simplified union of all site geometries by *distance_km*.
+
+    Pre-simplifies each geometry before unioning to dramatically reduce
+    vertex count and computation time for large site sets.
+    """
+    if distance_km <= 0:
+        log.info("min_control_distance_km <= 0 — skipping exclusion buffer")
+        return None
+
+    distance_m = distance_km * 1000
+    valid_geoms = [
+        make_valid(g) if not g.is_valid else g
+        for g in sites_gdf.geometry
+        if g is not None and not g.is_empty
+    ]
+    if not valid_geoms:
+        log.warning("No valid site geometries — skipping exclusion buffer")
+        return None
+
+    # Simplify before union to reduce vertex count (major performance win for
+    # large globally-distributed site sets).
+    simplified = [g.simplify(0.001, preserve_topology=True) for g in valid_geoms]
+    sites_union = unary_union(simplified)
+    if not sites_union.is_valid:
+        sites_union = make_valid(sites_union)
+
+    sites_series = gpd.GeoSeries([sites_union], crs="EPSG:4326")
+    buffered = (
+        sites_series.to_crs("+proj=cea +datum=WGS84 +units=m")
+        .buffer(distance_m)
+        .to_crs("EPSG:4326")
+    )
+    result = buffered.iloc[0]
+    if result is None or result.is_empty:
+        log.warning("Exclusion buffer is empty after reprojection — returning None")
+        return None
+
+    log.info(
+        "sites_exclusion_buffer computed (%.1f km buffer, type=%s)",
+        distance_km,
+        result.geom_type,
+    )
+    return mapping(result)
+
+
+# ---------------------------------------------------------------------------
+
+
 def main(argv: list[str] | None = None) -> None:
     rollbar_init()
     _configure_gdal()
@@ -755,6 +907,40 @@ def main(argv: list[str] | None = None) -> None:
             ) as f:
                 json.dump(group_mapping_json, f)
             log.info("  Saved exact-match group mapping: %d groups", len(group_mapping))
+
+        # Compute matching_extent and sites_exclusion_buffer when not already
+        # provided in config.  Results are written to prep_summary.json so
+        # downstream match/summarize steps can load them from S3.
+        _reference_layer_uris: dict = config.get("reference_layer_uris") or {}
+        _exact_match_vars: list = config.get("exact_match_vars") or []
+        _min_dist_km: float = float(config.get("min_control_distance_km", 10.0))
+
+        if not config.get("matching_extent"):
+            _t0 = time.time()
+            with tempfile.TemporaryDirectory(prefix="ae_ref_") as _tmp_ref:
+                _me = compute_matching_extent(
+                    sites, _exact_match_vars, _reference_layer_uris, _tmp_ref
+                )
+            log.info("matching_extent computed in %.1fs", time.time() - _t0)
+            config["matching_extent"] = _me
+
+        if not config.get("sites_exclusion_buffer") and _min_dist_km > 0:
+            _t0 = time.time()
+            _seb = compute_sites_exclusion_buffer(sites, _min_dist_km)
+            log.info("sites_exclusion_buffer computed in %.1fs", time.time() - _t0)
+            config["sites_exclusion_buffer"] = _seb
+
+        # Write prep_summary.json so downstream match/summarize steps can
+        # override their config with the correct spatial params.
+        with open(os.path.join(config["output_dir"], "prep_summary.json"), "w") as _fh:
+            json.dump(
+                {
+                    "matching_extent": config.get("matching_extent"),
+                    "sites_exclusion_buffer": config.get("sites_exclusion_buffer"),
+                },
+                _fh,
+            )
+        log.info("prep_summary.json written for downstream pipeline steps")
 
         # Extract covariates
         extract_covariates(config, sites)

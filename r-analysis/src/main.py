@@ -48,7 +48,6 @@ R_SCRIPTS_DIR = os.environ.get("R_SCRIPTS_DIR", "/app/scripts")
 R_STEP_TIMEOUT = int(os.environ.get("R_STEP_TIMEOUT", "14400"))
 
 STEP_SCRIPTS = {
-    "prep": "00_prep.py",
     "extract": "01_extract_covariates.py",
     "match": "02_perform_matching.R",
     "summarize": "03_summarize_results.R",
@@ -56,20 +55,13 @@ STEP_SCRIPTS = {
 
 # Step labels for user-visible log messages
 STEP_LABELS = {
-    "prep": "Preparing spatial inputs",
     "extract": "Extracting covariate values",
     "match": "Propensity score matching",
     "summarize": "Summarizing results",
 }
 
 # Canonical order of pipeline steps (used for progress calculation).
-# Note: "prep" is *not* included here because it only runs in pipeline mode
-# (dispatched as a separate Batch step before the extract array job).
-# _expand_steps("all") still returns ["extract", "match", "summarize"].
 PIPELINE_STEP_ORDER = ["extract", "match", "summarize"]
-
-# Files produced by the prep step that the extract step consumes.
-PREP_OUTPUT_FILES = ["prep_summary.json"]
 
 # Files produced by the extract step that subsequent steps need.
 EXTRACT_OUTPUT_FILES = [
@@ -188,34 +180,24 @@ def run(params, log=None):
     ):
         log.info("Downloading intermediate extract outputs from S3")
         _download_s3_files(intermediate_uri, output_dir, EXTRACT_OUTPUT_FILES, log)
-    if pipeline_mode and step == "summarize":
-        log.info("Downloading match results from S3")
-        _download_s3_prefix(intermediate_uri + "/matches", matches_dir, log)
-
-    # ----- pipeline: load prep_summary.json before extract step -----
-    # When the pipeline includes a dedicated prep step (i.e. ``prep`` ran as a
-    # separate Batch job before this extract job), download the prep summary
-    # and use it to override matching_extent and sites_exclusion_buffer so
-    # that the extract / match steps use values computed by the prep step
-    # rather than any values that may have been set in params.
-    if pipeline_mode and step == "extract" and params.get("reference_layer_uris"):
+        # Load spatial params written by the extract step so that
+        # matching_extent and sites_exclusion_buffer are available in config.
         try:
-            log.info("Downloading prep_summary.json from %s", intermediate_uri)
-            _download_s3_files(intermediate_uri, output_dir, PREP_OUTPUT_FILES, log)
-            prep_summary_path = os.path.join(output_dir, "prep_summary.json")
-            with open(prep_summary_path) as _fh:
-                prep_summary = json.load(_fh)
-            if prep_summary.get("matching_extent"):
-                params = dict(params, matching_extent=prep_summary["matching_extent"])
+            _download_s3_files(intermediate_uri, output_dir, ["prep_summary.json"], log)
+            _prep_path = os.path.join(output_dir, "prep_summary.json")
+            with open(_prep_path) as _fh:
+                _prep = json.load(_fh)
+            if _prep.get("matching_extent"):
+                params = dict(params, matching_extent=_prep["matching_extent"])
                 log.info("matching_extent loaded from prep_summary.json")
-            if prep_summary.get("sites_exclusion_buffer"):
-                params = dict(
-                    params,
-                    sites_exclusion_buffer=prep_summary["sites_exclusion_buffer"],
-                )
+            if _prep.get("sites_exclusion_buffer"):
+                params = dict(params, sites_exclusion_buffer=_prep["sites_exclusion_buffer"])
                 log.info("sites_exclusion_buffer loaded from prep_summary.json")
         except Exception as _exc:  # noqa: BLE001
             log.warning("Could not load prep_summary.json: %s — continuing", _exc)
+    if pipeline_mode and step == "summarize":
+        log.info("Downloading match results from S3")
+        _download_s3_prefix(intermediate_uri + "/matches", matches_dir, log)
 
     # ----- download sites file from S3 -----
     sites_artifact_uri = params.get("sites_parquet_s3_uri") or params.get(
@@ -376,13 +358,6 @@ def run(params, log=None):
             pct_end,
             f"Step {step_idx}/{len(steps)}: {label} (completed)",
         )
-
-    # ----- pipeline: upload intermediate data to S3 -----
-    if pipeline_mode and step == "prep":
-        log.info("Uploading prep outputs to S3")
-        _upload_to_s3_prefix(output_dir, intermediate_uri, log)
-        log.info("avoided_emissions: prep step complete (task %s)", task_id)
-        return None  # no final results yet
 
     if pipeline_mode and step == "extract":
         log.info("Uploading intermediate extract outputs to S3")

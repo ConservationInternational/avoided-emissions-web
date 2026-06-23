@@ -65,14 +65,13 @@ converted to avoided biomass loss and CO₂e emissions
 
 ## Analysis Pipeline Steps
 
-The matching analysis runs in four steps inside the `r-analysis` Docker
+The matching analysis runs in three steps inside the `r-analysis` Docker
 container (see [covariate-pipeline.md](covariate-pipeline.md#stage-4--pixel-extraction)
 for Step 1 details):
 
 | Step | Script | What it does |
 |---|---|---|
-| 0 — prep (optional) | Python | Pre-computes spatial exclusion buffers for all sites; used when `min_control_distance_km > 0` and PostGIS is not available |
-| 1 — extract | Python | Samples covariate values for treatment and control candidate pixels from COG files |
+| 1 — extract | Python | Samples covariate values for treatment and control candidate pixels from COG files; computes matching extent and control exclusion buffer |
 | 2 — match | R | Fits the propensity score model and performs matching; runs as an AWS Batch array job (one array element per site) |
 | 3 — summarize | R | Aggregates matched pairs to compute annual deforestation rates and avoided emissions |
 
@@ -244,10 +243,8 @@ from the control pool. This prevents matching treatment pixels against
 nearby unprotected pixels that may be influenced by spillover effects from
 the intervention (e.g. wildlife dispersal, edge effects).
 
-The buffer is computed from the union of all site polygons in the task.
-When PostGIS is available it is computed server-side; otherwise it is
-computed locally using a geodesic buffer. The optional Step 0 (prep) can
-pre-compute the buffer and cache it to save time in repeated matching runs.
+The buffer is computed within the extract step from the simplified union of
+all site polygons, using a 0.001° pre-simplification tolerance for performance.
 
 ---
 

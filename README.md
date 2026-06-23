@@ -48,7 +48,6 @@ analysis. Supports:
 
 Pipeline implementation:
 
-- **Step 0 (prep, optional)**: Pre-computes spatial buffers used to exclude nearby controls
 - **Step 1 (extract)**: Python — samples COG pixel values for treatment and control areas (`r-analysis/scripts/01_extract_covariates.py`)
 - **Step 2 (match)**: R — propensity score (or Mahalanobis) matching per site (`r-analysis/scripts/02_perform_matching.R`)
 - **Step 3 (summarize)**: R — computes forest loss and avoided CO₂e emissions from matched pairs (`r-analysis/scripts/03_summarize_results.R`)

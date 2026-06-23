@@ -772,23 +772,6 @@ def _complete_analysis_task_submission(task_id, user_id):
             **(
                 {
                     "pipeline": [
-                        # Prep step: compute matching_extent + exclusion_buffer
-                        # from exported reference GeoParquets on S3.
-                        # Only included when reference layers have been exported.
-                        *(
-                            [
-                                {
-                                    "name": "prep",
-                                    "command": ["prep"],
-                                    "timeout_seconds": 3600,  # 1 h
-                                    "memory_mib": 8192,
-                                    "vcpus": 2,
-                                    "retry_attempts": 2,
-                                }
-                            ]
-                            if reference_layer_uris
-                            else []
-                        ),
                         {
                             "name": "extract",
                             "command": ["extract"],

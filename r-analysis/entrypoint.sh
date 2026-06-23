@@ -72,10 +72,6 @@ COMMAND="${1:-help}"
 shift || true
 
 case "$COMMAND" in
-    prep)
-        echo "Preparing spatial inputs (Python)..."
-        run_step python /app/scripts/00_prep.py "$@"
-        ;;
     analyze)
         # Full pipeline: extract (Python) + match + summarize
         echo "Running full analysis pipeline..."
@@ -103,7 +99,6 @@ case "$COMMAND" in
         echo "The entrypoint below is for standalone / debugging use only."
         echo ""
         echo "Commands:"
-        echo "  prep       Prepare spatial inputs (matching_extent, exclusion_buffer)"
         echo "  analyze    Run the full pipeline (extract + match + summarize)"
         echo "  extract    Extract covariate values for sites and controls"
         echo "  match      Run propensity score matching for a single site"
