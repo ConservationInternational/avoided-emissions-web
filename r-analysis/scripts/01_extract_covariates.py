@@ -36,6 +36,7 @@ import time
 import warnings
 
 import boto3
+import gc
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -267,6 +268,7 @@ def _read_layer_values_with_retry(
                 arr = arr[0]
 
             vals = arr[rows, cols]
+            del arr  # Release the full-grid reference before returning
             if vals.dtype == np.float64:
                 vals = vals.astype(np.float32)
             return vals
@@ -612,11 +614,83 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     # Downcast float64 → float32 to halve memory and Parquet size;
     # covariates (elevation, slope, forest cover, etc.) don't need
     # float64 precision.
-    data: dict[str, np.ndarray] = {
-        "cell": candidate_indices,
-        "area_ha": candidate_pixel_areas,
-    }
+
+    # Before loading all layers, use the earliest forest cover year as a mask
+    # to prune non-forest and water pixels from the candidate set.  The avoided
+    # emissions analysis only applies to forest pixels; any pixel with zero tree
+    # cover in the baseline year cannot deforest, so excluding it here
+    # dramatically reduces the number of candidate pixels for globally
+    # distributed site sets.
+    # Hansen GFC exports water/non-land pixels as 0 (GEE masks → 0 on export),
+    # so the filter ref_vals > 0 correctly removes both ocean and non-forest.
+    # Treatment pixels (inside PA boundaries) are always kept unconditionally.
+    _fc_years = config.get("fc_years") or []
+    _PRUNE_LAYER = f"fc_{min(_fc_years)}" if _fc_years else None
+    if _PRUNE_LAYER and _PRUNE_LAYER in all_layers:
+        log.info(
+            "Pre-loading '%s' (baseline forest cover) to prune non-forest "
+            "candidate pixels (%d candidates before pruning)...",
+            _PRUNE_LAYER,
+            len(candidate_indices),
+        )
+        _ref_vals = _read_layer_values_with_retry(
+            ds=ds,
+            layer_name=_PRUNE_LAYER,
+            uri=layer_uris[_PRUNE_LAYER],
+            clip_bounds=clip_bounds,
+            rows=rows,
+            cols=cols,
+        )
+        ds = ds.drop_vars(_PRUNE_LAYER)
+        gc.collect()
+        # Keep pixels that either belong to a treatment site (unconditionally)
+        # or had some tree cover in the baseline year.  Hansen GFC encodes
+        # water/non-land as 0, so ref_vals > 0 is correct.
+        _is_treatment = np.isin(candidate_indices, treatment_key["cell"].values)
+        _keep = _is_treatment | (_ref_vals > 0)
+        del _is_treatment
+        n_before = len(candidate_indices)
+        candidate_indices = candidate_indices[_keep]
+        rows = rows[_keep]
+        cols = cols[_keep]
+        candidate_pixel_areas = candidate_pixel_areas[_keep]
+        _ref_vals = _ref_vals[_keep]
+        del _keep
+        log.info(
+            "Non-forest pruning: %d → %d candidates (%d non-forest/water pixels removed)",
+            n_before,
+            len(candidate_indices),
+            n_before - len(candidate_indices),
+        )
+        data: dict[str, np.ndarray] = {
+            "cell": candidate_indices,
+            "area_ha": candidate_pixel_areas,
+            _PRUNE_LAYER: _ref_vals,
+        }
+        del _ref_vals
+        _preloaded: set[str] = {_PRUNE_LAYER}
+    else:
+        data = {
+            "cell": candidate_indices,
+            "area_ha": candidate_pixel_areas,
+        }
+        _preloaded = set()
+        if not _PRUNE_LAYER:
+            log.warning("No fc_years in config — skipping non-forest pruning")
+        else:
+            log.warning(
+                "'%s' not in layer list — skipping non-forest pruning", _PRUNE_LAYER
+            )
+
     for i, layer_name in enumerate(all_layers, 1):
+        if layer_name in _preloaded:
+            log.info(
+                "  [%d/%d] Already loaded %s (pre-pruning)",
+                i,
+                len(all_layers),
+                layer_name,
+            )
+            continue
         log.info("  [%d/%d] Fetching %s", i, len(all_layers), layer_name)
         data[layer_name] = _read_layer_values_with_retry(
             ds=ds,
@@ -629,7 +703,10 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         # Release the full grid to free memory before the next layer.
         # The xr.Dataset keeps a reference to the loaded numpy array,
         # so we must drop the variable to allow GC to reclaim it.
+        # gc.collect() forces immediate reclamation so the freed memory
+        # is available for the next layer rather than sitting unreachable.
         ds = ds.drop_vars(layer_name)
+        gc.collect()
 
     covariate_df = pd.DataFrame(data)
     del data  # free the dict; DataFrame now owns the arrays
