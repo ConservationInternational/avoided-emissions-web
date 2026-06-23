@@ -289,20 +289,21 @@ def _load_layer_fresh(
     raise RuntimeError(f"Exhausted retries while reading layer '{layer_name}'.")
 
 
-def load_covariates_lazy(
+def open_covariate_dataset(
     cog_bucket: str,
     cog_prefix: str,
     covariate_names: list[str],
 ) -> xr.Dataset:
-    """Open each covariate COG as a lazy DataArray and merge into a Dataset.
+    """Open all covariate COGs and return a validated, coordinate-snapped Dataset.
 
-    Uses rioxarray which reads Cloud-Optimised GeoTIFFs through GDAL's
-    ``/vsis3/`` virtual filesystem.  Only metadata is fetched at this stage;
-    actual pixel data is pulled on-demand when ``.values`` is accessed or
-    ``.load()`` is called.
+    Opens each COG in parallel via rioxarray / GDAL's ``/vsis3/`` virtual
+    filesystem (metadata only — no pixel data is fetched).  Validates that
+    all layers share the same CRS and resolution, and snaps their coordinate
+    arrays to a common reference grid.
 
-    COGs are opened in parallel (thread pool) to overlap the per-file
-    HTTP metadata round-trips, then validated sequentially.
+    The returned Dataset is used exclusively for grid metadata (transform,
+    shape, CRS) and spatial clipping.  Pixel data is loaded separately via
+    ``_load_layer_fresh`` to enable parallel, memory-efficient reads.
     """
     # -- Phase 1: open all COGs in parallel (metadata-only reads) ----------
     uris = {name: _s3_path(cog_bucket, cog_prefix, name) for name in covariate_names}
@@ -455,18 +456,19 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     """Extract treatment & control pixel values from COG layers.
 
     Strategy:
-    1. Open all COGs lazily via rioxarray  (only metadata is fetched).
-    2. Determine the spatial clip window from the pre-computed
-       ``matching_extent`` polygon (the intersection of all polygon-type
-       exact-match layers that overlap the sites, computed by the webapp
-       via PostGIS).
-    3. Clip the lazy dataset to that window.
-    4. Use grid metadata (transform, shape) from the *unloaded* dataset
-       to rasterize sites and compute candidate pixel indices.
-    5. Load layers **one at a time**, extract candidate values, then
-       release the full grid — peak memory is O(1 grid + N_candidates)
-       instead of O(N_layers × grid).
-    6. Build treatment_cell_key and the full pixel DataFrame in-memory.
+    1. Open all COGs to validate CRS/resolution and get grid metadata
+       (transform, shape).  No pixel data is fetched at this stage.
+    2. Determine the spatial clip window from the ``matching_extent``
+       polygon (intersection of exact-match reference layers within
+       the sites bbox).
+    3. Clip the dataset to that window; extract grid metadata.
+    4. Rasterize sites and compute candidate pixel indices.
+    5. Load the baseline forest-cover layer to prune non-forest/water
+       pixels from the candidate set, reducing memory for global extents.
+    6. Load all remaining layers in parallel — each thread opens its COG
+       fresh, extracts candidate values, and frees the full grid before
+       returning.  Peak memory is O(N_parallel × grid + N_candidates × N_layers).
+    7. Build treatment_cell_key and the full pixel DataFrame in-memory.
     """
     cog_bucket = config["cog_bucket"]
     cog_prefix = config["cog_prefix"]
@@ -490,7 +492,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     log.info("Loading %d covariate layers from S3", len(all_layers))
 
     # --- 1. open lazily ---
-    ds = load_covariates_lazy(cog_bucket, cog_prefix, all_layers)
+    ds = open_covariate_dataset(cog_bucket, cog_prefix, all_layers)
 
     # --- 2. spatial window from matching extent ---
     matching_extent_geojson = config.get("matching_extent")
