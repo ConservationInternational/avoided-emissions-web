@@ -40,6 +40,8 @@ import gc
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import rioxarray  # noqa: F401 – registers the rio accessor
 import xarray as xr
 from osgeo import gdal
@@ -716,10 +718,15 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             data[layer_name] = layer_futures[layer_name].result()
             log.info("  [%d/%d] Done    %s", i, len(all_layers), layer_name)
 
-    covariate_df = pd.DataFrame(data)
-    del data  # free the dict; DataFrame now owns the arrays
+    # Write treatments_and_controls.parquet via PyArrow to avoid pandas block
+    # consolidation.  pd.DataFrame() copies all float32 columns into a single
+    # contiguous 2D array (same-dtype block merging), nearly doubling peak
+    # memory.  pa.table() wraps each numpy array in-place (zero-copy), so
+    # the only live allocation is the data dict itself.
+    _arrow_table = pa.table(data)
+    del data
 
-    log.info("Total covariate values extracted: %d pixels", len(covariate_df))
+    log.info("Total covariate values extracted: %d pixels", len(_arrow_table))
 
     # --- 8. save outputs ---
     output_dir = config["output_dir"]
@@ -729,11 +736,12 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         index=False,
         compression="zstd",
     )
-    covariate_df.to_parquet(
+    pq.write_table(
+        _arrow_table,
         os.path.join(output_dir, "treatments_and_controls.parquet"),
-        index=False,
         compression="zstd",
     )
+    del _arrow_table
 
     # Save grid metadata so downstream steps can convert cell indices
     # back to geographic coordinates (lon/lat).
