@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -77,6 +78,7 @@ ANALYSIS_DEFAULTS = {
     "group_by_exact_matches": False,
     "matching_method": "optimal",
     "n_replicates": 1,
+    "match_batch_size": 10,
     "match_memory_gb": 30,
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
     "fc_year_start": FC_YEAR_MIN,
@@ -105,6 +107,7 @@ def queue_analysis_task(
     group_by_exact_matches=ANALYSIS_DEFAULTS["group_by_exact_matches"],
     matching_method=ANALYSIS_DEFAULTS["matching_method"],
     n_replicates=ANALYSIS_DEFAULTS["n_replicates"],
+    match_batch_size=ANALYSIS_DEFAULTS["match_batch_size"],
     random_seed=None,
     match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
@@ -220,6 +223,7 @@ def queue_analysis_task(
                 "group_by_exact_matches": bool(group_by_exact_matches),
                 "matching_method": matching_method,
                 "n_replicates": n_replicates,
+                "match_batch_size": match_batch_size,
                 "resolution_m": resolution_m,
                 **({"random_seed": random_seed} if random_seed is not None else {}),
                 "match_memory_mib": match_memory_mib,
@@ -338,6 +342,9 @@ def _complete_analysis_task_submission(task_id, user_id):
             "matching_method", ANALYSIS_DEFAULTS["matching_method"]
         )
         n_replicates = config.get("n_replicates", ANALYSIS_DEFAULTS["n_replicates"])
+        match_batch_size = config.get(
+            "match_batch_size", ANALYSIS_DEFAULTS["match_batch_size"]
+        )
         random_seed = config.get("random_seed")
         match_memory_mib = config.get(
             "match_memory_mib", ANALYSIS_DEFAULTS["match_memory_mib"]
@@ -685,21 +692,25 @@ def _complete_analysis_task_submission(task_id, user_id):
             ]
             _match_chunks = None
         else:
-            _groups_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // max(1, n_replicates))
+            # Each chunk may contain at most this many match units.
+            # ceil(units / match_batch_size) * n_replicates ≤ BATCH_MAX_ARRAY_SIZE
+            _batches_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // max(1, n_replicates))
+            _units_per_chunk = _batches_per_chunk * match_batch_size
             _unit_ids = (
                 list(group_mapping_for_batch.keys())
                 if _batch_group_sites
                 else list(range(_n_match_units))
             )
             _chunks = [
-                _unit_ids[i : i + _groups_per_chunk]
-                for i in range(0, len(_unit_ids), _groups_per_chunk)
+                _unit_ids[i : i + _units_per_chunk]
+                for i in range(0, len(_unit_ids), _units_per_chunk)
             ]
             _match_steps = [
                 {
                     "name": f"match_chunk_{i}",
                     "command": [f"match_chunk_{i}"],
-                    "array_size": len(chunk) * n_replicates,
+                    "array_size": math.ceil(len(chunk) / match_batch_size)
+                    * n_replicates,
                     **_match_step_base,
                 }
                 for i, chunk in enumerate(_chunks)
@@ -712,7 +723,7 @@ def _complete_analysis_task_submission(task_id, user_id):
                 _raw_array_size,
                 BATCH_MAX_ARRAY_SIZE,
                 len(_chunks),
-                _groups_per_chunk,
+                _units_per_chunk,
             )
 
         # Build params matching AvoidedEmissionsParams schema.
@@ -744,6 +755,7 @@ def _complete_analysis_task_submission(task_id, user_id):
             "group_by_exact_matches": bool(group_by_exact_matches),
             "matching_method": matching_method,
             "n_replicates": n_replicates,
+            "match_batch_size": match_batch_size,
             **(
                 {"sites_exclusion_buffer": sites_exclusion_buffer}
                 if sites_exclusion_buffer
@@ -914,6 +926,7 @@ def submit_analysis_task(
     group_by_exact_matches=ANALYSIS_DEFAULTS["group_by_exact_matches"],
     matching_method=ANALYSIS_DEFAULTS["matching_method"],
     n_replicates=ANALYSIS_DEFAULTS["n_replicates"],
+    match_batch_size=ANALYSIS_DEFAULTS["match_batch_size"],
     random_seed=None,
     match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
     matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
@@ -1107,6 +1120,7 @@ def submit_analysis_task(
                 "group_by_exact_matches": bool(group_by_exact_matches),
                 "matching_method": matching_method,
                 "n_replicates": n_replicates,
+                "match_batch_size": match_batch_size,
                 "resolution_m": resolution_m,
                 **({"random_seed": random_seed} if random_seed is not None else {}),
                 "match_memory_mib": match_memory_mib,
@@ -1236,7 +1250,8 @@ def submit_analysis_task(
         _n_match_units = (
             len(group_mapping_for_batch) if _batch_group_sites else len(gdf_for_db)
         )
-        _raw_array_size = _n_match_units * n_replicates
+        _n_batches = math.ceil(_n_match_units / max(1, match_batch_size))
+        _raw_array_size = _n_batches * n_replicates
         _match_step_base = {
             "timeout_seconds": 14400,  # 4 h per element
             "memory_mib": match_memory_mib,
@@ -1254,21 +1269,23 @@ def submit_analysis_task(
             ]
             _match_chunks = None
         else:
-            _groups_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // max(1, n_replicates))
+            _batches_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // max(1, n_replicates))
+            _units_per_chunk = _batches_per_chunk * match_batch_size
             _unit_ids = (
                 list(group_mapping_for_batch.keys())
                 if _batch_group_sites
                 else list(range(_n_match_units))
             )
             _chunks = [
-                _unit_ids[i : i + _groups_per_chunk]
-                for i in range(0, len(_unit_ids), _groups_per_chunk)
+                _unit_ids[i : i + _units_per_chunk]
+                for i in range(0, len(_unit_ids), _units_per_chunk)
             ]
             _match_steps = [
                 {
                     "name": f"match_chunk_{i}",
                     "command": [f"match_chunk_{i}"],
-                    "array_size": len(chunk) * n_replicates,
+                    "array_size": math.ceil(len(chunk) / match_batch_size)
+                    * n_replicates,
                     **_match_step_base,
                 }
                 for i, chunk in enumerate(_chunks)
@@ -1281,7 +1298,7 @@ def submit_analysis_task(
                 _raw_array_size,
                 BATCH_MAX_ARRAY_SIZE,
                 len(_chunks),
-                _groups_per_chunk,
+                _units_per_chunk,
             )
 
         # Build params matching AvoidedEmissionsParams schema
@@ -1315,6 +1332,7 @@ def submit_analysis_task(
             "group_by_exact_matches": bool(group_by_exact_matches),
             "matching_method": matching_method,
             "n_replicates": n_replicates,
+            "match_batch_size": match_batch_size,
             **(
                 {"sites_exclusion_buffer": sites_exclusion_buffer}
                 if sites_exclusion_buffer

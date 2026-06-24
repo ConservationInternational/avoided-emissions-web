@@ -367,6 +367,9 @@ def resubmit_analysis_task(task_id, user_id):
             group_by_exact_matches=config.get("group_by_exact_matches", False),
             matching_method=config.get("matching_method", "optimal"),
             n_replicates=config.get("n_replicates", 1),
+            match_batch_size=config.get(
+                "match_batch_size", ANALYSIS_DEFAULTS["match_batch_size"]
+            ),
             random_seed=new_seed,
             match_memory_mib=match_memory_mib,
             matching_job_queue=config.get("matching_job_queue", "ae-spot-gp3"),

@@ -16,7 +16,9 @@ Input:
 Output:
     - {output_dir}/sites_processed.parquet
     - {output_dir}/treatment_cell_key.parquet
-    - {output_dir}/treatments_and_controls.parquet
+    - {output_dir}/treatment_pixels.parquet
+    - {output_dir}/control_pixels/  (hive-partitioned by primary exact-match var)
+    - {output_dir}/treatments_and_controls.parquet  (full table; for summarize + user download)
     - {output_dir}/formula.json
     - {output_dir}/site_id_key.csv
 """
@@ -41,6 +43,8 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.dataset as pad
 import pyarrow.parquet as pq
 import rioxarray  # noqa: F401 – registers the rio accessor
 import xarray as xr
@@ -736,6 +740,100 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         index=False,
         compression="zstd",
     )
+
+    # --- Split table into treatment_pixels + control_pixels ---
+    # Match workers download the small treatment file locally and stream
+    # control_pixels/ directly from S3 via Arrow's native S3 filesystem,
+    # filtering to only the partitions that match their site's exact-match
+    # variable values.  This avoids downloading the full (~5-15 GB)
+    # treatments_and_controls.parquet for every one of the ~17K workers.
+    #
+    # filter() is zero-copy in PyArrow — it applies a bitmask without
+    # allocating new buffers for the column data.
+    _treatment_cell_set = pa.chunked_array(
+        [pa.array(treatment_key["cell"].values, type=pa.int64())]
+    )
+    _treatment_mask = pc.is_in(
+        _arrow_table.column("cell"), value_set=_treatment_cell_set
+    )
+    del _treatment_cell_set
+
+    # treatment_pixels.parquet — one row per raster cell inside any site.
+    # Downloaded by every match worker (small: ~20-50 MB total).
+    _treatment_table = _arrow_table.filter(_treatment_mask)
+    pq.write_table(
+        _treatment_table,
+        os.path.join(output_dir, "treatment_pixels.parquet"),
+        compression="zstd",
+    )
+    log.info("Written treatment_pixels.parquet: %d rows", len(_treatment_table))
+    del _treatment_table
+
+    # control_pixels/ — all non-treatment candidate pixels.
+    # Written as a hive-partitioned Arrow dataset so match workers can read
+    # only the partitions whose exact-match variable values appear in their
+    # treatment pixels.  If no exact-match variables are configured, a single
+    # flat file is written; the disk-space saving still applies because
+    # workers stream it from S3 without a local download.
+    _control_table = _arrow_table.filter(pc.invert(_treatment_mask))
+    del _treatment_mask
+    _exact_match_vars: list[str] = config.get("exact_match_vars") or []
+    _partition_var = next(
+        (v for v in _exact_match_vars if v in _arrow_table.schema.names),
+        None,
+    )
+    _control_pixels_dir = os.path.join(output_dir, "control_pixels")
+    os.makedirs(_control_pixels_dir, exist_ok=True)
+    if _partition_var:
+        # Cast the partition column float32 → int32 for clean directory names
+        # (e.g. ecoregion=5/ not ecoregion=5.0/).  These are integer class
+        # values stored as float32 — rounding + casting is lossless.
+        # NaN / Inf / null → 0 before casting; pixels outside the rasterized
+        # vector data land in partition 0.  filter_groups() in R drops
+        # strata without both treatment and control, so partition 0 is
+        # automatically excluded when no treatment pixel carries that value.
+        _col_pd = _control_table.column(_partition_var).to_pandas()
+        _col_int = pa.array(
+            _col_pd.fillna(0).round().astype("int32"),
+            type=pa.int32(),
+        )
+        del _col_pd
+        _col_idx = _control_table.schema.get_field_index(_partition_var)
+        _control_table = _control_table.set_column(_col_idx, _partition_var, _col_int)
+        del _col_int
+        pad.write_dataset(
+            _control_table,
+            base_dir=_control_pixels_dir,
+            format="parquet",
+            partitioning=pad.partitioning(
+                pa.schema([(_partition_var, pa.int32())]),
+                flavor="hive",
+            ),
+            file_options=pad.ParquetFileFormat().make_write_options(compression="zstd"),
+            existing_data_behavior="overwrite_or_ignore",
+        )
+        log.info(
+            "Written control_pixels/ (%d rows, partitioned by '%s')",
+            len(_control_table),
+            _partition_var,
+        )
+    else:
+        # No exact-match vars: write flat.  Workers stream via S3 without
+        # partition pruning, but still avoid writing to local disk.
+        pq.write_table(
+            _control_table,
+            os.path.join(_control_pixels_dir, "part-0.parquet"),
+            compression="zstd",
+        )
+        log.info(
+            "Written control_pixels/part-0.parquet (%d rows, no partition var)",
+            len(_control_table),
+        )
+    del _control_table
+
+    # treatments_and_controls.parquet — full table kept for backward compat:
+    # the summarize step downloads it once, and it is exposed as a
+    # user-downloadable output in the webapp.
     pq.write_table(
         _arrow_table,
         os.path.join(output_dir, "treatments_and_controls.parquet"),
@@ -762,7 +860,10 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     with open(os.path.join(output_dir, "grid_metadata.json"), "w") as gf:
         json.dump(grid_meta, gf)
 
-    log.info("Saved treatment_cell_key.parquet and treatments_and_controls.parquet")
+    log.info(
+        "Saved treatment_cell_key.parquet, treatment_pixels.parquet, "
+        "control_pixels/, and treatments_and_controls.parquet"
+    )
 
 
 # ---------------------------------------------------------------------------

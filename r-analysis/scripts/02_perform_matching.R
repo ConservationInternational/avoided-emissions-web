@@ -5,16 +5,22 @@
 # scores estimated via logistic regression or Mahalanobis distance.
 #
 # When run on AWS Batch as an array job, each array element processes one
-# (site, replicate) combination.  The composite array index is decoded as:
-#   site_index      = floor(array_index / N_REPLICATES)
+# (batch_of_sites, replicate) combination.  MATCH_BATCH_SIZE sites (or groups
+# in BATCH_GROUP_SITES mode) are processed per array element to amortise the
+# per-worker overhead (container startup, package loading, file downloads).
+# The composite array index is decoded as:
+#   batch_index     = floor(array_index / N_REPLICATES)
 #   replicate_index = (array_index %% N_REPLICATES) + 1
-# When N_REPLICATES == 1 the mapping is identical to the old behaviour
-# (one element per site).
+#   site_start      = batch_index * MATCH_BATCH_SIZE
+# When N_REPLICATES == 1 and MATCH_BATCH_SIZE == 1 the mapping is identical
+# to the old behaviour (one element per site).
 #
 # Input:
 #   - {output_dir}/sites_processed.parquet
 #   - {output_dir}/treatment_cell_key.parquet
-#   - {output_dir}/treatments_and_controls.parquet
+#   - {output_dir}/treatment_pixels.parquet      (split-data mode)
+#   - s3://.../control_pixels/                   (split-data mode, S3)
+#   - {output_dir}/treatments_and_controls.parquet (legacy fallback)
 #   - {output_dir}/formula.json
 #
 # Output:
@@ -135,12 +141,29 @@ cell_to_lonlat <- function(cells, gm) {
     )
 }
 treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
-# Keep parquet on disk as an Arrow dataset — avoids materialising the entire
-# Per-site subsets are filtered in Arrow and collected just-in-time.
-base_dataset <- open_dataset(
-    file.path(config$output_dir, "treatments_and_controls.parquet"),
-    format = "parquet"
-)
+# Two data loading modes:
+#  1. Split mode (new): treatment_pixels.parquet is a small local file;
+#     control_pixels/ is an Arrow dataset on S3, partitioned by the primary
+#     exact-match variable so each worker reads only the relevant partitions.
+#     ~17K match workers each read O(1/N_partitions) of the control pool
+#     instead of the full file, eliminating disk-space errors.
+#  2. Legacy mode: full treatments_and_controls.parquet on local disk.
+USE_SPLIT_DATA <- !is.null(config$control_pixels_s3_uri) &&
+    file.exists(file.path(config$output_dir, "treatment_pixels.parquet"))
+if (USE_SPLIT_DATA) {
+    treatment_table <- read_parquet(
+        file.path(config$output_dir, "treatment_pixels.parquet")
+    ) %>% as_tibble()
+    control_dataset <- open_dataset(config$control_pixels_s3_uri)
+    message("Using split-data mode: treatment_pixels.parquet (local, ",
+            nrow(treatment_table), " rows) + control_pixels/ from S3")
+} else {
+    # Backward compat: full combined file on local disk.
+    base_dataset <- open_dataset(
+        file.path(config$output_dir, "treatments_and_controls.parquet"),
+        format = "parquet"
+    )
+}
 all_site_ids <- unique(treatment_key$id_numeric)
 all_treatment_cells <- unique(treatment_key$cell)
 
@@ -200,6 +223,18 @@ if (BATCH_GROUP_SITES || GROUP_BY_EXACT_MATCHES) {
     }
 }
 
+# Number of match units (sites or groups) to process per array element.
+# Batching multiple units in one container amortises per-worker overhead:
+# container startup, R package loading, file downloads, Arrow dataset open.
+# GROUP_BY_EXACT_MATCHES forces the effective batch size to 1 because each
+# group's joint propensity model must be computed on its own site set only.
+MATCH_BATCH_SIZE <- if (is.null(config$match_batch_size)) {
+    1L
+} else {
+    as.integer(config$match_batch_size)
+}
+if (GROUP_BY_EXACT_MATCHES) MATCH_BATCH_SIZE <- 1L
+
 # Determine which site(s) and replicate(s) to process.
 # BATCH_REPLICATE will be set to a single integer when the array index
 # specifies a specific replicate; NULL means "run all replicates".
@@ -219,37 +254,52 @@ if (!is.null(config$site_id)) {
         ai <- as.integer(array_index)
 
         if ((BATCH_GROUP_SITES || GROUP_BY_EXACT_MATCHES) && !is.null(GROUP_MAPPING)) {
-            # Cross-site grouping: array index maps to (group_id, replicate)
+            # Cross-site grouping: array index maps to (batch_of_groups, replicate).
+            # MATCH_BATCH_SIZE groups are processed per array element.
+            # GROUP_BY_EXACT_MATCHES forces MATCH_BATCH_SIZE=1 (set above) so
+            # that each group's joint propensity model is computed on its own
+            # site set only.
             group_ids <- as.integer(names(GROUP_MAPPING))
             n_groups <- length(group_ids)
+            n_batches <- ceiling(n_groups / MATCH_BATCH_SIZE)
 
             if (N_REPLICATES > 1L) {
-                group_idx_0 <- ai %/% N_REPLICATES  # 0-based
+                batch_idx_0 <- ai %/% N_REPLICATES  # 0-based batch index
                 rep_idx_0 <- ai %% N_REPLICATES
                 BATCH_REPLICATE <- rep_idx_0 + 1L
                 # Validate array index is within bounds
-                if (group_idx_0 >= n_groups) {
+                if (batch_idx_0 >= n_batches) {
                     stop("AWS Batch array index ", ai, " out of bounds for ",
-                         n_groups, " groups × ", N_REPLICATES, " replicates ",
-                         "(valid range: 0-", (n_groups * N_REPLICATES - 1), ")")
+                         n_batches, " batches \u00d7 ", N_REPLICATES,
+                         " replicates (valid range: 0-",
+                         (n_batches * N_REPLICATES - 1), ")")
                 }
-                group_id <- group_ids[group_idx_0 + 1L]
             } else {
+                batch_idx_0 <- ai
                 # Validate array index is within bounds
-                if (ai >= n_groups) {
+                if (batch_idx_0 >= n_batches) {
                     stop("AWS Batch array index ", ai, " out of bounds for ",
-                         n_groups, " groups (valid range: 0-", (n_groups - 1), ")")
+                         n_batches, " batches (valid range: 0-",
+                         (n_batches - 1), ")")
                 }
-                group_id <- group_ids[ai + 1L]
             }
 
-            # Load all sites in this group
-            group_members <- GROUP_MAPPING[[as.character(group_id)]]
-            # group_members is list of [site_id, sub_site_index]
-            group_site_ids <- sapply(group_members, function(x) x[[1]])
-            group_sub_indices <- sapply(group_members, function(x) x[[2]])
+            # Groups in this batch (R 1-based indexing)
+            group_start_0 <- batch_idx_0 * MATCH_BATCH_SIZE  # 0-based first group
+            group_end_0 <- min(group_start_0 + MATCH_BATCH_SIZE, n_groups)  # excl.
+            batch_group_ids <- group_ids[seq(group_start_0 + 1L, group_end_0)]
 
-            # Get numeric IDs for all sites in group
+            # Collect all site IDs from every group in this batch
+            all_batch_members <- unlist(
+                lapply(batch_group_ids, function(gid) {
+                    GROUP_MAPPING[[as.character(gid)]]
+                }),
+                recursive = FALSE
+            )
+            group_site_ids <- sapply(all_batch_members, function(x) x[[1]])
+            group_sub_indices <- sapply(all_batch_members, function(x) x[[2]])
+
+            # Get numeric IDs for all sites in batch
             site_ids <- sites %>%
                 filter(site_id %in% group_site_ids) %>%
                 pull(id_numeric) %>%
@@ -257,49 +307,58 @@ if (!is.null(config$site_id)) {
 
             message(
                 "  AWS Batch array index: ", array_index,
-                " -> group ", group_id,
-                " (", length(site_ids), " sites",
-                if (!is.null(BATCH_REPLICATE)) paste0(", replicate ", BATCH_REPLICATE, "/", N_REPLICATES) else "",
+                " -> batch ", batch_idx_0 + 1L, "/", n_batches,
+                " (", length(batch_group_ids), " group(s): ",
+                paste(batch_group_ids, collapse = ", "),
+                ", ", length(site_ids), " site(s)",
+                if (!is.null(BATCH_REPLICATE)) {
+                    paste0(", replicate ", BATCH_REPLICATE, "/", N_REPLICATES)
+                } else {
+                    ""
+                },
                 ")"
             )
         } else {
-            # Standard per-site mode
+            # Per-site mode: MATCH_BATCH_SIZE consecutive sites per array element.
             n_sites <- length(all_site_ids)
+            n_batches <- ceiling(n_sites / MATCH_BATCH_SIZE)
             if (N_REPLICATES > 1L) {
-                # Composite index: site_index * N_REPLICATES + replicate_index
-                site_idx_0 <- ai %/% N_REPLICATES  # 0-based site index
+                # Composite index: batch_index * N_REPLICATES + replicate_index
+                batch_idx_0 <- ai %/% N_REPLICATES  # 0-based batch index
                 rep_idx_0 <- ai %% N_REPLICATES    # 0-based replicate index
                 BATCH_REPLICATE <- rep_idx_0 + 1L   # 1-based
                 # Validate array index is within bounds
-                if (site_idx_0 >= n_sites) {
+                if (batch_idx_0 >= n_batches) {
                     stop("AWS Batch array index ", ai, " out of bounds for ",
-                         n_sites, " sites × ", N_REPLICATES, " replicates ",
-                         "(valid range: 0-", (n_sites * N_REPLICATES - 1), ")")
+                         n_batches, " batches \u00d7 ", N_REPLICATES,
+                         " replicates (valid range: 0-",
+                         (n_batches * N_REPLICATES - 1), ")")
                 }
-                site_ids <- all_site_ids[site_idx_0 + 1L]
-                batch_site_id <- filter(
-                    sites, id_numeric == site_ids
-                )$site_id[1]
-                message(
-                    "  AWS Batch array index: ", array_index,
-                    " -> site_id ", batch_site_id,
-                    ", replicate ", BATCH_REPLICATE, "/", N_REPLICATES
-                )
             } else {
-                # Validate array index is within bounds
-                if (ai >= n_sites) {
+                batch_idx_0 <- ai
+                if (batch_idx_0 >= n_batches) {
                     stop("AWS Batch array index ", ai, " out of bounds for ",
-                         n_sites, " sites (valid range: 0-", (n_sites - 1), ")")
+                         n_batches, " batches (valid range: 0-",
+                         (n_batches - 1), ")")
                 }
-                site_ids <- all_site_ids[ai + 1L]
-                batch_site_id <- filter(
-                    sites, id_numeric == site_ids
-                )$site_id[1]
-                message(
-                    "  AWS Batch array index: ", array_index,
-                    " -> site_id ", batch_site_id
-                )
             }
+            # Sites in this batch (R 1-based indexing)
+            site_batch_start_0 <- batch_idx_0 * MATCH_BATCH_SIZE  # 0-based
+            site_batch_end_0 <- min(site_batch_start_0 + MATCH_BATCH_SIZE,
+                                     n_sites)  # exclusive
+            site_ids <- all_site_ids[seq(site_batch_start_0 + 1L,
+                                          site_batch_end_0)]
+            message(
+                "  AWS Batch array index: ", array_index,
+                " -> batch ", batch_idx_0 + 1L, "/", n_batches,
+                " (sites ", site_batch_start_0 + 1L, "-", site_batch_end_0,
+                ", ", length(site_ids), " site(s))",
+                if (!is.null(BATCH_REPLICATE)) {
+                    paste0(", replicate ", BATCH_REPLICATE, "/", N_REPLICATES)
+                } else {
+                    ""
+                }
+            )
         }
     } else {
         # Process all sites sequentially
@@ -818,6 +877,73 @@ match_site_matchit <- function(d, f, precomputed_scores = NULL) {
     ))
 }
 
+# Per-worker cache for control-pixel partitions.  When MATCH_BATCH_SIZE > 1,
+# multiple sites in the same batch may share a partition value (e.g. same
+# admin1 region); the cache eliminates duplicate S3 reads within a batch.
+# The environment is created fresh for each array element (container) so
+# memory is bounded to the partitions actually needed for that batch.
+.ctrl_cache_env <- new.env(parent = emptyenv())
+
+# Helper: load treatment + control pixel data for a group of treatment cells.
+# In split-data mode, treatment rows come from the small local
+# treatment_pixels.parquet; control rows are streamed from the S3-hosted
+# partitioned Arrow dataset, reading only the partition(s) whose primary
+# exact-match variable value appears in the treatment pixels.
+# An optional cache_env (default: .ctrl_cache_env) stores previously fetched
+# partitions so that multiple sites sharing a partition value within a batch
+# only trigger one S3 read.
+# Returns a data.frame WITHOUT a treatment column — caller assigns it via
+# mutate(treatment = cell %in% ...).
+load_site_data_split <- function(group_treatment_cells, treatment_table,
+                                  control_dataset, exact_match_vars,
+                                  cache_env = .ctrl_cache_env) {
+    t_rows <- treatment_table %>%
+        filter(cell %in% group_treatment_cells)
+    if (length(exact_match_vars) > 0 && exact_match_vars[1] %in% names(t_rows)) {
+        primary_var <- exact_match_vars[1]
+        # Cast to integer to match the int32 hive partition keys written by
+        # the extract step (float32 covariate values cast to int32 for dirs).
+        primary_vals <- unique(as.integer(na.omit(t_rows[[primary_var]])))
+        cache_key <- paste(sort(primary_vals), collapse = ",")
+        if (!is.null(cache_env) &&
+                exists(cache_key, envir = cache_env, inherits = FALSE)) {
+            c_rows <- get(cache_key, envir = cache_env, inherits = FALSE)
+            message("    [S3 cache HIT] partition key=", cache_key,
+                    " (", nrow(c_rows), " control rows)")
+        } else {
+            arrow_t <- proc.time()
+            c_rows <- control_dataset %>%
+                filter(!!sym(primary_var) %in% primary_vals) %>%
+                collect() %>%
+                as_tibble()
+            message("    [S3 read] ", nrow(c_rows), " control rows (partition ",
+                    primary_var, " in c(",
+                    paste(primary_vals, collapse = ", "), ")) in ",
+                    round((proc.time() - arrow_t)["elapsed"], 2), "s")
+            if (!is.null(cache_env)) {
+                assign(cache_key, c_rows, envir = cache_env, inherits = FALSE)
+            }
+        }
+    } else {
+        cache_key <- "__all__"
+        if (!is.null(cache_env) &&
+                exists(cache_key, envir = cache_env, inherits = FALSE)) {
+            c_rows <- get(cache_key, envir = cache_env, inherits = FALSE)
+            message("    [S3 cache HIT] all controls (", nrow(c_rows), " rows)")
+        } else {
+            arrow_t <- proc.time()
+            c_rows <- control_dataset %>% collect() %>% as_tibble()
+            message("    [S3 read] ", nrow(c_rows),
+                    " control rows (no partition filter) in ",
+                    round((proc.time() - arrow_t)["elapsed"], 2), "s")
+            if (!is.null(cache_env)) {
+                assign(cache_key, c_rows, envir = cache_env, inherits = FALSE)
+            }
+        }
+    }
+    dplyr::bind_rows(t_rows, c_rows)
+}
+
 n_failed <- 0L
 required_match_cols <- c(
     "cell", "site_id", "id_numeric", "area_ha", "treatment",
@@ -839,11 +965,20 @@ if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
 
     gc_treatment_cells <- filter(treatment_key, id_numeric %in% site_ids)$cell
 
-    # Single Arrow scan: all group treatment pixels + all eligible controls
-    gc_raw <- base_dataset %>%
-        filter(cell %in% gc_treatment_cells | !(cell %in% all_treatment_cells)) %>%
-        collect() %>%
-        mutate(treatment = cell %in% gc_treatment_cells)
+    # Load treatment pixels + matching control pool.
+    # Split-data mode reads only the relevant S3 partitions; legacy mode
+    # scans the full local parquet.
+    if (USE_SPLIT_DATA) {
+        gc_raw <- load_site_data_split(
+            gc_treatment_cells, treatment_table, control_dataset, EXACT_MATCH_VARS
+        ) %>%
+            mutate(treatment = cell %in% gc_treatment_cells)
+    } else {
+        gc_raw <- base_dataset %>%
+            filter(cell %in% gc_treatment_cells | !(cell %in% all_treatment_cells)) %>%
+            collect() %>%
+            mutate(treatment = cell %in% gc_treatment_cells)
+    }
 
     # Remove pixels missing any exact-match grouping variable, then drop
     # strata that lack both treatment and control representation.
@@ -1092,11 +1227,19 @@ for (this_id in site_ids) {
                 other_sites_treatment <- NULL
 
                 arrow_timer <- proc.time()
-                vals <- base_dataset %>%
-                    filter(cell %in% group_treatment_cells |
-                           !(cell %in% all_treatment_cells)) %>%
-                    collect() %>%
-                    mutate(treatment = cell %in% site_treatment_cells)
+                if (USE_SPLIT_DATA) {
+                    vals <- load_site_data_split(
+                        group_treatment_cells, treatment_table,
+                        control_dataset, EXACT_MATCH_VARS
+                    ) %>%
+                        mutate(treatment = cell %in% site_treatment_cells)
+                } else {
+                    vals <- base_dataset %>%
+                        filter(cell %in% group_treatment_cells |
+                               !(cell %in% all_treatment_cells)) %>%
+                        collect() %>%
+                        mutate(treatment = cell %in% site_treatment_cells)
+                }
                 arrow_elapsed <- (proc.time() - arrow_timer)["elapsed"]
                 message(
                     "    [TIMING] Arrow dataset filter & collect: ",

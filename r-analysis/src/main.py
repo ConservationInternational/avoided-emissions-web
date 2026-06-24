@@ -73,6 +73,20 @@ EXTRACT_OUTPUT_FILES = [
     "grid_metadata.json",
 ]
 
+# Subset downloaded by match workers — omits treatments_and_controls.parquet
+# (5-15 GB) because match workers stream control_pixels/ directly from S3
+# via Arrow's native S3 filesystem, downloading only the partitions that
+# match their site's exact-match variable values.  treatment_pixels.parquet
+# is small (~20-50 MB) and is the only pixel-data file downloaded locally.
+MATCH_STEP_DOWNLOAD_FILES = [
+    "sites_processed.parquet",
+    "treatment_pixels.parquet",
+    "treatment_cell_key.parquet",
+    "formula.json",
+    "site_id_key.csv",
+    "grid_metadata.json",
+]
+
 
 # ---------------------------------------------------------------------------
 # Progress / log reporting helpers
@@ -178,8 +192,15 @@ def run(params, log=None):
     if pipeline_mode and (
         step in ("match", "summarize") or step.startswith("match_chunk_")
     ):
-        log.info("Downloading intermediate extract outputs from S3")
-        _download_s3_files(intermediate_uri, output_dir, EXTRACT_OUTPUT_FILES, log)
+        _is_match_step = step in ("match",) or step.startswith("match_chunk_")
+        _download_list = (
+            MATCH_STEP_DOWNLOAD_FILES if _is_match_step else EXTRACT_OUTPUT_FILES
+        )
+        log.info(
+            "Downloading intermediate extract outputs from S3 (%s)",
+            "match subset" if _is_match_step else "full set",
+        )
+        _download_s3_files(intermediate_uri, output_dir, _download_list, log)
         # Load spatial params written by the extract step so that
         # matching_extent and sites_exclusion_buffer are available in config.
         try:
@@ -191,7 +212,9 @@ def run(params, log=None):
                 params = dict(params, matching_extent=_prep["matching_extent"])
                 log.info("matching_extent loaded from prep_summary.json")
             if _prep.get("sites_exclusion_buffer"):
-                params = dict(params, sites_exclusion_buffer=_prep["sites_exclusion_buffer"])
+                params = dict(
+                    params, sites_exclusion_buffer=_prep["sites_exclusion_buffer"]
+                )
                 log.info("sites_exclusion_buffer loaded from prep_summary.json")
         except Exception as _exc:  # noqa: BLE001
             log.warning("Could not load prep_summary.json: %s — continuing", _exc)
@@ -248,6 +271,8 @@ def run(params, log=None):
         config["group_by_exact_matches"] = bool(params["group_by_exact_matches"])
     if params.get("batch_group_sites") is not None:
         config["batch_group_sites"] = bool(params["batch_group_sites"])
+    if params.get("match_batch_size") is not None:
+        config["match_batch_size"] = int(params["match_batch_size"])
     if params.get("separation_fallback_mahalanobis") is not None:
         config["separation_fallback_mahalanobis"] = bool(
             params["separation_fallback_mahalanobis"]
@@ -260,6 +285,13 @@ def run(params, log=None):
         config["resolution_m"] = int(params["resolution_m"])
     if params.get("reference_layer_uris"):
         config["reference_layer_uris"] = params["reference_layer_uris"]
+    # Provide the S3 URI for the partitioned control-pixels dataset so match
+    # workers can stream it directly from S3 (no local download).  Only set
+    # in pipeline mode for match steps; summarize and all-in-one runs don't
+    # need it because they never read control_pixels/ at all.
+    _is_match_step = step in ("match",) or step.startswith("match_chunk_")
+    if pipeline_mode and _is_match_step and intermediate_uri:
+        config["control_pixels_s3_uri"] = intermediate_uri + "/control_pixels"
 
     config_path = os.path.join(data_dir, "config.json")
     with open(config_path, "w") as f:
