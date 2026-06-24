@@ -78,7 +78,7 @@ ANALYSIS_DEFAULTS = {
     "group_by_exact_matches": False,
     "matching_method": "optimal",
     "n_replicates": 1,
-    "match_batch_size": 10,
+    "match_batch_size": 25,
     "match_memory_gb": 30,
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
     "fc_year_start": FC_YEAR_MIN,
