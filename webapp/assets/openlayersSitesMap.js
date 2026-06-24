@@ -164,9 +164,9 @@
         return el.getAttribute("data-geojson") || "";
     }
 
-    function mapStyle(siteId, selectedSiteId) {
+    function mapStyle(siteId, selectedSiteId, showLabel) {
         const isSelected = siteId && siteId === selectedSiteId;
-        return new ol.style.Style({
+        const styleOptions = {
             fill: new ol.style.Fill({
                 color: isSelected ? "rgba(245, 124, 0, 0.30)" : "rgba(38, 166, 91, 0.18)",
             }),
@@ -174,16 +174,21 @@
                 color: isSelected ? "#ef6c00" : "#2e7d32",
                 width: isSelected ? 3 : 2,
             }),
-            text: new ol.style.Text({
+        };
+
+        if (showLabel) {
+            styleOptions.text = new ol.style.Text({
                 text: siteId || "",
                 font: "12px sans-serif",
                 fill: new ol.style.Fill({ color: "#1f2937" }),
                 stroke: new ol.style.Stroke({ color: "#ffffff", width: 3 }),
                 overflow: true,
                 padding: [2, 2, 2, 2],
-                backgroundFill: new ol.style.Fill({ color: "rgba(255, 255, 255, 0.75)" }),
-            }),
-        });
+                backgroundFill: new ol.style.Fill({ color: "rgba(255, 255, 255, 0.55)" }),
+            });
+        }
+
+        return new ol.style.Style(styleOptions);
     }
 
     function mapStylePoint(areaHa, siteId, selectedSiteId) {
@@ -210,17 +215,32 @@
 
     function featureStyle(mapEl) {
         const styleCache = {};
+        const minPolygonLabelZoom = 9;
         return function (feature) {
             const geomType = feature.getGeometry()?.getType();
             const siteId = normalizeSiteId(feature.get("site_id"));
             const selectedSiteId = normalizeSiteId(mapEl._selectedSiteId);
-            const key = geomType + "|" + siteId + "|" + selectedSiteId;
+            const zoom = mapEl._olMap?.getView()?.getZoom() || 0;
+            const zoomBucket = Math.floor(zoom);
+            const showPolygonLabel =
+                geomType !== "Point" &&
+                (zoomBucket >= minPolygonLabelZoom || siteId === selectedSiteId);
+            const key =
+                geomType +
+                "|" +
+                siteId +
+                "|" +
+                selectedSiteId +
+                "|" +
+                zoomBucket +
+                "|" +
+                showPolygonLabel;
             if (!styleCache[key]) {
                 if (geomType === "Point") {
                     const areaHa = feature.get("area_ha") || 0;
                     styleCache[key] = mapStylePoint(areaHa, siteId, selectedSiteId);
                 } else {
-                    styleCache[key] = mapStyle(siteId, selectedSiteId);
+                    styleCache[key] = mapStyle(siteId, selectedSiteId, showPolygonLabel);
                 }
             }
             return styleCache[key];
@@ -500,6 +520,7 @@
                     tileLoadFunction: makeMvtTileLoadFunction(),
                 }),
                 style: featureStyle(el),
+                declutter: true,
             });
             el._olVtLayer = vtLayer;
             layers.push(vtLayer);
