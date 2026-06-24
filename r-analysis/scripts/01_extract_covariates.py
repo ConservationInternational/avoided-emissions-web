@@ -808,37 +808,54 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         gc.collect()
         log.info("Cast '%s' to int32 for hive partition keys", _partition_var)
 
-    # 4. Stream-write control_pixels/.  Iterate _arrow_table in zero-copy
-    # slices of _BATCH_ROWS, filter out treatment rows, and yield each batch
-    # to pad.write_dataset() (which routes rows to partition directories
-    # internally).  Peak memory per batch is approximately
-    #   batch_rows * n_columns * 4 bytes
-    # e.g. 2,000,000 * 50 * 4 = 400 MB, on top of the ~30 GB _arrow_table.
+    # 4. Stream-write control_pixels/.
+    #
+    # A naive pad.write_dataset() over UNSORTED record batches keeps one open
+    # Parquet writer per distinct partition value seen, each buffering a full
+    # row group in memory.  With hundreds of admin1 regions that buffering
+    # accumulates to tens of GB on top of the ~30 GB table and OOM-kills the
+    # container.  To avoid it we sort the control rows by the partition value
+    # first, so every emitted chunk belongs to a single partition and the
+    # writer keeps only ~1 file open at a time.
+    #
+    # Sorting is done WITHOUT copying the 30 GB table: we build an int index
+    # array of control-row positions, order it by partition value, then gather
+    # each chunk on demand via Table.take().  The index arrays are ~1 GB each
+    # (134M x 8 bytes), so peak stays around ~33 GB.
     _control_pixels_dir = os.path.join(output_dir, "control_pixels")
     os.makedirs(_control_pixels_dir, exist_ok=True)
 
     _BATCH_ROWS = 2_000_000
     _inv_mask = pc.invert(_treatment_mask)
     del _treatment_mask
-    _n_total = len(_arrow_table)
-    _n_batches = math.ceil(_n_total / _BATCH_ROWS) if _n_total else 0
-    _control_count = 0
+    # Positions (row indices) of all control pixels.
+    _control_positions = pc.indices_nonzero(_inv_mask)
+    del _inv_mask
+    gc.collect()
+    _control_count = len(_control_positions)
 
-    def _control_batch_iter(table, mask, n_total, batch_rows):
-        nonlocal _control_count
-        for start in range(0, n_total, batch_rows):
-            length = min(batch_rows, n_total - start)
-            sub = table.slice(start, length)  # zero-copy view
-            sub_mask = mask.slice(start, length)  # zero-copy view
-            c_batch = sub.filter(sub_mask)  # materialises batch; returns Table
-            if len(c_batch) > 0:
-                _control_count += len(c_batch)
-                # write_dataset expects RecordBatch objects, not Table
-                yield from c_batch.to_batches()
+    if _partition_var:
+        # Order control positions by their partition value so write_dataset
+        # sees rows already grouped by partition (1 open file at a time).
+        _part_vals = _arrow_table.column(_partition_var).take(_control_positions)
+        _order = pc.sort_indices(_part_vals)
+        del _part_vals
+        gc.collect()
+        _control_positions = _control_positions.take(_order)
+        del _order
+        gc.collect()
+
+    def _control_batch_iter(table, positions, batch_rows):
+        n = len(positions)
+        for start in range(0, n, batch_rows):
+            length = min(batch_rows, n - start)
+            idx = positions.slice(start, length)  # zero-copy view of index array
+            chunk = table.take(idx)  # materialises ~batch_rows rows
+            yield from chunk.to_batches()
 
     if _partition_var:
         pad.write_dataset(
-            _control_batch_iter(_arrow_table, _inv_mask, _n_total, _BATCH_ROWS),
+            _control_batch_iter(_arrow_table, _control_positions, _BATCH_ROWS),
             base_dir=_control_pixels_dir,
             format="parquet",
             schema=_arrow_table.schema,
@@ -848,27 +865,27 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             ),
             file_options=pad.ParquetFileFormat().make_write_options(compression="zstd"),
             existing_data_behavior="overwrite_or_ignore",
+            # Data is pre-sorted by partition, so only a couple of writers are
+            # ever open; keep the cap low and flush row groups promptly.
+            max_open_files=8,
+            max_rows_per_group=512_000,
         )
         log.info(
-            "Written control_pixels/ (%d rows in %d batches, partitioned by '%s')",
+            "Written control_pixels/ (%d rows, partitioned by '%s')",
             _control_count,
-            _n_batches,
             _partition_var,
         )
     else:
         # No exact-match vars: write a single flat file by appending batches.
         _flat_writer = None
-        for c_batch in _control_batch_iter(
-            _arrow_table, _inv_mask, _n_total, _BATCH_ROWS
-        ):
+        for _rb in _control_batch_iter(_arrow_table, _control_positions, _BATCH_ROWS):
             if _flat_writer is None:
                 _flat_writer = pq.ParquetWriter(
                     os.path.join(_control_pixels_dir, "part-0.parquet"),
                     _arrow_table.schema,
                     compression="zstd",
                 )
-            for rb in c_batch.to_batches():
-                _flat_writer.write_batch(rb)
+            _flat_writer.write_batch(_rb)
         if _flat_writer is not None:
             _flat_writer.close()
         log.info(
@@ -876,7 +893,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             _control_count,
         )
 
-    del _inv_mask
+    del _control_positions
     del _arrow_table
     gc.collect()
 
