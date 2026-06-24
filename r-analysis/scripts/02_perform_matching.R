@@ -18,9 +18,9 @@
 # Input:
 #   - {output_dir}/sites_processed.parquet
 #   - {output_dir}/treatment_cell_key.parquet
-#   - {output_dir}/treatment_pixels.parquet      (split-data mode)
-#   - s3://.../control_pixels/                   (split-data mode, S3)
-#   - {output_dir}/treatments_and_controls.parquet (legacy fallback)
+#   - {output_dir}/treatment_pixels.parquet
+#   - s3://.../control_pixels/   (pipelined mode; via config$control_pixels_s3_uri)
+#   - OR {output_dir}/control_pixels/   (all-in-one local mode)
 #   - {output_dir}/formula.json
 #
 # Output:
@@ -141,29 +141,32 @@ cell_to_lonlat <- function(cells, gm) {
     )
 }
 treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
-# Two data loading modes:
-#  1. Split mode (new): treatment_pixels.parquet is a small local file;
-#     control_pixels/ is an Arrow dataset on S3, partitioned by the primary
-#     exact-match variable so each worker reads only the relevant partitions.
-#     ~17K match workers each read O(1/N_partitions) of the control pool
-#     instead of the full file, eliminating disk-space errors.
-#  2. Legacy mode: full treatments_and_controls.parquet on local disk.
-USE_SPLIT_DATA <- !is.null(config$control_pixels_s3_uri) &&
-    file.exists(file.path(config$output_dir, "treatment_pixels.parquet"))
-if (USE_SPLIT_DATA) {
-    treatment_table <- read_parquet(
-        file.path(config$output_dir, "treatment_pixels.parquet")
-    ) %>% as_tibble()
-    control_dataset <- open_dataset(config$control_pixels_s3_uri)
-    message("Using split-data mode: treatment_pixels.parquet (local, ",
-            nrow(treatment_table), " rows) + control_pixels/ from S3")
+# Control pixels are read from a partitioned Arrow dataset.  Two cases:
+#   1. Pipelined mode: control_pixels/ lives on S3 (path in config$control_pixels_s3_uri);
+#      Arrow's S3 filesystem streams only the relevant partitions per worker.
+#   2. All-in-one mode (small single-site jobs): control_pixels/ is in
+#      output_dir on local disk.  We open it directly.
+# treatment_pixels.parquet is always local (small file downloaded per worker
+# or written locally by the extract step).
+treatment_pixels_path <- file.path(config$output_dir, "treatment_pixels.parquet")
+local_control_dir <- file.path(config$output_dir, "control_pixels")
+if (!is.null(config$control_pixels_s3_uri)) {
+    control_pixels_uri <- config$control_pixels_s3_uri
+} else if (dir.exists(local_control_dir)) {
+    control_pixels_uri <- local_control_dir
 } else {
-    # Backward compat: full combined file on local disk.
-    base_dataset <- open_dataset(
-        file.path(config$output_dir, "treatments_and_controls.parquet"),
-        format = "parquet"
-    )
+    stop("Neither config$control_pixels_s3_uri nor local control_pixels/ ",
+         "directory found.  Did the extract step run successfully?")
 }
+if (!file.exists(treatment_pixels_path)) {
+    stop("treatment_pixels.parquet not found at ", treatment_pixels_path,
+         ".  Did the extract step run successfully?")
+}
+treatment_table <- read_parquet(treatment_pixels_path) %>% as_tibble()
+control_dataset <- open_dataset(control_pixels_uri)
+message("Split-data mode: treatment_pixels.parquet (local, ",
+        nrow(treatment_table), " rows) + control_pixels/ from ",
+        control_pixels_uri)
 all_site_ids <- unique(treatment_key$id_numeric)
 all_treatment_cells <- unique(treatment_key$cell)
 
@@ -965,20 +968,12 @@ if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
 
     gc_treatment_cells <- filter(treatment_key, id_numeric %in% site_ids)$cell
 
-    # Load treatment pixels + matching control pool.
-    # Split-data mode reads only the relevant S3 partitions; legacy mode
-    # scans the full local parquet.
-    if (USE_SPLIT_DATA) {
-        gc_raw <- load_site_data_split(
-            gc_treatment_cells, treatment_table, control_dataset, EXACT_MATCH_VARS
-        ) %>%
-            mutate(treatment = cell %in% gc_treatment_cells)
-    } else {
-        gc_raw <- base_dataset %>%
-            filter(cell %in% gc_treatment_cells | !(cell %in% all_treatment_cells)) %>%
-            collect() %>%
-            mutate(treatment = cell %in% gc_treatment_cells)
-    }
+    # Load treatment pixels + matching control pool: filter to relevant
+    # exact-match partitions, then assign the treatment flag.
+    gc_raw <- load_site_data_split(
+        gc_treatment_cells, treatment_table, control_dataset, EXACT_MATCH_VARS
+    ) %>%
+        mutate(treatment = cell %in% gc_treatment_cells)
 
     # Remove pixels missing any exact-match grouping variable, then drop
     # strata that lack both treatment and control representation.
@@ -1227,19 +1222,11 @@ for (this_id in site_ids) {
                 other_sites_treatment <- NULL
 
                 arrow_timer <- proc.time()
-                if (USE_SPLIT_DATA) {
-                    vals <- load_site_data_split(
-                        group_treatment_cells, treatment_table,
-                        control_dataset, EXACT_MATCH_VARS
-                    ) %>%
-                        mutate(treatment = cell %in% site_treatment_cells)
-                } else {
-                    vals <- base_dataset %>%
-                        filter(cell %in% group_treatment_cells |
-                               !(cell %in% all_treatment_cells)) %>%
-                        collect() %>%
-                        mutate(treatment = cell %in% site_treatment_cells)
-                }
+                vals <- load_site_data_split(
+                    group_treatment_cells, treatment_table,
+                    control_dataset, EXACT_MATCH_VARS
+                ) %>%
+                    mutate(treatment = cell %in% site_treatment_cells)
                 arrow_elapsed <- (proc.time() - arrow_timer)["elapsed"]
                 message(
                     "    [TIMING] Arrow dataset filter & collect: ",

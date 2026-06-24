@@ -129,9 +129,13 @@ Mahalanobis distance has no caliper and is therefore robust to this condition.
 
 - `sites_processed.parquet`
 - `treatment_cell_key.parquet`
-- `treatments_and_controls.parquet`
+- `treatment_pixels.parquet` — covariates for every pixel inside a treatment site
+- `control_pixels/` — hive-partitioned Arrow dataset of all candidate control
+  pixels (partitioned by the primary exact-match variable so match workers can
+  stream only the relevant partitions directly from S3)
 - `formula.json`
 - `site_id_key.csv`
+- `grid_metadata.json`
 
 ### Step 2 (`02_perform_matching.R`)
 

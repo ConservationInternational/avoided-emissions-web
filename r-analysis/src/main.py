@@ -64,20 +64,23 @@ STEP_LABELS = {
 PIPELINE_STEP_ORDER = ["extract", "match", "summarize"]
 
 # Files produced by the extract step that subsequent steps need.
+# The combined treatments_and_controls.parquet is no longer written —
+# the match step uses treatment_pixels.parquet + S3-streamed control_pixels/,
+# and the summarize step only reads sites_processed.parquet and
+# treatment_cell_key.parquet.
 EXTRACT_OUTPUT_FILES = [
     "sites_processed.parquet",
     "treatment_cell_key.parquet",
-    "treatments_and_controls.parquet",
+    "treatment_pixels.parquet",
     "formula.json",
     "site_id_key.csv",
     "grid_metadata.json",
 ]
 
-# Subset downloaded by match workers — omits treatments_and_controls.parquet
-# (5-15 GB) because match workers stream control_pixels/ directly from S3
-# via Arrow's native S3 filesystem, downloading only the partitions that
-# match their site's exact-match variable values.  treatment_pixels.parquet
-# is small (~20-50 MB) and is the only pixel-data file downloaded locally.
+# Subset downloaded by match workers.  control_pixels/ is streamed directly
+# from S3 via Arrow's native S3 filesystem (no local download).
+# treatment_pixels.parquet is small (~20-50 MB) and is the only pixel-data
+# file downloaded locally.
 MATCH_STEP_DOWNLOAD_FILES = [
     "sites_processed.parquet",
     "treatment_pixels.parquet",

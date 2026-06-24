@@ -984,7 +984,11 @@ _FILE_DESCRIPTIONS = {
     "site_id_key.csv": "Mapping between numeric and string site IDs",
     "sites_processed.parquet": "Processed site geometries and metadata",
     "treatment_cell_key.parquet": "Raster cells belonging to each treatment site",
-    "treatments_and_controls.parquet": "Extracted covariates for all treatment/control pixels",
+    "treatment_pixels.parquet": "Covariate values for pixels inside treatment sites",
+    "control_pixels/": (
+        "Covariate values for control-pool pixels "
+        "(hive-partitioned by primary exact-match variable)"
+    ),
 }
 
 
