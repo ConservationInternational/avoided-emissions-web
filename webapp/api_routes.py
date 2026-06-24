@@ -394,8 +394,8 @@ def create_api_blueprint(limiter):
     # -- MVT tile endpoints --------------------------------------------------
     # Serve Mapbox Vector Tiles for site geometries.  The rendering layer in
     # OpenLayers fetches these directly; no Dash callback round-trip is needed
-    # for zoom/pan.  At zoom < 12 the endpoint returns centroid Points for all
-    # sites in the tile; at zoom >= 12 it returns simplified Polygons.
+    # for zoom/pan.  At zoom < 7 the endpoint returns centroid Points for all
+    # sites in the tile; at zoom >= 7 it returns simplified Polygons.
 
     def _mvt_simplify_tol(z):
         """Geometry simplification tolerance in degrees, halving each zoom level."""
@@ -414,7 +414,7 @@ def create_api_blueprint(limiter):
                 f.site_id,
                 f.site_name,
                 f.area_ha,
-                CASE WHEN :z < 12
+                CASE WHEN :z < 7
                     THEN ST_AsMVTGeom(
                              ST_Transform(ST_Centroid(f.geom), 3857),
                              t.env3857, 4096, 256, true)
@@ -447,7 +447,7 @@ def create_api_blueprint(limiter):
                 f.area_ha,
                 tr.extrapolated_emissions_avoided_mgco2e AS emissions_avoided_mgco2e,
                 tr.extrapolated_forest_loss_avoided_ha  AS forest_loss_avoided_ha,
-                CASE WHEN :z < 12
+                CASE WHEN :z < 7
                     THEN ST_AsMVTGeom(
                              ST_Transform(ST_Centroid(f.geom), 3857),
                              t.env3857, 4096, 256, true)
@@ -480,7 +480,7 @@ def create_api_blueprint(limiter):
     def sites_tiles(site_set_id, z, x, y):
         """Serve MVT tiles for a user-owned site set.
 
-        Returns centroid Points at zoom < 12; simplified Polygons at zoom >= 12.
+        Returns centroid Points at zoom < 7; simplified Polygons at zoom >= 7.
         The tile is empty (zero-length body) when no sites intersect the tile.
         """
         db = get_db()
