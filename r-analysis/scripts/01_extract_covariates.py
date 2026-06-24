@@ -830,10 +830,11 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             length = min(batch_rows, n_total - start)
             sub = table.slice(start, length)  # zero-copy view
             sub_mask = mask.slice(start, length)  # zero-copy view
-            c_batch = sub.filter(sub_mask)  # materialises batch
+            c_batch = sub.filter(sub_mask)  # materialises batch; returns Table
             if len(c_batch) > 0:
                 _control_count += len(c_batch)
-                yield c_batch
+                # write_dataset expects RecordBatch objects, not Table
+                yield from c_batch.to_batches()
 
     if _partition_var:
         pad.write_dataset(

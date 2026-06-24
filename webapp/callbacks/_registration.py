@@ -1649,7 +1649,7 @@ def register_callbacks(app, limiter=None):
                 [
                     html.P(
                         "Task queued for submission. It will appear as "
-                        "\u2018submitted\u2019 within a few seconds."
+                        "\u2018submitting\u2019 within a few seconds."
                     ),
                     dcc.Link(f"View task: {task_id}", href=f"/task/{task_id}"),
                 ],
