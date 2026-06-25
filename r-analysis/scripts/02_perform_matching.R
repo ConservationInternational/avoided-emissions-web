@@ -177,7 +177,9 @@ if (MIN_CONTROL_DISTANCE_KM > 0) {
     if (!is.null(config$sites_exclusion_buffer)) {
         # Use the pre-computed buffer from PostGIS (geography-based,
         # avoids S2 edge-crossing issues in R).
-        buf_json <- toJSON(config$sites_exclusion_buffer, auto_unbox = TRUE)
+        buf_json <- as.character(
+            toJSON(config$sites_exclusion_buffer, auto_unbox = TRUE)
+        )
         s2_state <- sf_use_s2()
         sf_use_s2(FALSE)
         all_sites_buffer <- st_make_valid(
