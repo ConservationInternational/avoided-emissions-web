@@ -789,8 +789,8 @@ def _complete_analysis_task_submission(task_id, user_id):
                             "command": ["extract"],
                             "timeout_seconds": 14400,  # 4 h
                             "memory_mib": max(
-                                61440, match_memory_mib
-                            ),  # at least 60 GB
+                                131072, match_memory_mib
+                            ),  # at least 128 GB
                             "vcpus": 4,
                             "retry_attempts": 3,
                         },
@@ -1369,8 +1369,8 @@ def submit_analysis_task(
                             "command": ["extract"],
                             "timeout_seconds": 14400,  # 4 h
                             "memory_mib": max(
-                                61440, match_memory_mib
-                            ),  # at least 60 GB
+                                131072, match_memory_mib
+                            ),  # at least 128 GB
                             "vcpus": 4,
                             "retry_attempts": 3,
                         },

@@ -160,7 +160,7 @@ class Config:
     # The extract step loads full COG grids into memory, so the default
     # must be large enough to avoid OOM kills.  Per-step overrides in
     # the pipeline descriptor can refine this for lighter steps.
-    BATCH_MEMORY_MIB = int(os.environ.get("BATCH_MEMORY_MIB", "61440"))  # 60 GB
+    BATCH_MEMORY_MIB = int(os.environ.get("BATCH_MEMORY_MIB", "131072"))  # 128 GB
     BATCH_VCPUS = int(os.environ.get("BATCH_VCPUS", "4"))
 
     # SparkPost email configuration

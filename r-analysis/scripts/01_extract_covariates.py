@@ -42,8 +42,6 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
-import pyarrow.dataset as pad
 import pyarrow.parquet as pq
 import rioxarray  # noqa: F401 – registers the rio accessor
 import xarray as xr
@@ -721,14 +719,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             data[layer_name] = layer_futures[layer_name].result()
             log.info("  [%d/%d] Done    %s", i, len(all_layers), layer_name)
 
-    # Build a single Arrow table directly from the dict of numpy arrays.
-    # pa.table() zero-copy-wraps each array (no pandas block consolidation),
-    # so peak memory at this point is just the sum of the layer arrays
-    # (~30 GB for 150M rows x ~50 float32 covariates).
-    _arrow_table = pa.table(data)
-    del data
-
-    log.info("Total covariate values extracted: %d pixels", len(_arrow_table))
+    log.info("Total covariate values extracted: %d pixels", len(data["cell"]))
 
     # --- 8. save outputs ---
     output_dir = config["output_dir"]
@@ -739,162 +730,145 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         compression="zstd",
     )
 
-    # --- Split table into treatment_pixels + control_pixels ---
+    # --- Split into treatment_pixels + control_pixels ---
     # The match step downloads the small treatment_pixels.parquet locally and
     # streams control_pixels/ directly from S3 via Arrow's native S3 filesystem,
-    # filtering to only the partitions that match its site's exact-match
-    # variable values.  This avoids downloading the full control pool for
-    # every one of the thousands of match workers.
+    # reading only the hive partitions whose exact-match variable values appear
+    # in its site's treatment pixels.  This avoids downloading the full control
+    # pool for every one of the thousands of match workers.
     #
-    # Memory budget:
-    #   pa.Table.filter() is NOT zero-copy -- it materialises a new table
-    #   containing only the kept rows.  For ~134M control rows x ~50 float32
-    #   columns that would allocate ~27 GB on top of the existing ~30 GB
-    #   _arrow_table, which OOM-kills the 60 GB extract container.
+    # MEMORY STRATEGY (critical):
+    #   The full pixel table is ~26 GB (148M rows x ~42 columns x 4 bytes) and
+    #   that already dominates the container's available memory.  Anything that
+    #   copies the table (pa.Table.filter), holds a second copy, or buffers one
+    #   open Parquet writer per partition (pad.write_dataset over unsorted data)
+    #   pushes peak memory over the limit and triggers the OOM killer.
     #
-    #   To bound peak memory we:
-    #     (a) write treatment_pixels.parquet via a single small filter
-    #         (~13M rows, ~3 GB peak -> total ~33 GB peak briefly);
-    #     (b) cast the partition column once via set_column (which only
-    #         replaces a single column reference, ~600 MB churn);
-    #     (c) stream control_pixels/ via zero-copy slicing -- each batch
-    #         materialises only ~few-hundred-MB of filtered rows at a time.
+    #   So we never build a combined Arrow table and never sort/copy the whole
+    #   dataset.  We operate directly on the numpy `data` dict and write each
+    #   output by streaming row-blocks: for any set of rows we gather at most
+    #   _WRITE_BLOCK rows across all columns at a time (~700 MB), append them to
+    #   a single ParquetWriter, and free the block.  Peak stays at
+    #   floor (~26 GB) + one block (~0.7 GB).
     #
-    # The combined treatments_and_controls.parquet is no longer written:
-    # neither the match step nor the summarize step reads it.  Users who
-    # want the combined table can concat treatment_pixels.parquet and
-    # control_pixels/ on the fly.
+    # The combined treatments_and_controls.parquet is no longer written: neither
+    # the match step nor the summarize step reads it.
 
-    # 1. Compute treatment-cell membership mask (one-time, ~18 MB).
-    _treatment_cell_set = pa.chunked_array(
-        [pa.array(treatment_key["cell"].values, type=pa.int64())]
-    )
-    _treatment_mask = pc.is_in(
-        _arrow_table.column("cell"), value_set=_treatment_cell_set
-    )
-    del _treatment_cell_set
+    _all_cols = list(data.keys())
+    _WRITE_BLOCK = 4_000_000  # rows gathered per parquet write block (~700 MB)
 
-    # 2. Write treatment_pixels.parquet.  The filter result is small enough
-    # (~3 GB) to materialise in one shot.
-    _treatment_table = _arrow_table.filter(_treatment_mask)
-    pq.write_table(
-        _treatment_table,
-        os.path.join(output_dir, "treatment_pixels.parquet"),
-        compression="zstd",
-    )
-    log.info("Written treatment_pixels.parquet: %d rows", len(_treatment_table))
-    del _treatment_table
-    gc.collect()
-
-    # 3. Cast partition column on _arrow_table once so hive directory names
-    # are clean integers (e.g. ecoregion=5/, not ecoregion=5.0/).  NaN/Inf
-    # become 0 -- pixels in partition 0 are dropped by R's filter_groups()
-    # because no treatment pixel ever lands there.
+    # Determine the hive partition variable (first exact-match var present).
     _exact_match_vars: list[str] = config.get("exact_match_vars") or []
-    _partition_var = next(
-        (v for v in _exact_match_vars if v in _arrow_table.schema.names),
-        None,
-    )
+    _partition_var = next((v for v in _exact_match_vars if v in data), None)
+
+    # Cast the partition column to int32 in-place so BOTH treatment_pixels and
+    # the control hive directory names use identical integer keys (otherwise the
+    # match step would compare float32 treatment values against int32 control
+    # values parsed from the directory paths).  NaN/Inf -> 0; pixels in
+    # partition 0 are dropped by R's filter_groups() because no treatment pixel
+    # ever lands there.
     if _partition_var:
-        _pidx = _arrow_table.schema.get_field_index(_partition_var)
-        _col_pd = _arrow_table.column(_partition_var).to_pandas()
-        _col_int = pa.array(
-            _col_pd.fillna(0).round().astype("int32"),
-            type=pa.int32(),
+        _pv = data[_partition_var]
+        data[_partition_var] = (
+            np.nan_to_num(_pv, nan=0.0, posinf=0.0, neginf=0.0).round().astype(np.int32)
         )
-        del _col_pd
-        _arrow_table = _arrow_table.set_column(_pidx, _partition_var, _col_int)
-        del _col_int
+        del _pv
         gc.collect()
         log.info("Cast '%s' to int32 for hive partition keys", _partition_var)
 
-    # 4. Stream-write control_pixels/.
-    #
-    # A naive pad.write_dataset() over UNSORTED record batches keeps one open
-    # Parquet writer per distinct partition value seen, each buffering a full
-    # row group in memory.  With hundreds of admin1 regions that buffering
-    # accumulates to tens of GB on top of the ~30 GB table and OOM-kills the
-    # container.  To avoid it we sort the control rows by the partition value
-    # first, so every emitted chunk belongs to a single partition and the
-    # writer keeps only ~1 file open at a time.
-    #
-    # Sorting is done WITHOUT copying the 30 GB table: we build an int index
-    # array of control-row positions, order it by partition value, then gather
-    # each chunk on demand via Table.take().  The index arrays are ~1 GB each
-    # (134M x 8 bytes), so peak stays around ~33 GB.
+    def _write_rows_blocked(rows, path, idx, columns):
+        """Stream the given row indices of ``rows`` to one Parquet file.
+
+        Gathers at most ``_WRITE_BLOCK`` rows across ``columns`` at a time so
+        peak extra memory is one block, regardless of how many rows ``idx``
+        selects.  Returns the number of rows written.
+        """
+        writer = None
+        written = 0
+        for start in range(0, idx.size, _WRITE_BLOCK):
+            bidx = idx[start : start + _WRITE_BLOCK]
+            block = pa.table({c: rows[c][bidx] for c in columns})
+            if writer is None:
+                writer = pq.ParquetWriter(path, block.schema, compression="zstd")
+            writer.write_table(block)
+            written += block.num_rows
+            del block
+        if writer is not None:
+            writer.close()
+        return written
+
+    # Treatment membership mask (numpy bool, ~N bytes).
+    _treatment_mask = np.isin(data["cell"], treatment_key["cell"].to_numpy())
+
+    # 1. treatment_pixels.parquet -- all columns, all treatment rows.
+    _treatment_idx = np.flatnonzero(_treatment_mask)
+    _n_treatment = _write_rows_blocked(
+        data,
+        os.path.join(output_dir, "treatment_pixels.parquet"),
+        _treatment_idx,
+        _all_cols,
+    )
+    del _treatment_idx
+    gc.collect()
+    log.info("Written treatment_pixels.parquet: %d rows", _n_treatment)
+
+    # 2. control_pixels/ -- every pixel that is not a treatment pixel.
+    _control_mask = ~_treatment_mask
+    del _treatment_mask
+    _control_count = int(_control_mask.sum())
     _control_pixels_dir = os.path.join(output_dir, "control_pixels")
     os.makedirs(_control_pixels_dir, exist_ok=True)
 
-    _BATCH_ROWS = 2_000_000
-    _inv_mask = pc.invert(_treatment_mask)
-    del _treatment_mask
-    # Positions (row indices) of all control pixels.
-    _control_positions = pc.indices_nonzero(_inv_mask)
-    del _inv_mask
-    gc.collect()
-    _control_count = len(_control_positions)
-
     if _partition_var:
-        # Order control positions by their partition value so write_dataset
-        # sees rows already grouped by partition (1 open file at a time).
-        _part_vals = _arrow_table.column(_partition_var).take(_control_positions)
-        _order = pc.sort_indices(_part_vals)
-        del _part_vals
-        gc.collect()
-        _control_positions = _control_positions.take(_order)
-        del _order
-        gc.collect()
-
-    def _control_batch_iter(table, positions, batch_rows):
-        n = len(positions)
-        for start in range(0, n, batch_rows):
-            length = min(batch_rows, n - start)
-            idx = positions.slice(start, length)  # zero-copy view of index array
-            chunk = table.take(idx)  # materialises ~batch_rows rows
-            yield from chunk.to_batches()
-
-    if _partition_var:
-        pad.write_dataset(
-            _control_batch_iter(_arrow_table, _control_positions, _BATCH_ROWS),
-            base_dir=_control_pixels_dir,
-            format="parquet",
-            schema=_arrow_table.schema,
-            partitioning=pad.partitioning(
-                pa.schema([(_partition_var, pa.int32())]),
-                flavor="hive",
-            ),
-            file_options=pad.ParquetFileFormat().make_write_options(compression="zstd"),
-            existing_data_behavior="overwrite_or_ignore",
-            # Data is pre-sorted by partition, so only a couple of writers are
-            # ever open; keep the cap low and flush row groups promptly.
-            max_open_files=8,
-            max_rows_per_group=512_000,
-        )
+        # One hive directory + one file per distinct partition value.  For each
+        # value we build a boolean mask over the (cheap, single-column) int32
+        # partition array, collect that partition's control row indices, and
+        # stream them in blocks.  Peak extra memory = one block + the per-value
+        # masks (~150 MB), never a second copy of the table.
+        _part_col = data[_partition_var]
+        _value_cols = [c for c in _all_cols if c != _partition_var]
+        _uniq = np.unique(_part_col[_control_mask])
         log.info(
-            "Written control_pixels/ (%d rows, partitioned by '%s')",
+            "Writing control_pixels/ for %d partition value(s) of '%s' ...",
+            len(_uniq),
+            _partition_var,
+        )
+        for _v in _uniq:
+            _idx = np.flatnonzero(_control_mask & (_part_col == _v))
+            if _idx.size == 0:
+                continue
+            _pdir = os.path.join(_control_pixels_dir, f"{_partition_var}={int(_v)}")
+            os.makedirs(_pdir, exist_ok=True)
+            _write_rows_blocked(
+                data,
+                os.path.join(_pdir, "part-0.parquet"),
+                _idx,
+                _value_cols,
+            )
+            del _idx
+        log.info(
+            "Written control_pixels/ (%d rows across %d partitions of '%s')",
             _control_count,
+            len(_uniq),
             _partition_var,
         )
     else:
-        # No exact-match vars: write a single flat file by appending batches.
-        _flat_writer = None
-        for _rb in _control_batch_iter(_arrow_table, _control_positions, _BATCH_ROWS):
-            if _flat_writer is None:
-                _flat_writer = pq.ParquetWriter(
-                    os.path.join(_control_pixels_dir, "part-0.parquet"),
-                    _arrow_table.schema,
-                    compression="zstd",
-                )
-            _flat_writer.write_batch(_rb)
-        if _flat_writer is not None:
-            _flat_writer.close()
+        # No exact-match vars: a single flat file, still streamed in blocks.
+        _idx = np.flatnonzero(_control_mask)
+        _write_rows_blocked(
+            data,
+            os.path.join(_control_pixels_dir, "part-0.parquet"),
+            _idx,
+            _all_cols,
+        )
+        del _idx
         log.info(
             "Written control_pixels/part-0.parquet (%d rows, no partition var)",
             _control_count,
         )
 
-    del _control_positions
-    del _arrow_table
+    del _control_mask
+    del data
     gc.collect()
 
     # Save grid metadata so downstream steps can convert cell indices
