@@ -1269,11 +1269,23 @@ for (this_id in site_ids) {
                             " pixels"
                         )
 
-                        # Spatial intersection - likely bottleneck
+                        # Spatial intersection - likely bottleneck.
+                        # The exclusion buffer is repaired only under planar
+                        # (GEOS) rules at load time, so it is not guaranteed
+                        # valid under S2's spherical rules.  Run the
+                        # containment test with S2 disabled to stay consistent
+                        # with how the buffer was validated and avoid
+                        # "Loop is not valid: Edge X crosses edge Y" errors.
+                        # Against a densely vertexed geography buffer at 1 km
+                        # resolution the planar/spherical difference is
+                        # sub-pixel.
                         intersect_timer <- proc.time()
+                        s2_intersect_state <- sf_use_s2()
+                        sf_use_s2(FALSE)
                         too_close <- lengths(
                             st_intersects(ctrl_pts, all_sites_buffer)
                         ) > 0
+                        sf_use_s2(s2_intersect_state)
                         intersect_elapsed <- (proc.time() - intersect_timer)["elapsed"]
 
                         n_excluded <- sum(too_close)
@@ -1311,6 +1323,24 @@ for (this_id in site_ids) {
                     round(data_elapsed, 1), "s",
                     " (T=", sum(vals$treatment),
                     ", C=", n_control_pool_site, ")"
+                )
+            }
+
+            # Guard: a site with no treatment pixels or no control pixels
+            # after exact-match group filtering and distance exclusion cannot
+            # be matched.  Fail early with a clear reason instead of letting
+            # the downstream sampling code raise a cryptic
+            # "Can't compute indices ... missing value where TRUE/FALSE
+            # needed" error.  The NO_OVERLAP prefix is recognised by the
+            # error handler below, which records it as a clean skip (no
+            # Rollbar report, not counted as a hard failure).
+            n_treatment_site <- sum(vals$treatment)
+            n_control_site <- sum(!vals$treatment)
+            if (n_treatment_site == 0L || n_control_site == 0L) {
+                stop(
+                    "NO_OVERLAP: no overlapping exact-match groups between ",
+                    "treatment and control after filtering (T=",
+                    n_treatment_site, ", C=", n_control_site, ")"
                 )
             }
 
@@ -1744,7 +1774,13 @@ for (this_id in site_ids) {
         }
     }, error = function(e) {
         msg <- conditionMessage(e)
-        message("  ERROR processing site_id ", this_site_id,
+        # Sites with no overlapping exact-match groups between treatment and
+        # control are an expected data condition, not a code failure.  They
+        # are recorded with a failure marker but are not reported to Rollbar
+        # and are not counted as hard failures.
+        is_no_overlap <- startsWith(msg, "NO_OVERLAP: ")
+        message("  ", if (is_no_overlap) "Skipping" else "ERROR processing",
+            " site_id ", this_site_id,
             " (batch_index=", this_batch_index,
             "): ", msg)
         failure_info <- list(
@@ -1752,13 +1788,16 @@ for (this_id in site_ids) {
             site_id = this_site_id,
             site_name = this_site_name,
             error = msg,
+            reason = if (is_no_overlap) "no_overlapping_groups" else "error",
             timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ")
         )
         write_json(failure_info, failure_path,
                     auto_unbox = TRUE, pretty = TRUE)
         message("  Failure marker written to ", failure_path)
-        rollbar_report_error(msg)
-        FALSE
+        if (!is_no_overlap) rollbar_report_error(msg)
+        # Return TRUE for the expected no-overlap case so it is treated as a
+        # clean skip (consistent with the "no treatment cells" handling).
+        is_no_overlap
     })
 
     if (!ok) n_failed <- n_failed + 1L
