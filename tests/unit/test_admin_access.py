@@ -34,9 +34,9 @@ def test_regular_user_sees_site_setup_but_not_privileged_tabs():
     assert admin_link.children == "Admin"
 
     tabs = {tab.tab_id: tab for tab in _find_components(admin_layout(user), dbc.Tab)}
-    assert tabs["tab-site-uploads"].tab_style is None
-    assert tabs["tab-covariates"].tab_style == {"display": "none"}
-    assert tabs["tab-users"].tab_style == {"display": "none"}
+    assert getattr(tabs["tab-site-uploads"], "tab_style", None) is None
+    assert getattr(tabs["tab-covariates"], "tab_style", None) == {"display": "none"}
+    assert getattr(tabs["tab-users"], "tab_style", None) == {"display": "none"}
 
 
 @pytest.mark.unit
@@ -45,6 +45,6 @@ def test_admin_sees_all_setup_tabs():
     user = SimpleNamespace(name="Administrator", is_admin=True)
 
     tabs = {tab.tab_id: tab for tab in _find_components(admin_layout(user), dbc.Tab)}
-    assert tabs["tab-site-uploads"].tab_style is None
-    assert tabs["tab-covariates"].tab_style == {}
-    assert tabs["tab-users"].tab_style == {}
+    assert getattr(tabs["tab-site-uploads"], "tab_style", None) is None
+    assert getattr(tabs["tab-covariates"], "tab_style", None) == {}
+    assert getattr(tabs["tab-users"], "tab_style", None) == {}
