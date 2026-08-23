@@ -3,7 +3,6 @@
 import logging
 from datetime import datetime, timezone
 
-
 from config import Config, report_exception
 from models import (
     AnalysisTask,

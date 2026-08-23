@@ -13,7 +13,6 @@ import sys
 import rollbar
 from celery import Celery
 from celery.signals import task_failure
-
 from config import Config
 
 logger = logging.getLogger(__name__)

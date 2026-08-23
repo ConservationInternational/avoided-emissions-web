@@ -25,7 +25,7 @@ Output:
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import gc
 import json
 import logging
 import math
@@ -35,23 +35,22 @@ import sys
 import tempfile
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
-import gc
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import rioxarray  # noqa: F401 – registers the rio accessor
+import rioxarray
 import xarray as xr
+from logging_utils import configure_third_party_logging
 from osgeo import gdal
 from rasterio.features import rasterize
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
 from shapely.validation import make_valid
-
-from logging_utils import configure_third_party_logging
 
 # Silence GDAL/rasterio deprecation noise
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -101,8 +100,7 @@ _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
 
-from py_utils import rollbar_init, with_rollbar  # noqa: E402
-
+from py_utils import rollbar_init, with_rollbar
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -935,8 +933,7 @@ _POLYGON_VARS = {"admin0", "admin1", "admin2", "ecoregion"}
 
 
 def _parse_s3_uri(uri: str) -> tuple[str, str]:
-    if uri.startswith("s3://"):
-        uri = uri[5:]
+    uri = uri.removeprefix("s3://")
     parts = uri.split("/", 1)
     return parts[0], parts[1] if len(parts) > 1 else ""
 

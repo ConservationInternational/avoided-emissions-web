@@ -8,8 +8,8 @@ Allows users to hide site sets from the dropdown without deleting them,
 even when the site set is still referenced by submitted tasks.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "0015a1b2c3e2"

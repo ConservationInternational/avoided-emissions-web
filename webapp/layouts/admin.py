@@ -5,9 +5,9 @@ from dash import dcc, html
 
 from gee_export import gee_config
 from layouts.common import (
+    COMBINED_SITE_UPLOAD_COLUMNS,
     COVARIATE_COLUMNS,
     COVARIATE_STATUS_ROW_STYLES,
-    COMBINED_SITE_UPLOAD_COLUMNS,
     USER_MANAGEMENT_COLUMNS,
     USER_SITE_UPLOAD_ROW_STYLES,
     _make_ag_grid,

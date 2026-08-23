@@ -3,7 +3,6 @@
 import logging
 from datetime import datetime, timezone
 
-
 from celery_app import celery_app
 from config import report_exception
 

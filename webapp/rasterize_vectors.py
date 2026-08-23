@@ -25,9 +25,8 @@ import subprocess
 import tempfile
 
 import boto3
-from sqlalchemy import create_engine, text
-
 from config import Config
+from sqlalchemy import create_engine, text
 
 logger = logging.getLogger(__name__)
 

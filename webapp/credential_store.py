@@ -9,11 +9,10 @@ import base64
 import logging
 from datetime import datetime, timezone
 
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
-
 from config import Config
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from models import TrendsEarthCredential, get_db
 
 logger = logging.getLogger(__name__)

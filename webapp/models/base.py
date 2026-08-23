@@ -1,9 +1,8 @@
 """SQLAlchemy declarative base, engine, and session factory."""
 
+from config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-
-from config import Config
 
 
 class Base(DeclarativeBase):

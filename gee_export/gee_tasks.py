@@ -6,6 +6,7 @@ single covariate, returning the task object for status tracking.
 
 import ee
 
+from .derived_layers import get_derived_image
 from .gee_config import (
     COVARIATES,
     DEFAULT_RESOLUTION_M,
@@ -13,7 +14,6 @@ from .gee_config import (
     MAX_PIXELS_PER_TASK,
     get_crs_transform,
 )
-from .derived_layers import get_derived_image
 
 
 def _load_simple_image(covariate_name, cfg):

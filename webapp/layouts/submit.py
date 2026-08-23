@@ -4,6 +4,7 @@ import random
 
 import dash_bootstrap_components as dbc
 from dash import dcc, html
+from services import ANALYSIS_DEFAULTS, DEFAULT_MATCHING_JOB_QUEUE
 
 from layouts.common import (
     DEFAULT_EXACT_MATCH,
@@ -11,7 +12,6 @@ from layouts.common import (
     MATCHING_JOB_QUEUE_OPTIONS,
     navbar,
 )
-from services import ANALYSIS_DEFAULTS, DEFAULT_MATCHING_JOB_QUEUE
 
 
 def submit_layout(user, recompute_config=None):

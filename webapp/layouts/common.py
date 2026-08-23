@@ -7,9 +7,8 @@ tables following the same patterns as the trends.earth-api-ui.
 
 import dash_ag_grid as dag
 import dash_bootstrap_components as dbc
-from dash import html
-
 from config import Config
+from dash import html
 
 # Default covariates for the matching formula
 DEFAULT_COVARIATES = [

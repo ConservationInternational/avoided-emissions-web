@@ -4,9 +4,9 @@ import logging
 from datetime import datetime, timezone
 
 import boto3
-
 from celery_app import celery_app
 from config import report_exception
+
 from tasks.reference_layers import export_reference_layers_task
 
 logger = logging.getLogger(__name__)

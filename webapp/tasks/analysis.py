@@ -3,7 +3,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-
 from celery_app import celery_app
 from config import report_exception, report_message
 
@@ -167,9 +166,8 @@ def poll_batch_tasks() -> dict:
         adopted = 0
         try:
             from config import Config
-            from trendsearth_client import TrendsEarthClient
-
             from models import User
+            from trendsearth_client import TrendsEarthClient
 
             if not Config.ENABLE_TASK_ADOPTION:
                 pass  # skip discovery entirely

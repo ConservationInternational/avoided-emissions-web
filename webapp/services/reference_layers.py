@@ -6,14 +6,13 @@ import tempfile
 from datetime import datetime, timezone
 
 import geopandas as gpd
-from pyproj import Transformer
-from sqlalchemy import text
-
 from config import Config
 from models import (
     ReferenceLayerExport,
     get_db,
 )
+from pyproj import Transformer
+from sqlalchemy import text
 
 from services.s3 import S3_COST_TAGGING, get_s3_client
 
@@ -485,7 +484,7 @@ def compute_exact_match_groups_with_splitting(
             # simplification cost.
             rows = db.execute(
                 text(
-                    f"SELECT {id_col}, "  # noqa: S608
+                    f"SELECT {id_col}, "
                     f"  ST_AsGeoJSON(geom_simp) "
                     f"FROM {table} "
                     f"WHERE ST_Intersects("

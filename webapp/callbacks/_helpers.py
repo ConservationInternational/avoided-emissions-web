@@ -5,9 +5,8 @@ import traceback
 import uuid as _uuid
 
 import dash_bootstrap_components as dbc
-from dash import dcc, html
-
 from auth import get_current_user
+from dash import dcc, html
 from models import Covariate, get_db
 from services import get_task_detail, validate_share_token
 

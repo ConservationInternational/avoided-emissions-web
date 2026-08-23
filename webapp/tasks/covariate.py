@@ -4,9 +4,9 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 from celery_app import celery_app
 from config import report_exception
+
 from gee_export import gee_config
 from tasks.reference_layers import _MergeSuperseded, ingest_sdg_cog_task
 
@@ -484,7 +484,6 @@ def auto_merge_unmerged() -> dict:
         ``{"scanned": N, "dispatched": N, "discovered": N}``
     """
     import redis as _redis
-
     from config import Config
 
     if not Config.GCS_BUCKET:
@@ -513,7 +512,6 @@ def _auto_merge_unmerged_inner() -> dict:
     from datetime import timedelta
 
     import sqlalchemy as sa
-
     from config import Config
     from models import Covariate, GeeExportMetadata, get_db
 

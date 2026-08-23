@@ -7,10 +7,9 @@ SQLAlchemy models (Base.metadata) for autogenerate support.
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
-
 from config import Config
 from models import Base
+from sqlalchemy import engine_from_config, pool
 
 # Alembic Config object (access to .ini values)
 config = context.config

@@ -12,11 +12,8 @@ import re
 
 import boto3
 import flask_login
-from flask import Blueprint, Response, jsonify, redirect, request
-from sqlalchemy import text as sa_text
-
 from config import Config
-from gee_export import gee_config
+from flask import Blueprint, Response, jsonify, redirect, request
 from layer_config import get_style
 from models import AnalysisTask, Covariate, UserSiteSet, UserSiteUpload, get_db
 from services import (
@@ -26,6 +23,9 @@ from services import (
     get_user_site_set_centroids_geojson,
     stream_stage_site_upload,
 )
+from sqlalchemy import text as sa_text
+
+from gee_export import gee_config
 
 logger = logging.getLogger(__name__)
 

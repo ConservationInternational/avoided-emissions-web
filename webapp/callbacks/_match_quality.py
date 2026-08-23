@@ -7,12 +7,12 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
+from services import download_results_csv
 
 from callbacks._helpers import (
     _attach_totals_to_geojson,
     _openlayers_map_component,
 )
-from services import download_results_csv
 
 logger = logging.getLogger(__name__)
 

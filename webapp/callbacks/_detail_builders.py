@@ -7,11 +7,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from dash import dcc, html
-
-from callbacks._helpers import (
-    _fmt_dt,
-    _normalize_metadata_list,
-)
 from layouts import (
     RESULTS_TOTAL_COLUMNS,
     RESULTS_YEARLY_COLUMNS,
@@ -20,6 +15,11 @@ from layouts import (
 from services import (
     download_results_csv,
     list_task_s3_files,
+)
+
+from callbacks._helpers import (
+    _fmt_dt,
+    _normalize_metadata_list,
 )
 from callbacks._match_quality import (
     _build_group_diagnostics_card,

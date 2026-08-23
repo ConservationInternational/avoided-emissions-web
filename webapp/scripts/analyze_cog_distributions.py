@@ -24,8 +24,8 @@ import numpy as np
 
 # -- App imports (flat PYTHONPATH=/app) ------------------------------------
 sys.path.insert(0, "/app")
-from config import Config  # noqa: E402
-from models import Covariate, get_db  # noqa: E402
+from config import Config
+from models import Covariate, get_db
 
 
 def get_merged_covariates():
@@ -204,8 +204,8 @@ def analyze_layer(name, url):
             info["error"] = "all pixels are nodata"
             return info
 
-        info["total_pixels"] = int(len(data))
-        info["valid_pixels"] = int(len(valid))
+        info["total_pixels"] = len(data)
+        info["valid_pixels"] = len(valid)
         info["nodata_value"] = float(nodata) if nodata is not None else None
         info["nodata_fraction"] = round(1.0 - len(valid) / len(data), 4)
         info["dtype"] = str(data.dtype)
@@ -241,7 +241,7 @@ def analyze_layer(name, url):
             info["is_categorical"] = True
         else:
             info["is_categorical"] = False
-            info["unique_count"] = int(len(unique))
+            info["unique_count"] = len(unique)
 
     return info
 

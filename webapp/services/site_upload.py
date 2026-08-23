@@ -16,19 +16,18 @@ from time import monotonic
 
 import geopandas as gpd
 import pandas as pd
+import tasks as webapp_tasks
 from botocore.exceptions import ClientError
-from sqlalchemy import text
-
 from config import Config
 from models import (
     UserSiteSet,
     UserSiteUpload,
     get_db,
 )
+from sqlalchemy import text
 
 from services.s3 import get_s3_client
 from services.site_set import get_user_site_set_detail
-import tasks as webapp_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +163,7 @@ def _parse_sites_geometry_file_from_path(file_path, filename):
             errors.append(f"Unsupported file format: {ext}")
             return None, errors
     except Exception as e:
-        errors.append(f"Failed to read file: {str(e)}")
+        errors.append(f"Failed to read file: {e!s}")
         return None, errors
 
     # Reuse existing validation/repair pipeline by operating on the parsed gdf.
@@ -700,7 +699,7 @@ def _read_sites_from_archive(file_content, filename):
 
 
 def _open_site_feature_source(path):
-    import fiona  # noqa: PLC0415
+    import fiona
 
     if str(path).lower().endswith(".shp"):
         cpg_path = os.path.splitext(path)[0] + ".cpg"
@@ -852,7 +851,7 @@ def _parse_sites_geometry_file(file_content, filename):
             errors.append(f"Unsupported file format: {ext}")
             return None, errors
     except Exception as e:
-        errors.append(f"Failed to read file: {str(e)}")
+        errors.append(f"Failed to read file: {e!s}")
         return None, errors
 
     # Validate geometries
@@ -1058,7 +1057,7 @@ def validate_site_upload_mapping(file_content, filename, column_mapping):
         return {"errors": map_errors, "warnings": warnings, "summary": {}}
 
     summary = {
-        "n_features": int(len(mapped_gdf)),
+        "n_features": len(mapped_gdf),
         "n_missing_end_date": int(mapped_gdf["end_date"].isna().sum()),
         "n_unique_site_id": int(mapped_gdf["site_id"].nunique(dropna=True)),
     }
@@ -1661,9 +1660,9 @@ def save_user_site_set_from_staged(
                 _report_upload_progress()
 
             if use_streaming_ingest:
-                from pyproj import Transformer  # noqa: PLC0415
-                from shapely.geometry import shape  # noqa: PLC0415
-                from shapely.ops import transform as shapely_transform  # noqa: PLC0415
+                from pyproj import Transformer
+                from shapely.geometry import shape
+                from shapely.ops import transform as shapely_transform
 
                 with _open_site_feature_source(source_path) as src:
                     source_columns = list(

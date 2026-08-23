@@ -100,7 +100,7 @@ def _get_git_revision() -> str:
         ):
             return head_content
 
-    except (OSError, IOError):
+    except OSError:
         pass
 
     return ""

@@ -16,8 +16,8 @@ duplicate-looking rows.  This migration:
   3. Adds a new four-column unique constraint that includes sub_site_index.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "0021a1b2c3e8"

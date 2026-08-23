@@ -10,9 +10,6 @@ import flask
 import flask_login
 import pandas as pd
 import plotly.graph_objects as go
-from dash import ALL, Input, Output, State, callback_context, dcc, html, no_update
-from dash.exceptions import PreventUpdate
-
 from auth import (
     authenticate,
     create_refresh_token,
@@ -23,7 +20,8 @@ from auth import (
     revoke_refresh_token,
 )
 from config import report_exception
-from gee_export import gee_config
+from dash import ALL, Input, Output, State, callback_context, dcc, html, no_update
+from dash.exceptions import PreventUpdate
 from layouts import (
     EXACT_MATCH_OPTIONS,
     TASK_LIST_COLUMNS,
@@ -32,12 +30,18 @@ from layouts import (
 from services import (
     ANALYSIS_DEFAULTS,
     approve_user,
+    archive_user_site_set,
     cancel_task,
+    cancel_user_site_upload,
     change_user_role,
     create_share_link,
+    create_user_site_upload,
     delete_covariate_preset,
     delete_matching_settings_preset,
     delete_user,
+    delete_user_site_set,
+    delete_user_site_upload,
+    discard_staged_site_upload,
     download_results_csv,
     force_reexport,
     force_remerge,
@@ -49,27 +53,29 @@ from services import (
     get_task_detail,
     get_task_list,
     get_task_site_results,
+    get_user_list,
     get_user_site_set_detail,
     get_user_site_set_preview_rows,
     grant_te_script_access,
     list_share_links,
     list_user_site_sets,
-    get_user_list,
+    list_user_site_uploads,
+    queue_analysis_task,
+    rename_user_site_set,
     revoke_share_link,
     revoke_te_script_access,
     save_covariate_preset,
     save_matching_settings_preset,
-    discard_staged_site_upload,
     start_gee_export,
-    queue_analysis_task,
     update_task_info,
-    archive_user_site_set,
-    cancel_user_site_upload,
-    create_user_site_upload,
-    delete_user_site_set,
-    delete_user_site_upload,
-    list_user_site_uploads,
-    rename_user_site_set,
+)
+
+from callbacks._detail_builders import (
+    _add_ci_band,
+    _build_overview,
+    _build_plots,
+    _build_raw_results,
+    _build_results_content,
 )
 from callbacks._helpers import (
     _authorize_task_access,
@@ -79,13 +85,6 @@ from callbacks._helpers import (
     _record_covariate_action_failure,
     _render_share_links_list,
 )
-from callbacks._detail_builders import (
-    _add_ci_band,
-    _build_overview,
-    _build_plots,
-    _build_raw_results,
-    _build_results_content,
-)
 from callbacks._match_quality import (
     _build_all_match_quality_plots,
     _build_map,
@@ -94,6 +93,7 @@ from callbacks._match_quality import (
     _build_quality_warning_banner,
     _compute_quality_warnings,
 )
+from gee_export import gee_config
 
 logger = logging.getLogger(__name__)
 
@@ -122,10 +122,9 @@ def register_callbacks(app, limiter=None):
         *action* within *window* seconds.  Silently returns False when
         Redis is unavailable."""
         try:
-            from flask import request as _req
             import redis as _redis
-
             from config import Config as _Cfg
+            from flask import request as _req
 
             ip = _req.remote_addr or "unknown"
             key = f"rl:{action}:{ip}"

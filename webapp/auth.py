@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 import bcrypt
 import flask
 import flask_login
-
 from config import Config, report_exception
 from models import PasswordResetToken, RefreshToken, User, get_db
 

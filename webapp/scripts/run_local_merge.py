@@ -170,9 +170,8 @@ if not args.verbose:
     for _noisy in ("botocore", "urllib3", "boto3", "s3transfer"):
         logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-from config import Config  # noqa: E402  (intentionally after env load)
-from cog_merge import list_gcs_tiles, merge_covariate_tiles  # noqa: E402
-
+from cog_merge import list_gcs_tiles, merge_covariate_tiles
+from config import Config
 
 # ---------------------------------------------------------------------------
 # Helpers

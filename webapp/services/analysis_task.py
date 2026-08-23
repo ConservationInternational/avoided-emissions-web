@@ -11,9 +11,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
-from pyproj import Transformer as _ProjTransformer
-from sqlalchemy import text
-
+import tasks as webapp_tasks
 from config import Config
 from models import (
     AnalysisTask,
@@ -24,9 +22,10 @@ from models import (
     User,
     get_db,
 )
-import tasks as webapp_tasks
-from gee_export import gee_config
+from pyproj import Transformer as _ProjTransformer
+from sqlalchemy import text
 
+from gee_export import gee_config
 from services.covariate import get_ready_covariate_names
 from services.reference_layers import (
     compute_exact_match_groups_with_splitting,
@@ -2252,8 +2251,7 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
     if results_s3_uri:
         # Parse s3://bucket/prefix
         uri = results_s3_uri
-        if uri.startswith("s3://"):
-            uri = uri[5:]
+        uri = uri.removeprefix("s3://")
         parts = uri.split("/", 1)
         bucket = parts[0]
         prefix = parts[1].rstrip("/") if len(parts) > 1 else ""
@@ -2326,8 +2324,7 @@ def _resolve_results_s3(task_id, results_s3_uri=None):
 
     if results_s3_uri:
         uri = results_s3_uri
-        if uri.startswith("s3://"):
-            uri = uri[5:]
+        uri = uri.removeprefix("s3://")
         parts = uri.split("/", 1)
         bucket = parts[0]
         prefix = parts[1].rstrip("/") if len(parts) > 1 else ""

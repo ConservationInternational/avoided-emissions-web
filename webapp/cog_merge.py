@@ -448,8 +448,7 @@ def _download_tile(url: str, dest_dir: str) -> str:
     with requests.get(url, stream=True, timeout=300) as resp:
         resp.raise_for_status()
         with open(local_path, "wb") as fh:
-            for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
-                fh.write(chunk)
+            fh.writelines(resp.iter_content(chunk_size=8 * 1024 * 1024))
     size_mb = os.path.getsize(local_path) / (1024 * 1024)
     logger.info("  -> %s (%.1f MB)", filename, size_mb)
     return local_path

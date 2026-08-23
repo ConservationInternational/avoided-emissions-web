@@ -45,7 +45,7 @@ def rollbar_init(
         Rollbar environment name.  Falls back to ``ROLLBAR_ENVIRONMENT``
         then ``ENVIRONMENT`` then ``"development"``.
     """
-    global _rollbar_enabled  # noqa: PLW0603
+    global _rollbar_enabled
 
     access_token = token or os.environ.get("ROLLBAR_SCRIPT_TOKEN", "")
     env = (

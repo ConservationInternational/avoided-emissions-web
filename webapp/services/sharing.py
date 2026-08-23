@@ -3,7 +3,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-
 from models import (
     AnalysisTask,
     TaskShareLink,

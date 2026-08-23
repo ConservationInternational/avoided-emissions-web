@@ -16,12 +16,12 @@ import flask
 import flask_login
 import rollbar
 import rollbar.contrib.flask
-from dash import Input, Output, State, dcc, html
-from flask import got_request_exception, request
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from flask_wtf.csrf import CSRFProtect
 
+# Import webapp's tasks module before other local modules are imported so that
+# sys.modules['tasks'] is populated with the Celery task registry before any
+# other import has a chance to bind a different module to that name.
+import tasks as _webapp_tasks  # noqa: F401 — side-effect: registers Celery tasks
+from api_routes import create_api_blueprint
 from auth import (
     REFRESH_TOKEN_COOKIE,
     clear_refresh_cookie,
@@ -29,14 +29,13 @@ from auth import (
     touch_refresh_token,
     validate_and_refresh,
 )
-
-# Import webapp's tasks module before other local modules are imported so that
-# sys.modules['tasks'] is populated with the Celery task registry before any
-# other import has a chance to bind a different module to that name.
-import tasks as _webapp_tasks  # noqa: F401 — side-effect: registers Celery tasks
-
 from callbacks import register_callbacks
 from config import Config
+from dash import Input, Output, State, dcc, html
+from flask import got_request_exception, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_wtf.csrf import CSRFProtect
 from layouts import (
     admin_layout,
     dashboard_layout,
@@ -50,7 +49,6 @@ from layouts import (
     submit_layout,
     task_detail_layout,
 )
-from api_routes import create_api_blueprint
 
 # ---------------------------------------------------------------------------
 # Logging — configure the root logger so that all application loggers (auth,
@@ -222,17 +220,17 @@ def _refresh_token_check():
     # Skip for paths that don't need auth checks
     path = request.path
     if any(path.startswith(p) for p in _REFRESH_SKIP_PREFIXES):
-        return None
+        return
 
     if flask_login.current_user.is_authenticated:
         # User has a live session — just keep the refresh token alive
         if cookie_token:
             touch_refresh_token(cookie_token)
-        return None
+        return
 
     # No active session — try to restore from refresh token
     if not cookie_token:
-        return None
+        return
 
     session_user, new_token = validate_and_refresh(cookie_token)
     if session_user and new_token:
@@ -247,7 +245,7 @@ def _refresh_token_check():
             clear_refresh_cookie(response)
             return response
 
-    return None
+    return
 
 
 # -- Security headers -------------------------------------------------------

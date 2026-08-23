@@ -4,15 +4,14 @@ import json
 import logging
 import os
 
-
+import tasks as webapp_tasks
 from config import Config
 from models import (
     Covariate,
     get_db,
 )
-from gee_export import gee_config
-from gee_export import gee_tasks
-import tasks as webapp_tasks
+
+from gee_export import gee_config, gee_tasks
 
 logger = logging.getLogger(__name__)
 

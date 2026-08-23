@@ -19,12 +19,10 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import requests
-
 import geopandas as gpd
-from sqlalchemy import create_engine, text
-
+import requests
 from config import Config
+from sqlalchemy import create_engine, text
 
 logging.basicConfig(
     level=logging.INFO,
@@ -289,8 +287,7 @@ def _download(
 
                 mode = "ab" if resp.status_code == 206 else "wb"
                 with open(dest, mode) as fp:
-                    for chunk in resp.iter_content(chunk_size=chunk_size):
-                        fp.write(chunk)
+                    fp.writelines(resp.iter_content(chunk_size=chunk_size))
 
             size_mb = dest.stat().st_size / (1024 * 1024)
             log.info("Downloaded %.1f MB", size_mb)

@@ -6,15 +6,14 @@ import logging
 
 import geopandas as gpd
 import pandas as pd
-from shapely import from_wkb, wkb
-from sqlalchemy import text
-
 from config import Config
 from models import (
     AnalysisTask,
     UserSiteSet,
     get_db,
 )
+from shapely import from_wkb, wkb
+from sqlalchemy import text
 
 from services.s3 import S3_COST_TAGGING, get_s3_client
 
