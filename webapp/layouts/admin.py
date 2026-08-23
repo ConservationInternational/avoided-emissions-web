@@ -112,10 +112,6 @@ def _site_upload_card(footer_text):
                                 outline=True,
                                 className="w-100 mb-1",
                             ),
-                            html.Div(
-                                "All uploads use streamed transfer for reliability on large and small files.",
-                                className="small text-muted mb-2",
-                            ),
                         ],
                         id="site-upload-controls",
                         is_open=True,
@@ -280,7 +276,7 @@ def admin_layout(user):
                             html.Div(
                                 [
                                     _site_upload_card(
-                                        "After the mapping is confirmed, a background Celery worker imports the staged site file into the database."
+                                        "After the mapping is confirmed, the staged site file is imported into the database in the background."
                                     ),
                                     dbc.Card(
                                         [
