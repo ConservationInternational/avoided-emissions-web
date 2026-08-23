@@ -757,8 +757,10 @@ def _build_results_content(
                 [
                     html.I(className="bi bi-info-circle me-2"),
                     html.Strong(f"Large task: {n_sites:,} sites. "),
-                    "Per-site yearly rows are not shown to keep the page responsive. "
-                    "Use the Raw Results tab to download site-level CSVs.",
+                    (
+                        "Per-site yearly rows are not shown to keep the page responsive. "
+                        "Use the Raw Results tab to download site-level CSVs."
+                    ),
                 ],
                 color="info",
                 className="mb-3",
@@ -1080,7 +1082,7 @@ def _add_ci_band(fig, x, y_lower, y_upper, color, name):
             x=x,
             y=y_upper,
             mode="lines",
-            line=dict(width=0),
+            line={"width": 0},
             showlegend=False,
             hoverinfo="skip",
         )
@@ -1090,7 +1092,7 @@ def _add_ci_band(fig, x, y_lower, y_upper, color, name):
             x=x,
             y=y_lower,
             mode="lines",
-            line=dict(width=0),
+            line={"width": 0},
             fill="tonexty",
             fillcolor=color,
             name=name,
@@ -1290,8 +1292,8 @@ def _build_plots(
                 y=agg_df["treatment_defor_ha"],
                 mode="lines+markers",
                 name="Project Sites",
-                line=dict(color="#2ca02c", width=2),
-                marker=dict(size=6),
+                line={"color": "#2ca02c", "width": 2},
+                marker={"size": 6},
             )
         )
         fig_defor.add_trace(
@@ -1300,8 +1302,8 @@ def _build_plots(
                 y=agg_df["control_defor_ha"],
                 mode="lines+markers",
                 name="Matched Controls",
-                line=dict(color="#d62728", width=2),
-                marker=dict(size=6),
+                line={"color": "#d62728", "width": 2},
+                marker={"size": 6},
             )
         )
         if has_ci:
@@ -1335,7 +1337,7 @@ def _build_plots(
             ),
             xaxis_title="Year",
             yaxis_title="Deforestation (ha)",
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
+            legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
         )
         # Only shade pre/post-intervention when all sites share the
@@ -1402,8 +1404,8 @@ def _build_plots(
                 y=agg_df["cum_treatment_defor_ha"],
                 mode="lines+markers",
                 name="Project Sites",
-                line=dict(color="#2ca02c", width=2),
-                marker=dict(size=6),
+                line={"color": "#2ca02c", "width": 2},
+                marker={"size": 6},
             )
         )
         fig_cum.add_trace(
@@ -1412,8 +1414,8 @@ def _build_plots(
                 y=agg_df["cum_control_defor_ha"],
                 mode="lines+markers",
                 name="Matched Controls",
-                line=dict(color="#d62728", width=2),
-                marker=dict(size=6),
+                line={"color": "#d62728", "width": 2},
+                marker={"size": 6},
             )
         )
         if has_ci:
@@ -1440,7 +1442,7 @@ def _build_plots(
             ),
             xaxis_title="Year",
             yaxis_title="Cumulative Deforestation (ha)",
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
+            legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
         )
         if len(unique_start_years) == 1 and "is_pre_intervention" in df.columns:
@@ -1500,16 +1502,16 @@ def _build_plots(
                     x=agg_em["year"],
                     y=agg_em["total"],
                     mode="markers",
-                    marker=dict(size=0, opacity=0),
-                    error_y=dict(
-                        type="data",
-                        symmetric=False,
-                        array=agg_em["ci_upper"] - agg_em["total"],
-                        arrayminus=agg_em["total"] - agg_em["ci_lower"],
-                        color="rgba(0,0,0,0.4)",
-                        thickness=1.5,
-                        width=4,
-                    ),
+                    marker={"size": 0, "opacity": 0},
+                    error_y={
+                        "type": "data",
+                        "symmetric": False,
+                        "array": agg_em["ci_upper"] - agg_em["total"],
+                        "arrayminus": agg_em["total"] - agg_em["ci_lower"],
+                        "color": "rgba(0,0,0,0.4)",
+                        "thickness": 1.5,
+                        "width": 4,
+                    },
                     name="95% CI",
                     showlegend=True,
                 )
@@ -1540,16 +1542,16 @@ def _build_plots(
                     x=agg_fl["year"],
                     y=agg_fl["total"],
                     mode="markers",
-                    marker=dict(size=0, opacity=0),
-                    error_y=dict(
-                        type="data",
-                        symmetric=False,
-                        array=agg_fl["ci_upper"] - agg_fl["total"],
-                        arrayminus=agg_fl["total"] - agg_fl["ci_lower"],
-                        color="rgba(0,0,0,0.4)",
-                        thickness=1.5,
-                        width=4,
-                    ),
+                    marker={"size": 0, "opacity": 0},
+                    error_y={
+                        "type": "data",
+                        "symmetric": False,
+                        "array": agg_fl["ci_upper"] - agg_fl["total"],
+                        "arrayminus": agg_fl["total"] - agg_fl["ci_lower"],
+                        "color": "rgba(0,0,0,0.4)",
+                        "thickness": 1.5,
+                        "width": 4,
+                    },
                     name="95% CI",
                     showlegend=True,
                 )
@@ -1573,22 +1575,22 @@ def _build_plots(
                     x=df["year"],
                     y=df["emissions_avoided_mgco2e"],
                     mode="markers",
-                    marker=dict(size=0, opacity=0),
-                    error_y=dict(
-                        type="data",
-                        symmetric=False,
-                        array=(
+                    marker={"size": 0, "opacity": 0},
+                    error_y={
+                        "type": "data",
+                        "symmetric": False,
+                        "array": (
                             df["emissions_avoided_mgco2e_ci_upper"]
                             - df["emissions_avoided_mgco2e"]
                         ),
-                        arrayminus=(
+                        "arrayminus": (
                             df["emissions_avoided_mgco2e"]
                             - df["emissions_avoided_mgco2e_ci_lower"]
                         ),
-                        color="rgba(0,0,0,0.4)",
-                        thickness=1.5,
-                        width=4,
-                    ),
+                        "color": "rgba(0,0,0,0.4)",
+                        "thickness": 1.5,
+                        "width": 4,
+                    },
                     name="95% CI",
                     showlegend=True,
                 )
@@ -1611,22 +1613,22 @@ def _build_plots(
                     x=df["year"],
                     y=df["forest_loss_avoided_ha"],
                     mode="markers",
-                    marker=dict(size=0, opacity=0),
-                    error_y=dict(
-                        type="data",
-                        symmetric=False,
-                        array=(
+                    marker={"size": 0, "opacity": 0},
+                    error_y={
+                        "type": "data",
+                        "symmetric": False,
+                        "array": (
                             df["forest_loss_avoided_ha_ci_upper"]
                             - df["forest_loss_avoided_ha"]
                         ),
-                        arrayminus=(
+                        "arrayminus": (
                             df["forest_loss_avoided_ha"]
                             - df["forest_loss_avoided_ha_ci_lower"]
                         ),
-                        color="rgba(0,0,0,0.4)",
-                        thickness=1.5,
-                        width=4,
-                    ),
+                        "color": "rgba(0,0,0,0.4)",
+                        "thickness": 1.5,
+                        "width": 4,
+                    },
                     name="95% CI",
                     showlegend=True,
                 )

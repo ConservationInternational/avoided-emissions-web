@@ -98,8 +98,10 @@ def _site_upload_card(footer_text):
                                     html.Strong("GeoJSON"),
                                     ", or ",
                                     html.Strong("GeoPackage"),
-                                    " dataset with site polygons. Geometries must be valid "
-                                    "Polygons or MultiPolygons in EPSG:4326 (WGS 84).",
+                                    (
+                                        " dataset with site polygons. Geometries must be valid "
+                                        "Polygons or MultiPolygons in EPSG:4326 (WGS 84)."
+                                    ),
                                 ],
                                 className="mb-2 small",
                             ),

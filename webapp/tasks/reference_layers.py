@@ -94,7 +94,7 @@ def ingest_sdg_cog_task(self) -> dict:
         for resolution_m, res_cfg in RESOLUTIONS.items():
             cog_suffix = res_cfg["cog_suffix"]
             prefix = f"{Config.S3_PREFIX}/cog{cog_suffix}".strip("/")
-            for name in SDG_LAYERS.keys():
+            for name in SDG_LAYERS:
                 s3_key = f"{prefix}/{name}.tif"
                 try:
                     s3.head_object(Bucket=Config.S3_BUCKET, Key=s3_key)

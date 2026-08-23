@@ -539,7 +539,7 @@ def _auto_merge_unmerged_inner() -> dict:
     # Scan all resolution-specific GCS prefixes for tiles.
     # Each entry is keyed by (covariate_name, resolution_m).
     gcs_details: dict[tuple[str, int], list[dict]] = {}
-    for res_m, res_cfg in resolutions.items():
+    for res_m in resolutions:
         gcs_prefix = gee_config.get_gcs_prefix(Config.GCS_PREFIX, res_m)
         try:
             for name, tiles in scan_gcs_tile_details(
@@ -899,7 +899,7 @@ def _auto_merge_unmerged_inner() -> dict:
         # - Large 250m COGs are deferred until last, reducing OOM risk
         def get_sort_key(key: tuple[str, int]) -> tuple[int, int]:
             """Return (negative_resolution, total_size) for sorting."""
-            name, res_m = key
+            _name, res_m = key
             tiles = gcs_details.get(key, [])
             total_size = sum(t.get("size_bytes", 0) for t in tiles)
             # Negative resolution to sort 1000m before 250m (descending)

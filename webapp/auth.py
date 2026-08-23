@@ -155,9 +155,11 @@ def register_user(email: str, name: str):
 
         return (
             True,
-            "Account created. An administrator will review your request. "
-            "Once approved, you will receive an email with a link to set "
-            "your password.",
+            (
+                "Account created. An administrator will review your request. "
+                "Once approved, you will receive an email with a link to set "
+                "your password."
+            ),
         )
     except Exception:
         db.rollback()

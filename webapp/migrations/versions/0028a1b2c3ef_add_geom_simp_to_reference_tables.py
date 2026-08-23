@@ -41,9 +41,7 @@ _TOL = 0.005
 def upgrade() -> None:
     for table in _TABLES:
         # Add column (no-op if already present from a partial migration).
-        op.execute(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS geom_simp geometry"
-        )
+        op.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS geom_simp geometry")
         # Populate from the full-resolution geometry.  This is intentionally
         # done outside CONCURRENTLY so it runs inside the migration transaction
         # and rolls back cleanly if anything else fails.
@@ -62,6 +60,4 @@ def upgrade() -> None:
 def downgrade() -> None:
     for table in reversed(_TABLES):
         op.execute(f"DROP INDEX IF EXISTS {table}_geom_simp_idx")
-        op.execute(
-            f"ALTER TABLE {table} DROP COLUMN IF EXISTS geom_simp"
-        )
+        op.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS geom_simp")

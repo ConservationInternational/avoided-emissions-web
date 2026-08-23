@@ -154,16 +154,18 @@ def _build_group_diagnostics_card(group_diags):
                                             html.Li(
                                                 [
                                                     html.Strong("Covariate separation"),
-                                                    " \u2014 A covariate value "
-                                                    "appears exclusively in "
-                                                    "treatment or control pixels "
-                                                    "(e.g. all treatment pixels "
-                                                    "are in a protected area but "
-                                                    "no control pixels are). This "
-                                                    "makes the propensity score "
-                                                    "model predict treatment "
-                                                    "perfectly, so no control can "
-                                                    "match within the caliper.",
+                                                    (
+                                                        " \u2014 A covariate value "
+                                                        "appears exclusively in "
+                                                        "treatment or control pixels "
+                                                        "(e.g. all treatment pixels "
+                                                        "are in a protected area but "
+                                                        "no control pixels are). This "
+                                                        "makes the propensity score "
+                                                        "model predict treatment "
+                                                        "perfectly, so no control can "
+                                                        "match within the caliper."
+                                                    ),
                                                 ]
                                             ),
                                             html.Li(
@@ -171,20 +173,24 @@ def _build_group_diagnostics_card(group_diags):
                                                     html.Strong(
                                                         "Insufficient controls"
                                                     ),
-                                                    " \u2014 Too few control "
-                                                    "pixels in the group relative "
-                                                    "to treatment pixels. The "
-                                                    "matching algorithm cannot "
-                                                    "find enough similar controls.",
+                                                    (
+                                                        " \u2014 Too few control "
+                                                        "pixels in the group relative "
+                                                        "to treatment pixels. The "
+                                                        "matching algorithm cannot "
+                                                        "find enough similar controls."
+                                                    ),
                                                 ]
                                             ),
                                             html.Li(
                                                 [
                                                     html.Strong("Caliper rejection"),
-                                                    " \u2014 Even when controls "
-                                                    "exist, none are similar "
-                                                    "enough (within the caliper "
-                                                    "threshold) to be matched.",
+                                                    (
+                                                        " \u2014 Even when controls "
+                                                        "exist, none are similar "
+                                                        "enough (within the caliper "
+                                                        "threshold) to be matched."
+                                                    ),
                                                 ]
                                             ),
                                         ],
@@ -434,8 +440,10 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                             html.P(
                                 [
                                     html.Strong("Critical quality issue"),
-                                    " (red) — Results are likely unreliable. "
-                                    "Triggers include:",
+                                    (
+                                        " (red) — Results are likely unreliable. "
+                                        "Triggers include:"
+                                    ),
                                 ],
                                 className="mb-1",
                             ),
@@ -462,9 +470,11 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                             html.P(
                                 [
                                     html.Strong("Quality concern"),
-                                    " (yellow) — Results may be limited but "
-                                    "are not necessarily invalid. "
-                                    "Triggers include:",
+                                    (
+                                        " (yellow) — Results may be limited but "
+                                        "are not necessarily invalid. "
+                                        "Triggers include:"
+                                    ),
                                 ],
                                 className="mb-1",
                             ),
@@ -488,10 +498,12 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                             html.P(
                                 [
                                     html.Strong("SMD"),
-                                    " (Standardized Mean Difference) measures "
-                                    "how similar the treatment and control "
-                                    "groups are for each covariate. Values "
-                                    "closer to 0 indicate better balance.",
+                                    (
+                                        " (Standardized Mean Difference) measures "
+                                        "how similar the treatment and control "
+                                        "groups are for each covariate. Values "
+                                        "closer to 0 indicate better balance."
+                                    ),
                                 ],
                                 className="mb-0 text-muted",
                                 style={"fontSize": "0.85em"},
@@ -1084,7 +1096,7 @@ def _build_love_plot(balance_df, cov_df, site_filter=None):
             x=agg["smd"],
             y=agg["covariate"],
             mode="markers",
-            marker=dict(size=10, color=colors),
+            marker={"size": 10, "color": colors},
             hovertemplate="%{y}: SMD = %{x:.3f}<extra></extra>",
         )
     )
@@ -1099,8 +1111,8 @@ def _build_love_plot(balance_df, cov_df, site_filter=None):
         yaxis_title="",
         showlegend=False,
         height=max(300, 40 * len(agg) + 100),
-        margin=dict(l=200, r=40, t=50, b=50),
-        xaxis=dict(zeroline=True),
+        margin={"l": 200, "r": 40, "t": 50, "b": 50},
+        xaxis={"zeroline": True},
     )
 
     return dcc.Graph(figure=fig)
@@ -1157,7 +1169,7 @@ def _build_pscore_qq_plot(pscore_df, cov_df, site_filter=None):
             x=[q_min, q_max],
             y=[q_min, q_max],
             mode="lines",
-            line=dict(color="gray", dash="dash"),
+            line={"color": "gray", "dash": "dash"},
             name="45┬░ line",
             hoverinfo="skip",
         )
@@ -1167,7 +1179,7 @@ def _build_pscore_qq_plot(pscore_df, cov_df, site_filter=None):
             x=c_quantiles,
             y=t_quantiles,
             mode="markers",
-            marker=dict(size=4, color="#1f77b4", opacity=0.6),
+            marker={"size": 4, "color": "#1f77b4", "opacity": 0.6},
             name="Matched Pixels",
             hovertemplate=(
                 "Control quantile: %{x:.3f}<br>"
@@ -1180,9 +1192,9 @@ def _build_pscore_qq_plot(pscore_df, cov_df, site_filter=None):
         xaxis_title="Control Quantiles",
         yaxis_title="Treatment Quantiles",
         height=450,
-        margin=dict(t=50, b=50, l=60, r=30),
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-        xaxis=dict(scaleanchor="y", scaleratio=1),
+        margin={"t": 50, "b": 50, "l": 60, "r": 30},
+        legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
+        xaxis={"scaleanchor": "y", "scaleratio": 1},
     )
 
     return dcc.Graph(figure=fig)
@@ -1371,7 +1383,7 @@ def _build_qq_from_summary(qq_data):
             x=[q_min, q_max],
             y=[q_min, q_max],
             mode="lines",
-            line=dict(color="gray", dash="dash"),
+            line={"color": "gray", "dash": "dash"},
             name="45┬░ line",
             hoverinfo="skip",
         )
@@ -1381,7 +1393,7 @@ def _build_qq_from_summary(qq_data):
             x=c_q,
             y=t_q,
             mode="markers",
-            marker=dict(size=4, color="#1f77b4", opacity=0.6),
+            marker={"size": 4, "color": "#1f77b4", "opacity": 0.6},
             name="Matched Pixels",
             hovertemplate=(
                 "Control quantile: %{x:.3f}<br>"
@@ -1394,9 +1406,9 @@ def _build_qq_from_summary(qq_data):
         xaxis_title="Control Quantiles",
         yaxis_title="Treatment Quantiles",
         height=450,
-        margin=dict(t=50, b=50, l=60, r=30),
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-        xaxis=dict(scaleanchor="y", scaleratio=1),
+        margin={"t": 50, "b": 50, "l": 60, "r": 30},
+        legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
+        xaxis={"scaleanchor": "y", "scaleratio": 1},
     )
 
     return dcc.Graph(figure=fig)
@@ -1449,9 +1461,9 @@ def _build_histograms_from_summary(hist_data):
             xaxis_title=col,
             yaxis_title="Frequency (%)",
             barmode="overlay",
-            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
+            legend={"yanchor": "top", "y": 0.99, "xanchor": "right", "x": 0.99},
             height=350,
-            margin=dict(t=40, b=40, l=50, r=20),
+            margin={"t": 40, "b": 40, "l": 50, "r": 20},
         )
         plots.append(dcc.Graph(figure=fig))
 
@@ -1485,7 +1497,7 @@ def _build_match_quality_plots(df, covariate_cols):
         col_min = float(col_vals.min())
         col_max = float(col_vals.max())
         bin_size = (col_max - col_min) / n_bins if col_max > col_min else 1
-        xbins = dict(start=col_min, end=col_max + bin_size, size=bin_size)
+        xbins = {"start": col_min, "end": col_max + bin_size, "size": bin_size}
 
         fig = go.Figure()
         fig.add_trace(
@@ -1513,9 +1525,9 @@ def _build_match_quality_plots(df, covariate_cols):
             xaxis_title=col,
             yaxis_title="Frequency (%)",
             barmode="overlay",
-            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
+            legend={"yanchor": "top", "y": 0.99, "xanchor": "right", "x": 0.99},
             height=350,
-            margin=dict(t=40, b=40, l=50, r=20),
+            margin={"t": 40, "b": 40, "l": 50, "r": 20},
         )
         plots.append(dcc.Graph(figure=fig))
 

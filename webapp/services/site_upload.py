@@ -630,7 +630,7 @@ def _find_supported_dataset_paths(directory):
                 shapefiles.append(full_path)
             elif lower_name.endswith(".gpkg"):
                 geopackages.append(full_path)
-            elif lower_name.endswith(".geojson") or lower_name.endswith(".json"):
+            elif lower_name.endswith((".geojson", ".json")):
                 geojsons.append(full_path)
 
     return sorted(shapefiles), sorted(geopackages), sorted(geojsons)

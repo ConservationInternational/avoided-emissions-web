@@ -1109,8 +1109,10 @@ def register_callbacks(app, limiter=None):
 
         return (
             rows,
-            f"Total: {len(rows)} | Archived: {archived_count} | Pending: {queued_count}"
-            f" | Running: {running_count} | Cancelled: {cancelled_count}",
+            (
+                f"Total: {len(rows)} | Archived: {archived_count} | Pending: {queued_count}"
+                f" | Running: {running_count} | Cancelled: {cancelled_count}"
+            ),
         )
 
     @app.callback(
@@ -1934,7 +1936,7 @@ def register_callbacks(app, limiter=None):
             filename = "results_by_site_total.csv"
 
         if csv:
-            return dict(content=csv, filename=filename)
+            return {"content": csv, "filename": filename}
         return no_update
 
     # -- Match quality download -----------------------------------------------
@@ -1957,7 +1959,7 @@ def register_callbacks(app, limiter=None):
 
         csv = download_results_csv(task_id, "match_covariates")
         if csv:
-            return dict(content=csv, filename="results_pixel_covariates.csv")
+            return {"content": csv, "filename": "results_pixel_covariates.csv"}
         return no_update
 
     # -- Share modal ----------------------------------------------------------
@@ -2380,9 +2382,7 @@ def register_callbacks(app, limiter=None):
         if not ctx.triggered:
             raise PreventUpdate
         trigger = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trigger == "start-gee-export":
-            return True
-        return False
+        return trigger == "start-gee-export"
 
     @app.callback(
         Output("gee-export-result", "children"),
@@ -2982,9 +2982,7 @@ def register_callbacks(app, limiter=None):
         if not ctx.triggered:
             raise PreventUpdate
         trigger = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trigger == "admin-delete-btn":
-            return True
-        return False
+        return trigger == "admin-delete-btn"
 
     @app.callback(
         [
@@ -3034,9 +3032,7 @@ def register_callbacks(app, limiter=None):
         if not ctx.triggered:
             raise PreventUpdate
         trigger = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trigger == "self-delete-btn":
-            return True
-        return False
+        return trigger == "self-delete-btn"
 
     @app.callback(
         Output("self-delete-result", "children"),
@@ -3219,8 +3215,8 @@ def register_callbacks(app, limiter=None):
                 y=site_df["treatment_defor_ha"],
                 mode="lines+markers",
                 name="Project Site",
-                line=dict(color="#2ca02c", width=2),
-                marker=dict(size=6),
+                line={"color": "#2ca02c", "width": 2},
+                marker={"size": 6},
             )
         )
         fig_defor.add_trace(
@@ -3229,8 +3225,8 @@ def register_callbacks(app, limiter=None):
                 y=site_df["control_defor_ha"],
                 mode="lines+markers",
                 name="Matched Controls",
-                line=dict(color="#d62728", width=2),
-                marker=dict(size=6),
+                line={"color": "#d62728", "width": 2},
+                marker={"size": 6},
             )
         )
         if site_has_ci:
@@ -3254,7 +3250,7 @@ def register_callbacks(app, limiter=None):
             title=f"Annual Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
             yaxis_title="Deforestation (ha)",
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
+            legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
         )
         if not pre_years.empty:
@@ -3293,8 +3289,8 @@ def register_callbacks(app, limiter=None):
                 y=cum_treatment,
                 mode="lines+markers",
                 name="Project Site",
-                line=dict(color="#2ca02c", width=2),
-                marker=dict(size=6),
+                line={"color": "#2ca02c", "width": 2},
+                marker={"size": 6},
             )
         )
         fig_cum.add_trace(
@@ -3303,8 +3299,8 @@ def register_callbacks(app, limiter=None):
                 y=cum_control,
                 mode="lines+markers",
                 name="Matched Controls",
-                line=dict(color="#d62728", width=2),
-                marker=dict(size=6),
+                line={"color": "#d62728", "width": 2},
+                marker={"size": 6},
             )
         )
         if site_has_ci:
@@ -3328,7 +3324,7 @@ def register_callbacks(app, limiter=None):
             title=f"Cumulative Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
             yaxis_title="Cumulative Deforestation (ha)",
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
+            legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
         )
         if not pre_years.empty:
@@ -3369,8 +3365,8 @@ def register_callbacks(app, limiter=None):
                     y=site_df["treatment_emissions_mgco2e"],
                     mode="lines+markers",
                     name="Project Site",
-                    line=dict(color="#2ca02c", width=2),
-                    marker=dict(size=6),
+                    line={"color": "#2ca02c", "width": 2},
+                    marker={"size": 6},
                 )
             )
             fig_em.add_trace(
@@ -3379,8 +3375,8 @@ def register_callbacks(app, limiter=None):
                     y=site_df["control_emissions_mgco2e"],
                     mode="lines+markers",
                     name="Matched Controls",
-                    line=dict(color="#d62728", width=2),
-                    marker=dict(size=6),
+                    line={"color": "#d62728", "width": 2},
+                    marker={"size": 6},
                 )
             )
             if site_has_ci and "treatment_emissions_mgco2e_ci_lower" in site_df.columns:
@@ -3404,7 +3400,7 @@ def register_callbacks(app, limiter=None):
                 title=f"Annual Emissions: {site_name}{sub_note}",
                 xaxis_title="Year",
                 yaxis_title="Emissions (MgCOΓéée)",
-                legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02),
+                legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
                 hovermode="x unified",
             )
             if not pre_years.empty:

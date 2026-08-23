@@ -182,12 +182,12 @@ limiter = Limiter(
 
 # Initialize Rollbar error tracking
 if Config.ROLLBAR_ACCESS_TOKEN:
-    _rollbar_kwargs = dict(
-        access_token=Config.ROLLBAR_ACCESS_TOKEN,
-        environment=Config.ROLLBAR_ENVIRONMENT,
-        root=__name__,
-        allow_logging_basic_config=False,
-    )
+    _rollbar_kwargs = {
+        "access_token": Config.ROLLBAR_ACCESS_TOKEN,
+        "environment": Config.ROLLBAR_ENVIRONMENT,
+        "root": __name__,
+        "allow_logging_basic_config": False,
+    }
     if Config.GIT_REVISION:
         _rollbar_kwargs["code_version"] = Config.GIT_REVISION
     with server.app_context():

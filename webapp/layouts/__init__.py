@@ -40,13 +40,13 @@ __all__ = [
     "TASK_LIST_COLUMNS",
     # shared UI helpers
     "_make_ag_grid",
-    "footer",
-    "navbar",
     # page layouts
     "admin_layout",
     "dashboard_layout",
+    "footer",
     "forgot_password_layout",
     "login_layout",
+    "navbar",
     "not_found_layout",
     "register_layout",
     "reset_password_layout",

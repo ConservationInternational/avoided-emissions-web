@@ -678,8 +678,10 @@ def delete_user_site_set(site_set_id, user_id):
         if task_count > 0:
             return (
                 False,
-                "This site set is linked to submitted tasks and cannot be deleted."
-                " Use Archive to hide it instead.",
+                (
+                    "This site set is linked to submitted tasks and cannot be deleted."
+                    " Use Archive to hide it instead."
+                ),
             )
 
         db.delete(site_set)
