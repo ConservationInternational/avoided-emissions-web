@@ -837,9 +837,9 @@ def register_callbacks(app, limiter=None):
 
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
         user = get_current_user()
-        if not user or not user.is_admin:
+        if not user:
             return (
-                dbc.Alert("Admin access required.", color="danger"),
+                dbc.Alert("Login required.", color="danger"),
                 no_update,
                 False,
                 True,
@@ -1081,7 +1081,7 @@ def register_callbacks(app, limiter=None):
     )
     def refresh_admin_site_upload_views(_n_intervals, _refresh_token, show_archived):
         user = get_current_user()
-        if not user or not user.is_admin:
+        if not user:
             raise PreventUpdate
 
         site_sets = list_user_site_sets(user.id, include_archived=True)
@@ -1132,8 +1132,8 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
 
         user = get_current_user()
-        if not user or not user.is_admin:
-            return dbc.Alert("Admin access required.", color="danger"), no_update
+        if not user:
+            return dbc.Alert("Login required.", color="danger"), no_update
 
         try:
             if action == "cancel_import":

@@ -249,6 +249,7 @@ def _site_upload_card(footer_text):
 def admin_layout(user):
     """Admin panel for covariate management, site uploads, and users."""
     category_options = _build_category_options()
+    admin_tab_style = {} if user.is_admin else {"display": "none"}
 
     return dbc.Container(
         [
@@ -334,6 +335,7 @@ def admin_layout(user):
                     dbc.Tab(
                         label="Covariates",
                         tab_id="tab-covariates",
+                        tab_style=admin_tab_style,
                         children=[
                             html.Div(
                                 [
@@ -503,6 +505,7 @@ def admin_layout(user):
                     dbc.Tab(
                         label="Users",
                         tab_id="tab-users",
+                        tab_style=admin_tab_style,
                         children=[
                             html.Div(
                                 [

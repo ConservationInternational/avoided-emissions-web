@@ -412,10 +412,7 @@ def display_page(pathname, search):
     elif pathname == "/settings":
         page = settings_layout(user)
     elif pathname == "/admin":
-        if not user.is_admin:
-            page = not_found_layout(user)
-        else:
-            page = admin_layout(user)
+        page = admin_layout(user)
     elif pathname and pathname.startswith("/task/"):
         task_id = pathname.split("/task/")[1]
         # Validate task_id is a proper UUID to prevent injection

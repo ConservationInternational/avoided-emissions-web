@@ -980,17 +980,16 @@ def navbar(user=None, active_page=None):
                 )
             ),
         ]
-        if user.is_admin:
-            nav_items.append(
-                dbc.NavItem(
-                    dbc.NavLink(
-                        "Admin",
-                        href="/admin",
-                        active=(active_page == "/admin"),
-                        className="fw-bold" if active_page == "/admin" else "",
-                    )
+        nav_items.append(
+            dbc.NavItem(
+                dbc.NavLink(
+                    "Admin",
+                    href="/admin",
+                    active=(active_page == "/admin"),
+                    className="fw-bold" if active_page == "/admin" else "",
                 )
             )
+        )
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
