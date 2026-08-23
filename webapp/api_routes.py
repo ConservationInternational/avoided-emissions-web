@@ -205,12 +205,12 @@ def create_api_blueprint(limiter):
             s3_key = f"{cog_prefix}/{name}.tif"
             try:
                 s3.head_object(Bucket=Config.S3_BUCKET, Key=s3_key)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 if legacy_cog_prefix:
                     s3_key = f"{legacy_cog_prefix}/{name}.tif"
                     try:
                         s3.head_object(Bucket=Config.S3_BUCKET, Key=s3_key)
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S112
                         continue
                 else:
                     continue
@@ -220,7 +220,7 @@ def create_api_blueprint(limiter):
                     Params={"Bucket": Config.S3_BUCKET, "Key": s3_key},
                     ExpiresIn=3600,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001, S112
                 continue
 
             style = get_style(name, category)

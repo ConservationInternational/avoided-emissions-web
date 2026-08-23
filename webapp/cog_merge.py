@@ -349,7 +349,7 @@ def _get_gcs_credentials():
         auth_req = google.auth.transport.requests.Request()
         credentials.refresh(auth_req)
         return credentials
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
     # Attempt 2: EE_SERVICE_ACCOUNT_JSON env var
@@ -363,7 +363,7 @@ def _get_gcs_credentials():
         try:
             try:
                 key_data = base64.b64decode(ee_sa_json).decode("utf-8")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 key_data = ee_sa_json
             sa_info = json.loads(key_data)
             credentials = service_account.Credentials.from_service_account_info(
@@ -667,7 +667,7 @@ def merge_covariate_tiles(
         # 5. Capture the S3 ETag for provenance tracking
         try:
             s3_etag = get_s3_object_etag(output_bucket, s3_key, aws_region)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("Failed to read S3 ETag for %s", s3_key)
             s3_etag = None
 

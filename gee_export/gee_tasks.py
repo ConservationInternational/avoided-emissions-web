@@ -36,7 +36,7 @@ def _load_simple_image(covariate_name, cfg):
         # Try as Image first; if it's a FeatureCollection, handle separately
         try:
             image = ee.Image(asset)
-        except Exception:
+        except Exception:  # noqa: BLE001
             image = ee.ImageCollection(asset).mosaic()
 
     if bands:

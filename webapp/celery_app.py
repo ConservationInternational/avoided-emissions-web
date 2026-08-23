@@ -178,7 +178,7 @@ def handle_task_failure(sender=None, task_id=None, exception=None, einfo=None, *
                             "failed after terminal worker failure",
                             analysis_task_id,
                         )
-                except Exception as db_exc:
+                except Exception as db_exc:  # noqa: BLE001
                     db.rollback()
                     logger.error(
                         "handle_task_failure: could not mark task %s failed: %s",
@@ -187,7 +187,5 @@ def handle_task_failure(sender=None, task_id=None, exception=None, einfo=None, *
                     )
                 finally:
                     db.close()
-        except Exception as signal_exc:
-            logger.error(
-                "handle_task_failure cleanup raised: %s", signal_exc, exc_info=True
-            )
+        except Exception:
+            logger.exception("handle_task_failure cleanup raised")

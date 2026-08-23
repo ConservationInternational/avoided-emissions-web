@@ -102,7 +102,7 @@ def main(
 
         try:
             key_data = base64.b64decode(ee_sa_json).decode("utf-8")
-        except Exception:
+        except Exception:  # noqa: BLE001
             key_data = ee_sa_json
         sa_info = json.loads(key_data)
         credentials = ee.ServiceAccountCredentials(

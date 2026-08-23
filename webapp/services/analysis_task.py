@@ -883,11 +883,10 @@ def _complete_analysis_task_submission(task_id, user_id):
         )
 
     except Exception as e:
-        logger.error(
+        logger.exception(
             "[SUBMIT-WORKER] Task %s FAILED: %s",
             task_id,
-            e,
-            exc_info=True,
+            e,  # noqa: TRY401
         )
         db.rollback()
         try:
@@ -896,7 +895,7 @@ def _complete_analysis_task_submission(task_id, user_id):
                 task_obj.status = "failed"
                 task_obj.error_message = str(e)
                 db.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001
             db.rollback()
         raise
     finally:
@@ -1469,11 +1468,10 @@ def submit_analysis_task(
         return task_id
 
     except Exception as e:
-        logger.error(
+        logger.exception(
             "[SUBMIT] Task %s FAILED during submission: %s",
             task_id if "task_id" in dir() else "(pre-creation)",
-            e,
-            exc_info=True,
+            e,  # noqa: TRY401
         )
         db.rollback()
         if "task_id" in dir():
@@ -1526,7 +1524,7 @@ def cancel_task(task_id, user):
                         task_id,
                         api_exec_id,
                     )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "[CANCEL] Task %s: failed to cancel API execution %s: %s",
                     task_id,
@@ -2371,7 +2369,7 @@ def generate_match_quality_summary(task_id, results_s3_uri=None):
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
             s3.download_fileobj(Bucket=bucket, Key=cov_key, Fileobj=tmp)
             cov_path = tmp.name
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.info(
             "generate_match_quality_summary(%s): "
             "match_covariates CSV not found, skipping histograms",
@@ -2426,7 +2424,7 @@ def generate_match_quality_summary(task_id, results_s3_uri=None):
                     frac = row.get("sampled_fraction", 1.0)
                     if sid_str and frac and frac > 0:
                         sampling_by_site[sid_str] = float(frac)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass  # Not available for older tasks
 
             # Compute total treatment / control pool counts
@@ -2516,7 +2514,7 @@ def generate_match_quality_summary(task_id, results_s3_uri=None):
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
             s3.download_fileobj(Bucket=bucket, Key=ps_key, Fileobj=tmp)
             ps_path = tmp.name
-    except Exception:
+    except Exception:  # noqa: BLE001
         ps_path = None
 
     if ps_path:

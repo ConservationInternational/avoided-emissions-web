@@ -8,10 +8,8 @@ results_payload.json) provides a representative 2-site × 5-year dataset.
 from unittest.mock import MagicMock
 
 import pytest
-
 from models import TaskResult, TaskResultTotal
 from services.analysis_task import import_execution_results
-
 
 # ---------------------------------------------------------------------------
 # Helpers

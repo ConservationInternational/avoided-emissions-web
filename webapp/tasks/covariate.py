@@ -106,7 +106,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
                 f"https://storage.googleapis.com/{source_bucket}/{t['name']}"
                 for t in tile_details
             ]
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to fetch tile details for %s — "
                 "merge will still proceed but metadata will be incomplete",
@@ -300,7 +300,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
                 meta.error_message = str(exc)[:2000]
                 meta.merge_completed_at = datetime.now(timezone.utc)
             db.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001
             db.rollback()
         finally:
             db.close()
@@ -348,7 +348,7 @@ def poll_gee_exports() -> dict:
         if ee_sa_json:
             try:
                 key_data = base64.b64decode(ee_sa_json).decode("utf-8")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 key_data = ee_sa_json
             sa_info = json.loads(key_data)
             credentials = ee.ServiceAccountCredentials(
@@ -431,7 +431,7 @@ def poll_gee_exports() -> dict:
                         export.completed_at = datetime.now(timezone.utc)
                         updated += 1
 
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Failed to poll GEE status for task %s: %s",
                     export.gee_task_id,
@@ -503,7 +503,7 @@ def auto_merge_unmerged() -> dict:
     finally:
         try:
             _lock.release()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass  # lock may have expired; safe to ignore
 
 
@@ -582,7 +582,7 @@ def _auto_merge_unmerged_inner() -> dict:
                         Config.S3_BUCKET, cog_prefix, Config.AWS_REGION
                     ):
                         s3_cog_map[(obj["covariate"], res_m)] = obj
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("Failed to scan S3 for existing COGs")
             report_exception()
 

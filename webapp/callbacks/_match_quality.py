@@ -767,7 +767,7 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
                 kwargs={"results_s3_uri": task.results_s3_uri},
             )
             logger.info("Dispatched backfill summary task for %s", task_id)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass  # best effort
 
         return html.Div(

@@ -133,7 +133,7 @@ def register_callbacks(app, limiter=None):
             if count == 1:
                 r.expire(key, window)
             return count > max_attempts
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     # -- Navbar toggle (responsive collapse) ----------------------------------
@@ -859,7 +859,7 @@ def register_callbacks(app, limiter=None):
 
             try:
                 payload = json.loads(stream_payload)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return (
                     dbc.Alert(
                         "Stream upload payload could not be parsed.", color="danger"
@@ -2634,7 +2634,7 @@ def register_callbacks(app, limiter=None):
             try:
                 profile = client.get_user_profile()
                 te_user_id = (profile.get("data") or {}).get("id")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning("Could not fetch trends.earth user profile")
 
             # 3. Register an OAuth2 service client

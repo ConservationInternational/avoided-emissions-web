@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import dash_bootstrap_components as dbc
 import pytest
-
 from layouts.admin import admin_layout
 from layouts.common import navbar
 

@@ -352,14 +352,14 @@ def open_covariate_dataset(
                 raise RuntimeError(
                     f"CRS mismatch: '{name}' has {layer_crs}, expected {ref_crs}"
                 )
-            if layer_res != ref_res:
-                # Allow tiny floating-point differences in pixel size
-                # (e.g. 1/120 vs GEE's 30 arc-second grid constant).
-                if not all(abs(a - b) < 1e-6 for a, b in zip(layer_res, ref_res)):
-                    raise RuntimeError(
-                        f"Resolution mismatch: '{name}' has {layer_res}, "
-                        f"expected {ref_res}"
-                    )
+            # Allow tiny floating-point differences in pixel size
+            # (e.g. 1/120 vs GEE's 30 arc-second grid constant).
+            if layer_res != ref_res and not all(
+                abs(a - b) < 1e-6 for a, b in zip(layer_res, ref_res)
+            ):
+                raise RuntimeError(
+                    f"Resolution mismatch: '{name}' has {layer_res}, expected {ref_res}"
+                )
 
             # Snap coordinates to the reference grid so that all layers
             # share identical x/y arrays.  Without this, layers whose

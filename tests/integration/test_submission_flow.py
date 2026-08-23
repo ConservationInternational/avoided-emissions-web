@@ -9,7 +9,6 @@ Run locally (from the repo root):
 
 import pytest
 
-
 pytestmark = pytest.mark.integration
 
 

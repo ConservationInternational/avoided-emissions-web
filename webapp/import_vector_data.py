@@ -643,7 +643,7 @@ def import_wdpa(engine, tmpdir: Path) -> _SourceInfo:
                 if "poly" in lyr.lower() or "polygon" in lyr.lower():
                     poly_layer = lyr
                     break
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass  # will read the default layer
 
     # Fall back to GeoPackage / Shapefile patterns
@@ -669,7 +669,7 @@ def import_wdpa(engine, tmpdir: Path) -> _SourceInfo:
                         if "poly" in lyr.lower() or "polygon" in lyr.lower():
                             poly_layer = lyr
                             break
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
                 break
 

@@ -9,9 +9,7 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
-
 from auth import authenticate, hash_password, validate_password, verify_password
-
 
 # ---------------------------------------------------------------------------
 # hash_password
@@ -22,7 +20,7 @@ from auth import authenticate, hash_password, validate_password, verify_password
 class TestHashPassword:
     def test_produces_bcrypt_hash(self):
         h = hash_password("SecurePass1!abcdef")
-        assert h.startswith("$2b$") or h.startswith("$2a$")
+        assert h.startswith(("$2b$", "$2a$"))
 
     def test_returns_string(self):
         assert isinstance(hash_password("SecurePass1!abcdef"), str)

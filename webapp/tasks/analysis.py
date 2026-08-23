@@ -113,7 +113,7 @@ def poll_batch_tasks() -> dict:
                                         "returned by API",
                                         task.id,
                                     )
-                            except Exception as results_exc:
+                            except Exception as results_exc:  # noqa: BLE001
                                 # Roll back the session FIRST.  If import_execution_results
                                 # raised a SQLAlchemy exception (e.g. IntegrityError from
                                 # an autoflush) the session is in PendingRollbackError state
@@ -147,7 +147,7 @@ def poll_batch_tasks() -> dict:
 
                         if task.status != old_status:
                             updated += 1
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "Failed to poll API status for task %s: %s",
                             task_id_str,
@@ -244,7 +244,7 @@ def poll_batch_tasks() -> dict:
                                 # adoption fires a SELECT.
                                 db.commit()
                                 adopted += 1
-                            except Exception as adopt_exc:
+                            except Exception as adopt_exc:  # noqa: BLE001
                                 db.rollback()
                                 logger.warning(
                                     "Failed to adopt API execution %s: %s",
@@ -255,7 +255,7 @@ def poll_batch_tasks() -> dict:
 
                 if adopted:
                     logger.info("Discovery: adopted %d new API execution(s)", adopted)
-        except Exception as disc_exc:
+        except Exception as disc_exc:  # noqa: BLE001
             logger.warning("API execution discovery failed: %s", disc_exc)
             db.rollback()
 
@@ -423,11 +423,10 @@ def submit_analysis_task_worker(self, task_id: str, user_id: str) -> None:
         _complete_analysis_task_submission(task_id, user_id)
         logger.info("submit_analysis_task_worker: completed for task %s", task_id)
     except Exception as exc:
-        logger.error(
+        logger.exception(
             "submit_analysis_task_worker: failed for task %s: %s",
             task_id,
-            exc,
-            exc_info=True,
+            exc,  # noqa: TRY401
         )
         report_exception()
         raise

@@ -375,7 +375,7 @@ class TrendsEarthClient:
             # in the webapp logs, not just the HTTP status code.
             try:
                 body = resp.json()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 body = resp.text[:500]
             logger.error("[TE-API] Error response from %s: %s", url, body)
         resp.raise_for_status()
@@ -455,7 +455,7 @@ class TrendsEarthClient:
             )
             resp.raise_for_status()
             return resp.json().get("data", [])
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[TE-API] Failed to fetch logs for execution %s: %s",
                 execution_id,

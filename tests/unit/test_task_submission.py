@@ -13,7 +13,6 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
-
 from services.analysis_task import queue_analysis_task
 
 # ---------------------------------------------------------------------------
@@ -87,7 +86,7 @@ class TestQueueAnalysisTaskSuccess:
         assert added.config["n_replicates"] == 5
 
     def test_dispatches_celery_task_with_correct_args(self, mocker):
-        mock_db, mock_submit = _setup_happy_path(mocker)
+        _mock_db, mock_submit = _setup_happy_path(mocker)
         user_id = str(uuid.uuid4())
         task_id = queue_analysis_task(user_id=user_id, **_BASE_KWARGS)
 

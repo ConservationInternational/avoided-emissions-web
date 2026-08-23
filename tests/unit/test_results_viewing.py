@@ -9,10 +9,10 @@ External I/O is mocked via:
 No DB connection or S3 access is made during these tests.
 """
 
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
-
 from models import AnalysisTask, TaskResult, TaskResultTotal, TaskSite
 from services.analysis_task import (
     LARGE_TASK_THRESHOLD,
@@ -208,7 +208,7 @@ class TestGetTaskDetailRouting:
 
 @pytest.mark.unit
 class TestGetTaskSiteResults:
-    _EXPECTED_KEYS = {
+    _EXPECTED_KEYS: ClassVar[set[str]] = {
         "site_id",
         "year",
         "treatment_defor_ha",

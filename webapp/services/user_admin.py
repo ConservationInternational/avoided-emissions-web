@@ -79,7 +79,7 @@ def approve_user(user_id):
             report_exception(approved_user_email=user.email)
 
         return True, f"User {user.email} approved."
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
         return False, "Failed to approve user."
     finally:
@@ -103,7 +103,7 @@ def change_user_role(user_id, new_role, acting_user_id=None):
         user.updated_at = datetime.now(timezone.utc)
         db.commit()
         return True, f"User {user.email} role changed to {new_role}."
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
         return False, "Failed to change role."
     finally:
@@ -259,7 +259,7 @@ def delete_user(user_id):
         db.delete(user)
         db.commit()
         return True, f"User {email} deleted."
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
         return False, "Failed to delete user."
     finally:

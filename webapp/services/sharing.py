@@ -195,7 +195,7 @@ def validate_share_token(token, record_access=True):
             link.record_access()
             db.commit()
         return str(link.task_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
         return None
     finally:

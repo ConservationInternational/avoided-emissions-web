@@ -49,7 +49,7 @@ def _cleanup_covariate_downstream(covariate_name, db, *, resolution_m=None):
                 covariate_name,
                 region=Config.AWS_REGION,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to delete S3 COG for %s at %sm resolution",
                 covariate_name,
@@ -64,7 +64,7 @@ def _cleanup_covariate_downstream(covariate_name, db, *, resolution_m=None):
                 Config.GCS_PREFIX,
                 covariate_name,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("Failed to delete GCS tiles for %s", covariate_name)
 
     # 3. Remove old DB records for this covariate (at the target resolution
@@ -102,7 +102,7 @@ def start_gee_export(covariate_names, user_id, *, resolution_m=1000):
 
         try:
             key_data = base64.b64decode(ee_sa_json).decode("utf-8")
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Assume it's already plain JSON, not base64-encoded
             key_data = ee_sa_json
         sa_info = json.loads(key_data)
@@ -182,7 +182,7 @@ def list_export_tiles(bucket, prefix, covariate_name):
             if item["name"].endswith(".tif")
         ]
         return sorted(urls)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Failed to list GCS tiles for %s/%s: %s",
             bucket,
@@ -250,7 +250,7 @@ def force_remerge(covariate_name, user_id, *, resolution_m=1000):
                 covariate_name,
                 region=Config.AWS_REGION,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to delete S3 COG for %s at %sm resolution",
                 covariate_name,

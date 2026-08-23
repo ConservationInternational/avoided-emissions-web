@@ -107,7 +107,7 @@ def rollbar_report_error(
             rollbar.report_exc_info(extra_data=extra)
         else:
             rollbar.report_message(error_msg, level="error", extra_data=extra)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.warning("Rollbar: could not send error report: %s", exc)
 
 
@@ -138,7 +138,7 @@ def rollbar_report_message(
 
     try:
         rollbar.report_message(msg, level=level, extra_data=extra)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.warning("Rollbar: could not send message: %s", exc)
 
 

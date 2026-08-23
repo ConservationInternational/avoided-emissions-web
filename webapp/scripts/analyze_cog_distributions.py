@@ -68,6 +68,7 @@ def gdalinfo_json(vsicurl_path):
     result = subprocess.run(
         ["gdalinfo", "-json", "-stats", vsicurl_path],
         capture_output=True,
+        check=False,
         text=True,
         timeout=120,
     )
@@ -125,7 +126,9 @@ def sample_overview(url, max_pixels=200000):
         "/vsicurl/" + url,
         tmp_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    result = subprocess.run(
+        cmd, capture_output=True, check=False, text=True, timeout=300
+    )
     if result.returncode != 0:
         print(f"  gdal_translate failed: {result.stderr[:200]}", flush=True)
         return stats, None
@@ -145,7 +148,9 @@ def sample_overview(url, max_pixels=200000):
             tmp_path,
             tmp_path + ".bil",
         ]
-        subprocess.run(raw_cmd, capture_output=True, text=True, timeout=120)
+        subprocess.run(
+            raw_cmd, capture_output=True, check=False, text=True, timeout=120
+        )
 
         # Determine numpy dtype from GDAL type
         dtype_map = {
@@ -170,7 +175,7 @@ def sample_overview(url, max_pixels=200000):
             os.unlink(f)
 
         return stats, data, nodata
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"  numpy read failed: {e}", flush=True)
         return stats, None, nodata
 
@@ -316,7 +321,7 @@ def main():
                     )
                 else:
                     print(f"    {name}: stats only - {info.get('gdal_stats', {})}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"    {name}: ERROR - {e}")
 
     # Copy results from representatives to skipped series members

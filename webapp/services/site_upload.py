@@ -162,7 +162,7 @@ def _parse_sites_geometry_file_from_path(file_path, filename):
         else:
             errors.append(f"Unsupported file format: {ext}")
             return None, errors
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         errors.append(f"Failed to read file: {e!s}")
         return None, errors
 
@@ -214,7 +214,7 @@ def _cleanup_expired_staged_uploads():
             created_at = datetime.fromisoformat(meta.get("created_at", ""))
             if created_at.tzinfo is None:
                 created_at = created_at.replace(tzinfo=timezone.utc)
-        except Exception:
+        except Exception:  # noqa: BLE001
             created_at = datetime.fromtimestamp(
                 meta_path.stat().st_mtime, tz=timezone.utc
             )
@@ -223,7 +223,7 @@ def _cleanup_expired_staged_uploads():
             try:
                 meta_path.unlink(missing_ok=True)
                 data_path.unlink(missing_ok=True)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning("Failed cleaning expired staged upload: %s", token)
 
 
@@ -487,7 +487,7 @@ def get_site_upload_mapping_preview_from_staged(token, user_id):
                 n_features = len(gdf_sample)
         else:
             return None, [f"Unsupported file format: {ext}"]
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return None, [f"Failed to read file: {exc}"]
     finally:
         if preview_path:
@@ -677,7 +677,7 @@ def _read_shapefile(path):
     if not os.path.exists(cpg_path):
         try:
             return gpd.read_file(path, encoding="utf-8")
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
     return gpd.read_file(path)
 
@@ -850,7 +850,7 @@ def _parse_sites_geometry_file(file_content, filename):
         else:
             errors.append(f"Unsupported file format: {ext}")
             return None, errors
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         errors.append(f"Failed to read file: {e!s}")
         return None, errors
 
@@ -1707,7 +1707,7 @@ def save_user_site_set_from_staged(
                             to_wgs84 = Transformer.from_crs(
                                 src.crs, "EPSG:4326", always_xy=True
                             ).transform
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         # If CRS is unavailable/unparseable, trust source geometry.
                         to_wgs84 = None
 
@@ -2080,7 +2080,7 @@ def save_user_site_set_from_staged(
         if _skip_csv_file is not None:
             try:
                 _skip_csv_file.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
         if _skip_csv_path and os.path.exists(_skip_csv_path):
             try:

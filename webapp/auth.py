@@ -43,7 +43,7 @@ def load_user(user_id):
         user = db.query(User).filter(User.id == user_id).first()
         if user and user.is_active and user.is_approved:
             return SessionUser(user)
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Database may be unavailable (migrations pending, connection
         # issues, etc.).  Return None so Flask-Login treats the session
         # as anonymous and redirects to the login page instead of
@@ -161,7 +161,7 @@ def register_user(email: str, name: str):
                 "your password."
             ),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
         return False, "Registration failed. Please try again."
     finally:

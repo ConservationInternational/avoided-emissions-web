@@ -107,7 +107,7 @@ def ingest_sdg_cog_task(self) -> dict:
         if all_exist:
             logger.info("All SDG layers already exist on S3 — skipping ingestion")
             return {"status": "skipped", "message": "All layers already exist"}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to check S3 for existing layers: %s", exc)
         # Continue with ingestion if check fails
 

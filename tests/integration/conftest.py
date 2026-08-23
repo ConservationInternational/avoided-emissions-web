@@ -7,9 +7,8 @@ Run locally (from the repo root):
 """
 
 import pytest
-from sqlalchemy import text
-
 from models import get_db
+from sqlalchemy import text
 
 
 @pytest.fixture(scope="session")

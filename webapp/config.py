@@ -41,6 +41,7 @@ def _get_git_revision() -> str:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
+            check=False,
             text=True,
             timeout=5,
             cwd=os.path.dirname(__file__) or ".",
