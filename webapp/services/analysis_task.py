@@ -5,7 +5,7 @@ import logging
 import math
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import geopandas as gpd
 import numpy as np
@@ -23,7 +23,6 @@ from models import (
     get_db,
 )
 from pyproj import Transformer as _ProjTransformer
-from sqlalchemy import text
 
 from gee_export import gee_config
 from services.covariate import get_ready_covariate_names
@@ -74,7 +73,6 @@ ANALYSIS_DEFAULTS = {
     "max_controls_per_treatment": 1,
     "min_control_distance_km": 10,
     "separation_fallback_mahalanobis": False,
-    "group_by_exact_matches": False,
     "matching_method": "optimal",
     "n_replicates": 1,
     "match_batch_size": 25,
@@ -84,6 +82,19 @@ ANALYSIS_DEFAULTS = {
     "fc_year_end": FC_YEAR_MAX + 1,  # exclusive upper bound for range()
     "resolution_m": 1000,  # nominal resolution: 1000 m (1 km) or 250 m
 }
+
+
+_EQUAL_AREA = _ProjTransformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
+
+
+def _equal_area_ha(geometries):
+    """Area in hectares, computed in the Mollweide equal-area projection."""
+    # shapely.transform passes a single (N, 2) array; pyproj expects (xx, yy).
+    projected = shapely.transform(
+        np.asarray(geometries, dtype=object),
+        lambda c: np.column_stack(_EQUAL_AREA.transform(c[:, 0], c[:, 1])),
+    )
+    return shapely.area(projected) / 10_000.0
 
 
 def queue_analysis_task(
@@ -103,7 +114,6 @@ def queue_analysis_task(
     separation_fallback_mahalanobis=ANALYSIS_DEFAULTS[
         "separation_fallback_mahalanobis"
     ],
-    group_by_exact_matches=ANALYSIS_DEFAULTS["group_by_exact_matches"],
     matching_method=ANALYSIS_DEFAULTS["matching_method"],
     n_replicates=ANALYSIS_DEFAULTS["n_replicates"],
     match_batch_size=ANALYSIS_DEFAULTS["match_batch_size"],
@@ -167,6 +177,11 @@ def queue_analysis_task(
         raise ValueError("caliper_width must be zero (disabled) or positive")
     if max_controls_per_treatment < 0:
         raise ValueError("max_controls_per_treatment must be 0 (no limit) or positive")
+    if matching_method == "nearest" and max_controls_per_treatment == 0:
+        raise ValueError(
+            "Full matching (no limit on controls per treatment) requires the "
+            "optimal matching method."
+        )
     if min_control_distance_km < 0:
         raise ValueError("min_control_distance_km must be 0 (disabled) or positive")
     if random_seed is not None and (random_seed < 1 or random_seed > 2_147_483_647):
@@ -219,7 +234,6 @@ def queue_analysis_task(
                 "separation_fallback_mahalanobis": bool(
                     separation_fallback_mahalanobis
                 ),
-                "group_by_exact_matches": bool(group_by_exact_matches),
                 "matching_method": matching_method,
                 "n_replicates": n_replicates,
                 "match_batch_size": match_batch_size,
@@ -308,7 +322,7 @@ def _complete_analysis_task_submission(task_id, user_id):
         config = task.config or {}
         task.config = {
             **config,
-            "worker_started_at": datetime.now(timezone.utc).isoformat(),
+            "worker_started_at": datetime.now(UTC).isoformat(),
         }
         db.commit()
         # ─────────────────────────────────────────────────────────────────────
@@ -336,7 +350,6 @@ def _complete_analysis_task_submission(task_id, user_id):
         separation_fallback_mahalanobis = config.get(
             "separation_fallback_mahalanobis", False
         )
-        group_by_exact_matches = config.get("group_by_exact_matches", False)
         matching_method = config.get(
             "matching_method", ANALYSIS_DEFAULTS["matching_method"]
         )
@@ -441,7 +454,9 @@ def _complete_analysis_task_submission(task_id, user_id):
                 _time.perf_counter() - _stream_t0,
             )
 
-            fc_min = max(ANALYSIS_DEFAULTS["fc_year_start"], min_year - 5)
+            # Pre-intervention deforestation needs cover from six years
+            # before the earliest start (see baseline_year() in R).
+            fc_min = max(ANALYSIS_DEFAULTS["fc_year_start"], min_year - 6)
             fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
             fc_years = list(range(fc_min, fc_max))
 
@@ -467,7 +482,7 @@ def _complete_analysis_task_submission(task_id, user_id):
             start_dates = pd.to_datetime(gdf["start_date"])
             fc_min = max(
                 ANALYSIS_DEFAULTS["fc_year_start"],
-                int(start_dates.dt.year.min()) - 5,
+                int(start_dates.dt.year.min()) - 6,
             )
             fc_max = ANALYSIS_DEFAULTS["fc_year_end"]
             fc_years = list(range(fc_min, fc_max))
@@ -510,11 +525,18 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _t0,
         )
 
+        # Apply the minimum area to whole sites before they are split, so a
+        # large site keeps any small fragments created by region boundaries.
+        gdf = gdf[_equal_area_ha(gdf.geometry) >= min_site_area_ha].reset_index(
+            drop=True
+        )
+        if gdf.empty:
+            raise ValueError(f"No sites are at least {min_site_area_ha} ha.")
+
         # Always split sites across exact-match boundaries when polygon-type
         # exact_match_vars are specified.  Splitting assigns each site piece
         # to a unique region combination so Batch can process one group at a
-        # time.  group_by_exact_matches controls whether sites within a group
-        # are matched jointly or independently (a separate concept).
+        # time.
         if exact_match_vars:
             _split_t0 = _time.perf_counter()
             split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
@@ -532,20 +554,10 @@ def _complete_analysis_task_submission(task_id, user_id):
             gdf_for_db = gdf
             group_mapping = None
 
-        # Reproject to Mollweide equal-area (ESRI:54009) and compute area in ha.
-        # shapely.transform avoids a full GDF copy while guaranteeing the same
-        # accurate value is stored in both the TaskSite DB (web UI) and the S3
-        # Parquet (R analysis pipeline).  Update gdf_for_db so the Parquet upload
-        # carries these values rather than the DB-streamed originals.
-        _ea_tfm = _ProjTransformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
+        # Store the same equal-area value in TaskSite (web UI) and the S3
+        # Parquet (R analysis pipeline).
         _geoms_deg = np.asarray(gdf_for_db.geometry, dtype=object)
-        # shapely.transform passes a single (N, 2) array; pyproj expects (xx, yy).
-        _geoms_ea = shapely.transform(
-            _geoms_deg,
-            lambda c: np.column_stack(_ea_tfm.transform(c[:, 0], c[:, 1])),
-        )
-        _areas_ha_arr = shapely.area(_geoms_ea) / 10_000.0
-        del _geoms_ea
+        _areas_ha_arr = _equal_area_ha(_geoms_deg)
         gdf_for_db = gdf_for_db.assign(area_ha=_areas_ha_arr)
 
         # Delete any TaskSite rows left by a previous interrupted attempt so
@@ -650,15 +662,13 @@ def _complete_analysis_task_submission(task_id, user_id):
         )
 
         # Determine batch-grouping strategy and pre-compute match pipeline steps.
-        # batch_group_sites: True when exact_match_vars are present — each Batch
-        # array element processes one (group × replicate) with data loaded once
-        # per group.  This is independent of group_by_exact_matches, which
-        # controls whether sites within a group are matched jointly or independently.
+        # With a group mapping, each Batch array element processes a batch of
+        # exact-match groups, loading their data once.
         #
         # Group 0 holds sites with no exact-match region assignment (all polygon
-        # exact_match_vars were NULL for that site).  The R script processes group
-        # 0 as a real group, which would run matching without any region constraint.
-        # Exclude group 0 from the Batch array job; these sites will not be matched.
+        # exact_match_vars were NULL for that site).  Exclude group 0 from the
+        # Batch array job; these sites are not matched and are reported as
+        # failed by the summarize step.
         if group_mapping and 0 in group_mapping:
             logger.warning(
                 "[SUBMIT-WORKER] Task %s: %d site(s) had no exact-match region "
@@ -669,11 +679,12 @@ def _complete_analysis_task_submission(task_id, user_id):
             group_mapping_for_batch = {k: v for k, v in group_mapping.items() if k != 0}
         else:
             group_mapping_for_batch = group_mapping
-        _batch_group_sites = bool(group_mapping_for_batch)
+        # Each array element processes match_batch_size units (exact-match
+        # groups, or sites when there is no group mapping) for one replicate.
         _n_match_units = (
-            len(group_mapping_for_batch) if _batch_group_sites else len(gdf_for_db)
+            len(group_mapping_for_batch) if group_mapping_for_batch else len(gdf_for_db)
         )
-        _raw_array_size = _n_match_units * n_replicates
+        _raw_array_size = math.ceil(_n_match_units / match_batch_size) * n_replicates
         _match_step_base = {
             "timeout_seconds": 14400,  # 4 h per element
             "memory_mib": match_memory_mib,
@@ -697,7 +708,7 @@ def _complete_analysis_task_submission(task_id, user_id):
             _units_per_chunk = _batches_per_chunk * match_batch_size
             _unit_ids = (
                 list(group_mapping_for_batch.keys())
-                if _batch_group_sites
+                if group_mapping_for_batch
                 else list(range(_n_match_units))
             )
             _chunks = [
@@ -745,13 +756,11 @@ def _complete_analysis_task_submission(task_id, user_id):
             "fc_years": fc_years,
             "max_treatment_pixels": max_treatment_pixels,
             "control_multiplier": control_multiplier,
-            "min_site_area_ha": min_site_area_ha,
             "min_glm_treatment_pixels": min_glm_treatment_pixels,
             "caliper_width": caliper_width,
             "max_controls_per_treatment": max_controls_per_treatment,
             "min_control_distance_km": min_control_distance_km,
             "separation_fallback_mahalanobis": bool(separation_fallback_mahalanobis),
-            "group_by_exact_matches": bool(group_by_exact_matches),
             "matching_method": matching_method,
             "n_replicates": n_replicates,
             "match_batch_size": match_batch_size,
@@ -760,7 +769,6 @@ def _complete_analysis_task_submission(task_id, user_id):
                 if sites_exclusion_buffer
                 else {}
             ),
-            "batch_group_sites": _batch_group_sites,
             **(
                 {"exact_match_group_mapping": group_mapping_for_batch}
                 if group_mapping_for_batch
@@ -872,7 +880,7 @@ def _complete_analysis_task_submission(task_id, user_id):
         }
         task.results_s3_uri = params["results_s3_uri"]
         task.status = "submitted"
-        task.submitted_at = datetime.now(timezone.utc)
+        task.submitted_at = datetime.now(UTC)
         task.extract_job_id = f"api:{exec_id}"
         db.commit()
         logger.info(
@@ -897,589 +905,6 @@ def _complete_analysis_task_submission(task_id, user_id):
                 db.commit()
         except Exception:  # noqa: BLE001
             db.rollback()
-        raise
-    finally:
-        db.close()
-
-
-def submit_analysis_task(
-    task_name,
-    description,
-    user_id,
-    gdf,
-    covariates,
-    exact_match_vars,
-    fc_years=None,
-    site_set_id=None,
-    max_treatment_pixels=ANALYSIS_DEFAULTS["max_treatment_pixels"],
-    control_multiplier=ANALYSIS_DEFAULTS["control_multiplier"],
-    min_site_area_ha=ANALYSIS_DEFAULTS["min_site_area_ha"],
-    min_glm_treatment_pixels=ANALYSIS_DEFAULTS["min_glm_treatment_pixels"],
-    caliper_width=ANALYSIS_DEFAULTS["caliper_width"],
-    max_controls_per_treatment=ANALYSIS_DEFAULTS["max_controls_per_treatment"],
-    min_control_distance_km=ANALYSIS_DEFAULTS["min_control_distance_km"],
-    separation_fallback_mahalanobis=ANALYSIS_DEFAULTS[
-        "separation_fallback_mahalanobis"
-    ],
-    group_by_exact_matches=ANALYSIS_DEFAULTS["group_by_exact_matches"],
-    matching_method=ANALYSIS_DEFAULTS["matching_method"],
-    n_replicates=ANALYSIS_DEFAULTS["n_replicates"],
-    match_batch_size=ANALYSIS_DEFAULTS["match_batch_size"],
-    random_seed=None,
-    match_memory_mib=ANALYSIS_DEFAULTS["match_memory_mib"],
-    matching_job_queue=DEFAULT_MATCHING_JOB_QUEUE,
-    resolution_m=ANALYSIS_DEFAULTS["resolution_m"],
-):
-    """Create and submit a full analysis task via the trends.earth API.
-
-    Creates an Execution on the API which handles AWS Batch dispatch,
-    status tracking, and result collection.
-
-    ``exact_match_vars`` must contain at least one variable name from
-    ``["admin0", "admin1", "admin2", "ecoregion", "pa"]``.  A
-    ``ValueError`` is raised if the list is empty.
-
-    Before submission the function queries PostGIS to compute the
-    *matching extent* — the intersection of all polygon-type exact-match
-    layers that overlap the uploaded sites.  This extent is passed to
-    the analysis pipeline so control pixels are only drawn from areas
-    where they can potentially share exact-match values with treatment
-    sites.
-
-    Requires the submitting user to have linked their trends.earth account
-    (i.e. stored OAuth2 client credentials via the Settings page).  Raises
-    ``ValueError`` if the user has not linked their account.
-
-    1. Validates exact match selection
-    2. Computes matching extent via PostGIS
-    3. Creates the local database record
-    4. Uploads sites and config to S3
-    5. Submits to the trends.earth API
-    6. Updates the database with tracking IDs
-
-    Returns the task ID.
-    """
-    if not exact_match_vars:
-        raise ValueError(
-            "At least one exact match variable must be selected "
-            "(admin0, admin1, admin2, ecoregion, or pa)."
-        )
-
-    overlap = set(covariates or []) & set(exact_match_vars)
-    if overlap:
-        raise ValueError(
-            "The following variables are selected as both covariates and "
-            "exact matches. Each variable must be used as one or the "
-            "other, not both: " + ", ".join(sorted(overlap))
-        )
-
-    ready_covariates = set(get_ready_covariate_names())
-    requested_covariates = set(covariates or [])
-    unavailable_covariates = sorted(requested_covariates - ready_covariates)
-    if unavailable_covariates:
-        raise ValueError(
-            "The following covariates are not fully processed and ready: "
-            + ", ".join(unavailable_covariates)
-        )
-
-    if max_treatment_pixels < 1:
-        raise ValueError("max_treatment_pixels must be at least 1")
-    if control_multiplier < 1:
-        raise ValueError("control_multiplier must be at least 1")
-    if min_site_area_ha < 0:
-        raise ValueError("min_site_area_ha must be zero or greater")
-    if min_glm_treatment_pixels < 1:
-        raise ValueError("min_glm_treatment_pixels must be at least 1")
-    if caliper_width < 0:
-        raise ValueError("caliper_width must be zero (disabled) or positive")
-    if max_controls_per_treatment < 0:
-        raise ValueError("max_controls_per_treatment must be 0 (no limit) or positive")
-    if min_control_distance_km < 0:
-        raise ValueError("min_control_distance_km must be 0 (disabled) or positive")
-    if random_seed is not None and (random_seed < 1 or random_seed > 2_147_483_647):
-        raise ValueError("random_seed must be between 1 and 2147483647")
-    if n_replicates < 1 or n_replicates > 1000:
-        raise ValueError("n_replicates must be between 1 and 1000")
-    if matching_job_queue not in ALLOWED_MATCHING_JOB_QUEUES:
-        raise ValueError(
-            "matching_job_queue must be one of: "
-            + ", ".join(sorted(ALLOWED_MATCHING_JOB_QUEUES))
-        )
-
-    # Verify trends.earth integration *before* any DB or S3 work so the
-    # user gets an immediate error on the submission form instead of a
-    # half-created failed task.
-    from credential_store import get_decrypted_secret
-    from trendsearth_client import TrendsEarthClient
-
-    user_creds = get_decrypted_secret(user_id)
-    if not user_creds:
-        raise ValueError(
-            "You must link your trends.earth account before "
-            "submitting analysis tasks.  Go to Profile \u2192 "
-            "trends.earth API Integration to connect your account."
-        )
-    script_id = Config.TRENDSEARTH_SCRIPT_ID
-    if not script_id:
-        raise ValueError(
-            "TRENDSEARTH_SCRIPT_ID is not configured. Set this "
-            "environment variable to the UUID of the avoided-emissions "
-            "script registered on the trends.earth API."
-        )
-
-    import time as _time
-
-    _submit_t0 = _time.perf_counter()
-
-    # Compute the matching extent polygon from PostGIS.
-    # Pass site_set_id so the function can query site geometries directly
-    # from user_site_features, avoiding a Python-side unary_union.
-    _site_set_id = str(site_set_id) if site_set_id else None
-    matching_extent = compute_matching_extent(
-        gdf, exact_match_vars, site_set_id=_site_set_id
-    )
-    logger.info(
-        "[SUBMIT] matching extent computed in %.2fs",
-        _time.perf_counter() - _submit_t0,
-    )
-
-    # Pre-compute the exclusion buffer around all sites in PostGIS
-    # (geography-based, so distance is correct on the sphere).
-    _buf_t0 = _time.perf_counter()
-    sites_exclusion_buffer = compute_sites_exclusion_buffer(
-        gdf, min_control_distance_km, site_set_id=_site_set_id
-    )
-    logger.info(
-        "[SUBMIT] sites exclusion buffer computed in %.2fs",
-        _time.perf_counter() - _buf_t0,
-    )
-
-    # Always split sites across exact-match boundaries when polygon-type
-    # exact_match_vars are specified.  Splitting assigns each site piece
-    # to a unique region combination so Batch can process one group at a
-    # time.  group_by_exact_matches controls whether sites within a group
-    # are matched jointly or independently (a separate concept).
-    if exact_match_vars:
-        _split_t0 = _time.perf_counter()
-        split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
-            gdf, exact_match_vars
-        )
-        logger.info(
-            "[SUBMIT] Site splitting: %d → %d pieces in %.2fs",
-            len(gdf),
-            len(split_gdf),
-            _time.perf_counter() - _split_t0,
-        )
-        # Use split sites for DB storage and S3 upload
-        gdf_for_db = split_gdf
-    else:
-        # No splitting — use original gdf, no group mapping
-        gdf_for_db = gdf
-        group_mapping = None
-
-    if fc_years is None:
-        fc_years = list(
-            range(ANALYSIS_DEFAULTS["fc_year_start"], ANALYSIS_DEFAULTS["fc_year_end"])
-        )
-
-    db = get_db()
-    try:
-        task_id = str(uuid.uuid4())
-        logger.info(
-            "[SUBMIT] Creating analysis task %s: name=%r, user=%s, "
-            "n_sites=%d, covariates=%d, exact_match=%s",
-            task_id,
-            task_name,
-            user_id,
-            len(gdf),
-            len(covariates),
-            exact_match_vars,
-        )
-
-        task = AnalysisTask(
-            id=task_id,
-            name=task_name,
-            description=description,
-            submitted_by=user_id,
-            site_set_id=site_set_id,
-            status="pending",
-            config={
-                "exact_match_vars": list(exact_match_vars),
-                "max_treatment_pixels": max_treatment_pixels,
-                "control_multiplier": control_multiplier,
-                "min_site_area_ha": min_site_area_ha,
-                "min_glm_treatment_pixels": min_glm_treatment_pixels,
-                "caliper_width": caliper_width,
-                "max_controls_per_treatment": max_controls_per_treatment,
-                "min_control_distance_km": min_control_distance_km,
-                "separation_fallback_mahalanobis": bool(
-                    separation_fallback_mahalanobis
-                ),
-                "group_by_exact_matches": bool(group_by_exact_matches),
-                "matching_method": matching_method,
-                "n_replicates": n_replicates,
-                "match_batch_size": match_batch_size,
-                "resolution_m": resolution_m,
-                **({"random_seed": random_seed} if random_seed is not None else {}),
-                "match_memory_mib": match_memory_mib,
-                "matching_job_queue": matching_job_queue,
-                **(
-                    {"code_git_sha": Config.GIT_REVISION} if Config.GIT_REVISION else {}
-                ),
-            },
-            covariates=covariates,
-            n_sites=len(gdf),
-        )
-        db.add(task)
-
-        # Reproject to Mollweide equal-area (ESRI:54009) and compute area in ha.
-        # shapely.transform avoids a full GDF copy while guaranteeing the same
-        # accurate value is stored in both the TaskSite DB (web UI) and the S3
-        # Parquet (R analysis pipeline).  Update gdf_for_db so the Parquet upload
-        # carries these values.
-        _ea_tfm = _ProjTransformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
-        _geoms_deg = np.asarray(gdf_for_db.geometry, dtype=object)
-        # shapely.transform passes a single (N, 2) array; pyproj expects (xx, yy).
-        _geoms_ea = shapely.transform(
-            _geoms_deg,
-            lambda c: np.column_stack(_ea_tfm.transform(c[:, 0], c[:, 1])),
-        )
-        _areas_ha_arr = shapely.area(_geoms_ea) / 10_000.0
-        del _geoms_ea
-        gdf_for_db = gdf_for_db.assign(area_ha=_areas_ha_arr)
-
-        _empty_mask = shapely.is_empty(_geoms_deg) | shapely.is_missing(_geoms_deg)
-        del _geoms_deg
-        _sid_arr = gdf_for_db["site_id"].astype(str).tolist()
-        _name_col = (
-            gdf_for_db["site_name"]
-            if "site_name" in gdf_for_db.columns
-            else gdf_for_db["site_id"]
-        )
-        _name_arr = _name_col.astype(str).tolist()
-        _start_py = pd.to_datetime(gdf_for_db["start_date"]).tolist()
-        _end_dt = pd.to_datetime(
-            gdf_for_db["end_date"] if "end_date" in gdf_for_db.columns else pd.NaT,
-            errors="coerce",
-        )
-        _end_py = [None if pd.isna(v) else v for v in _end_dt]
-        _sub_idx_arr = (
-            gdf_for_db["sub_site_index"].to_numpy(dtype=int)
-            if "sub_site_index" in gdf_for_db.columns
-            else np.zeros(len(gdf_for_db), dtype=int)
-        )
-        _is_sub_arr = (
-            gdf_for_db["is_sub_site"].to_numpy(dtype=bool)
-            if "is_sub_site" in gdf_for_db.columns
-            else np.zeros(len(gdf_for_db), dtype=bool)
-        )
-        _orig_raw = (
-            gdf_for_db["original_area_ha"].tolist()
-            if "original_area_ha" in gdf_for_db.columns
-            else [None] * len(gdf_for_db)
-        )
-        _orig_py = [
-            None if (v is None or (isinstance(v, float) and np.isnan(v))) else float(v)
-            for v in _orig_raw
-        ]
-        _site_mappings = [
-            {
-                "task_id": task_id,
-                "site_id": _sid_arr[i],
-                "site_name": _name_arr[i],
-                "start_date": _start_py[i],
-                "end_date": _end_py[i],
-                "area_ha": (
-                    None
-                    if (_empty_mask[i] or np.isnan(_areas_ha_arr[i]))
-                    else float(_areas_ha_arr[i])
-                ),
-                "sub_site_index": int(_sub_idx_arr[i]),
-                "is_sub_site": bool(_is_sub_arr[i]) or int(_sub_idx_arr[i]) > 0,
-                "original_area_ha": _orig_py[i],
-            }
-            for i in range(len(gdf_for_db))
-        ]
-        db.execute(TaskSite.__table__.insert(), _site_mappings)
-        db.commit()
-
-        logger.info(
-            "[SUBMIT] Task %s: DB record created, uploading sites to S3", task_id
-        )
-
-        # Upload sites to S3.
-        # When cross-site grouping is enabled, the split GeoDataFrame must be
-        # uploaded so Batch uses the same site/sub-site geometry used to build
-        # exact_match_group_mapping.
-        _s3_t0 = _time.perf_counter()
-        sites_parquet_uri = upload_sites_parquet_to_s3(gdf_for_db, task_id)
-        sites_uri = None
-        if not site_set_id:
-            sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
-        logger.info(
-            "[SUBMIT] Task %s: site artifacts uploaded (parquet=%s, geojson=%s) (%.2fs)",
-            task_id,
-            sites_parquet_uri,
-            sites_uri,
-            _time.perf_counter() - _s3_t0,
-        )
-
-        # Determine batch-grouping strategy and pre-compute match pipeline steps.
-        # batch_group_sites: True when exact_match_vars are present — each Batch
-        # array element processes one (group × replicate) with data loaded once
-        # per group.  This is independent of group_by_exact_matches, which
-        # controls whether sites within a group are matched jointly or independently.
-        #
-        # Group 0 holds sites with no exact-match region assignment (all polygon
-        # exact_match_vars were NULL for that site).  The R script processes group
-        # 0 as a real group, which would run matching without any region constraint.
-        # Exclude group 0 from the Batch array job; these sites will not be matched.
-        if group_mapping and 0 in group_mapping:
-            logger.warning(
-                "[SUBMIT] Task %s: %d site(s) had no exact-match region "
-                "assignment (group 0) and will be excluded from matching",
-                task_id,
-                len(group_mapping[0]),
-            )
-            group_mapping_for_batch = {k: v for k, v in group_mapping.items() if k != 0}
-        else:
-            group_mapping_for_batch = group_mapping
-        _batch_group_sites = bool(group_mapping_for_batch)
-        _n_match_units = (
-            len(group_mapping_for_batch) if _batch_group_sites else len(gdf_for_db)
-        )
-        _n_batches = math.ceil(_n_match_units / max(1, match_batch_size))
-        _raw_array_size = _n_batches * n_replicates
-        _match_step_base = {
-            "timeout_seconds": 14400,  # 4 h per element
-            "memory_mib": match_memory_mib,
-            "vcpus": 2,
-            "retry_attempts": 5,
-        }
-        if _raw_array_size <= BATCH_MAX_ARRAY_SIZE:
-            _match_steps = [
-                {
-                    "name": "match",
-                    "command": ["match"],
-                    "array_size": _raw_array_size,
-                    **_match_step_base,
-                }
-            ]
-            _match_chunks = None
-        else:
-            _batches_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // max(1, n_replicates))
-            _units_per_chunk = _batches_per_chunk * match_batch_size
-            _unit_ids = (
-                list(group_mapping_for_batch.keys())
-                if _batch_group_sites
-                else list(range(_n_match_units))
-            )
-            _chunks = [
-                _unit_ids[i : i + _units_per_chunk]
-                for i in range(0, len(_unit_ids), _units_per_chunk)
-            ]
-            _match_steps = [
-                {
-                    "name": f"match_chunk_{i}",
-                    "command": [f"match_chunk_{i}"],
-                    "array_size": math.ceil(len(chunk) / match_batch_size)
-                    * n_replicates,
-                    **_match_step_base,
-                }
-                for i, chunk in enumerate(_chunks)
-            ]
-            _match_chunks = _chunks
-            logger.warning(
-                "[SUBMIT] Task %s: array size %d exceeds limit %d; "
-                "splitting match into %d chunks of \u2264%d units",
-                task_id,
-                _raw_array_size,
-                BATCH_MAX_ARRAY_SIZE,
-                len(_chunks),
-                _units_per_chunk,
-            )
-
-        # Build params matching AvoidedEmissionsParams schema
-        # Resolve the COG prefix for the chosen resolution.
-        # Both resolutions have an explicit suffix (_1km / _250m).
-        _cog_suffixes = {1000: "_1km", 250: "_250m"}
-        _cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
-        cog_prefix = f"{Config.S3_PREFIX}/cog{_cog_suffix}"
-
-        params = {
-            "task_id": task_id,
-            "task_name": task_name,
-            "task_description": description,
-            **({"sites_s3_uri": sites_uri} if sites_uri else {}),
-            "sites_parquet_s3_uri": sites_parquet_uri,
-            "cog_bucket": Config.S3_BUCKET,
-            "cog_prefix": cog_prefix,
-            "resolution_m": resolution_m,
-            "covariates": covariates,
-            "exact_match_vars": exact_match_vars,
-            "matching_extent": matching_extent,
-            "fc_years": fc_years,
-            "max_treatment_pixels": max_treatment_pixels,
-            "control_multiplier": control_multiplier,
-            "min_site_area_ha": min_site_area_ha,
-            "min_glm_treatment_pixels": min_glm_treatment_pixels,
-            "caliper_width": caliper_width,
-            "max_controls_per_treatment": max_controls_per_treatment,
-            "min_control_distance_km": min_control_distance_km,
-            "separation_fallback_mahalanobis": bool(separation_fallback_mahalanobis),
-            "group_by_exact_matches": bool(group_by_exact_matches),
-            "matching_method": matching_method,
-            "n_replicates": n_replicates,
-            "match_batch_size": match_batch_size,
-            **(
-                {"sites_exclusion_buffer": sites_exclusion_buffer}
-                if sites_exclusion_buffer
-                else {}
-            ),
-            "batch_group_sites": _batch_group_sites,
-            **(
-                {"exact_match_group_mapping": group_mapping_for_batch}
-                if group_mapping_for_batch
-                else {}
-            ),
-            **({"match_chunks": _match_chunks} if _match_chunks is not None else {}),
-            **({"random_seed": random_seed} if random_seed is not None else {}),
-            "results_s3_uri": (
-                f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
-            ),
-            "intermediate_s3_uri": (
-                f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}"
-                f"/tasks/{task_id}/intermediate"
-            ),
-            # For multi-site jobs, use a pipeline of chained AWS Batch
-            # jobs (extract → match array → summarize) so each site
-            # can run its matching step in parallel as an array child.
-            # For single-site, single-replicate jobs, skip the pipeline
-            # entirely and run all steps in one container (step="all")
-            # — this avoids the overhead of S3 intermediate data
-            # transfer and extra job scheduling.  The R analysis
-            # container handles both modes via the ``step`` parameter.
-            **(
-                {
-                    "pipeline": [
-                        {
-                            "name": "extract",
-                            "command": ["extract"],
-                            "timeout_seconds": 14400,  # 4 h
-                            "memory_mib": max(
-                                131072, match_memory_mib
-                            ),  # at least 128 GB
-                            "vcpus": 4,
-                            "retry_attempts": 3,
-                        },
-                        *_match_steps,
-                        {
-                            "name": "summarize",
-                            "command": ["summarize"],
-                            "timeout_seconds": 7200,  # 2 h
-                            "memory_mib": max(16384, match_memory_mib // 2),
-                            "vcpus": 2,
-                            "retry_attempts": 3,
-                        },
-                    ],
-                }
-                if _raw_array_size > 1
-                else {}
-            ),
-        }
-
-        # Attach AWS Batch overrides so the API routes this execution to
-        # the correct job queue / job definition (if configured).
-        # Always include timeout_seconds — the pipeline runs three
-        # sequential steps so the Batch job timeout must be large enough
-        # to cover all of them (default: 14 h, see Config).
-        batch_overrides = {
-            "timeout_seconds": Config.BATCH_TIMEOUT_SECONDS,
-            "memory_mib": max(Config.BATCH_MEMORY_MIB, match_memory_mib),
-            "vcpus": Config.BATCH_VCPUS,
-        }
-        if matching_job_queue:
-            batch_overrides["job_queue"] = matching_job_queue
-        elif Config.BATCH_JOB_QUEUE:
-            batch_overrides["job_queue"] = Config.BATCH_JOB_QUEUE
-        if Config.BATCH_JOB_DEFINITION:
-            batch_overrides["job_definition"] = Config.BATCH_JOB_DEFINITION
-        params["batch"] = batch_overrides
-
-        # Submit via trends.earth API using the user's own OAuth2 creds
-        # (credentials and script_id already validated above)
-        _auth_t0 = _time.perf_counter()
-        client_id, client_secret = user_creds
-        client = TrendsEarthClient.from_oauth2_credentials(
-            api_url=Config.TRENDSEARTH_API_URL,
-            client_id=client_id,
-            client_secret=client_secret,
-        )
-        logger.info(
-            "[SUBMIT] Task %s: OAuth2 auth in %.2fs, calling trends.earth "
-            "API (script=%s, api_url=%s, batch_overrides=%s)",
-            task_id,
-            _time.perf_counter() - _auth_t0,
-            script_id,
-            Config.TRENDSEARTH_API_URL,
-            batch_overrides if batch_overrides else "none",
-        )
-        _api_t0 = _time.perf_counter()
-        execution = client.create_execution(script_id, params)
-        logger.info(
-            "[SUBMIT] Task %s: API create_execution took %.2fs",
-            task_id,
-            _time.perf_counter() - _api_t0,
-        )
-
-        # Store the API execution ID for polling
-        exec_data = execution.get("data", {})
-        exec_id = exec_data.get("id", "")
-        exec_status = exec_data.get("status", "unknown")
-        logger.info(
-            "[SUBMIT] Task %s: API execution created — exec_id=%s, "
-            "initial_status=%s, full_response_keys=%s",
-            task_id,
-            exec_id,
-            exec_status,
-            list(exec_data.keys()),
-        )
-        task.sites_s3_uri = sites_uri
-        task.config = {
-            **(task.config or {}),
-            **({"sites_s3_uri": sites_uri} if sites_uri else {}),
-            "sites_parquet_s3_uri": sites_parquet_uri,
-        }
-        task.results_s3_uri = params["results_s3_uri"]
-        task.status = "submitted"
-        task.submitted_at = datetime.now(timezone.utc)
-        # Store the API execution ID in a new-ish field; reuse
-        # extract_job_id since we no longer need the Batch job IDs.
-        task.extract_job_id = f"api:{exec_id}"
-        db.commit()
-        logger.info(
-            "[SUBMIT] Task %s: status → submitted (tracking as api:%s) "
-            "— total submit time %.2fs",
-            task_id,
-            exec_id,
-            _time.perf_counter() - _submit_t0,
-        )
-
-        return task_id
-
-    except Exception as e:
-        logger.exception(
-            "[SUBMIT] Task %s FAILED during submission: %s",
-            task_id if "task_id" in dir() else "(pre-creation)",
-            e,  # noqa: TRY401
-        )
-        db.rollback()
-        if "task_id" in dir():
-            task = db.query(AnalysisTask).get(task_id)
-            if task:
-                task.status = "failed"
-                task.error_message = str(e)
-                db.commit()
         raise
     finally:
         db.close()
@@ -1674,41 +1099,6 @@ def update_task_info(task_id, name=None, description=None, user_id=None):
 LARGE_TASK_THRESHOLD = 200
 
 
-def _get_task_results_aggregated(task_id, db):
-    """Return per-year aggregate of task_results rows as a list of plain dicts.
-
-    Performs a single SQL GROUP BY query rather than loading every row, so it
-    is safe to call for tasks with thousands of sites.
-    """
-    sql = text(
-        """
-        SELECT
-            year,
-            SUM(extrapolated_treatment_defor_ha)               AS treatment_defor_ha,
-            SUM(extrapolated_control_defor_ha)                 AS control_defor_ha,
-            SUM(extrapolated_emissions_avoided_mgco2e)         AS emissions_avoided_mgco2e,
-            SUM(extrapolated_forest_loss_avoided_ha)           AS forest_loss_avoided_ha,
-            SUM(extrapolated_treatment_emissions_mgco2e)       AS treatment_emissions_mgco2e,
-            SUM(extrapolated_control_emissions_mgco2e)         AS control_emissions_mgco2e,
-            SUM(extrapolated_treatment_defor_ha_ci_lower)      AS treatment_defor_ha_ci_lower,
-            SUM(extrapolated_treatment_defor_ha_ci_upper)      AS treatment_defor_ha_ci_upper,
-            SUM(extrapolated_control_defor_ha_ci_lower)        AS control_defor_ha_ci_lower,
-            SUM(extrapolated_control_defor_ha_ci_upper)        AS control_defor_ha_ci_upper,
-            SUM(extrapolated_emissions_avoided_mgco2e_ci_lower)  AS emissions_avoided_mgco2e_ci_lower,
-            SUM(extrapolated_emissions_avoided_mgco2e_ci_upper)  AS emissions_avoided_mgco2e_ci_upper,
-            SUM(extrapolated_forest_loss_avoided_ha_ci_lower)    AS forest_loss_avoided_ha_ci_lower,
-            SUM(extrapolated_forest_loss_avoided_ha_ci_upper)    AS forest_loss_avoided_ha_ci_upper,
-            COUNT(DISTINCT site_id)                            AS n_sites
-        FROM task_results
-        WHERE task_id = :task_id
-        GROUP BY year
-        ORDER BY year
-        """
-    )
-    result = db.execute(sql, {"task_id": str(task_id)})
-    return [dict(r._mapping) for r in result.fetchall()]
-
-
 def get_task_site_results(task_id, site_id):
     """Return per-year TaskResult rows for a single site as a list of dicts.
 
@@ -1737,7 +1127,7 @@ def get_task_site_results(task_id, site_id):
                 "control_emissions_mgco2e": r.extrapolated_control_emissions_mgco2e
                 or 0,
                 "is_pre_intervention": bool(r.is_pre_intervention),
-                "is_post_intervention": bool(getattr(r, "is_post_intervention", False)),
+                "is_post_intervention": bool(r.is_post_intervention),
                 "treatment_defor_ha_ci_lower": r.extrapolated_treatment_defor_ha_ci_lower,
                 "treatment_defor_ha_ci_upper": r.extrapolated_treatment_defor_ha_ci_upper,
                 "control_defor_ha_ci_lower": r.extrapolated_control_defor_ha_ci_lower,
@@ -1757,10 +1147,11 @@ def get_task_detail(task_id):
     """Get full task details including sites and results.
 
     For tasks with more than ``LARGE_TASK_THRESHOLD`` sites the per-site-year
-    ``TaskResult`` rows and ``TaskSite`` rows are **not** loaded into Python.
-    Instead a pre-aggregated yearly summary is returned in ``agg_yearly`` so
-    the Dash process never has to hold tens of thousands of ORM objects in
+    ``TaskResult`` rows and ``TaskSite`` rows are **not** loaded into Python,
+    so the Dash process never has to hold tens of thousands of ORM objects in
     memory.  The ``is_large`` flag tells callers which path was taken.
+    ``agg_yearly`` is the all-site yearly series (with replicate ranges)
+    computed by the R summary step.
     """
     db = get_db()
     try:
@@ -1777,9 +1168,9 @@ def get_task_detail(task_id):
             db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).all()
         )
 
-        # Aggregated yearly summary — always computed; used by plots for
-        # large tasks and as a cheap cross-check for small ones.
-        agg_yearly = _get_task_results_aggregated(task_id, db)
+        # Portfolio (all-site) yearly series computed by the R summary step.
+        # Bounds must come from here: summing per-site bounds is invalid.
+        agg_yearly = (task.extra_metadata or {}).get("portfolio", {}).get("yearly", [])
 
         if is_large:
             # Avoid loading tens of thousands of per-site-year rows.
@@ -1846,8 +1237,100 @@ def get_task_detail(task_id):
         db.close()
 
 
+_YEAR_METRICS = (
+    "extrapolated_forest_loss_avoided_ha",
+    "extrapolated_emissions_avoided_mgco2e",
+    "extrapolated_treatment_defor_ha",
+    "extrapolated_control_defor_ha",
+    "extrapolated_treatment_emissions_mgco2e",
+    "extrapolated_control_emissions_mgco2e",
+)
+_TOTAL_METRICS = (
+    "extrapolated_forest_loss_avoided_ha",
+    "extrapolated_emissions_avoided_mgco2e",
+)
+# Summary fields stored on AnalysisTask.extra_metadata for the UI.
+_SUMMARY_METADATA = (
+    "n_sites",
+    "n_failed_sites",
+    "n_replicates",
+    "bounds_label",
+    "failed_sites",
+    "worker_failures",
+    "subsampled_sites",
+    "methodology_warnings",
+    "portfolio",
+)
+
+
+class ResultImportError(ValueError):
+    """The results payload is missing values or is internally inconsistent."""
+
+
+def _metric_columns(values, metrics, n_replicates):
+    """Metric values plus their replicate bounds when n_replicates > 1."""
+    columns = {key: values[key] for key in metrics}
+    if n_replicates > 1:
+        for key in metrics:
+            for suffix in ("_ci_lower", "_ci_upper"):
+                columns[key + suffix] = values[key + suffix]
+    return columns
+
+
+def _parse_results_payload(task_id, payload):
+    """Return ``(summary, year_rows, total_rows)`` or raise ResultImportError."""
+    try:
+        summary = payload["summary"]
+        n_replicates = int(summary["n_replicates"])
+        year_rows = []
+        for ts in payload.get("time_series") or []:
+            meta = ts["metadata"]
+            year_rows.append(
+                {
+                    "task_id": task_id,
+                    "site_id": ts["entity_id"],
+                    "year": int(ts["year"]),
+                    **_metric_columns(ts["values"], _YEAR_METRICS, n_replicates),
+                    "is_pre_intervention": bool(meta["is_pre_intervention"]),
+                    "is_post_intervention": bool(meta["is_post_intervention"]),
+                    "n_sample_pixels": meta["n_sample_pixels"],
+                    "sampled_fraction": meta["sampled_fraction"],
+                }
+            )
+        total_rows = []
+        for rec in payload.get("records") or []:
+            meta = rec["metadata"]
+            total_rows.append(
+                {
+                    "task_id": task_id,
+                    "site_id": rec["entity_id"],
+                    "site_name": rec.get("entity_name"),
+                    **_metric_columns(rec["values"], _TOTAL_METRICS, n_replicates),
+                    "area_ha": rec["values"]["area_ha"],
+                    "n_sample_pixels": meta["n_sample_pixels"],
+                    "n_eligible_pixels": meta["n_eligible_pixels"],
+                    "n_treatment_pixels": meta["n_treatment_pixels"],
+                    "sampled_fraction": meta["sampled_fraction"],
+                    "first_year": rec["period_start"],
+                    "last_year": rec["period_end"],
+                    "n_years": meta["n_years"],
+                }
+            )
+        metadata = {key: summary[key] for key in _SUMMARY_METADATA}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ResultImportError(f"Invalid results payload: {exc!r}") from exc
+
+    year_keys = [(r["site_id"], r["year"]) for r in year_rows]
+    site_keys = [r["site_id"] for r in total_rows]
+    if len(set(year_keys)) != len(year_keys) or len(set(site_keys)) != len(site_keys):
+        raise ResultImportError("Results payload contains duplicate site rows")
+    if summary.get("r_analysis_git_sha"):
+        metadata["r_analysis_git_sha"] = summary["r_analysis_git_sha"]
+    return metadata, year_rows, total_rows
+
+
 def import_execution_results(task_id, results_payload, db=None):
-    """Parse an AnalysisResults payload and save rows to TaskResult / TaskResultTotal.
+    """Validate an AnalysisResults payload and save it to TaskResult / TaskResultTotal.
 
     Called by the polling task when an API execution finishes.  The
     *results_payload* is the dict returned by
@@ -1855,8 +1338,9 @@ def import_execution_results(task_id, results_payload, db=None):
     ``AnalysisResults`` object with ``records`` (per-site totals) and
     ``time_series`` (per-site-year observations).
 
-    This function is idempotent: existing result rows for the task are
-    deleted before new ones are inserted.
+    Raises :class:`ResultImportError` when the payload is incomplete or
+    inconsistent.  Existing result rows for the task are replaced, so the
+    import can be retried.
 
     Parameters
     ----------
@@ -1868,186 +1352,27 @@ def import_execution_results(task_id, results_payload, db=None):
         Existing DB session.  If *None*, a new session is created and
         committed/closed within this function.
     """
+    metadata, year_rows, total_rows = _parse_results_payload(task_id, results_payload)
     own_session = db is None
     if own_session:
         db = get_db()
-
     try:
-        if not results_payload:
-            logger.warning(
-                "import_execution_results(%s): empty results payload", task_id
-            )
-            return
-
-        # Store summary-level info (failed sites, subsampled sites) on the
-        # AnalysisTask so the UI can display diagnostics.
-        summary = results_payload.get("summary") or {}
         task_obj = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
         if task_obj:
-            meta = dict(task_obj.extra_metadata or {})
-            meta["failed_sites"] = summary.get("failed_sites", [])
-            meta["n_failed_sites"] = summary.get("n_failed_sites", 0)
-            meta["subsampled_sites"] = summary.get("subsampled_sites", [])
-            meta["n_sites"] = summary.get("n_sites", 0)
-            meta["n_replicates"] = summary.get("n_replicates", 1)
-            if summary.get("r_analysis_git_sha"):
-                meta["r_analysis_git_sha"] = summary["r_analysis_git_sha"]
-            task_obj.extra_metadata = meta
-
-        # Delete any existing results (idempotent re-import)
+            task_obj.extra_metadata = {**(task_obj.extra_metadata or {}), **metadata}
         db.query(TaskResult).filter(TaskResult.task_id == task_id).delete()
         db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).delete()
-
-        # --- per-site-year time series → TaskResult ---
-        # Each entry may carry a sub_site_index in its metadata (0 when the
-        # site was not split into sub-sites; 1+ for cross-site grouping
-        # fragments).  The unique constraint is now on
-        # (task_id, site_id, sub_site_index, year) so sub-site rows are
-        # stored and distinguished correctly.
-        time_series = results_payload.get("time_series") or []
-
-        # Deduplicate by (entity_id, sub_site_index, year) — the API
-        # payload can occasionally contain duplicate rows for the same key
-        # (e.g. when the R script emits two replicates for the same site/year).
-        # Keep the last occurrence so we get a deterministic single row per key.
-        _seen_ts: dict = {}
-        for ts in time_series:
-            meta = ts.get("metadata", {})
-            key = (
-                ts.get("entity_id"),
-                int(meta.get("sub_site_index", 0)),
-                ts.get("year"),
-            )
-            _seen_ts[key] = ts
-        if len(_seen_ts) < len(time_series):
-            logger.warning(
-                "import_execution_results(%s): dropped %d duplicate time-series "
-                "row(s) from results payload",
-                task_id,
-                len(time_series) - len(_seen_ts),
-            )
-        time_series = list(_seen_ts.values())
-
-        for ts in time_series:
-            values = ts.get("values", {})
-            metadata = ts.get("metadata", {})
-            db.add(
-                TaskResult(
-                    task_id=task_id,
-                    site_id=ts["entity_id"],
-                    sub_site_index=int(metadata.get("sub_site_index", 0)),
-                    year=ts["year"],
-                    extrapolated_forest_loss_avoided_ha=values.get(
-                        "extrapolated_forest_loss_avoided_ha"
-                    ),
-                    extrapolated_emissions_avoided_mgco2e=values.get(
-                        "extrapolated_emissions_avoided_mgco2e"
-                    ),
-                    extrapolated_treatment_defor_ha=values.get(
-                        "extrapolated_treatment_defor_ha"
-                    ),
-                    extrapolated_control_defor_ha=values.get(
-                        "extrapolated_control_defor_ha"
-                    ),
-                    extrapolated_treatment_emissions_mgco2e=values.get(
-                        "extrapolated_treatment_emissions_mgco2e"
-                    ),
-                    extrapolated_control_emissions_mgco2e=values.get(
-                        "extrapolated_control_emissions_mgco2e"
-                    ),
-                    is_pre_intervention=bool(
-                        metadata.get("is_pre_intervention", False)
-                    ),
-                    is_post_intervention=bool(
-                        metadata.get("is_post_intervention", False)
-                    ),
-                    n_sample_pixels=metadata.get("n_sample_pixels"),
-                    sampled_fraction=metadata.get("sampled_fraction"),
-                    extrapolated_treatment_defor_ha_ci_lower=values.get(
-                        "extrapolated_treatment_defor_ha_ci_lower"
-                    ),
-                    extrapolated_treatment_defor_ha_ci_upper=values.get(
-                        "extrapolated_treatment_defor_ha_ci_upper"
-                    ),
-                    extrapolated_control_defor_ha_ci_lower=values.get(
-                        "extrapolated_control_defor_ha_ci_lower"
-                    ),
-                    extrapolated_control_defor_ha_ci_upper=values.get(
-                        "extrapolated_control_defor_ha_ci_upper"
-                    ),
-                    extrapolated_forest_loss_avoided_ha_ci_lower=values.get(
-                        "extrapolated_forest_loss_avoided_ha_ci_lower"
-                    ),
-                    extrapolated_forest_loss_avoided_ha_ci_upper=values.get(
-                        "extrapolated_forest_loss_avoided_ha_ci_upper"
-                    ),
-                    extrapolated_treatment_emissions_mgco2e_ci_lower=values.get(
-                        "extrapolated_treatment_emissions_mgco2e_ci_lower"
-                    ),
-                    extrapolated_treatment_emissions_mgco2e_ci_upper=values.get(
-                        "extrapolated_treatment_emissions_mgco2e_ci_upper"
-                    ),
-                    extrapolated_control_emissions_mgco2e_ci_lower=values.get(
-                        "extrapolated_control_emissions_mgco2e_ci_lower"
-                    ),
-                    extrapolated_control_emissions_mgco2e_ci_upper=values.get(
-                        "extrapolated_control_emissions_mgco2e_ci_upper"
-                    ),
-                    extrapolated_emissions_avoided_mgco2e_ci_lower=values.get(
-                        "extrapolated_emissions_avoided_mgco2e_ci_lower"
-                    ),
-                    extrapolated_emissions_avoided_mgco2e_ci_upper=values.get(
-                        "extrapolated_emissions_avoided_mgco2e_ci_upper"
-                    ),
-                )
-            )
-
-        # --- per-site totals → TaskResultTotal ---
-        records = results_payload.get("records") or []
-        for rec in records:
-            values = rec.get("values", {})
-            metadata = rec.get("metadata", {})
-            db.add(
-                TaskResultTotal(
-                    task_id=task_id,
-                    site_id=rec["entity_id"],
-                    site_name=rec.get("entity_name"),
-                    extrapolated_forest_loss_avoided_ha=values.get(
-                        "extrapolated_forest_loss_avoided_ha"
-                    ),
-                    extrapolated_emissions_avoided_mgco2e=values.get(
-                        "extrapolated_emissions_avoided_mgco2e"
-                    ),
-                    area_ha=values.get("area_ha"),
-                    n_sample_pixels=metadata.get("n_sample_pixels"),
-                    n_treatment_pixels=metadata.get("n_treatment_pixels"),
-                    sampled_fraction=metadata.get("sampled_fraction"),
-                    first_year=rec.get("period_start"),
-                    last_year=rec.get("period_end"),
-                    n_years=metadata.get("n_years"),
-                    extrapolated_forest_loss_avoided_ha_ci_lower=values.get(
-                        "extrapolated_forest_loss_avoided_ha_ci_lower"
-                    ),
-                    extrapolated_forest_loss_avoided_ha_ci_upper=values.get(
-                        "extrapolated_forest_loss_avoided_ha_ci_upper"
-                    ),
-                    extrapolated_emissions_avoided_mgco2e_ci_lower=values.get(
-                        "extrapolated_emissions_avoided_mgco2e_ci_lower"
-                    ),
-                    extrapolated_emissions_avoided_mgco2e_ci_upper=values.get(
-                        "extrapolated_emissions_avoided_mgco2e_ci_upper"
-                    ),
-                )
-            )
-
+        if year_rows:
+            db.execute(TaskResult.__table__.insert(), year_rows)
+        if total_rows:
+            db.execute(TaskResultTotal.__table__.insert(), total_rows)
         if own_session:
             db.commit()
-
         logger.info(
-            "import_execution_results(%s): imported %d time-series rows, %d total rows",
+            "import_execution_results(%s): imported %d site-year rows, %d site rows",
             task_id,
-            len(time_series),
-            len(records),
+            len(year_rows),
+            len(total_rows),
         )
     except Exception:
         if own_session:
@@ -2185,7 +1510,7 @@ def _parse_iso_datetime(value):
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except (ValueError, AttributeError):
         return None
 
@@ -2331,242 +1656,6 @@ def _resolve_results_s3(task_id, results_s3_uri=None):
         prefix = f"{Config.S3_PREFIX}/tasks/{task_id}/output"
 
     return bucket, prefix
-
-
-def generate_match_quality_summary(task_id, results_s3_uri=None):
-    """Build ``results_match_quality_summary.json`` from existing raw CSVs.
-
-    This is the *backfill* path: for tasks that completed before the R
-    summarize script started producing this file.  It downloads the raw
-    CSVs to temporary files and processes them with chunked reads to keep
-    memory usage low.  The resulting JSON is uploaded back to S3 alongside
-    the other result artefacts.
-
-    Returns the parsed summary dict, or ``None`` on failure.
-    """
-    import json
-    import tempfile
-
-    import numpy as np
-
-    N_BINS = 40
-    N_QQ = 500
-    CHUNK = 50_000
-
-    bucket, prefix = _resolve_results_s3(task_id, results_s3_uri)
-    s3 = get_s3_client()
-
-    summary = {
-        "summary_stats": {},
-        "histograms": {},
-        "qq_quantiles": {},
-        "covariate_cols": [],
-    }
-
-    # ---- Histograms from results_pixel_covariates.csv --------------------
-    cov_key = f"{prefix}/results_pixel_covariates.csv"
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-            s3.download_fileobj(Bucket=bucket, Key=cov_key, Fileobj=tmp)
-            cov_path = tmp.name
-    except Exception:  # noqa: BLE001
-        logger.info(
-            "generate_match_quality_summary(%s): "
-            "match_covariates CSV not found, skipping histograms",
-            task_id,
-        )
-        cov_path = None
-
-    id_cols = {"cell", "site_id", "treatment", "match_group", "match_weight"}
-    covariate_cols = []
-    site_stats: dict = {}
-    cov_ranges: dict = {}
-
-    if cov_path:
-        import os
-
-        try:
-            # Pass 1 — compute ranges and counts
-            for chunk in pd.read_csv(cov_path, chunksize=CHUNK):
-                if not covariate_cols:
-                    covariate_cols = [c for c in chunk.columns if c not in id_cols]
-                for sid in chunk["site_id"].unique():
-                    s = str(sid)
-                    mask = chunk["site_id"] == sid
-                    sub = chunk[mask]
-                    if s not in site_stats:
-                        site_stats[s] = {"n_treatment": 0, "n_control": 0}
-                    site_stats[s]["n_treatment"] += int(sub["treatment"].sum())
-                    site_stats[s]["n_control"] += int((~sub["treatment"]).sum())
-                for cov in covariate_cols:
-                    vals = chunk[cov].dropna()
-                    if vals.empty:
-                        continue
-                    lo, hi = float(vals.min()), float(vals.max())
-                    if cov not in cov_ranges:
-                        cov_ranges[cov] = {"min": lo, "max": hi}
-                    else:
-                        cov_ranges[cov]["min"] = min(cov_ranges[cov]["min"], lo)
-                        cov_ranges[cov]["max"] = max(cov_ranges[cov]["max"], hi)
-
-            summary["covariate_cols"] = covariate_cols
-
-            # --- Read sampling-by-site for total treatment counts ----------
-            sampling_by_site = {}
-            sampling_key = f"{prefix}/results_sampling_by_site.csv"
-            try:
-                import io as _io
-
-                obj = s3.get_object(Bucket=bucket, Key=sampling_key)
-                sbs_df = pd.read_csv(_io.BytesIO(obj["Body"].read()))
-                for _, row in sbs_df.iterrows():
-                    sid_str = str(row.get("site_id", ""))
-                    frac = row.get("sampled_fraction", 1.0)
-                    if sid_str and frac and frac > 0:
-                        sampling_by_site[sid_str] = float(frac)
-            except Exception:  # noqa: BLE001, S110
-                pass  # Not available for older tasks
-
-            # Compute total treatment / control pool counts
-            for sid_str, stats in site_stats.items():
-                frac = sampling_by_site.get(sid_str, 1.0)
-                if frac > 0:
-                    stats["n_treatment_total"] = round(stats["n_treatment"] / frac)
-
-            # Summary stats
-            n_treatment_total_all = sum(
-                s.get("n_treatment_total", s["n_treatment"])
-                for s in site_stats.values()
-            )
-            summary["summary_stats"]["__all__"] = {
-                "n_treatment": sum(s["n_treatment"] for s in site_stats.values()),
-                "n_control": sum(s["n_control"] for s in site_stats.values()),
-                "n_sites": len(site_stats),
-                "n_treatment_total": n_treatment_total_all,
-            }
-            for sid_str, stats in site_stats.items():
-                summary["summary_stats"][sid_str] = stats
-
-            # Compute bin edges per covariate
-            bin_edges: dict = {}
-            for cov in covariate_cols:
-                if cov in cov_ranges:
-                    r = cov_ranges[cov]
-                    if r["max"] > r["min"]:
-                        bin_edges[cov] = np.linspace(
-                            r["min"], r["max"], N_BINS + 1
-                        ).tolist()
-
-            # Pass 2 — accumulate bin counts
-            hist_counts: dict = {}
-            for chunk in pd.read_csv(cov_path, chunksize=CHUNK):
-                scope_masks = [("__all__", slice(None))]
-                for sid in chunk["site_id"].unique():
-                    scope_masks.append((str(sid), chunk["site_id"] == sid))
-                for scope, mask in scope_masks:
-                    sub = chunk if scope == "__all__" else chunk[mask]
-                    if scope not in hist_counts:
-                        hist_counts[scope] = {}
-                    for cov in covariate_cols:
-                        if cov not in bin_edges:
-                            continue
-                        if cov not in hist_counts[scope]:
-                            hist_counts[scope][cov] = {
-                                "treatment": np.zeros(N_BINS, dtype=np.int64),
-                                "control": np.zeros(N_BINS, dtype=np.int64),
-                            }
-                        edges = bin_edges[cov]
-                        t_v = sub.loc[sub["treatment"], cov].dropna()
-                        c_v = sub.loc[~sub["treatment"], cov].dropna()
-                        if len(t_v) > 0:
-                            h, _ = np.histogram(t_v, bins=edges)
-                            hist_counts[scope][cov]["treatment"] += h
-                        if len(c_v) > 0:
-                            h, _ = np.histogram(c_v, bins=edges)
-                            hist_counts[scope][cov]["control"] += h
-
-            # Convert counts → percentages
-            for scope, covs in hist_counts.items():
-                scope_hists = {}
-                for cov, counts in covs.items():
-                    tt = counts["treatment"].sum()
-                    ct = counts["control"].sum()
-                    scope_hists[cov] = {
-                        "bin_edges": bin_edges[cov],
-                        "treatment_pct": (
-                            (counts["treatment"] / tt * 100).tolist()
-                            if tt > 0
-                            else [0.0] * N_BINS
-                        ),
-                        "control_pct": (
-                            (counts["control"] / ct * 100).tolist()
-                            if ct > 0
-                            else [0.0] * N_BINS
-                        ),
-                    }
-                summary["histograms"][scope] = scope_hists
-        finally:
-            os.unlink(cov_path)
-
-    # ---- QQ quantiles from results_propensity_scores.csv -----------------
-    ps_key = f"{prefix}/results_propensity_scores.csv"
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-            s3.download_fileobj(Bucket=bucket, Key=ps_key, Fileobj=tmp)
-            ps_path = tmp.name
-    except Exception:  # noqa: BLE001
-        ps_path = None
-
-    if ps_path:
-        import os as _os
-
-        try:
-            # Collect scores per scope — pscores have only 6 columns so
-            # the per-row memory is small even for large pixel counts.
-            pscores: dict = {}
-            for chunk in pd.read_csv(
-                ps_path,
-                chunksize=CHUNK,
-                usecols=["site_id", "treatment", "pscore"],
-            ):
-                for scope, mask in [("__all__", slice(None))] + [
-                    (str(sid), chunk["site_id"] == sid)
-                    for sid in chunk["site_id"].unique()
-                ]:
-                    sub = chunk if scope == "__all__" else chunk[mask]
-                    if scope not in pscores:
-                        pscores[scope] = {"treatment": [], "control": []}
-                    t_ps = sub.loc[sub["treatment"], "pscore"].dropna()
-                    c_ps = sub.loc[~sub["treatment"], "pscore"].dropna()
-                    pscores[scope]["treatment"].extend(t_ps.tolist())
-                    pscores[scope]["control"].extend(c_ps.tolist())
-
-            for scope, data in pscores.items():
-                t_s = np.sort(data["treatment"])
-                c_s = np.sort(data["control"])
-                if len(t_s) >= 2 and len(c_s) >= 2:
-                    n_pts = min(N_QQ, max(len(t_s), len(c_s)))
-                    probs = np.linspace(0, 1, n_pts)
-                    summary["qq_quantiles"][scope] = {
-                        "quantiles": probs.tolist(),
-                        "treatment_values": np.quantile(t_s, probs).tolist(),
-                        "control_values": np.quantile(c_s, probs).tolist(),
-                    }
-        finally:
-            _os.unlink(ps_path)
-
-    # ---- Upload summary to S3 --------------------------------------------
-    summary_json = json.dumps(summary)
-    summary_key = f"{prefix}/results_match_quality_summary.json"
-    s3.put_object(Bucket=bucket, Key=summary_key, Body=summary_json.encode("utf-8"))
-
-    logger.info(
-        "generate_match_quality_summary(%s): uploaded to s3://%s/%s",
-        task_id,
-        bucket,
-        summary_key,
-    )
-    return summary
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """Celery task: import staged user site uploads into the database."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from celery_app import celery_app
 from config import report_exception
@@ -75,7 +75,7 @@ def import_user_site_upload_task(
     update_user_site_upload_status(
         upload_uuid,
         status="running",
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         n_sites_imported=0,
         error_message=None,
     )
@@ -90,7 +90,7 @@ def import_user_site_upload_task(
         update_user_site_upload_status(
             upload_uuid,
             status="completed",
-            completed_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(UTC),
             site_set_id=uuid.UUID(str(detail["id"])),
             site_set_name=detail["name"],
             n_sites_imported=detail["n_sites"],
@@ -109,7 +109,7 @@ def import_user_site_upload_task(
         update_user_site_upload_status(
             upload_uuid,
             status="failed",
-            completed_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(UTC),
             n_sites_imported=0,
             error_message=str(exc),
         )

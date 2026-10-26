@@ -31,7 +31,7 @@ from bootstrap import ensure_scripts_dir_on_path
 
 ensure_scripts_dir_on_path(__file__)
 
-from logging_utils import configure_third_party_logging, parse_log_level  # noqa: E402
+from logging_utils import configure_third_party_logging, parse_log_level
 
 
 def _configure_logging():
@@ -141,7 +141,7 @@ def main(step_override=None):
         params["step"] = step_override
 
     # ---- run script ----
-    from main import run  # noqa: E402 — the script's own main.py
+    from main import run
 
     logger.info(
         "Running analysis script (step=%s, task_id=%s)…",

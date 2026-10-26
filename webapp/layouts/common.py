@@ -20,11 +20,13 @@ DEFAULT_COVARIATES = [
     "friction_surface",
     "pop_2015",
     "pop_growth",
-    "total_biomass_2025",
 ]
 
-# All available covariates (matching + additional options)
+# All available covariates (matching + additional options).
+# total_biomass_2025 is loss-masked to 2025, so it can reflect deforestation
+# after a site's start; it is available but not a default covariate.
 ALL_COVARIATES = DEFAULT_COVARIATES + [
+    "total_biomass_2025",
     "sdg_baseline",
     "sdg_status_2019",
     "sdg_status_2023",

@@ -93,3 +93,42 @@ class TestProcessingFlowIntegration:
 
         rows = clean_db.query(TaskResult).filter(TaskResult.task_id == task_id).all()
         assert len(rows) == 10  # still 10, not 20
+
+    def test_failed_import_does_not_undo_other_tasks(
+        self, clean_db, sample_results_payload, mocker
+    ):
+        """A database error importing one task must not roll back another."""
+        import copy
+
+        from models import AnalysisTask, TaskResult
+        from tasks.analysis import poll_batch_tasks
+
+        ok_id, bad_id = uuid.uuid4(), uuid.uuid4()
+        owner = self._insert_stub_task(clean_db, ok_id).submitted_by
+        self._insert_stub_task(clean_db, bad_id, user_id=str(owner))
+        for task_id in (ok_id, bad_id):
+            task = clean_db.get(AnalysisTask, task_id)
+            task.status = "running"
+            task.extract_job_id = f"api:{task_id}"
+        clean_db.commit()
+
+        bad_payload = copy.deepcopy(sample_results_payload)
+        bad_payload["records"][0]["entity_id"] = "x" * 200  # exceeds String(100)
+        client = mocker.MagicMock()
+        client.get_execution.return_value = {"data": {"status": "FINISHED"}}
+        client.get_execution_results.side_effect = lambda exec_id: (
+            sample_results_payload if exec_id == str(ok_id) else bad_payload
+        )
+        mocker.patch("trendsearth_client.TrendsEarthClient", return_value=client)
+        mocker.patch("config.Config.TRENDSEARTH_CLIENT_ID", "id")
+        mocker.patch("config.Config.TRENDSEARTH_CLIENT_SECRET", "secret")
+
+        poll_batch_tasks()
+
+        clean_db.expire_all()
+        assert clean_db.get(AnalysisTask, ok_id).status == "succeeded"
+        assert (
+            clean_db.query(TaskResult).filter(TaskResult.task_id == ok_id).count() == 10
+        )
+        # The failed import is retried on the next poll.
+        assert clean_db.get(AnalysisTask, bad_id).status == "running"

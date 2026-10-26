@@ -10,7 +10,6 @@ or that do ``import tasks as webapp_tasks`` continue to work unchanged.
 
 # Import submodules to register all @celery_app.task decorators.
 from tasks.analysis import (  # noqa: F401
-    generate_match_quality_summary_task,
     poll_batch_tasks,
     submit_analysis_task_worker,
 )

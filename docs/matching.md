@@ -20,7 +20,7 @@ treatment pixels on a set of pre-intervention covariates.
   - [Replicates](#replicates)
   - [Minimum Control Distance](#minimum-control-distance)
   - [Pixel Sampling Limits](#pixel-sampling-limits)
-  - [Cross-Site Grouping](#cross-site-grouping)
+  - [Sampling Weights and Coverage](#sampling-weights-and-coverage)
   - [Random Seed](#random-seed)
 - [Covariate Balance Assessment](#covariate-balance-assessment)
 - [Default Parameter Values](#default-parameter-values)
@@ -72,8 +72,24 @@ for Step 1 details):
 | Step | Script | What it does |
 |---|---|---|
 | 1 — extract | Python | Samples covariate values for treatment and control candidate pixels from COG files; computes matching extent and control exclusion buffer |
-| 2 — match | R | Fits the propensity score model and performs matching; runs as an AWS Batch array job (one array element per site) |
-| 3 — summarize | R | Aggregates matched pairs to compute annual deforestation rates and avoided emissions |
+| 2 — match | R | Within each exact-match stratum of each site, fits a propensity model and matches sampled treatment pixels to controls; runs as an AWS Batch array job (each element handles a batch of exact-match groups for one replicate) |
+| 3 — summarize | R | Computes annual forest loss and emissions for matched pixels, aggregates within each replicate, and reports means and replicate ranges per site-year, per site, and for all sites |
+
+### Eligible pixels
+
+A pixel is eligible for matching when it has forest cover in the site's
+baseline year (`start_year − 6`, or the first forest-cover year if earlier),
+complete covariate and outcome data (`total_biomass_2025` and every
+forest-cover year), and a value for every exact-match variable. Treatment and
+control pixels use the same rules. Pixels without forest at baseline cannot
+lose forest, so including them would bias the comparison.
+
+### Pre-intervention deforestation covariate
+
+For sites starting in 2006 or later, `defor_pre_intervention` (percent change
+in forest cover from `start_year − 6` to `start_year − 1`) is added to the
+propensity model. It ends the year before the intervention, so no
+intervention-period outcome influences the matches.
 
 ---
 
@@ -99,21 +115,23 @@ has many thousands of pixels and optimal matching is too slow.
 
 **Parameter**: `caliper_width`  
 **Default**: `0.2`  
-**Units**: Standard deviations of the propensity score distribution  
+**Units**: Standard deviations of the logit of the propensity score  
 **Range**: `0` (disabled) to any positive number; values > 0.5 are rarely useful
 
-The caliper is a maximum allowable distance between matched treatment and
-control pixels in propensity score space. Pairs separated by more than the
-caliper width are not permitted.
+The caliper is the maximum allowable distance between matched treatment and
+control pixels on the logit propensity scale, computed separately within
+each exact-match stratum. A caliper of 0.2 SD of the logit (Austin 2011) is
+the conventional default. Tighter calipers improve balance at the cost of
+fewer matched pixels; unmatched treatment pixels are reported (see
+[Sampling weights and coverage](#sampling-weights-and-coverage)). Set to `0`
+to disable the caliper.
 
-A caliper of 0.2 SD is the conventional default (Rosenbaum & Rubin 1985).
-Tighter calipers improve balance at the cost of fewer matched pairs (some
-treatment pixels may be left unmatched). Set to `0` to disable the caliper
-and match all treatment pixels.
+Both matching methods apply the caliper identically. It applies only to
+propensity-score matching, never to Mahalanobis distance matching.
 
-**Note**: The caliper applies only when a GLM-based propensity score is used.
-It is ignored when the [Mahalanobis fallback](#mahalanobis-distance-fallback)
-is active.
+With optimal k:1 matching, a stratum in which the caliper leaves some
+treatment pixels with fewer than k eligible controls cannot be solved and is
+recorded as unmatched in the group diagnostics.
 
 ---
 
@@ -128,17 +146,17 @@ Controls how many control pixels are matched to each treatment pixel.
 | Value | Behaviour |
 |---|---|
 | `1` | 1:1 matching — one control per treatment pixel |
-| `k > 1` | Up to k controls per treatment pixel |
-| `0` | Full matching — variable ratio; every pixel (treatment and control) is matched into a set |
+| `k > 1` | k controls per treatment pixel |
+| `0` | Full matching — variable ratio; every pixel (treatment and control) is matched into a set. Requires `matching_method = "optimal"` |
 
 Increasing the ratio increases statistical power (more matched pairs) at the
 cost of potentially worse per-pair balance. Full matching (`0`) is the most
 flexible option and often achieves the best overall balance, but matched-set
 weights must be applied carefully downstream.
 
-When multiple controls are matched to a single treatment pixel, their
-contribution to the emissions calculation is weighted so that the total
-control weight equals the number of treatment pixels.
+Within each matched set, treatment pixels have weight 1 and control weights
+are scaled so that total control weight equals the number of treatment
+pixels in the set. Both matching methods use the same weights.
 
 ---
 
@@ -163,10 +181,17 @@ within each stratum. If a site is the only protected area in its
 country × ecoregion combination there may be no eligible controls, and the
 site will be excluded from the analysis.
 
-To use `ecoregion` or `pa` as a continuous covariate rather than a
-stratification variable, add them to the covariate list instead of (or as
-well as) the exact-match list. These two variables are marked as
-*dual-purpose* in the UI.
+To use `ecoregion` or `pa` as a covariate rather than a stratification
+variable, add it to the covariate list instead of the exact-match list (a
+variable cannot be both). These two variables are marked as *dual-purpose* in
+the UI.
+
+Exact matching on `pa` matches protected treatment pixels to controls in
+other protected areas, not to unprotected land. Leave `pa` out of the
+exact-match list when the comparison should include unprotected controls.
+
+If site polygons overlap, each overlapping pixel is assigned to only one site
+(the last one rasterized).
 
 ---
 
@@ -175,60 +200,46 @@ well as) the exact-match list. These two variables are marked as
 **Parameter**: `separation_fallback_mahalanobis`  
 **Default**: `false` (must be explicitly enabled)
 
-When logistic regression cannot reliably estimate the propensity score — due
-to complete or quasi-complete separation — the model produces extreme or
-undefined coefficients. The Mahalanobis fallback handles these cases by
-switching to **Mahalanobis distance matching** instead of propensity score
-matching.
+The distance used within each exact-match stratum is chosen as follows:
 
-#### When the fallback activates automatically
+1. **Fewer than `min_glm_treatment_pixels`** treatment pixels — Mahalanobis
+   distance on all covariates. A logistic regression cannot be fitted
+   reliably with so few positives.
+2. **Separation** — detected before fitting (a factor level, or one side of a
+   numeric or binary covariate's range, present in only one group) or while
+   fitting (the GLM does not converge or fits probabilities of 0 or 1).
+   - With `separation_fallback_mahalanobis = true`, the stratum is matched on
+     Mahalanobis distance with the separating variables removed.
+   - With `false`, the stratum is not matched and the reason is recorded in
+     the group diagnostics. A site with no matched stratum fails.
+3. **Otherwise** — propensity-score matching with a per-stratum logistic
+   model.
 
-Even when `separation_fallback_mahalanobis` is `false`, the fallback is
-triggered automatically in these situations:
-
-1. **Too few treatment pixels** — fewer than `min_glm_treatment_pixels`
-   (default 15) treatment pixels in a site. A logistic regression cannot
-   be reliably fitted with so few positives.
-2. **Complete separation** — one or more factor-coded covariates (e.g. a
-   categorical variable where one level appears only in treatment pixels)
-   cause the GLM to fail entirely.
-3. **Severe imbalance** — the treatment-to-control ratio exceeds 2:1 within
-   a stratum, making GLM propensity scores unreliable.
-
-When the fallback is active:
-- Variables that cause separation are **excluded** from the Mahalanobis
-  distance formula to avoid them dominating the distance measure.
-- The caliper parameter is ignored.
-- `pscore` values in the output data are `NA`.
-
-If `separation_fallback_mahalanobis = false` and separation is detected for
-a site, that site is marked as failed (see
-[analysis-outputs.md](analysis-outputs.md#failure-markers)).
+For Mahalanobis matching no caliper is applied and `pscore` is `NA`.
 
 ---
 
 ### Replicates
 
 **Parameter**: `n_replicates`  
-**Default**: `1` (no confidence intervals)  
-**Range**: `1` to `1000` (practical maximum ~100 for reasonable runtime)
+**Default**: `1`  
+**Range**: `1` to `1000`
 
-Running multiple replicates repeats the matching with different random
-samples of control pixels, producing a distribution of estimates from which
-**95 % confidence intervals** are derived.
+Each replicate repeats the pixel sampling and matching with a different
+random draw and writes `m_{id_numeric}_rep{k}.rds`. Step 3 aggregates each
+replicate separately, then reports the mean and the 2.5% / 97.5% quantiles
+across replicates at each reported level (site-year, site total, and all
+sites). Bounds are never summed across sites or years.
 
-For each replicate $k$:
-- A fresh random sample of control candidate pixels is drawn from the
-  control pool (of size `max_treatment_pixels × control_multiplier`).
-- The full matching procedure is repeated independently.
-- A result file `m_{id_numeric}_rep{k}.rds` is written.
+These bounds are the **range across matching replicates**: they reflect
+variability from pixel sampling and matching only. They are not confidence
+intervals for the avoided emissions, because they do not capture spatial
+dependence or model uncertainty. Fewer than 50 replicates gives imprecise
+bounds; the web app shows a warning.
 
-The summarisation step aggregates across replicates by computing the 2.5th
-and 97.5th percentiles of each metric to form the lower and upper CI bounds.
+A site fragment is included only if every replicate produced a match file.
 
-**Performance note**: Runtime scales approximately linearly with
-`n_replicates`. A task with 50 sites and `n_replicates = 10` requires
-10× as much compute as the same task with `n_replicates = 1`.
+Runtime scales approximately linearly with `n_replicates`.
 
 ---
 
@@ -273,7 +284,8 @@ computation.
 
 Sites smaller than this threshold are excluded from the analysis entirely.
 Very small sites produce too few treatment pixels for a reliable propensity
-score estimate.
+score estimate. The threshold applies to whole sites before they are split
+across exact-match regions, so a large site keeps small fragments.
 
 **Parameter**: `min_glm_treatment_pixels`  
 **Default**: `15` pixels
@@ -284,19 +296,18 @@ distance is used instead.
 
 ---
 
-### Cross-Site Grouping
+### Sampling Weights and Coverage
 
-**Parameter**: `group_by_exact_matches`  
-**Default**: `false`
+Totals are scaled to all **eligible** treatment pixels. In each exact-match
+stratum, matched treatment pixels (and their controls) are weighted by
+`n_eligible / n_matched`. This assumes treatment pixels dropped by the
+caliper resemble matched ones. Pixels that are not eligible (no forest at
+baseline, missing data, or no shared stratum) are not represented.
 
-When enabled, sites that share all exact-match strata values are **pooled
-into a single matching problem**. This is useful when individual sites are
-too small to yield reliable propensity score estimates but neighbouring sites
-with similar characteristics can collectively provide a large enough sample.
-
-Results are still reported per site (the sub-site index tracks which original
-polygon each matched pixel came from), but the propensity score model and
-matching are run once across the combined group.
+Per-site results report `n_treatment_pixels` (all site pixels),
+`n_eligible_pixels`, `n_sample_pixels` (matched), `coverage_fraction`
+(eligible / site pixels), and `match_rate` (matched / sampled). The web app
+warns when either fraction is below 80%.
 
 ---
 
@@ -318,17 +329,22 @@ collaborators.
 After matching, covariate balance is assessed using the **Standardized Mean
 Difference (SMD)** for each covariate:
 
-$$\text{SMD} = \frac{\bar{X}_T - \bar{X}_C}{s_p}$$
+$$\text{SMD} = \frac{\bar{X}_T - \bar{X}_C}{s_T}$$
 
-where $\bar{X}_T$ and $\bar{X}_C$ are the weighted means of the covariate
-for treatment and matched control pixels respectively, and $s_p$ is the
-pooled standard deviation (computed from the **unmatched** distributions).
+where $\bar{X}_T$ and $\bar{X}_C$ are the match-weighted means of the
+covariate for treatment and matched control pixels, and $s_T$ is the standard
+deviation of the matched treatment pixels (the usual convention for the
+average treatment effect on the treated). The SMD does not depend on the
+scale of the weights. Categorical covariates are assessed per level as the
+difference in proportions. When $s_T = 0$ and the means differ, the SMD is
+undefined and the web app shows a warning.
 
 The conventional threshold for acceptable balance is $|\text{SMD}| < 0.1$.
 The web app displays automated warnings when:
 - Any covariate has $|\text{SMD}| \geq 0.25$ (Critical)
 - More than 20 % of covariates have $|\text{SMD}| > 0.1$ (Caution)
 
+Covariate histograms and propensity-score QQ plots use the matching weights.
 See the **Love plot** on the Task Detail page for a visual summary.
 
 ---
@@ -344,12 +360,11 @@ All defaults are defined in `webapp/services/analysis_task.py`:
 | `max_controls_per_treatment` | `1` | 1:1 matching |
 | `exact_match_vars` | `["admin1", "ecoregion", "pa"]` | |
 | `separation_fallback_mahalanobis` | `false` | Must be opted in |
-| `n_replicates` | `1` | No CIs by default |
+| `n_replicates` | `1` | No replicate range by default |
 | `min_control_distance_km` | `10` | km |
 | `max_treatment_pixels` | `1000` | pixels per site |
 | `control_multiplier` | `50` | controls per treatment pixel |
 | `min_site_area_ha` | `100` | ha |
 | `min_glm_treatment_pixels` | `15` | pixels |
-| `group_by_exact_matches` | `false` | |
 | `random_seed` | `null` | |
 | `resolution_m` | `1000` | 1 km grid |

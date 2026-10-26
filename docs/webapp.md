@@ -163,15 +163,16 @@ A per-site table showing, for each site:
 
 - Total avoided forest loss (ha) over the intervention period
 - Total avoided emissions (MgCO₂e) over the intervention period
-- 95 % confidence interval bounds (if the task was run with `n_replicates > 1`)
+- Range across matching replicates (if the task was run with `n_replicates > 1`;
+  this reflects sampling and matching variability, not a confidence interval)
 - Number of matched treatment pixels used
 - Sampling fraction (< 1 if treatment was subsampled)
 
 ### Time series chart
 
 An interactive Plotly line chart of annual avoided emissions (MgCO₂e) per
-site, including the pre-intervention baseline period. Confidence intervals
-are shown as a shaded ribbon when available.
+site, including the pre-intervention baseline period. Ranges across matching
+replicates are shown as a shaded ribbon when available.
 
 ### Match quality diagnostics
 

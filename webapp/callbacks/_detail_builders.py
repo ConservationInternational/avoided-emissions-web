@@ -150,12 +150,6 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                             else "Disabled",
                         ),
                         _detail_row(
-                            "Group by exact-match regions",
-                            "Enabled"
-                            if config.get("group_by_exact_matches")
-                            else "Disabled",
-                        ),
-                        _detail_row(
                             "Matching method",
                             "Nearest neighbour (MatchIt)"
                             if config.get("matching_method") == "nearest"
@@ -438,8 +432,8 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                 for t in totals:
                     name_lookup[str(t.site_id)] = t.site_name or str(t.site_id)
                     totals_lookup[str(t.site_id)] = {
-                        "n_matched": t.n_sample_pixels or 0,
-                        "n_treatment": t.n_treatment_pixels,
+                        "n_matched": t.n_sample_pixels,
+                        "n_eligible": t.n_eligible_pixels,
                         "area_ha": t.area_ha,
                         "sampled_fraction": t.sampled_fraction,
                     }
@@ -460,23 +454,11 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                 has_danger = any(w["level"] == "danger" for w in ws)
                 issues_text = "; ".join(w["message"] for w in ws)
                 tinfo = totals_lookup.get(sid, {})
-                n_matched = tinfo.get("n_matched", 0) or 0
+                n_matched = tinfo.get("n_matched", 0)
                 area_ha = tinfo.get("area_ha")
-                sampled_frac = tinfo.get("sampled_fraction") or 1.0
-
-                # Estimate % of treatment pixels matched
-                n_treatment = tinfo.get("n_treatment")
-                pct_matched = None
-                if n_treatment and n_treatment > 0:
-                    eligible = n_treatment * sampled_frac
-                    if eligible > 0:
-                        pct_matched = min(n_matched / eligible * 100, 100)
-                elif area_ha and area_ha > 0:
-                    # Fallback for old results without n_treatment_pixels
-                    approx_pixels = area_ha / 86.0
-                    eligible = approx_pixels * sampled_frac
-                    if eligible > 0:
-                        pct_matched = min(n_matched / eligible * 100, 100)
+                # Matched pixels as a share of the eligible pixels sampled
+                sampled = tinfo.get("n_eligible", 0) * tinfo.get("sampled_fraction", 0)
+                pct_matched = n_matched / sampled * 100 if sampled > 0 else None
 
                 grid_rows.append(
                     {
@@ -1075,6 +1057,11 @@ def _build_raw_results(task):
     )
 
 
+# Replicate bounds reflect pixel sampling and matching variability only; they
+# are not confidence intervals for the avoided emissions.
+BOUNDS_NAME = "Range across matching replicates"
+
+
 def _add_ci_band(fig, x, y_lower, y_upper, color, name):
     """Add a shaded confidence-interval band to a Plotly figure."""
     fig.add_trace(
@@ -1135,96 +1122,41 @@ def _build_plots(
     is_large : bool
         When True, ``results`` is None; use ``agg_yearly`` instead.
     """
-    # Normalise: for large tasks agg_yearly holds pre-summed year rows
-    if is_large or results is None:
-        if not agg_yearly:
-            return html.P("No results to plot.", className="text-muted")
-        df = pd.DataFrame(
-            [
-                {
-                    "year": r["year"],
-                    "emissions_avoided_mgco2e": r.get("emissions_avoided_mgco2e") or 0,
-                    "forest_loss_avoided_ha": r.get("forest_loss_avoided_ha") or 0,
-                    "treatment_defor_ha": r.get("treatment_defor_ha") or 0,
-                    "control_defor_ha": r.get("control_defor_ha") or 0,
-                    "treatment_emissions_mgco2e": r.get("treatment_emissions_mgco2e")
-                    or 0,
-                    "control_emissions_mgco2e": r.get("control_emissions_mgco2e") or 0,
-                    "treatment_defor_ha_ci_lower": r.get("treatment_defor_ha_ci_lower"),
-                    "treatment_defor_ha_ci_upper": r.get("treatment_defor_ha_ci_upper"),
-                    "control_defor_ha_ci_lower": r.get("control_defor_ha_ci_lower"),
-                    "control_defor_ha_ci_upper": r.get("control_defor_ha_ci_upper"),
-                    "forest_loss_avoided_ha_ci_lower": r.get(
-                        "forest_loss_avoided_ha_ci_lower"
-                    ),
-                    "forest_loss_avoided_ha_ci_upper": r.get(
-                        "forest_loss_avoided_ha_ci_upper"
-                    ),
-                    "emissions_avoided_mgco2e_ci_lower": r.get(
-                        "emissions_avoided_mgco2e_ci_lower"
-                    ),
-                    "emissions_avoided_mgco2e_ci_upper": r.get(
-                        "emissions_avoided_mgco2e_ci_upper"
-                    ),
-                    # No is_pre_intervention for aggregate path
-                    "is_pre_intervention": False,
-                }
-                for r in agg_yearly
-            ]
-        )
-        # n_sites for the plot title
-        n_sites_display = agg_yearly[0].get("n_sites", 0) if agg_yearly else 0
-    else:
-        if not results:
-            return html.P("No results to plot.", className="text-muted")
+    if not agg_yearly:
+        return html.P("No results to plot.", className="text-muted")
+    # All-site yearly series with replicate ranges, computed in R.  Bounds are
+    # never summed across sites or years here: quantiles of sums are not sums
+    # of quantiles.
+    agg_df = pd.DataFrame(agg_yearly).sort_values("year")
+    n_sites_display = len(totals or [])
+    # Per-site rows (small tasks only) for stacked bars and the site drill-down.
+    df = None
+    if not is_large and results:
         df = pd.DataFrame(
             [
                 {
                     "site_id": r.site_id,
                     "year": r.year,
-                    "emissions_avoided_mgco2e": r.extrapolated_emissions_avoided_mgco2e
-                    or 0,
-                    "forest_loss_avoided_ha": r.extrapolated_forest_loss_avoided_ha
-                    or 0,
-                    "treatment_defor_ha": r.extrapolated_treatment_defor_ha or 0,
-                    "control_defor_ha": r.extrapolated_control_defor_ha or 0,
-                    "treatment_emissions_mgco2e": r.extrapolated_treatment_emissions_mgco2e
-                    or 0,
-                    "control_emissions_mgco2e": r.extrapolated_control_emissions_mgco2e
-                    or 0,
+                    "emissions_avoided_mgco2e": r.extrapolated_emissions_avoided_mgco2e,
+                    "forest_loss_avoided_ha": r.extrapolated_forest_loss_avoided_ha,
+                    "treatment_defor_ha": r.extrapolated_treatment_defor_ha,
+                    "control_defor_ha": r.extrapolated_control_defor_ha,
+                    "treatment_emissions_mgco2e": r.extrapolated_treatment_emissions_mgco2e,
+                    "control_emissions_mgco2e": r.extrapolated_control_emissions_mgco2e,
                     "is_pre_intervention": bool(r.is_pre_intervention),
-                    "is_post_intervention": bool(
-                        getattr(r, "is_post_intervention", False)
-                    ),
-                    "treatment_defor_ha_ci_lower": getattr(
-                        r, "extrapolated_treatment_defor_ha_ci_lower", None
-                    ),
-                    "treatment_defor_ha_ci_upper": getattr(
-                        r, "extrapolated_treatment_defor_ha_ci_upper", None
-                    ),
-                    "control_defor_ha_ci_lower": getattr(
-                        r, "extrapolated_control_defor_ha_ci_lower", None
-                    ),
-                    "control_defor_ha_ci_upper": getattr(
-                        r, "extrapolated_control_defor_ha_ci_upper", None
-                    ),
-                    "forest_loss_avoided_ha_ci_lower": getattr(
-                        r, "extrapolated_forest_loss_avoided_ha_ci_lower", None
-                    ),
-                    "forest_loss_avoided_ha_ci_upper": getattr(
-                        r, "extrapolated_forest_loss_avoided_ha_ci_upper", None
-                    ),
-                    "emissions_avoided_mgco2e_ci_lower": getattr(
-                        r, "extrapolated_emissions_avoided_mgco2e_ci_lower", None
-                    ),
-                    "emissions_avoided_mgco2e_ci_upper": getattr(
-                        r, "extrapolated_emissions_avoided_mgco2e_ci_upper", None
-                    ),
+                    "is_post_intervention": bool(r.is_post_intervention),
+                    "treatment_defor_ha_ci_lower": r.extrapolated_treatment_defor_ha_ci_lower,
+                    "treatment_defor_ha_ci_upper": r.extrapolated_treatment_defor_ha_ci_upper,
+                    "control_defor_ha_ci_lower": r.extrapolated_control_defor_ha_ci_lower,
+                    "control_defor_ha_ci_upper": r.extrapolated_control_defor_ha_ci_upper,
+                    "forest_loss_avoided_ha_ci_lower": r.extrapolated_forest_loss_avoided_ha_ci_lower,
+                    "forest_loss_avoided_ha_ci_upper": r.extrapolated_forest_loss_avoided_ha_ci_upper,
+                    "emissions_avoided_mgco2e_ci_lower": r.extrapolated_emissions_avoided_mgco2e_ci_lower,
+                    "emissions_avoided_mgco2e_ci_upper": r.extrapolated_emissions_avoided_mgco2e_ci_upper,
                 }
                 for r in results
             ]
         )
-        n_sites_display = None  # will be computed below from df
 
     # Extract diagnostic metadata from the task (common to both paths)
     meta = (task.extra_metadata or {}) if task else {}
@@ -1237,54 +1169,15 @@ def _build_plots(
         for ss in _normalize_metadata_list(meta.get("subsampled_sites", []))
     }
 
-    has_ci = df["treatment_defor_ha_ci_lower"].notna().any()
+    has_ci = "treatment_defor_ha_ci_lower" in agg_df.columns
 
     plots = []
 
     # --- Aggregate deforestation comparison (treatment vs control) ----------
     has_defor_data = (
-        df["treatment_defor_ha"].sum() > 0 or df["control_defor_ha"].sum() > 0
+        agg_df["treatment_defor_ha"].sum() > 0 or agg_df["control_defor_ha"].sum() > 0
     )
     if has_defor_data:
-        agg_cols = {
-            "treatment_defor_ha": ("treatment_defor_ha", "sum"),
-            "control_defor_ha": ("control_defor_ha", "sum"),
-        }
-        if has_ci:
-            agg_cols.update(
-                {
-                    "treatment_defor_ha_ci_lower": (
-                        "treatment_defor_ha_ci_lower",
-                        "sum",
-                    ),
-                    "treatment_defor_ha_ci_upper": (
-                        "treatment_defor_ha_ci_upper",
-                        "sum",
-                    ),
-                    "control_defor_ha_ci_lower": ("control_defor_ha_ci_lower", "sum"),
-                    "control_defor_ha_ci_upper": ("control_defor_ha_ci_upper", "sum"),
-                }
-            )
-        # For large tasks df is already grouped by year; for small tasks we
-        # need to group (aggregate across sites).
-        if "site_id" in df.columns:
-            agg_df = (
-                df.groupby("year").agg(**agg_cols).reset_index().sort_values("year")
-            )
-        else:
-            agg_df = df[
-                ["year", "treatment_defor_ha", "control_defor_ha"]
-                + (
-                    [
-                        "treatment_defor_ha_ci_lower",
-                        "treatment_defor_ha_ci_upper",
-                        "control_defor_ha_ci_lower",
-                        "control_defor_ha_ci_upper",
-                    ]
-                    if has_ci
-                    else []
-                )
-            ].sort_values("year")
         fig_defor = go.Figure()
         fig_defor.add_trace(
             go.Scatter(
@@ -1313,7 +1206,7 @@ def _build_plots(
                 agg_df["treatment_defor_ha_ci_lower"],
                 agg_df["treatment_defor_ha_ci_upper"],
                 color="rgba(44,160,44,0.15)",
-                name="Project Sites 95% CI",
+                name=f"Project Sites ({BOUNDS_NAME.lower()})",
             )
             _add_ci_band(
                 fig_defor,
@@ -1321,11 +1214,7 @@ def _build_plots(
                 agg_df["control_defor_ha_ci_lower"],
                 agg_df["control_defor_ha_ci_upper"],
                 color="rgba(214,39,40,0.15)",
-                name="Matched Controls 95% CI",
-            )
-        if n_sites_display is None:
-            n_sites_display = (
-                len(df["site_id"].unique()) if "site_id" in df.columns else 0
+                name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         title_suffix = f" ({n_sites_display} sites"
         if failed_site_ids:
@@ -1352,7 +1241,7 @@ def _build_plots(
                 if s.end_date:
                     unique_end_years.add(s.end_date.year)
 
-        if len(unique_start_years) == 1 and "is_pre_intervention" in df.columns:
+        if len(unique_start_years) == 1 and df is not None:
             pre_years = df.loc[df["is_pre_intervention"], "year"]
             if not pre_years.empty:
                 fig_defor.add_vrect(
@@ -1380,23 +1269,6 @@ def _build_plots(
         plots.append(dcc.Graph(figure=fig_defor))
 
         # --- Cumulative deforestation plot ---
-        agg_df = agg_df.sort_values("year")
-        agg_df["cum_treatment_defor_ha"] = agg_df["treatment_defor_ha"].cumsum()
-        agg_df["cum_control_defor_ha"] = agg_df["control_defor_ha"].cumsum()
-        if has_ci:
-            agg_df["cum_treatment_defor_ha_ci_lower"] = agg_df[
-                "treatment_defor_ha_ci_lower"
-            ].cumsum()
-            agg_df["cum_treatment_defor_ha_ci_upper"] = agg_df[
-                "treatment_defor_ha_ci_upper"
-            ].cumsum()
-            agg_df["cum_control_defor_ha_ci_lower"] = agg_df[
-                "control_defor_ha_ci_lower"
-            ].cumsum()
-            agg_df["cum_control_defor_ha_ci_upper"] = agg_df[
-                "control_defor_ha_ci_upper"
-            ].cumsum()
-
         fig_cum = go.Figure()
         fig_cum.add_trace(
             go.Scatter(
@@ -1425,7 +1297,7 @@ def _build_plots(
                 agg_df["cum_treatment_defor_ha_ci_lower"],
                 agg_df["cum_treatment_defor_ha_ci_upper"],
                 color="rgba(44,160,44,0.15)",
-                name="Project Sites 95% CI",
+                name=f"Project Sites ({BOUNDS_NAME.lower()})",
             )
             _add_ci_band(
                 fig_cum,
@@ -1433,7 +1305,7 @@ def _build_plots(
                 agg_df["cum_control_defor_ha_ci_lower"],
                 agg_df["cum_control_defor_ha_ci_upper"],
                 color="rgba(214,39,40,0.15)",
-                name="Matched Controls 95% CI",
+                name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         fig_cum.update_layout(
             title=(
@@ -1445,7 +1317,7 @@ def _build_plots(
             legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
         )
-        if len(unique_start_years) == 1 and "is_pre_intervention" in df.columns:
+        if len(unique_start_years) == 1 and df is not None:
             pre_years = df.loc[df["is_pre_intervention"], "year"]
             if not pre_years.empty:
                 fig_cum.add_vrect(
@@ -1473,167 +1345,60 @@ def _build_plots(
         plots.append(dcc.Graph(figure=fig_cum))
 
     # --- Emissions / forest-loss bar charts ---------------------------------
-    # For small tasks: stacked by site (shows per-site contribution).
-    # For large tasks: single aggregate bar (no `color="site_id"` with 1000
-    # legend entries which is unreadable and extremely slow to render).
-    if "site_id" in df.columns:
-        # Small-task path: stacked bars coloured by site
-        fig_emissions = px.bar(
-            df,
-            x="year",
-            y="emissions_avoided_mgco2e",
-            color="site_id",
-            title="Avoided Emissions by Year",
-            labels={
-                "emissions_avoided_mgco2e": "Emissions Avoided (MgCO₂e)",
-                "year": "Year",
-                "site_id": "Site",
-            },
-        )
-        fig_emissions.update_layout(barmode="stack")
-        if has_ci:
-            agg_em = df.groupby("year", as_index=False).agg(
-                total=("emissions_avoided_mgco2e", "sum"),
-                ci_lower=("emissions_avoided_mgco2e_ci_lower", "sum"),
-                ci_upper=("emissions_avoided_mgco2e_ci_upper", "sum"),
+    # Small tasks: bars stacked by site.  Large tasks: one all-site bar per
+    # year (1000 legend entries would be unreadable).  Replicate ranges always
+    # come from the all-site series.
+    for metric, title, label in (
+        (
+            "emissions_avoided_mgco2e",
+            "Avoided Emissions by Year",
+            "Emissions Avoided (MgCO₂e)",
+        ),
+        (
+            "forest_loss_avoided_ha",
+            "Forest Loss Avoided by Year",
+            "Forest Loss Avoided (ha)",
+        ),
+    ):
+        if df is not None:
+            fig = px.bar(
+                df,
+                x="year",
+                y=metric,
+                color="site_id",
+                title=title,
+                labels={metric: label, "year": "Year", "site_id": "Site"},
             )
-            fig_emissions.add_trace(
+            fig.update_layout(barmode="stack")
+        else:
+            fig = px.bar(
+                agg_df,
+                x="year",
+                y=metric,
+                title=f"{title} (all {n_sites_display:,} sites)",
+                labels={metric: label, "year": "Year"},
+            )
+        if has_ci:
+            fig.add_trace(
                 go.Scatter(
-                    x=agg_em["year"],
-                    y=agg_em["total"],
+                    x=agg_df["year"],
+                    y=agg_df[metric],
                     mode="markers",
                     marker={"size": 0, "opacity": 0},
                     error_y={
                         "type": "data",
                         "symmetric": False,
-                        "array": agg_em["ci_upper"] - agg_em["total"],
-                        "arrayminus": agg_em["total"] - agg_em["ci_lower"],
+                        "array": agg_df[f"{metric}_ci_upper"] - agg_df[metric],
+                        "arrayminus": agg_df[metric] - agg_df[f"{metric}_ci_lower"],
                         "color": "rgba(0,0,0,0.4)",
                         "thickness": 1.5,
                         "width": 4,
                     },
-                    name="95% CI",
+                    name=BOUNDS_NAME,
                     showlegend=True,
                 )
             )
-        plots.append(dcc.Graph(figure=fig_emissions))
-
-        fig_forest = px.bar(
-            df,
-            x="year",
-            y="forest_loss_avoided_ha",
-            color="site_id",
-            title="Forest Loss Avoided by Year",
-            labels={
-                "forest_loss_avoided_ha": "Forest Loss Avoided (ha)",
-                "year": "Year",
-                "site_id": "Site",
-            },
-        )
-        fig_forest.update_layout(barmode="stack")
-        if has_ci:
-            agg_fl = df.groupby("year", as_index=False).agg(
-                total=("forest_loss_avoided_ha", "sum"),
-                ci_lower=("forest_loss_avoided_ha_ci_lower", "sum"),
-                ci_upper=("forest_loss_avoided_ha_ci_upper", "sum"),
-            )
-            fig_forest.add_trace(
-                go.Scatter(
-                    x=agg_fl["year"],
-                    y=agg_fl["total"],
-                    mode="markers",
-                    marker={"size": 0, "opacity": 0},
-                    error_y={
-                        "type": "data",
-                        "symmetric": False,
-                        "array": agg_fl["ci_upper"] - agg_fl["total"],
-                        "arrayminus": agg_fl["total"] - agg_fl["ci_lower"],
-                        "color": "rgba(0,0,0,0.4)",
-                        "thickness": 1.5,
-                        "width": 4,
-                    },
-                    name="95% CI",
-                    showlegend=True,
-                )
-            )
-        plots.append(dcc.Graph(figure=fig_forest))
-    else:
-        # Large-task path: single aggregate bar per year (df already summed)
-        fig_emissions = px.bar(
-            df.sort_values("year"),
-            x="year",
-            y="emissions_avoided_mgco2e",
-            title=f"Avoided Emissions by Year (all {n_sites_display:,} sites)",
-            labels={
-                "emissions_avoided_mgco2e": "Emissions Avoided (MgCO₂e)",
-                "year": "Year",
-            },
-        )
-        if has_ci:
-            fig_emissions.add_trace(
-                go.Scatter(
-                    x=df["year"],
-                    y=df["emissions_avoided_mgco2e"],
-                    mode="markers",
-                    marker={"size": 0, "opacity": 0},
-                    error_y={
-                        "type": "data",
-                        "symmetric": False,
-                        "array": (
-                            df["emissions_avoided_mgco2e_ci_upper"]
-                            - df["emissions_avoided_mgco2e"]
-                        ),
-                        "arrayminus": (
-                            df["emissions_avoided_mgco2e"]
-                            - df["emissions_avoided_mgco2e_ci_lower"]
-                        ),
-                        "color": "rgba(0,0,0,0.4)",
-                        "thickness": 1.5,
-                        "width": 4,
-                    },
-                    name="95% CI",
-                    showlegend=True,
-                )
-            )
-        plots.append(dcc.Graph(figure=fig_emissions))
-
-        fig_forest = px.bar(
-            df.sort_values("year"),
-            x="year",
-            y="forest_loss_avoided_ha",
-            title=f"Forest Loss Avoided by Year (all {n_sites_display:,} sites)",
-            labels={
-                "forest_loss_avoided_ha": "Forest Loss Avoided (ha)",
-                "year": "Year",
-            },
-        )
-        if has_ci:
-            fig_forest.add_trace(
-                go.Scatter(
-                    x=df["year"],
-                    y=df["forest_loss_avoided_ha"],
-                    mode="markers",
-                    marker={"size": 0, "opacity": 0},
-                    error_y={
-                        "type": "data",
-                        "symmetric": False,
-                        "array": (
-                            df["forest_loss_avoided_ha_ci_upper"]
-                            - df["forest_loss_avoided_ha"]
-                        ),
-                        "arrayminus": (
-                            df["forest_loss_avoided_ha"]
-                            - df["forest_loss_avoided_ha_ci_lower"]
-                        ),
-                        "color": "rgba(0,0,0,0.4)",
-                        "thickness": 1.5,
-                        "width": 4,
-                    },
-                    name="95% CI",
-                    showlegend=True,
-                )
-            )
-        plots.append(dcc.Graph(figure=fig_forest))
+        plots.append(dcc.Graph(figure=fig))
 
     # --- Per-site totals bar chart ------------------------------------------
     # Only shown for small tasks (large tasks would render 1000 bars which is
@@ -1669,14 +1434,14 @@ def _build_plots(
     if has_defor_data:
         # Build site options for the dropdown.
         # For large tasks we read IDs/names from `totals` (always loaded).
-        # For small tasks we read from `df["site_id"]` as before.
+        # For small tasks we read from the per-site rows.
         totals_name_map = {}
         if totals:
             for t in totals:
                 if t.site_name:
                     totals_name_map[str(t.site_id)] = t.site_name
 
-        if is_large or "site_id" not in df.columns:
+        if df is None:
             # Populate dropdown from totals; no results pre-loaded in store
             site_ids = sorted(str(t.site_id) for t in totals) if totals else []
             site_info_map = {

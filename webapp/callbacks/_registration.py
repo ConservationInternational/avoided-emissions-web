@@ -71,6 +71,7 @@ from services import (
 )
 
 from callbacks._detail_builders import (
+    BOUNDS_NAME,
     _add_ci_band,
     _build_overview,
     _build_plots,
@@ -86,7 +87,6 @@ from callbacks._helpers import (
     _render_share_links_list,
 )
 from callbacks._match_quality import (
-    _build_all_match_quality_plots,
     _build_map,
     _build_match_quality,
     _build_plots_from_summary,
@@ -485,7 +485,6 @@ def register_callbacks(app, limiter=None):
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
         State("separation-fallback-mahalanobis", "value"),
-        State("group-by-exact-matches", "value"),
         State("matching-method", "value"),
         State("n-replicates", "value"),
         State("random-seed", "value"),
@@ -509,7 +508,6 @@ def register_callbacks(app, limiter=None):
         max_controls_per_treatment,
         min_control_distance_km,
         separation_fallback_mahalanobis,
-        group_by_exact_matches,
         matching_method,
         n_replicates,
         random_seed,
@@ -711,10 +709,6 @@ def register_callbacks(app, limiter=None):
                                     "Mahalanobis"
                                     if separation_fallback_mahalanobis
                                     else "Disabled (GLM fails)",
-                                ),
-                                _param_row(
-                                    "Group by exact-match regions",
-                                    "Enabled" if group_by_exact_matches else "Disabled",
                                 ),
                                 _param_row(
                                     "Matching method",
@@ -1495,7 +1489,6 @@ def register_callbacks(app, limiter=None):
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
         State("separation-fallback-mahalanobis", "value"),
-        State("group-by-exact-matches", "value"),
         State("matching-method", "value"),
         State("n-replicates", "value"),
         State("random-seed", "value"),
@@ -1519,7 +1512,6 @@ def register_callbacks(app, limiter=None):
         max_controls_per_treatment,
         min_control_distance_km,
         separation_fallback_mahalanobis,
-        group_by_exact_matches,
         matching_method,
         n_replicates,
         random_seed,
@@ -1637,7 +1629,6 @@ def register_callbacks(app, limiter=None):
                 max_controls_per_treatment=_mcpt,
                 min_control_distance_km=_mcd,
                 separation_fallback_mahalanobis=bool(separation_fallback_mahalanobis),
-                group_by_exact_matches=bool(group_by_exact_matches),
                 matching_method=matching_method or ANALYSIS_DEFAULTS["matching_method"],
                 random_seed=_seed,
                 n_replicates=_nrep,
@@ -3096,44 +3087,8 @@ def register_callbacks(app, limiter=None):
             quality_warnings, scope_filter=scope
         )
 
-        if store_data.get("has_summary"):
-            # New path: use pre-computed histograms and QQ quantiles
-            return html.Div(
-                [warning_banner] + _build_plots_from_summary(store_data, site_filter)
-            )
-
-        # Legacy path: raw pixel data (kept for backward compatibility
-        # with any data still in browser stores from before the
-        # pre-computation change).
-        df = pd.DataFrame(store_data.get("rows", []))
-        covariate_cols = store_data.get("covariate_cols", [])
-        site_areas = store_data.get("site_areas", {})
-
-        balance_rows = store_data.get("balance_rows")
-        balance_df = pd.DataFrame(balance_rows) if balance_rows else None
-
-        pscore_rows = store_data.get("pscore_rows")
-        pscore_df = pd.DataFrame(pscore_rows) if pscore_rows else None
-
-        if df.empty:
-            return html.P("No data available.", className="text-muted")
-
-        if site_filter:
-            df = df[df["site_id"].astype(str) == str(selected_site)]
-
-        if df.empty:
-            return html.P("No data for selected site.", className="text-muted")
-
         return html.Div(
-            [warning_banner]
-            + _build_all_match_quality_plots(
-                df,
-                covariate_cols,
-                balance_df,
-                pscore_df,
-                site_filter,
-                site_areas=site_areas,
-            )
+            [warning_banner] + _build_plots_from_summary(store_data, site_filter)
         )
 
     # -- Site-level deforestation drill-down ----------------------------------
@@ -3236,7 +3191,7 @@ def register_callbacks(app, limiter=None):
                 site_df["treatment_defor_ha_ci_lower"],
                 site_df["treatment_defor_ha_ci_upper"],
                 color="rgba(44,160,44,0.15)",
-                name="Project Site 95% CI",
+                name=f"Project Site ({BOUNDS_NAME.lower()})",
             )
             _add_ci_band(
                 fig_defor,
@@ -3244,7 +3199,7 @@ def register_callbacks(app, limiter=None):
                 site_df["control_defor_ha_ci_lower"],
                 site_df["control_defor_ha_ci_upper"],
                 color="rgba(214,39,40,0.15)",
-                name="Matched Controls 95% CI",
+                name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         fig_defor.update_layout(
             title=f"Annual Deforestation: {site_name}{sub_note}",
@@ -3303,23 +3258,8 @@ def register_callbacks(app, limiter=None):
                 marker={"size": 6},
             )
         )
-        if site_has_ci:
-            _add_ci_band(
-                fig_cum,
-                site_sorted["year"],
-                site_sorted["treatment_defor_ha_ci_lower"].cumsum(),
-                site_sorted["treatment_defor_ha_ci_upper"].cumsum(),
-                color="rgba(44,160,44,0.15)",
-                name="Project Site 95% CI",
-            )
-            _add_ci_band(
-                fig_cum,
-                site_sorted["year"],
-                site_sorted["control_defor_ha_ci_lower"].cumsum(),
-                site_sorted["control_defor_ha_ci_upper"].cumsum(),
-                color="rgba(214,39,40,0.15)",
-                name="Matched Controls 95% CI",
-            )
+        # No replicate band here: cumulative bounds cannot be derived from
+        # yearly bounds.
         fig_cum.update_layout(
             title=f"Cumulative Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
@@ -3386,7 +3326,7 @@ def register_callbacks(app, limiter=None):
                     site_df["treatment_emissions_mgco2e_ci_lower"],
                     site_df["treatment_emissions_mgco2e_ci_upper"],
                     color="rgba(44,160,44,0.15)",
-                    name="Project Site 95% CI",
+                    name=f"Project Site ({BOUNDS_NAME.lower()})",
                 )
                 _add_ci_band(
                     fig_em,
@@ -3394,7 +3334,7 @@ def register_callbacks(app, limiter=None):
                     site_df["control_emissions_mgco2e_ci_lower"],
                     site_df["control_emissions_mgco2e_ci_upper"],
                     color="rgba(214,39,40,0.15)",
-                    name="Matched Controls 95% CI",
+                    name=f"Matched Controls ({BOUNDS_NAME.lower()})",
                 )
             fig_em.update_layout(
                 title=f"Annual Emissions: {site_name}{sub_note}",
@@ -3707,7 +3647,6 @@ def register_callbacks(app, limiter=None):
             Output("min-control-distance-km", "value"),
             Output("matching-method", "value"),
             Output("separation-fallback-mahalanobis", "value"),
-            Output("group-by-exact-matches", "value"),
             Output("n-replicates", "value"),
             Output("match-memory-gb", "value"),
             Output("matching-job-queue", "value"),
@@ -3736,7 +3675,6 @@ def register_callbacks(app, limiter=None):
                     s.get("min_control_distance_km", no_update),
                     s.get("matching_method", no_update),
                     s.get("separation_fallback_mahalanobis", no_update),
-                    s.get("group_by_exact_matches", no_update),
                     s.get("n_replicates", no_update),
                     s.get("match_memory_gb", no_update),
                     s.get("matching_job_queue", no_update),
@@ -3769,7 +3707,6 @@ def register_callbacks(app, limiter=None):
         State("min-control-distance-km", "value"),
         State("matching-method", "value"),
         State("separation-fallback-mahalanobis", "value"),
-        State("group-by-exact-matches", "value"),
         State("n-replicates", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
@@ -3787,7 +3724,6 @@ def register_callbacks(app, limiter=None):
         min_control_distance_km,
         matching_method,
         separation_fallback_mahalanobis,
-        group_by_exact_matches,
         n_replicates,
         match_memory_gb,
         matching_job_queue,
@@ -3818,7 +3754,6 @@ def register_callbacks(app, limiter=None):
             "min_control_distance_km": min_control_distance_km,
             "matching_method": matching_method,
             "separation_fallback_mahalanobis": separation_fallback_mahalanobis,
-            "group_by_exact_matches": group_by_exact_matches,
             "n_replicates": n_replicates,
             "match_memory_gb": match_memory_gb,
             "matching_job_queue": matching_job_queue,

@@ -10,7 +10,7 @@ import tarfile
 import tempfile
 import uuid
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 
@@ -83,7 +83,7 @@ def _use_shared_site_upload_stage():
 def _parse_staged_upload_created_at(meta):
     created_at = datetime.fromisoformat(meta.get("created_at", ""))
     if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
+        created_at = created_at.replace(tzinfo=UTC)
     return created_at
 
 
@@ -114,7 +114,7 @@ def _validate_staged_upload_access(upload_token, user_id):
         raise ValueError("You do not have access to this staged upload.")
 
     created_at = _parse_staged_upload_created_at(meta)
-    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+    age_seconds = (datetime.now(UTC) - created_at).total_seconds()
     if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS:
         discard_staged_site_upload(upload_token, user_id)
         raise ValueError("Staged upload expired. Please upload the file again.")
@@ -201,9 +201,7 @@ def _cleanup_expired_staged_uploads():
         return
 
     SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        seconds=SITE_UPLOAD_STAGE_TTL_SECONDS
-    )
+    cutoff = datetime.now(UTC) - timedelta(seconds=SITE_UPLOAD_STAGE_TTL_SECONDS)
 
     for meta_path in SITE_UPLOAD_STAGE_DIR.glob("*.json"):
         token = meta_path.stem
@@ -213,11 +211,9 @@ def _cleanup_expired_staged_uploads():
                 meta = json.load(f)
             created_at = datetime.fromisoformat(meta.get("created_at", ""))
             if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
+                created_at = created_at.replace(tzinfo=UTC)
         except Exception:  # noqa: BLE001
-            created_at = datetime.fromtimestamp(
-                meta_path.stat().st_mtime, tz=timezone.utc
-            )
+            created_at = datetime.fromtimestamp(meta_path.stat().st_mtime, tz=UTC)
 
         if created_at < cutoff:
             try:
@@ -235,7 +231,7 @@ def stage_site_upload(file_content, filename, user_id):
     meta = {
         "user_id": str(user_id),
         "filename": filename,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
     if _use_shared_site_upload_stage():
@@ -348,7 +344,7 @@ def stream_stage_site_upload(file_stream, filename, user_id):
         meta = {
             "user_id": str(user_id),
             "filename": filename,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
 
         if _use_shared_site_upload_stage():
@@ -429,7 +425,7 @@ def get_site_upload_mapping_preview_from_staged(token, user_id):
         return None, ["You do not have access to this staged upload."]
 
     created_at = _parse_staged_upload_created_at(meta)
-    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+    age_seconds = (datetime.now(UTC) - created_at).total_seconds()
     if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS:
         discard_staged_site_upload(token, user_id)
         return None, ["Staged upload expired. Please upload the file again."]
@@ -1076,7 +1072,7 @@ def validate_site_upload_mapping(file_content, filename, column_mapping):
 def _derive_site_set_name(filename):
     stem = os.path.splitext(os.path.basename(filename or "sites"))[0].strip()
     stem = stem or "sites"
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     return f"{stem}_{timestamp}"
 
 
@@ -1290,7 +1286,7 @@ def cancel_user_site_upload(upload_id, user_id):
                 return False, "Failed to cancel upload task."
 
         upload.status = "cancelled"
-        upload.completed_at = datetime.now(timezone.utc)
+        upload.completed_at = datetime.now(UTC)
         upload.error_message = "Cancelled by admin."
         db.commit()
         return True, "Upload cancelled."

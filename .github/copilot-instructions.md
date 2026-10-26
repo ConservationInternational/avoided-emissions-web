@@ -172,10 +172,12 @@ docker exec -it "$CID" psql \
 - The database password is not needed when connecting via `docker exec` because `psql` inside the Alpine container trusts local Unix socket connections by default.
 
 ### Testing
-There is **no test suite** in this repository. Validate changes by:
+Validate changes by:
 1. Ensuring `ruff check` and `ruff format --check` pass (see above)
-2. Starting the Docker Compose stack and verifying the health endpoint returns `ok`
-3. Manually checking affected functionality in the web UI
+2. Running the Python tests with `./run_tests.sh` (unit) or `./run_tests.sh -m integration` (needs PostGIS)
+3. Running the R tests for analysis changes (see `r-analysis/scripts/README.md`); `test_pipeline.R` needs the analysis container's packages
+4. Starting the Docker Compose stack and verifying the health endpoint returns `ok`
+5. Manually checking affected functionality in the web UI
 
 ## CI/CD Pipelines
 

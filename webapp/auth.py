@@ -7,7 +7,7 @@ via email.
 
 import functools
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import bcrypt
 import flask
@@ -106,7 +106,7 @@ def authenticate(email: str, password: str):
         if user and user.is_active and verify_password(password, user.password_hash):
             if not user.is_approved:
                 return "pending_approval"
-            user.last_login = datetime.now(timezone.utc)
+            user.last_login = datetime.now(UTC)
             db.commit()
             return SessionUser(user)
     finally:

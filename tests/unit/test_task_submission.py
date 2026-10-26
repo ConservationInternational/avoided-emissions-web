@@ -137,6 +137,16 @@ class TestQueueAnalysisTaskValidation:
                 exact_match_vars=["admin0", "elev"],  # "elev" in both
             )
 
+    def test_raises_if_nearest_with_full_matching(self, mocker):
+        _setup_happy_path(mocker)
+        with pytest.raises(ValueError, match="requires the optimal matching method"):
+            queue_analysis_task(
+                user_id=str(uuid.uuid4()),
+                matching_method="nearest",
+                max_controls_per_treatment=0,
+                **_BASE_KWARGS,
+            )
+
     def test_raises_if_covariate_not_ready(self, mocker):
         mock_db = MagicMock()
         mocker.patch("services.analysis_task.get_db", return_value=mock_db)

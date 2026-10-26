@@ -1,7 +1,7 @@
 """User management, trends.earth admin integration, and result exports."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from config import Config, report_exception
 from models import (
@@ -38,7 +38,7 @@ def approve_user(user_id):
         if user.is_approved:
             return False, "User is already approved."
         user.is_approved = True
-        user.updated_at = datetime.now(timezone.utc)
+        user.updated_at = datetime.now(UTC)
         db.commit()
 
         # Send the newly-approved user a link to set their password.
@@ -100,7 +100,7 @@ def change_user_role(user_id, new_role, acting_user_id=None):
         if not user:
             return False, "User not found."
         user.role = new_role
-        user.updated_at = datetime.now(timezone.utc)
+        user.updated_at = datetime.now(UTC)
         db.commit()
         return True, f"User {user.email} role changed to {new_role}."
     except Exception:  # noqa: BLE001

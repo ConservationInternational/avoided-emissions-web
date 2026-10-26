@@ -287,22 +287,6 @@ for year in (2003, 2007, 2011, 2015, 2019):
     }
 
 
-# -- Matching formula (default) ----------------------------------------------
-# This is the standard propensity score matching formula. Users can modify
-# the covariate list when submitting analysis tasks.
-
-DEFAULT_MATCHING_COVARIATES = [
-    "precip",
-    "temp",
-    "elev",
-    "slope",
-    "dist_cities",
-    "friction_surface",
-    "pop_2015",
-    "pop_growth",
-    "total_biomass_2025",
-]
-
 # These are used for exact matching (stratification), not propensity scores.
 # Names must match the output_name values in webapp/rasterize_vectors.py.
 EXACT_MATCHING_VARIABLES = ["admin0", "admin1", "admin2", "ecoregion", "pa"]

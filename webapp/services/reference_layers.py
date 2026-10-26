@@ -3,7 +3,7 @@
 import json
 import logging
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import geopandas as gpd
 from config import Config
@@ -56,7 +56,7 @@ def export_reference_layers_to_s3() -> dict[str, str]:
 
     exported: dict[str, str] = {}
     s3 = get_s3_client()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for layer_name, table in _EXTENT_TABLE_MAP.items():
         assert _SAFE_TABLE_RE.match(table), f"Unsafe table name: {table}"  # nosec B101

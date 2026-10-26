@@ -1,7 +1,7 @@
 """Celery tasks: export reference layers to S3 and ingest SDG COG."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from celery_app import celery_app
 from config import report_exception
@@ -159,7 +159,7 @@ def ingest_sdg_cog_task(self) -> dict:
                             resolution_m=resolution_m,
                             output_bucket=bucket,
                             output_prefix=prefix,
-                            started_at=datetime.now(timezone.utc),
+                            started_at=datetime.now(UTC),
                         )
                         db.add(layer)
                         db.flush()
@@ -167,7 +167,7 @@ def ingest_sdg_cog_task(self) -> dict:
                     layer.status = "merged"
                     layer.merged_url = result["cog_url"]
                     layer.size_bytes = result["size_bytes"]
-                    layer.completed_at = datetime.now(timezone.utc)
+                    layer.completed_at = datetime.now(UTC)
                     meta = dict(layer.extra_metadata or {})
                     meta["source"] = "sdg_cog_ingest"
                     meta["band"] = layer_info["band"]

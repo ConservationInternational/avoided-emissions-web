@@ -1,7 +1,7 @@
 """Covariate lifecycle and GEE export metadata models."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     BigInteger,
@@ -64,9 +64,7 @@ class Covariate(Base):
         default="pending_export",
     )
     started_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
-    started_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     completed_at = Column(DateTime(timezone=True))
     error_message = Column(Text)
     extra_metadata = Column("metadata", JSON, default=dict)
@@ -139,9 +137,7 @@ class GeeExportMetadata(Base):
         default="detected",
     )
     error_message = Column(Text)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     covariate = relationship("Covariate", back_populates="export_snapshots")
 

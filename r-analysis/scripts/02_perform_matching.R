@@ -1,46 +1,36 @@
 # Step 2: Propensity score matching for avoided emissions analysis.
 #
-# For each site, matches treatment pixels (within the site) to control pixels
-# (outside the site, within the precomputed matching extent) using propensity
-# scores estimated via logistic regression or Mahalanobis distance.
+# Each site fragment (id_numeric) is matched independently.  Within every
+# exact-match stratum, sampled treatment pixels are matched to control pixels
+# outside all sites using a per-stratum logistic propensity model, or
+# Mahalanobis distance when the stratum is too small or separated.
 #
-# When run on AWS Batch as an array job, each array element processes one
-# (batch_of_sites, replicate) combination.  MATCH_BATCH_SIZE sites (or groups
-# in BATCH_GROUP_SITES mode) are processed per array element to amortise the
-# per-worker overhead (container startup, package loading, file downloads).
-# The composite array index is decoded as:
+# On AWS Batch each array element processes one batch of match units (the
+# exact-match groups in config$exact_match_group_mapping, or sites when no
+# mapping is given) for one replicate:
 #   batch_index     = floor(array_index / N_REPLICATES)
 #   replicate_index = (array_index %% N_REPLICATES) + 1
-#   site_start      = batch_index * MATCH_BATCH_SIZE
-# When N_REPLICATES == 1 and MATCH_BATCH_SIZE == 1 the mapping is identical
-# to the old behaviour (one element per site).
 #
-# Input:
-#   - {output_dir}/sites_processed.parquet
-#   - {output_dir}/treatment_cell_key.parquet
-#   - {output_dir}/treatment_pixels.parquet
-#   - s3://.../control_pixels/   (pipelined mode; via config$control_pixels_s3_uri)
-#   - OR {output_dir}/control_pixels/   (all-in-one local mode)
-#   - {output_dir}/formula.json
-#
-# Output:
-#   - {matches_dir}/m_{id_numeric}[_rep{k}].rds : Matched pairs for each site
+# Output, per site fragment {id} and replicate {k}:
+#   - {matches_dir}/m_{id}_rep{k}.rds          matched pixels
+#   - {matches_dir}/failed_{id}_rep{k}.json    failure marker
+#   - {matches_dir}/m_{id}_na_exclusion.json   missing-data exclusions
 
 library(dplyr, warn.conflicts = FALSE)
-library(foreach)
 library(optmatch)
 library(MatchIt)
-library(arrow)
+library(arrow, warn.conflicts = FALSE)
 library(jsonlite)
 
-source("/app/scripts/utils.R")
+scripts_dir <- Sys.getenv("R_SCRIPTS_DIR", "/app/scripts")
+source(file.path(scripts_dir, "utils.R"))
+source(file.path(scripts_dir, "stats_functions.R"))
 rollbar_init()
 
 with_rollbar({
 
 options("optmatch_max_problem_size" = Inf)
-# Use the RELAX-IV network flow solver (via rrelaxiv) which is 2-5x
-# faster than the default LEMON solver for large matching problems.
+# RELAX-IV (via rrelaxiv) is 2-5x faster than the default LEMON solver.
 if (requireNamespace("rrelaxiv", quietly = TRUE)) {
     options("optmatch_solver" = "RELAX-IV")
     message("Using RELAX-IV solver")
@@ -54,1774 +44,446 @@ MAX_TREATMENT <- config$max_treatment_pixels
 CONTROL_MULTIPLIER <- config$control_multiplier
 MIN_GLM <- config$min_glm_treatment_pixels
 CALIPER_WIDTH <- config$caliper_width
-# 0 means no upper limit (full matching); positive integer caps controls
+# 0 means full matching (optimal method only); k > 0 means k:1 matching
 MAX_CONTROLS <- config$max_controls_per_treatment
-RANDOM_SEED <- if (is.null(config$random_seed)) {
-    NULL
-} else {
-    as.integer(config$random_seed)
-}
-
-# Number of times to repeat the matching (with different random samples)
-# to construct confidence intervals. Default 1 (single run, no CIs).
-N_REPLICATES <- if (is.null(config$n_replicates)) {
-    1L
-} else {
-    as.integer(config$n_replicates)
-}
-
-# When TRUE and GLM separation is detected, fall back to Mahalanobis
-# distance matching instead of failing outright.  Default FALSE so
-# users must opt in via the webapp.
-SEPARATION_FALLBACK <- isTRUE(
-    config$separation_fallback_mahalanobis
-)
-
-# When the treatment-to-control pixel ratio exceeds this value, the
-# logistic GLM produces unreliable propensity scores (intercept bias
-# pushes all predictions away from 0.5, collapsing score overlap).
-# Fall back to Mahalanobis distance matching unconditionally.
-# This typically occurs when the control pool is exhausted in a sparse
-# exact-match stratum (e.g. T=503 vs C=50 in a small ecoregion unit).
-IMBALANCE_RATIO_THRESHOLD <- 2.0
-
-# Minimum distance (km) from treatment polygons for control pixels.
-# Controls whose centroids fall within this buffer are excluded.
-# 0 disables the distance exclusion.
+RANDOM_SEED <- if (is.null(config$random_seed)) NULL else as.integer(config$random_seed)
+N_REPLICATES <- if (is.null(config$n_replicates)) 1L else as.integer(config$n_replicates)
+SEPARATION_FALLBACK <- isTRUE(config$separation_fallback_mahalanobis)
 MIN_CONTROL_DISTANCE_KM <- if (is.null(config$min_control_distance_km)) {
     10
 } else {
     as.numeric(config$min_control_distance_km)
 }
-
-# Exact-match variables read from config (e.g. admin1, ecoregion, pa)
 EXACT_MATCH_VARS <- config$exact_match_vars
+MATCHING_METHOD <- if (is.null(config$matching_method)) "optimal" else config$matching_method
+MATCH_BATCH_SIZE <- if (is.null(config$match_batch_size)) 1L else as.integer(config$match_batch_size)
+FC_YEARS <- as.integer(config$fc_years)
+FC_COLS <- paste0("fc_", FC_YEARS)
+GROUP_MAPPING <- fromJSON(config$config_path, simplifyVector = FALSE)$exact_match_group_mapping
 
-# Matching method: "optimal" uses optmatch (slower, globally optimal)
-# "nearest" uses MatchIt nearest-neighbour (faster, greedy)
-MATCHING_METHOD <- if (is.null(config$matching_method)) {
-    "optimal"
-} else {
-    config$matching_method
+if (length(EXACT_MATCH_VARS) == 0) {
+    stop("At least one exact-match variable is required")
+}
+if (MATCHING_METHOD == "nearest" && MAX_CONTROLS == 0) {
+    stop("Full matching (max_controls_per_treatment = 0) requires matching_method = 'optimal'")
 }
 message("Matching method: ", MATCHING_METHOD)
 
-# Load data — step 1 now outputs Parquet (from the Python rewrite)
-sites <- read_parquet(file.path(config$output_dir, "sites_processed.parquet")) %>%
-    as_tibble()
-# Reconstruct sf geometry from the WKB column written by GeoPandas.
-# Temporarily disable S2 so that st_as_sf() does not reject geometries
-# with degenerate edges or self-intersections under spherical rules.
-# After repairing with st_make_valid(), S2 is re-enabled.
-if ("geometry" %in% names(sites)) {
-    s2_was_on <- sf_use_s2()
-    sf_use_s2(FALSE)
-    sites <- st_as_sf(sites, wkt = "geometry", crs = 4326)
-    sites <- st_make_valid(sites)
-    sf_use_s2(s2_was_on)
-}
+sites <- read_parquet(
+    file.path(config$output_dir, "sites_processed.parquet"),
+    col_select = c("site_id", "site_name", "id_numeric", "sub_site_index", "start_year")
+) %>% as_tibble()
 
-# Load grid metadata for cell-index → lon/lat conversion (needed for
-# the minimum control distance exclusion).
 grid_meta <- fromJSON(file.path(config$output_dir, "grid_metadata.json"))
 
 cell_to_lonlat <- function(cells, gm) {
-    # Convert flat cell indices to pixel-centre lon/lat using the
-    # affine transform stored in grid_metadata.json.
-    # transform = [a, b, c, d, e, f] where:
-    #   x = c + col * a  (a = pixel width)
-    #   y = f + row * e  (e = pixel height, negative for north-up)
+    # Pixel-centre lon/lat from the affine transform [a, b, c, d, e, f]:
+    #   x = c + col * a,  y = f + row * e
     tf <- gm$transform
-    w <- gm$width
-    rows <- cells %/% w
-    cols <- cells %% w
+    rows <- cells %/% gm$width
+    cols <- cells %% gm$width
     data.frame(
         lon = tf[3] + (cols + 0.5) * tf[1],
         lat = tf[6] + (rows + 0.5) * tf[5]
     )
 }
+
 treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
-# Control pixels are read from a partitioned Arrow dataset.  Two cases:
-#   1. Pipelined mode: control_pixels/ lives on S3 (path in config$control_pixels_s3_uri);
-#      Arrow's S3 filesystem streams only the relevant partitions per worker.
-#   2. All-in-one mode (small single-site jobs): control_pixels/ is in
-#      output_dir on local disk.  We open it directly.
-# treatment_pixels.parquet is always local (small file downloaded per worker
-# or written locally by the extract step).
-treatment_pixels_path <- file.path(config$output_dir, "treatment_pixels.parquet")
-local_control_dir <- file.path(config$output_dir, "control_pixels")
-if (!is.null(config$control_pixels_s3_uri)) {
-    control_pixels_uri <- config$control_pixels_s3_uri
-} else if (dir.exists(local_control_dir)) {
-    control_pixels_uri <- local_control_dir
+treatment_table <- read_parquet(file.path(config$output_dir, "treatment_pixels.parquet")) %>%
+    as_tibble()
+# Control pixels are a hive-partitioned Arrow dataset, streamed from S3 in
+# pipeline mode or read from local disk in all-in-one mode.
+control_pixels_uri <- if (!is.null(config$control_pixels_s3_uri)) {
+    config$control_pixels_s3_uri
 } else {
-    stop("Neither config$control_pixels_s3_uri nor local control_pixels/ ",
-         "directory found.  Did the extract step run successfully?")
+    file.path(config$output_dir, "control_pixels")
 }
-if (!file.exists(treatment_pixels_path)) {
-    stop("treatment_pixels.parquet not found at ", treatment_pixels_path,
-         ".  Did the extract step run successfully?")
-}
-treatment_table <- read_parquet(treatment_pixels_path) %>% as_tibble()
 control_dataset <- open_dataset(control_pixels_uri)
-message("Split-data mode: treatment_pixels.parquet (local, ",
-        nrow(treatment_table), " rows) + control_pixels/ from ",
-        control_pixels_uri)
-all_site_ids <- unique(treatment_key$id_numeric)
-all_treatment_cells <- unique(treatment_key$cell)
 
-# Pre-compute the buffer around ALL treatment sites for the minimum
-# control distance exclusion.  Controls for any site must be at least
-# MIN_CONTROL_DISTANCE_KM away from every treatment polygon.
+# Buffer around all sites; controls inside it are excluded.
+all_sites_buffer <- NULL
 if (MIN_CONTROL_DISTANCE_KM > 0) {
-    if (!is.null(config$sites_exclusion_buffer)) {
-        # Use the pre-computed buffer from PostGIS (geography-based,
-        # avoids S2 edge-crossing issues in R).
-        buf_json <- as.character(
-            toJSON(config$sites_exclusion_buffer, auto_unbox = TRUE)
-        )
-        s2_state <- sf_use_s2()
-        sf_use_s2(FALSE)
-        all_sites_buffer <- st_make_valid(
-            st_set_crs(st_as_sfc(buf_json, GeoJSON = TRUE), 4326)
-        )
-        sf_use_s2(s2_state)
-        message(
-            "  Distance exclusion buffer loaded from config: ",
-            MIN_CONTROL_DISTANCE_KM, " km around all ",
-            nrow(sites), " site(s)"
-        )
-    } else {
-        # Fallback: compute buffer locally.  The webapp normally
-        # pre-computes this in PostGIS; this path only runs for
-        # manual/legacy invocations.
-        warning("sites_exclusion_buffer not in config; computing locally")
-        all_sites_buffer <- st_buffer(
-            st_union(st_geometry(sites)),
-            dist = units::set_units(MIN_CONTROL_DISTANCE_KM, "km")
-        )
+    buffer_geojson <- config$sites_exclusion_buffer
+    if (is.null(buffer_geojson)) {
+        buffer_geojson <- fromJSON(
+            file.path(config$output_dir, "prep_summary.json")
+        )$sites_exclusion_buffer
     }
-} else {
-    all_sites_buffer <- NULL
+    if (is.null(buffer_geojson)) {
+        stop("sites_exclusion_buffer is required when min_control_distance_km > 0")
+    }
+    s2_state <- sf_use_s2()
+    sf_use_s2(FALSE)
+    all_sites_buffer <- st_make_valid(st_set_crs(
+        st_as_sfc(as.character(toJSON(buffer_geojson, auto_unbox = TRUE)), GeoJSON = TRUE),
+        4326
+    ))
+    sf_use_s2(s2_state)
 }
 
-# Load formula from JSON
 formula_json <- fromJSON(file.path(config$output_dir, "formula.json"))
 f <- as.formula(formula_json$formula_str)
 
-# Check for cross-site grouping mode
-GROUP_BY_EXACT_MATCHES <- isTRUE(config$group_by_exact_matches)
-BATCH_GROUP_SITES <- isTRUE(config$batch_group_sites)
-GROUP_MAPPING <- NULL
-if (BATCH_GROUP_SITES || GROUP_BY_EXACT_MATCHES) {
-    group_file <- file.path(config$output_dir, "exact_match_groups.json")
-    if (file.exists(group_file)) {
-        GROUP_MAPPING <- fromJSON(group_file, simplifyVector = FALSE)
-        message(
-            "  Cross-site grouping enabled: ",
-            length(GROUP_MAPPING), " exact-match groups"
-        )
+
+# -- Work selection ----------------------------------------------------------
+
+select_work <- function() {
+    # Returns the site fragments and replicates this process should handle.
+    all_reps <- seq_len(N_REPLICATES)
+    mapped <- if (is.null(GROUP_MAPPING)) {
+        sites
     } else {
-        warning("Group mapping file not found: exact_match_groups.json")
-        GROUP_BY_EXACT_MATCHES <- FALSE
-        BATCH_GROUP_SITES <- FALSE
+        keys <- vapply(unlist(GROUP_MAPPING, recursive = FALSE),
+                       function(m) paste(m[[1]], m[[2]], sep = "\r"), character(1))
+        filter(sites, paste(site_id, sub_site_index, sep = "\r") %in% keys)
     }
-}
-
-# Number of match units (sites or groups) to process per array element.
-# Batching multiple units in one container amortises per-worker overhead:
-# container startup, R package loading, file downloads, Arrow dataset open.
-# GROUP_BY_EXACT_MATCHES forces the effective batch size to 1 because each
-# group's joint propensity model must be computed on its own site set only.
-MATCH_BATCH_SIZE <- if (is.null(config$match_batch_size)) {
-    1L
-} else {
-    as.integer(config$match_batch_size)
-}
-if (GROUP_BY_EXACT_MATCHES) MATCH_BATCH_SIZE <- 1L
-
-# Determine which site(s) and replicate(s) to process.
-# BATCH_REPLICATE will be set to a single integer when the array index
-# specifies a specific replicate; NULL means "run all replicates".
-BATCH_REPLICATE <- NULL
-
-if (!is.null(config$site_id)) {
-    # Process a specific site
-    target_site <- filter(sites, site_id == config$site_id)
-    if (nrow(target_site) == 0) {
-        stop(paste("Site not found:", config$site_id))
+    if (!is.null(config$site_id)) {
+        return(list(sites = filter(mapped, site_id == config$site_id), replicates = all_reps))
     }
-    site_ids <- target_site$id_numeric
-} else {
-    # Check for AWS Batch array index
     array_index <- Sys.getenv("AWS_BATCH_JOB_ARRAY_INDEX", "")
-    if (array_index != "") {
-        ai <- as.integer(array_index)
-
-        if ((BATCH_GROUP_SITES || GROUP_BY_EXACT_MATCHES) && !is.null(GROUP_MAPPING)) {
-            # Cross-site grouping: array index maps to (batch_of_groups, replicate).
-            # MATCH_BATCH_SIZE groups are processed per array element.
-            # GROUP_BY_EXACT_MATCHES forces MATCH_BATCH_SIZE=1 (set above) so
-            # that each group's joint propensity model is computed on its own
-            # site set only.
-            group_ids <- as.integer(names(GROUP_MAPPING))
-            n_groups <- length(group_ids)
-            n_batches <- ceiling(n_groups / MATCH_BATCH_SIZE)
-
-            if (N_REPLICATES > 1L) {
-                batch_idx_0 <- ai %/% N_REPLICATES  # 0-based batch index
-                rep_idx_0 <- ai %% N_REPLICATES
-                BATCH_REPLICATE <- rep_idx_0 + 1L
-                # Validate array index is within bounds
-                if (batch_idx_0 >= n_batches) {
-                    stop("AWS Batch array index ", ai, " out of bounds for ",
-                         n_batches, " batches \u00d7 ", N_REPLICATES,
-                         " replicates (valid range: 0-",
-                         (n_batches * N_REPLICATES - 1), ")")
-                }
-            } else {
-                batch_idx_0 <- ai
-                # Validate array index is within bounds
-                if (batch_idx_0 >= n_batches) {
-                    stop("AWS Batch array index ", ai, " out of bounds for ",
-                         n_batches, " batches (valid range: 0-",
-                         (n_batches - 1), ")")
-                }
-            }
-
-            # Groups in this batch (R 1-based indexing)
-            group_start_0 <- batch_idx_0 * MATCH_BATCH_SIZE  # 0-based first group
-            group_end_0 <- min(group_start_0 + MATCH_BATCH_SIZE, n_groups)  # excl.
-            batch_group_ids <- group_ids[seq(group_start_0 + 1L, group_end_0)]
-
-            # Collect all site IDs from every group in this batch
-            all_batch_members <- unlist(
-                lapply(batch_group_ids, function(gid) {
-                    GROUP_MAPPING[[as.character(gid)]]
-                }),
-                recursive = FALSE
-            )
-            group_site_ids <- sapply(all_batch_members, function(x) x[[1]])
-            group_sub_indices <- sapply(all_batch_members, function(x) x[[2]])
-
-            # Get numeric IDs for all sites in batch
-            site_ids <- sites %>%
-                filter(site_id %in% group_site_ids) %>%
-                pull(id_numeric) %>%
-                unique()
-
-            message(
-                "  AWS Batch array index: ", array_index,
-                " -> batch ", batch_idx_0 + 1L, "/", n_batches,
-                " (", length(batch_group_ids), " group(s): ",
-                paste(batch_group_ids, collapse = ", "),
-                ", ", length(site_ids), " site(s)",
-                if (!is.null(BATCH_REPLICATE)) {
-                    paste0(", replicate ", BATCH_REPLICATE, "/", N_REPLICATES)
-                } else {
-                    ""
-                },
-                ")"
-            )
-        } else {
-            # Per-site mode: MATCH_BATCH_SIZE consecutive sites per array element.
-            n_sites <- length(all_site_ids)
-            n_batches <- ceiling(n_sites / MATCH_BATCH_SIZE)
-            if (N_REPLICATES > 1L) {
-                # Composite index: batch_index * N_REPLICATES + replicate_index
-                batch_idx_0 <- ai %/% N_REPLICATES  # 0-based batch index
-                rep_idx_0 <- ai %% N_REPLICATES    # 0-based replicate index
-                BATCH_REPLICATE <- rep_idx_0 + 1L   # 1-based
-                # Validate array index is within bounds
-                if (batch_idx_0 >= n_batches) {
-                    stop("AWS Batch array index ", ai, " out of bounds for ",
-                         n_batches, " batches \u00d7 ", N_REPLICATES,
-                         " replicates (valid range: 0-",
-                         (n_batches * N_REPLICATES - 1), ")")
-                }
-            } else {
-                batch_idx_0 <- ai
-                if (batch_idx_0 >= n_batches) {
-                    stop("AWS Batch array index ", ai, " out of bounds for ",
-                         n_batches, " batches (valid range: 0-",
-                         (n_batches - 1), ")")
-                }
-            }
-            # Sites in this batch (R 1-based indexing)
-            site_batch_start_0 <- batch_idx_0 * MATCH_BATCH_SIZE  # 0-based
-            site_batch_end_0 <- min(site_batch_start_0 + MATCH_BATCH_SIZE,
-                                     n_sites)  # exclusive
-            site_ids <- all_site_ids[seq(site_batch_start_0 + 1L,
-                                          site_batch_end_0)]
-            message(
-                "  AWS Batch array index: ", array_index,
-                " -> batch ", batch_idx_0 + 1L, "/", n_batches,
-                " (sites ", site_batch_start_0 + 1L, "-", site_batch_end_0,
-                ", ", length(site_ids), " site(s))",
-                if (!is.null(BATCH_REPLICATE)) {
-                    paste0(", replicate ", BATCH_REPLICATE, "/", N_REPLICATES)
-                } else {
-                    ""
-                }
-            )
-        }
+    if (array_index == "") {
+        return(list(sites = mapped, replicates = all_reps))
+    }
+    ai <- as.integer(array_index)
+    batch_idx <- ai %/% N_REPLICATES
+    replicate <- ai %% N_REPLICATES + 1L
+    units <- if (is.null(GROUP_MAPPING)) {
+        as.character(sort(sites$id_numeric))
     } else {
-        # Process all sites sequentially
-        site_ids <- all_site_ids
+        names(GROUP_MAPPING)
     }
-}
-
-
-check_separation <- function(d, f) {
-    # Detect quasi-complete separation in the data before fitting GLM.
-    # Returns a list with:
-    #   separated    : logical — TRUE if any covariate is problematic
-    #   details      : character vector describing each problem
-    #   sep_vars     : character vector of variable names that caused
-    #                  separation (used to build a reduced formula for
-    #                  the Mahalanobis fallback)
-    #
-    # Checks three things:
-    # 1. Factor levels that appear only in treatment or only in control
-    # 2. Continuous variables with zero overlap between groups
-    # 3. Low-cardinality numeric variables (e.g. binary 0/1) where
-    #    specific values appear exclusively in one group — this catches
-    #    cases like pa=1 appearing only in treatment, which causes
-    #    quasi-complete separation even though the ranges overlap at 0.
-    formula_vars <- all.vars(f)
-    rhs_vars <- setdiff(formula_vars, "treatment")
-    problems <- character(0)
-    problem_vars <- character(0)
-
-    for (v in rhs_vars) {
-        if (!v %in% names(d)) next
-        col <- d[[v]]
-        treat_vals <- col[d$treatment]
-        ctrl_vals <- col[!d$treatment]
-
-        if (is.factor(col) || is.character(col)) {
-            treat_levels <- unique(as.character(treat_vals))
-            ctrl_levels <- unique(as.character(ctrl_vals))
-            only_treat <- setdiff(treat_levels, ctrl_levels)
-            only_ctrl <- setdiff(ctrl_levels, treat_levels)
-            if (length(only_treat) > 0) {
-                problem_vars <- c(problem_vars, v)
-                problems <- c(problems, paste0(
-                    v, ": ", length(only_treat),
-                    " level(s) only in treatment (",
-                    paste(head(only_treat, 5), collapse = ", "),
-                    if (length(only_treat) > 5) ", ..." else "",
-                    ")"
-                ))
-            }
-            if (length(only_ctrl) > 0) {
-                problem_vars <- c(problem_vars, v)
-                problems <- c(problems, paste0(
-                    v, ": ", length(only_ctrl),
-                    " level(s) only in control (",
-                    paste(head(only_ctrl, 5), collapse = ", "),
-                    if (length(only_ctrl) > 5) ", ..." else "",
-                    ")"
-                ))
-            }
-        } else if (is.numeric(col)) {
-            # For numeric variables, only check for complete range separation
-            # (no overlap between treatment and control ranges)
-            t_range <- range(treat_vals, na.rm = TRUE)
-            c_range <- range(ctrl_vals, na.rm = TRUE)
-            if (t_range[2] < c_range[1] || c_range[2] < t_range[1]) {
-                problem_vars <- c(problem_vars, v)
-                problems <- c(problems, paste0(
-                    v, ": no overlap (treatment [",
-                    round(t_range[1], 3), ", ", round(t_range[2], 3),
-                    "], control [",
-                    round(c_range[1], 3), ", ", round(c_range[2], 3),
-                    "])"
-                ))
-            }
-        }
-    }
-
-    list(
-        separated = length(problems) > 0,
-        details = problems,
-        sep_vars = unique(problem_vars)
-    )
-}
-
-
-get_matches <- function(d, dists) {
-    # Attempt matching and return matched pairs with weights.
-    # Returns empty data.frame if matching fails.
-    #
-    # MAX_CONTROLS controls the matching strategy:
-    #   0 -> full matching with variable ratios
-    #   k -> fixed k:1 matching via pairmatch
-    #
-    # Controls within each matched set are weighted so that total control
-    # weight equals the number of treated units in that set. Treatment
-    # pixels get weight = 1.
-    subdim_works <- tryCatch(
-        is.data.frame(subdim(dists)),
-        error = function(e) FALSE
-    )
-    if (subdim_works) {
-        if (MAX_CONTROLS > 0) {
-            # Assigns exactly controls per treatment when feasible;
-            # treatments without enough eligible controls are left unmatched.
-            m <- pairmatch(dists, controls = MAX_CONTROLS, data = d)
-        } else {
-            # Full matching — variable ratios, all units matched
-            m <- fullmatch(dists, min.controls = 1,
-                           max.controls = Inf, data = d)
-        }
-        d$match_group <- as.character(m)
-        d <- d[matched(m), ]
-
-        # Weights within matched sets:
-        # treatment units carry weight 1 each; control weights are scaled so
-        # the total control weight in a set equals the number of treated units.
-        # This supports both pair matching (1:k) and full matching with
-        # potentially multiple treated units per matched set.
-        d$match_weight <- 1
-        group_counts <- d %>%
-            group_by(match_group) %>%
-            summarise(
-                n_treated = sum(treatment),
-                n_controls = sum(!treatment),
-                .groups = "drop"
-            )
-        ctrl_idx <- which(!d$treatment)
-        ctrl_groups <- d$match_group[ctrl_idx]
-        matched_counts <- group_counts[match(ctrl_groups, group_counts$match_group), ]
-        d$match_weight[ctrl_idx] <-
-            matched_counts$n_treated / matched_counts$n_controls
+    in_batch <- (seq_along(units) - 1L) %/% MATCH_BATCH_SIZE == batch_idx
+    message("Array index ", ai, ": batch ", batch_idx + 1L, ", replicate ",
+            replicate, ", ", sum(in_batch), " unit(s)")
+    if (is.null(GROUP_MAPPING)) {
+        selected <- filter(sites, id_numeric %in% as.integer(units[in_batch]))
     } else {
-        d <- data.frame()
+        members <- unlist(GROUP_MAPPING[in_batch], recursive = FALSE)
+        keys <- vapply(members, function(m) paste(m[[1]], m[[2]], sep = "\r"), character(1))
+        selected <- filter(sites, paste(site_id, sub_site_index, sep = "\r") %in% keys)
     }
-    return(d)
+    list(sites = selected, replicates = replicate)
 }
 
 
-match_site <- function(d, f) {
-    # Run propensity score matching within each exact-match group.
-    # Propensity scores (from GLM) are stored in a ``pscore`` column on
-    # the returned data.frame.  Groups too small for GLM get NA scores.
-    #
-    # Returns a list with:
-    #   result              : data.frame of matched rows (or NULL)
-    #   separation_warnings : list of per-group separation diagnostics
-    #   group_diagnostics   : list of per-group match outcome summaries
-    sep_warnings <- list()
-    group_diags <- list()
-    fn_env <- environment()  # explicit ref for use inside foreach
+# -- Data loading ------------------------------------------------------------
 
-    m <- foreach(this_group = unique(d$group), .combine = foreach_rbind) %do% {
-        this_d <- filter(d, group == this_group)
-        n_treatment_grp <- sum(this_d$treatment)
-        n_control_grp <- sum(!this_d$treatment)
-
-        # NA removal now happens before sampling (upstream) to preserve
-        # sampling weight accuracy. This function assumes clean data.
-
-        n_treatment <- sum(this_d$treatment)
-
-        if (n_treatment < 1) {
-            message("    Group ", this_group, ": 0 treatment pixels, skipping")
-            return(NULL)
-        } else if (n_treatment < MIN_GLM) {
-            # Too few treatment pixels for GLM; use Mahalanobis distance
-            dists <- match_on(f, data = this_d)
-            if (CALIPER_WIDTH > 0) {
-                dists <- dists + caliper(dists, width = CALIPER_WIDTH)
-            }
-            this_d$pscore <- NA_real_
-        } else {
-            # Check for quasi-complete separation before fitting GLM
-            sep <- check_separation(this_d, f)
-            if (sep$separated) {
-                for (d_msg in sep$details) {
-                    message("    Separation detected in group ",
-                            this_group, ": ", d_msg)
-                }
-                sw <- get("sep_warnings", envir = fn_env)
-                sw[[as.character(this_group)]] <- sep$details
-                assign("sep_warnings", sw, envir = fn_env)
-
-                if (SEPARATION_FALLBACK) {
-                    message("    Falling back to Mahalanobis distance ",
-                            "(separation_fallback_mahalanobis=true)")
-                    # Build a reduced formula excluding the variables
-                    # that caused separation so they don't dominate the
-                    # Mahalanobis distance.  If that would remove ALL
-                    # RHS variables, fall back to the full formula.
-                    rhs_vars <- setdiff(all.vars(f), "treatment")
-                    reduced_vars <- setdiff(rhs_vars, sep$sep_vars)
-                    fb_formula <- if (length(reduced_vars) > 0) {
-                        as.formula(
-                            paste("treatment ~",
-                                  paste(reduced_vars, collapse = " + "))
-                        )
-                    } else {
-                        f
-                    }
-                    dists <- match_on(fb_formula, data = this_d)
-                    # Skip caliper for Mahalanobis fallback — the
-                    # separated variable is excluded from the distance
-                    # but would make a caliper unreliable. This is
-                    # consistent with the MatchIt path, which also
-                    # drops the caliper for Mahalanobis distance.
-                    this_d$pscore <- NA_real_
-                    grp_fb <- get_matches(this_d, dists)
-                    n_fb <- if (is.data.frame(grp_fb)) {
-                        sum(grp_fb$treatment)
-                    } else {
-                        0L
-                    }
-                    message("    Group ", this_group,
-                            " (fallback): T=", n_treatment_grp,
-                            " C=", n_control_grp,
-                            " -> ", n_fb, " matched")
-                    return(grp_fb)
-                }
-            }
-
-            # Estimate propensity scores with logistic regression
-            model <- glm(f, data = this_d, family = binomial())
-            this_d$pscore <- predict(model, type = "response")
-            dists <- match_on(model, data = this_d)
-            if (CALIPER_WIDTH > 0) {
-                dists <- dists + caliper(dists, width = CALIPER_WIDTH)
-            }
-        }
-        grp_result <- get_matches(this_d, dists)
-        n_matched <- if (is.data.frame(grp_result)) {
-            sum(grp_result$treatment)
-        } else {
-            0L
-        }
-        # Prefix match_group with exact-match group ID to ensure uniqueness
-        # across groups within the site.  Without this prefix, different
-        # exact-match groups can produce overlapping match_group values
-        # (e.g., "1.1", "1.2") which would be incorrectly combined in step 3
-        # when aggregating by (match_group, site_id, year).
-        if (is.data.frame(grp_result) && nrow(grp_result) > 0) {
-            grp_result$match_group <- paste(
-                this_group, grp_result$match_group, sep = "_"
-            )
-        }
-        if (n_matched == 0) {
-            message("    Group ", this_group, ": T=", n_treatment_grp,
-                    " C=", n_control_grp, " -> 0 matches")
-        } else {
-            message("    Group ", this_group, ": T=", n_treatment_grp,
-                    " C=", n_control_grp, " -> ", n_matched, " matched")
-        }
-
-        # Record per-group diagnostics for structured output
-        gd <- get("group_diags", envir = fn_env)
-        sep_cur <- get("sep_warnings", envir = fn_env)
-        gd[[length(gd) + 1L]] <- list(
-            group = as.character(this_group),
-            n_treatment = n_treatment_grp,
-            n_control = n_control_grp,
-            n_matched = n_matched,
-            separation_detected = as.character(this_group) %in%
-                names(sep_cur),
-            separation_details = sep_cur[[as.character(this_group)]]
-        )
-        assign("group_diags", gd, envir = fn_env)
-
-        return(grp_result)
-    }
-
-    if (is.null(m) || nrow(m) == 0) {
-        return(list(
-            result = NULL,
-            separation_warnings = sep_warnings,
-            group_diagnostics = group_diags
-        ))
-    }
-    return(list(
-        result = m,
-        separation_warnings = sep_warnings,
-        group_diagnostics = group_diags
+load_worker_pixels <- function(site_rows) {
+    # Treatment pixels for every site in this batch plus the candidate
+    # controls for their exact-match strata, loaded once per worker.  Pixels
+    # missing an exact-match value are dropped and the distance exclusion is
+    # applied to controls here because it does not depend on the site.
+    needed <- unique(c(
+        "cell", "area_ha", EXACT_MATCH_VARS, setdiff(all.vars(f), "treatment"),
+        "total_biomass_2025", FC_COLS
     ))
-}
-
-
-match_site_matchit <- function(d, f, precomputed_scores = NULL) {
-    # Match treatment to control pixels using MatchIt nearest-neighbour
-    # matching.  This is a greedy (non-optimal) algorithm that is
-    # substantially faster than optmatch.
-    #
-    # Exact matching on EXACT_MATCH_VARS is handled natively by MatchIt
-    # via the `exact` parameter, so no external group loop is needed.
-    #
-    # Returns a list with:
-    #   result              : data.frame of matched rows (or NULL)
-    #   separation_warnings : list of per-group separation diagnostics
-    sep_warnings <- list()
-
-    # Check separation before fitting
-    sep <- check_separation(d, f)
-    if (sep$separated) {
-        for (d_msg in sep$details) {
-            message("    Separation detected: ", d_msg)
-        }
-        sep_warnings[["global"]] <- sep$details
-        if (!SEPARATION_FALLBACK) {
-            # Without fallback, MatchIt may still succeed since nearest-
-            # neighbour is more forgiving than GLM-based optimal matching.
-            # Log the warning but proceed.
-            message("    Proceeding with MatchIt despite separation")
-        }
-    }
-
-    # NA removal now happens before sampling (upstream) to preserve
-    # sampling weight accuracy. This function assumes clean data.
-
-    n_treatment <- sum(d$treatment)
-    n_control <- sum(!d$treatment)
-    if (n_treatment < 1) {
-        return(list(
-            result = NULL, separation_warnings = sep_warnings,
-            group_diagnostics = list()
-        ))
-    }
-
-    # Build exact-match formula from EXACT_MATCH_VARS that are present
-    exact_vars_present <- intersect(EXACT_MATCH_VARS, names(d))
-    exact_formula <- if (length(exact_vars_present) > 0) {
-        as.formula(paste("~", paste(exact_vars_present, collapse = " + ")))
-    } else {
-        NULL
-    }
-
-    # Determine distance method.
-    # When a named numeric vector of pre-computed propensity scores is
-    # supplied, skip GLM fitting entirely and pass the scores to MatchIt.
-    use_precomputed <- !is.null(precomputed_scores)
-    if (use_precomputed) {
-        cell_scores <- precomputed_scores[as.character(d$cell)]
-        if (anyNA(cell_scores)) {
-            message(
-                "    WARNING: ", sum(is.na(cell_scores)),
-                " cells missing from pre-computed scores;",
-                " falling back to per-site GLM"
-            )
-            use_precomputed <- FALSE
-        }
-    }
-    use_mahalanobis <- (
-        (!use_precomputed && n_treatment < MIN_GLM) ||
-        (sep$separated && SEPARATION_FALLBACK) ||
-        (n_control > 0 && n_treatment / n_control > IMBALANCE_RATIO_THRESHOLD)
-    )
-    # Separation and imbalance fallbacks must override pre-computed group
-    # scores: the group GLM may be unreliable in those edge cases
-    # (degenerate scores from T >> C cause the caliper to reject all matches;
-    # perfect separation means the group model didn't fit a valid GLM anyway).
-    if (use_mahalanobis && use_precomputed) {
-        reason <- if (sep$separated && SEPARATION_FALLBACK) {
-            "separation detected"
-        } else {
-            paste0(
-                "T/C ratio ", round(n_treatment / n_control, 1),
-                " > threshold ", IMBALANCE_RATIO_THRESHOLD
-            )
-        }
-        message(
-            "    Discarding pre-computed group scores (", reason,
-            "); falling back to Mahalanobis distance"
-        )
-        use_precomputed <- FALSE
-    }
-    distance_method <- if (use_precomputed) "precomputed" else
-                       if (use_mahalanobis) "mahalanobis" else "glm"
-
-    # When falling back to Mahalanobis due to separation, exclude the
-    # separated variables so they don't dominate the distance.
-    # When using pre-computed scores, pass the base formula f — MatchIt
-    # uses it only to identify the treatment column; no GLM is fitted.
-    mi_formula <- f
-    if (!use_precomputed && use_mahalanobis &&
-        sep$separated && length(sep$sep_vars) > 0) {
-        rhs_vars <- setdiff(all.vars(f), "treatment")
-        reduced_vars <- setdiff(rhs_vars, sep$sep_vars)
-        if (length(reduced_vars) > 0) {
-            mi_formula <- as.formula(
-                paste("treatment ~", paste(reduced_vars, collapse = " + "))
-            )
-        }
-    }
-
-    # Determine ratio
-    ratio_val <- if (MAX_CONTROLS > 0) MAX_CONTROLS else NA
-
-    # Run MatchIt
-    mi <- tryCatch({
-        matchit(
-            mi_formula, data = d,
-            method = "nearest",
-            distance = if (use_precomputed) cell_scores else distance_method,
-            exact = exact_formula,
-            ratio = if (!is.na(ratio_val)) ratio_val else 1L,
-            caliper = if (CALIPER_WIDTH > 0 &&
-                          distance_method != "mahalanobis") {
-                CALIPER_WIDTH
-            } else {
-                NULL
-            },
-            std.caliper = TRUE,
-            replace = FALSE
-        )
-    }, error = function(e) {
-        message("    MatchIt error: ", conditionMessage(e))
-        rollbar_report_error(conditionMessage(e))
-        NULL
-    })
-
-    if (is.null(mi)) {
-        return(list(
-            result = NULL, separation_warnings = sep_warnings,
-            group_diagnostics = list(list(
-                group = "__all__",
-                n_treatment = n_treatment,
-                n_control = n_control,
-                n_matched = 0L,
-                separation_detected = sep$separated,
-                separation_details = if (sep$separated) sep$details
-            ))
-        ))
-    }
-
-    # Extract matched data
-    md <- match.data(mi)
-    if (nrow(md) == 0) {
-        return(list(
-            result = NULL, separation_warnings = sep_warnings,
-            group_diagnostics = list(list(
-                group = "__all__",
-                n_treatment = n_treatment,
-                n_control = n_control,
-                n_matched = 0L,
-                separation_detected = sep$separated,
-                separation_details = if (sep$separated) sep$details
-            ))
-        ))
-    }
-
-    # Map MatchIt output to the same schema as optmatch output
-    md$match_group <- as.character(md$subclass)
-    md$match_weight <- md$weights
-
-    # Prefix match_group with exact-match stratum for consistency with optmatch.
-    # Both paths create prefixes from interaction(exact_vars), ensuring unique
-    # match_group IDs across different strata.
-    if (length(exact_vars_present) > 0) {
-        exact_group <- interaction(md[exact_vars_present], drop = TRUE)
-        md$match_group <- paste(exact_group, md$match_group, sep = "_")
-    }
-
-    # Add propensity scores
-    if (distance_method %in% c("glm", "precomputed")) {
-        md$pscore <- md$distance
-    } else {
-        md$pscore <- NA_real_
-    }
-
-    # Drop MatchIt-specific columns
-    md <- md %>% select(-any_of(c("distance", "weights", "subclass")))
-
-    n_matched <- sum(md$treatment)
-    message("    MatchIt: T=", n_treatment,
-            " C=", n_control,
-            " -> ", n_matched, " matched")
-
-    # Build per-group diagnostics from MatchIt exact-match subgroups
-    matchit_diags <- list()
-    if (length(exact_vars_present) > 0) {
-        md_all <- d  # full data before matching
-        md_all$group <- interaction(
-            md_all[exact_vars_present], drop = TRUE
-        )
-        md_matched <- md
-        md_matched$group <- interaction(
-            md_matched[exact_vars_present], drop = TRUE
-        )
-        for (g in levels(md_all$group)) {
-            gd <- md_all[md_all$group == g, ]
-            gm <- md_matched[md_matched$group == g, ]
-            n_t <- sum(gd$treatment)
-            n_c <- sum(!gd$treatment)
-            n_m <- if (nrow(gm) > 0) sum(gm$treatment) else 0L
-            matchit_diags[[length(matchit_diags) + 1L]] <- list(
-                group = as.character(g),
-                n_treatment = n_t,
-                n_control = n_c,
-                n_matched = n_m,
-                separation_detected = sep$separated,
-                separation_details = if (sep$separated) sep$details
-            )
-        }
-    } else {
-        matchit_diags <- list(list(
-            group = "__all__",
-            n_treatment = n_treatment,
-            n_control = n_control,
-            n_matched = n_matched,
-            separation_detected = sep$separated,
-            separation_details = if (sep$separated) sep$details
-        ))
-    }
-
-    return(list(
-        result = md, separation_warnings = sep_warnings,
-        group_diagnostics = matchit_diags
-    ))
-}
-
-# Per-worker cache for control-pixel partitions.  When MATCH_BATCH_SIZE > 1,
-# multiple sites in the same batch may share a partition value (e.g. same
-# admin1 region); the cache eliminates duplicate S3 reads within a batch.
-# The environment is created fresh for each array element (container) so
-# memory is bounded to the partitions actually needed for that batch.
-.ctrl_cache_env <- new.env(parent = emptyenv())
-
-# Helper: load treatment + control pixel data for a group of treatment cells.
-# In split-data mode, treatment rows come from the small local
-# treatment_pixels.parquet; control rows are streamed from the S3-hosted
-# partitioned Arrow dataset, reading only the partition(s) whose primary
-# exact-match variable value appears in the treatment pixels.
-# An optional cache_env (default: .ctrl_cache_env) stores previously fetched
-# partitions so that multiple sites sharing a partition value within a batch
-# only trigger one S3 read.
-# Returns a data.frame WITHOUT a treatment column — caller assigns it via
-# mutate(treatment = cell %in% ...).
-load_site_data_split <- function(group_treatment_cells, treatment_table,
-                                  control_dataset, exact_match_vars,
-                                  cache_env = .ctrl_cache_env) {
+    tk <- treatment_key %>%
+        filter(id_numeric %in% site_rows$id_numeric) %>%
+        select(cell, id_numeric)
+    # The extract step encodes missing partition values as -1.
+    partition_var <- EXACT_MATCH_VARS[1]
     t_rows <- treatment_table %>%
-        filter(cell %in% group_treatment_cells)
-    if (length(exact_match_vars) > 0 && exact_match_vars[1] %in% names(t_rows)) {
-        primary_var <- exact_match_vars[1]
-        # Cast to integer to match the int32 hive partition keys written by
-        # the extract step (float32 covariate values cast to int32 for dirs).
-        primary_vals <- unique(as.integer(na.omit(t_rows[[primary_var]])))
-        cache_key <- paste(sort(primary_vals), collapse = ",")
-        if (!is.null(cache_env) &&
-                exists(cache_key, envir = cache_env, inherits = FALSE)) {
-            c_rows <- get(cache_key, envir = cache_env, inherits = FALSE)
-            message("    [S3 cache HIT] partition key=", cache_key,
-                    " (", nrow(c_rows), " control rows)")
-        } else {
-            arrow_t <- proc.time()
-            c_rows <- control_dataset %>%
-                filter(!!sym(primary_var) %in% primary_vals) %>%
-                collect() %>%
-                as_tibble()
-            message("    [S3 read] ", nrow(c_rows), " control rows (partition ",
-                    primary_var, " in c(",
-                    paste(primary_vals, collapse = ", "), ")) in ",
-                    round((proc.time() - arrow_t)["elapsed"], 2), "s")
-            if (!is.null(cache_env)) {
-                assign(cache_key, c_rows, envir = cache_env, inherits = FALSE)
-            }
-        }
-    } else {
-        cache_key <- "__all__"
-        if (!is.null(cache_env) &&
-                exists(cache_key, envir = cache_env, inherits = FALSE)) {
-            c_rows <- get(cache_key, envir = cache_env, inherits = FALSE)
-            message("    [S3 cache HIT] all controls (", nrow(c_rows), " rows)")
-        } else {
-            arrow_t <- proc.time()
-            c_rows <- control_dataset %>% collect() %>% as_tibble()
-            message("    [S3 read] ", nrow(c_rows),
-                    " control rows (no partition filter) in ",
-                    round((proc.time() - arrow_t)["elapsed"], 2), "s")
-            if (!is.null(cache_env)) {
-                assign(cache_key, c_rows, envir = cache_env, inherits = FALSE)
-            }
-        }
+        filter(cell %in% tk$cell) %>%
+        select(all_of(needed)) %>%
+        mutate(across(all_of(partition_var), ~ if_else(.x == -1L, NA, .x))) %>%
+        inner_join(tk, by = "cell")
+
+    query <- control_dataset %>% select(all_of(needed))
+    for (v in EXACT_MATCH_VARS) {
+        present <- unique(t_rows[[v]][!is.na(t_rows[[v]])])
+        query <- query %>% filter(!!sym(v) %in% !!present)
     }
-    dplyr::bind_rows(t_rows, c_rows)
+    timer <- proc.time()
+    c_rows <- query %>% collect() %>% as_tibble()
+    message("  Loaded ", nrow(t_rows), " treatment and ", nrow(c_rows),
+            " candidate control pixels in ",
+            round((proc.time() - timer)["elapsed"], 1), "s")
+
+    pixels <- bind_rows(t_rows, c_rows) %>%
+        mutate(treatment = !is.na(id_numeric)) %>%
+        filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.x)))
+
+    if (!is.null(all_sites_buffer)) {
+        ctrl <- which(!pixels$treatment)
+        points <- st_as_sf(
+            cell_to_lonlat(pixels$cell[ctrl], grid_meta),
+            coords = c("lon", "lat"), crs = 4326
+        )
+        # The buffer is validated under planar (GEOS) rules, so test with S2
+        # off; at 1 km resolution the difference is sub-pixel.
+        s2_state <- sf_use_s2()
+        sf_use_s2(FALSE)
+        too_close <- lengths(st_intersects(points, all_sites_buffer)) > 0
+        sf_use_s2(s2_state)
+        if (any(too_close)) pixels <- pixels[-ctrl[too_close], ]
+        message("  Excluded ", sum(too_close), " control pixels within ",
+                MIN_CONTROL_DISTANCE_KM, " km of any site")
+    }
+    pixels
 }
 
-n_failed <- 0L
-required_match_cols <- c(
-    "cell", "site_id", "id_numeric", "area_ha", "treatment",
-    "sampled_fraction", "total_biomass_2025", "match_group", "match_weight"
-)
 
-# ======================================================================
-# Group-level pre-computation (cross-site mode only)
-#
-# When multiple sites share an exact-match group, a single Arrow scan,
-# one distance exclusion, and one propensity model are computed here.
-# The per-site loop then works entirely from this in-memory cache,
-# eliminating repeated I/O and repeated GLM fitting.
-# ======================================================================
-group_cache <- NULL
-if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
-    cache_timer <- proc.time()
-    message("Pre-computing group cache for ", length(site_ids), " sites ...")
+# -- Matching ----------------------------------------------------------------
 
-    gc_treatment_cells <- filter(treatment_key, id_numeric %in% site_ids)$cell
-
-    # Load treatment pixels + matching control pool: filter to relevant
-    # exact-match partitions, then assign the treatment flag.
-    gc_raw <- load_site_data_split(
-        gc_treatment_cells, treatment_table, control_dataset, EXACT_MATCH_VARS
-    ) %>%
-        mutate(treatment = cell %in% gc_treatment_cells)
-
-    # Remove pixels missing any exact-match grouping variable, then drop
-    # strata that lack both treatment and control representation.
-    gc_raw <- gc_raw %>%
-        filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.)))
-    gc_raw <- filter_groups(gc_raw, EXACT_MATCH_VARS)
-
-    # Spatial distance exclusion — performed once for all sites in the group
-    if (MIN_CONTROL_DISTANCE_KM > 0) {
-        ctrl_mask <- !gc_raw$treatment
-        n_ctrl <- sum(ctrl_mask)
-        if (n_ctrl > 0) {
-            coords <- cell_to_lonlat(gc_raw$cell[ctrl_mask], grid_meta)
-            ctrl_pts <- st_as_sf(
-                coords, coords = c("lon", "lat"), crs = 4326
-            )
-            too_close <- lengths(st_intersects(ctrl_pts, all_sites_buffer)) > 0
-            n_excluded <- sum(too_close)
-            if (n_excluded > 0) {
-                gc_raw <- gc_raw[-which(ctrl_mask)[too_close], ]
-                message(
-                    "  Group cache: excluded ", n_excluded, " control pixels",
-                    " within ", MIN_CONTROL_DISTANCE_KM, " km of treatment"
-                )
-            }
-        }
-        # Re-filter groups after distance exclusion
-        gc_raw <- filter_groups(gc_raw, EXACT_MATCH_VARS)
-    }
-
-    # Fit ONE propensity model on the pooled group data (base formula f).
-    # These scores are reused for every site, avoiding N repeated GLM fits.
-    gc_complete <- gc_raw[
-        complete.cases(gc_raw[, all.vars(f), drop = FALSE]), , drop = FALSE
-    ]
-    gc_propensity_scores <- NULL
-    if (sum(gc_complete$treatment) >= MIN_GLM) {
-        gc_sep <- check_separation(gc_complete, f)
-        if (!gc_sep$separated) {
-            gc_glm <- tryCatch(
-                glm(f, data = gc_complete, family = binomial),
-                error = function(e) {
-                    message(
-                        "  Group GLM failed: ", conditionMessage(e),
-                        "; each site will fit its own model"
-                    )
-                    NULL
-                }
-            )
-            if (!is.null(gc_glm)) {
-                raw_scores <- predict(gc_glm, newdata = gc_raw, type = "response")
-                gc_propensity_scores <- setNames(
-                    raw_scores, as.character(gc_raw$cell)
-                )
-            }
-        } else {
-            message(
-                "  Group GLM skipped (separation detected);",
-                " each site will fit its own model"
-            )
-        }
-    } else {
-        message(
-            "  Group GLM skipped (only ", sum(gc_complete$treatment),
-            " treatment pixels < MIN_GLM=", MIN_GLM, ");",
-            " each site will fit its own model"
+run_matcher <- function(gd, method, mf, lp) {
+    # Match one stratum.  `lp` is the propensity linear predictor (NULL for
+    # Mahalanobis).  Both backends apply the same caliper: CALIPER_WIDTH
+    # standard deviations of the linear predictor, propensity matching only.
+    caliper <- if (method == "glm" && CALIPER_WIDTH > 0) CALIPER_WIDTH * sd(lp) else NULL
+    if (MATCHING_METHOD == "nearest") {
+        mi <- matchit(
+            mf, data = gd, method = "nearest",
+            distance = if (method == "glm") lp else "mahalanobis",
+            ratio = MAX_CONTROLS, replace = FALSE,
+            caliper = caliper, std.caliper = FALSE
         )
+        md <- match_data(mi, data = gd)
+        if (nrow(md) == 0) return(NULL)
+        md$match_group <- as.character(md$subclass)
+        md <- md[, setdiff(names(md), c("distance", "weights", "subclass"))]
+        return(set_match_weights(md))
     }
-
-    cache_elapsed <- round((proc.time() - cache_timer)["elapsed"], 1)
-    message(
-        "Group cache ready: ",
-        sum(gc_raw$treatment), " treatment / ",
-        sum(!gc_raw$treatment), " control pixels; ",
-        if (!is.null(gc_propensity_scores)) {
-            "shared propensity model fitted"
-        } else {
-            "no shared model (per-site GLM will be used)"
-        },
-        " (", cache_elapsed, "s)"
-    )
-
-    group_cache <- list(
-        raw               = gc_raw,
-        treatment_cells   = gc_treatment_cells,
-        propensity_scores = gc_propensity_scores
-    )
+    dists <- if (method == "glm") {
+        # Passing the caliper here builds a sparse distance matrix.
+        match_on(setNames(lp, rownames(gd)), z = gd$treatment, caliper = caliper)
+    } else {
+        match_on(mf, data = gd)
+    }
+    m <- if (MAX_CONTROLS > 0) {
+        pairmatch(dists, controls = MAX_CONTROLS, data = gd, remove.unmatchables = TRUE)
+    } else {
+        fullmatch(dists, min.controls = 1, max.controls = Inf, data = gd)
+    }
+    if (all(is.na(m))) {
+        stop("no feasible optimal match within the caliper for the requested ratio")
+    }
+    gd$match_group <- as.character(m)
+    gd <- gd[matched(m), , drop = FALSE]
+    if (nrow(gd) == 0) NULL else set_match_weights(gd)
 }
 
-for (this_id in site_ids) {
-    site <- filter(sites, id_numeric == this_id)
-    this_site_id <- site$site_id[1]
-    this_site_name <- if ("site_name" %in% names(site)) site$site_name[1] else NA_character_
-    this_batch_index <- match(this_id, all_site_ids) - 1L
 
-    # Determine sub_site_index if in cross-site grouping mode
-    this_sub_site_index <- 0L
-    if ((BATCH_GROUP_SITES || GROUP_BY_EXACT_MATCHES) && !is.null(GROUP_MAPPING)) {
-        # Find this site in the group mapping
-        for (gid in names(GROUP_MAPPING)) {
-            group_members <- GROUP_MAPPING[[gid]]
-            for (member in group_members) {
-                if (member[[1]] == this_site_id) {
-                    this_sub_site_index <- as.integer(member[[2]])
-                    break
-                }
-            }
-            if (this_sub_site_index > 0L) break
-        }
-    }
-
-    # Which replicates should this node process?
-    replicate_range <- if (!is.null(BATCH_REPLICATE)) {
-        BATCH_REPLICATE  # single replicate when parallelised
+match_stratum <- function(gd, f) {
+    # Choose the distance for one exact-match stratum and match it.
+    rownames(gd) <- NULL
+    method <- "glm"
+    mf <- f
+    lp <- NULL
+    details <- NULL
+    if (sum(gd$treatment) < MIN_GLM) {
+        method <- "mahalanobis"
     } else {
-        seq_len(N_REPLICATES)
-    }
-
-    # Build replicate-specific match file paths.
-    # Include sub_site_index when cross-site grouping is enabled.
-    # When N_REPLICATES == 1, use the original naming for backward compat.
-    base_filename <- if (this_sub_site_index > 0L) {
-        paste0("m_", this_id, "_", this_sub_site_index)
-    } else {
-        paste0("m_", this_id)
-    }
-
-    if (N_REPLICATES > 1L) {
-        rep_match_paths <- file.path(
-            config$matches_dir,
-            paste0(base_filename, "_rep", seq_len(N_REPLICATES), ".rds")
-        )
-        # Paths for only the replicates this node will process
-        node_match_paths <- file.path(
-            config$matches_dir,
-            paste0(base_filename, "_rep", replicate_range, ".rds")
-        )
-    } else {
-        rep_match_paths <- file.path(
-            config$matches_dir, paste0(base_filename, ".rds")
-        )
-        node_match_paths <- rep_match_paths
-    }
-    # Include replicate in failure marker name when parallelised,
-    # so each array child writes a distinct file.
-    if (!is.null(BATCH_REPLICATE)) {
-        failure_path <- file.path(
-            config$matches_dir,
-            paste0("failed_", base_filename, "_rep", BATCH_REPLICATE, ".json")
-        )
-    } else {
-        failure_path <- file.path(
-            config$matches_dir, paste0("failed_", base_filename, ".json")
-        )
-    }
-
-    rep_label <- if (!is.null(BATCH_REPLICATE)) {
-        paste0("replicate ", BATCH_REPLICATE, "/", N_REPLICATES)
-    } else {
-        paste0("replicates=", N_REPLICATES)
-    }
-
-    site_label <- if (this_sub_site_index > 0L) {
-        paste0(this_site_id, " (sub-site ", this_sub_site_index, ")")
-    } else {
-        this_site_id
-    }
-
-    message("  Processing site_id ", site_label,
-            " (batch_index=", this_batch_index,
-            ", ", rep_label, ")")
-
-    # Wrap per-site matching in tryCatch so that a failure in one site
-    # (e.g. memory allocation error in optmatch) does not abort the
-    # entire job.  A failure marker JSON is written instead.
-    ok <- tryCatch({
-        site_timer <- proc.time()
-
-        # Get treatment cell IDs for this site
-        treatment_cells <- filter(treatment_key, id_numeric == this_id)
-        n_treatment_total <- nrow(treatment_cells)
-
-        if (n_treatment_total == 0) {
-            message("  Skipping: no treatment cells")
-            failure_info <- list(
-                id_numeric = this_id,
-                site_id = this_site_id,
-                site_name = this_site_name,
-                sub_site_index = this_sub_site_index,
-                error = "No treatment cells found for site",
-                timestamp = format(
-                    Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
-                ),
-                array_index = this_batch_index
-            )
-            write_json(
-                failure_info, failure_path,
-                auto_unbox = TRUE, pretty = TRUE
-            )
-            TRUE
-        } else {
-            # Load treatment and control pixels for matching.
-            site_treatment_cells <- treatment_cells$cell
-
-            if (!is.null(group_cache)) {
-                # ---- Cross-site: derive data from the pre-loaded group cache ----
-                # All Arrow I/O and spatial distance exclusion were done once
-                # before the site loop.  Here we only slice the in-memory cache.
-                group_treatment_cells <- group_cache$treatment_cells
-
-                data_timer <- proc.time()
-                # Build site-specific dataset: current site's treatment pixels
-                # plus all controls.  Exclude other sites' treatment pixels so
-                # that filter_groups() only sees groups relevant to THIS site,
-                # preventing control pool contamination.
-                vals <- group_cache$raw %>%
-                    filter(
-                        cell %in% site_treatment_cells |
-                        !(cell %in% group_treatment_cells)
-                    ) %>%
-                    mutate(treatment = cell %in% site_treatment_cells)
-                vals <- filter_groups(vals, EXACT_MATCH_VARS)
-
-                # Other sites' treatment pixels — added back after sampling for
-                # shared propensity modeling (via pre-computed group scores)
-                other_sites_treatment <- group_cache$raw %>%
-                    filter(
-                        cell %in% group_treatment_cells &
-                        !(cell %in% site_treatment_cells)
-                    ) %>%
-                    mutate(treatment = TRUE)
-
-                n_control_pool_site <- sum(!vals$treatment)
-                data_elapsed <- round(
-                    (proc.time() - data_timer)["elapsed"], 2
-                )
-                message(
-                    "    [TIMING] Group cache derivation: ",
-                    data_elapsed, "s",
-                    " (T=", sum(vals$treatment),
-                    ", C=", n_control_pool_site, ")"
+        sep <- check_separation(gd, f)
+        if (!sep$separated) {
+            fit <- fit_propensity(f, gd)
+            if (fit$separated) {
+                sep <- list(
+                    separated = TRUE, sep_vars = character(0),
+                    details = "GLM did not converge or fitted probabilities of 0 or 1"
                 )
             } else {
-                # ---- Standard mode: Arrow scan + distance exclusion ----
-                group_treatment_cells <- treatment_cells$cell
-                other_sites_treatment <- NULL
-
-                arrow_timer <- proc.time()
-                vals <- load_site_data_split(
-                    group_treatment_cells, treatment_table,
-                    control_dataset, EXACT_MATCH_VARS
-                ) %>%
-                    mutate(treatment = cell %in% site_treatment_cells)
-                arrow_elapsed <- (proc.time() - arrow_timer)["elapsed"]
-                message(
-                    "    [TIMING] Arrow dataset filter & collect: ",
-                    round(arrow_elapsed, 2), "s (", nrow(vals), " rows)"
-                )
-
-                # Remove pixels with NA in exact-match grouping variables
-                n_before <- nrow(vals)
-                vals <- vals %>%
-                    filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.)))
-                n_dropped <- n_before - nrow(vals)
-                if (n_dropped > 0) {
-                    message("  Filtered ", n_dropped,
-                            " pixels with missing group data")
-                }
-
-                # Filter to groups present in both treatment and control.
-                vals <- filter_groups(vals, EXACT_MATCH_VARS)
-
-                # Exclude control pixels too close to ANY treatment polygon
-                if (MIN_CONTROL_DISTANCE_KM > 0) {
-                    control_mask <- !vals$treatment
-                    n_ctrl_before <- sum(control_mask)
-                    if (n_ctrl_before > 0) {
-                        # Coordinate conversion
-                        coord_timer <- proc.time()
-                        coords <- cell_to_lonlat(
-                            vals$cell[control_mask], grid_meta
-                        )
-                        ctrl_pts <- st_as_sf(
-                            coords,
-                            coords = c("lon", "lat"), crs = 4326
-                        )
-                        coord_elapsed <- (proc.time() - coord_timer)["elapsed"]
-                        message(
-                            "    [TIMING] Coordinate conversion: ",
-                            round(coord_elapsed, 2), "s for ", n_ctrl_before,
-                            " pixels"
-                        )
-
-                        # Spatial intersection - likely bottleneck.
-                        # The exclusion buffer is repaired only under planar
-                        # (GEOS) rules at load time, so it is not guaranteed
-                        # valid under S2's spherical rules.  Run the
-                        # containment test with S2 disabled to stay consistent
-                        # with how the buffer was validated and avoid
-                        # "Loop is not valid: Edge X crosses edge Y" errors.
-                        # Against a densely vertexed geography buffer at 1 km
-                        # resolution the planar/spherical difference is
-                        # sub-pixel.
-                        intersect_timer <- proc.time()
-                        s2_intersect_state <- sf_use_s2()
-                        sf_use_s2(FALSE)
-                        too_close <- lengths(
-                            st_intersects(ctrl_pts, all_sites_buffer)
-                        ) > 0
-                        sf_use_s2(s2_intersect_state)
-                        intersect_elapsed <- (proc.time() - intersect_timer)["elapsed"]
-
-                        n_excluded <- sum(too_close)
-                        if (n_excluded > 0) {
-                            exclude_rows <- which(control_mask)[too_close]
-                            vals <- vals[-exclude_rows, ]
-                            message(
-                                "  Excluded ", n_excluded,
-                                " control pixels within ",
-                                MIN_CONTROL_DISTANCE_KM,
-                                " km of treatment polygons"
-                            )
-                        }
-                        message(
-                            "    [TIMING] Spatial intersection: ",
-                            round(intersect_elapsed, 2), "s (",
-                            round(n_ctrl_before / intersect_elapsed, 0),
-                            " pixels/sec)"
-                        )
-                    }
-                    # Re-filter groups after distance exclusion
-                    refilter_timer <- proc.time()
-                    vals <- filter_groups(vals, EXACT_MATCH_VARS)
-                    refilter_elapsed <- (proc.time() - refilter_timer)["elapsed"]
-                    message(
-                        "    [TIMING] Group re-filtering: ",
-                        round(refilter_elapsed, 2), "s"
-                    )
-                }
-
-                n_control_pool_site <- sum(!vals$treatment)
-                data_elapsed <- (proc.time() - site_timer)["elapsed"]
-                message(
-                    "    [TIMING] Data loading & filtering: ",
-                    round(data_elapsed, 1), "s",
-                    " (T=", sum(vals$treatment),
-                    ", C=", n_control_pool_site, ")"
-                )
+                lp <- predict(fit$model, type = "link")
             }
-
-            # Guard: a site with no treatment pixels or no control pixels
-            # after exact-match group filtering and distance exclusion cannot
-            # be matched.  Fail early with a clear reason instead of letting
-            # the downstream sampling code raise a cryptic
-            # "Can't compute indices ... missing value where TRUE/FALSE
-            # needed" error.  The NO_OVERLAP prefix is recognised by the
-            # error handler below, which records it as a clean skip (no
-            # Rollbar report, not counted as a hard failure).
-            n_treatment_site <- sum(vals$treatment)
-            n_control_site <- sum(!vals$treatment)
-            if (n_treatment_site == 0L || n_control_site == 0L) {
-                stop(
-                    "NO_OVERLAP: no overlapping exact-match groups between ",
-                    "treatment and control after filtering (T=",
-                    n_treatment_site, ", C=", n_control_site, ")"
-                )
-            }
-
-            # Determine formula update for pre-intervention deforestation
-            # (deterministic — computed once, applied inside each replicate)
-            estab_year <- site$start_year
-            this_f <- f
-            add_defor_pre <- FALSE
-            fc_init_name <- NULL
-            fc_final_name <- NULL
-
-            if (estab_year >= 2005) {
-                fc_init_name <- paste0("fc_", estab_year - 5)
-                fc_final_name <- paste0("fc_", estab_year)
-                if (fc_init_name %in% names(vals) &&
-                    fc_final_name %in% names(vals)) {
-                    add_defor_pre <- TRUE
-                    this_f <- update(this_f, ~ . + defor_pre_intervention)
-                }
-            }
-
-            # Pre-compute defor_pre_intervention for cross-site treatment pixels.
-            # Only needed when falling back to per-site GLM (i.e. no shared
-            # propensity scores from the group cache).
-            if (!is.null(other_sites_treatment) && add_defor_pre &&
-                is.null(group_cache)) {
-                other_sites_treatment <- other_sites_treatment %>%
-                    mutate(
-                        defor_pre_intervention = if_else(
-                            .data[[fc_init_name]] > 0,
-                            (.data[[fc_final_name]] - .data[[fc_init_name]]) /
-                                .data[[fc_init_name]] * 100,
-                            NA_real_
-                        )
-                    )
-            }
-
-            # Save unsampled data for replicate re-use
-            vals_base <- vals
-
-            # ---- Replicate loop ----
-            for (rep_k in replicate_range) {
-                rep_timer <- proc.time()
-                match_path_k <- rep_match_paths[rep_k]
-
-                if (file.exists(match_path_k)) {
-                    message("    Replicate ", rep_k,
-                            "/", N_REPLICATES, ": already exists, skipping")
-                    next
-                }
-
-                # Deterministic per-site, per-replicate seed using bitwise XOR
-                # to avoid collision risks from simple addition
-                if (!is.null(RANDOM_SEED)) {
-                    if (N_REPLICATES > 1L) {
-                        # Use bit shifting to pack site and replicate IDs
-                        combined_seed <- bitwXor(
-                            RANDOM_SEED,
-                            bitwXor(
-                                bitwShiftL(as.integer(this_id) %% 65536L, 10L),
-                                as.integer(rep_k)
-                            )
-                        )
-                        set.seed(combined_seed)
-                    } else {
-                        set.seed(bitwXor(RANDOM_SEED, as.integer(this_id)))
-                    }
-                }
-
-                if (N_REPLICATES > 1L) {
-                    message("    Replicate ", rep_k, "/", N_REPLICATES)
-                }
-
-                vals <- vals_base
-
-                # ----------------------------------------------------------------
-                # Add pre-intervention deforestation
-                # ----------------------------------------------------------------
-                if (add_defor_pre) {
-                    defor_timer <- proc.time()
-                    init_fc <- vals[[fc_init_name]]
-                    final_fc <- vals[[fc_final_name]]
-                    # Set to NA when initial forest cover is 0 (undefined rate of change)
-                    # These pixels are excluded in the NA removal step below.
-                    vals$defor_pre_intervention <- if_else(
-                        init_fc > 0,
-                        ((final_fc - init_fc) / init_fc) * 100,
-                        NA_real_
-                    )
-                    defor_elapsed <- (proc.time() - defor_timer)["elapsed"]
-                    message(
-                        "    [TIMING] Pre-intervention defor calculation: ",
-                        round(defor_elapsed, 2), "s"
-                    )
-                }
-
-                # ----------------------------------------------------------------
-                # Drop NA covariates BEFORE sampling to preserve weight accuracy
-                # ----------------------------------------------------------------
-                # Sampling weights become inaccurate if NAs are dropped after
-                # sampling. Remove incomplete cases first, then calculate weights.
-                formula_vars <- all.vars(this_f)
-                complete <- complete.cases(vals[, formula_vars, drop = FALSE])
-                n_dropped_na <- sum(!complete)
-                n_before_na_drop <- nrow(vals)
-                n_treatment_before_na <- sum(vals$treatment)
-                n_control_before_na <- sum(!vals$treatment)
-
-                if (n_dropped_na > 0) {
-                    na_counts <- vapply(
-                        formula_vars,
-                        function(v) sum(is.na(vals[[v]])),
-                        integer(1)
-                    )
-                    na_vars <- na_counts[na_counts > 0]
-
-                    # Calculate exclusion percentages
-                    pct_excluded_overall <- (n_dropped_na / n_before_na_drop) * 100
-                    n_treatment_dropped <- sum(vals$treatment[!complete])
-                    n_control_dropped <- sum(!vals$treatment[!complete])
-                    pct_treatment_excluded <- (n_treatment_dropped / n_treatment_before_na) * 100
-                    pct_control_excluded <- (n_control_dropped / n_control_before_na) * 100
-
-                    message(
-                        "    Dropped ", n_dropped_na,
-                        " rows with NA covariates before sampling (",
-                        sprintf("%.1f%%", pct_excluded_overall),
-                        "). NA counts: ",
-                        paste(names(na_vars), na_vars, sep = "=", collapse = ", ")
-                    )
-
-                    # Flag substantial exclusions
-                    if (pct_excluded_overall > 10 || pct_treatment_excluded > 10) {
-                        message(
-                            "    WARNING: Substantial NA exclusion detected! ",
-                            "Treatment: ", sprintf("%.1f%%", pct_treatment_excluded),
-                            ", Control: ", sprintf("%.1f%%", pct_control_excluded),
-                            ". Results may not be representative of full population."
-                        )
-                    }
-
-                    # Write NA exclusion metrics to JSON
-                    na_exclusion_metrics <- list(
-                        id_numeric = this_id,
-                        site_id = this_site_id,
-                        site_name = this_site_name,
-                        sub_site_index = this_sub_site_index,
-                        replicate = rep_k,
-                        n_before_exclusion = n_before_na_drop,
-                        n_dropped = n_dropped_na,
-                        pct_excluded_overall = round(pct_excluded_overall, 2),
-                        n_treatment_before = n_treatment_before_na,
-                        n_treatment_dropped = n_treatment_dropped,
-                        pct_treatment_excluded = round(pct_treatment_excluded, 2),
-                        n_control_before = n_control_before_na,
-                        n_control_dropped = n_control_dropped,
-                        pct_control_excluded = round(pct_control_excluded, 2),
-                        variables_with_na = as.list(na_vars),
-                        substantial_exclusion = pct_excluded_overall > 10 || pct_treatment_excluded > 10,
-                        timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
-                        array_index = this_batch_index
-                    )
-
-                    na_exclusion_path <- file.path(
-                        config$matches_dir,
-                        paste0(base_filename, "_rep", rep_k, "_na_exclusion.json")
-                    )
-                    write_json(
-                        na_exclusion_metrics, na_exclusion_path,
-                        auto_unbox = TRUE, pretty = TRUE
-                    )
-
-                    vals <- vals[complete, ]
-                    # Re-filter groups after NA removal
-                    vals <- filter_groups(vals, EXACT_MATCH_VARS)
-                } else {
-                    # No NAs dropped - still write metrics file for consistency
-                    na_exclusion_metrics <- list(
-                        id_numeric = this_id,
-                        site_id = this_site_id,
-                        site_name = this_site_name,
-                        sub_site_index = this_sub_site_index,
-                        replicate = rep_k,
-                        n_before_exclusion = n_before_na_drop,
-                        n_dropped = 0,
-                        pct_excluded_overall = 0,
-                        n_treatment_before = n_treatment_before_na,
-                        n_treatment_dropped = 0,
-                        pct_treatment_excluded = 0,
-                        n_control_before = n_control_before_na,
-                        n_control_dropped = 0,
-                        pct_control_excluded = 0,
-                        variables_with_na = list(),
-                        substantial_exclusion = FALSE,
-                        timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
-                        array_index = this_batch_index
-                    )
-
-                    na_exclusion_path <- file.path(
-                        config$matches_dir,
-                        paste0(base_filename, "_rep", rep_k, "_na_exclusion.json")
-                    )
-                    write_json(
-                        na_exclusion_metrics, na_exclusion_path,
-                        auto_unbox = TRUE, pretty = TRUE
-                    )
-                }
-
-                # ----------------------------------------------------------------
-                # Stratified sampling with per-group population weights
-                # ----------------------------------------------------------------
-                # Compute per-group population sizes before sampling so we can
-                # track the sampling weight for each group.  This enables proper
-                # inverse-probability weighting in step 3 when groups have
-                # different sampling rates.
-                sampling_timer <- proc.time()
-
-                # Treatment population sizes per group
-                treatment_pop <- vals %>%
-                    filter(treatment) %>%
-                    count(group, name = "pop_size")
-
-                # Sample treatment pixels: min(MAX_TREATMENT, n) per group
-                treatment_sampled <- filter(vals, treatment) %>%
-                    left_join(treatment_pop, by = "group") %>%
-                    group_by(group) %>%
-                    sample_n(min(MAX_TREATMENT, n())) %>%
-                    mutate(
-                        sample_size = n(),
-                        sampling_weight = pop_size / sample_size
-                    ) %>%
-                    ungroup() %>%
-                    select(-pop_size, -sample_size)
-
-                # Build lookup of sampled treatment counts per group for control sampling
-                treatment_sample_counts <- treatment_sampled %>%
-                    count(group, name = "n_treatment_sampled")
-
-                # Sample control pixels: CONTROL_MULTIPLIER * sampled treatment per group
-                control_sampled <- filter(vals, !treatment) %>%
-                    left_join(treatment_sample_counts, by = "group") %>%
-                    filter(!is.na(n_treatment_sampled)) %>%
-                    group_by(group) %>%
-                    sample_n(min(
-                        CONTROL_MULTIPLIER * n_treatment_sampled[1],
-                        n()
-                    )) %>%
-                    ungroup() %>%
-                    select(-n_treatment_sampled)
-
-                vals <- bind_rows(treatment_sampled, control_sampled)
-
-                sampling_elapsed <- (proc.time() - sampling_timer)["elapsed"]
-                message(
-                    "    [TIMING] Stratified sampling: ",
-                    round(sampling_elapsed, 2), "s"
-                )
-
-                # Note: pre-intervention deforestation was calculated earlier
-                # (before NA filtering) to ensure it's available for complete.cases()
-
-                n_treatment_final <- sum(vals$treatment)
-                n_control_final <- sum(!vals$treatment)
-                message("    Treatment pixels: ", n_treatment_final,
-                        ", Control pixels: ", n_control_final)
-
-                if (n_treatment_final == 0) {
-                    message("    No treatment pixels remaining after filtering")
-                    failure_info <- list(
-                        id_numeric = this_id,
-                        site_id = this_site_id,
-                        site_name = this_site_name,
-                        replicate = rep_k,
-                        error = "No treatment pixels remaining after filtering",
-                        timestamp = format(
-                            Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
-                        ),
-                        array_index = this_batch_index
-                    )
-                    write_json(
-                        failure_info, failure_path,
-                        auto_unbox = TRUE, pretty = TRUE
-                    )
-                } else {
-                    # Add cross-site treatment pixels for propensity modeling.
-                    # Restrict to groups that survived the full filtering pipeline.
-                    if (!is.null(other_sites_treatment) &&
-                        nrow(other_sites_treatment) > 0) {
-                        valid_groups <- as.character(unique(vals$group))
-                        other_filtered <- other_sites_treatment %>%
-                            filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.))) %>%
-                            mutate(group = as.character(
-                                interaction(across(all_of(EXACT_MATCH_VARS)), drop = TRUE)
-                            )) %>%
-                            filter(group %in% valid_groups)
-
-                        if (nrow(other_filtered) > 0) {
-                            vals <- bind_rows(vals, other_filtered)
-                            message(
-                                "    Added ", nrow(other_filtered),
-                                " cross-site treatment pixels for propensity modeling"
-                            )
-                        }
-                    }
-
-                    # Run matching
-                    match_timer <- proc.time()
-                    if (MATCHING_METHOD == "nearest") {
-                        match_result <- match_site_matchit(
-                            vals, this_f,
-                            precomputed_scores = if (!is.null(group_cache)) {
-                                group_cache$propensity_scores
-                            } else {
-                                NULL
-                            }
-                        )
-                    } else {
-                        match_result <- match_site(vals, this_f)
-                    }
-                    match_elapsed <- (proc.time() - match_timer)["elapsed"]
-                    m <- match_result$result
-                    sep_warnings <- match_result$separation_warnings
-                    grp_diags <- match_result$group_diagnostics
-                    message(
-                        "    [TIMING] Matching: ",
-                        round(match_elapsed, 1), "s"
-                    )
-
-                    # Write per-group matching diagnostics to JSON
-                    if (length(grp_diags) > 0) {
-                        diag_path <- sub(
-                            "\\.rds$", "_diagnostics.json",
-                            match_path_k
-                        )
-                        write_json(
-                            grp_diags, diag_path,
-                            auto_unbox = TRUE, pretty = TRUE
-                        )
-                    }
-
-                    if (is.null(m)) {
-                        message("    No matches found")
-                        error_msg <- paste0(
-                            "No matches found (treatment=",
-                            n_treatment_final,
-                            ", control=", n_control_final, ")"
-                        )
-                        if (length(sep_warnings) > 0) {
-                            error_msg <- paste0(
-                                error_msg,
-                                "; separation detected in ",
-                                length(sep_warnings), " group(s)"
-                            )
-                        }
-                        failure_info <- list(
-                            id_numeric = this_id,
-                            site_id = this_site_id,
-                            site_name = this_site_name,
-                            sub_site_index = this_sub_site_index,
-                            replicate = rep_k,
-                            error = error_msg,
-                            separation_warnings = sep_warnings,
-                            group_diagnostics = grp_diags,
-                            timestamp = format(
-                                Sys.time(), "%Y-%m-%dT%H:%M:%SZ"
-                            ),
-                            array_index = this_batch_index
-                        )
-                        write_json(
-                            failure_info, failure_path,
-                            auto_unbox = TRUE, pretty = TRUE
-                        )
-                        message(
-                            "    No-match marker written to ",
-                            failure_path
-                        )
-                    } else {
-                        # In cross-site grouping mode, the match result contains
-                        # matches for ALL sites in the group.  Filter to keep only
-                        # matches for THIS site's treatment pixels.
-                        if (GROUP_BY_EXACT_MATCHES && length(site_ids) > 1L) {
-                            n_before_filter <- nrow(m)
-                            m <- m %>% filter(
-                                !treatment | cell %in% site_treatment_cells
-                            )
-                            n_after_filter <- nrow(m)
-                            if (n_before_filter != n_after_filter) {
-                                message(
-                                    "    Filtered group matches: ",
-                                    n_before_filter, " -> ", n_after_filter,
-                                    " rows (keeping only this site's pixels)"
-                                )
-                            }
-                        }
-
-                        m$id_numeric <- this_id
-                        m$site_id <- site$site_id
-                        m$sub_site_index <- this_sub_site_index
-                        m$sampled_fraction <-
-                            n_treatment_final / n_treatment_total
-                        m$n_control_sampled <- n_control_final
-                        m$n_control_pool <- n_control_pool_site
-                        m$replicate <- rep_k
-                        if (length(sep_warnings) > 0) {
-                            attr(m, "separation_warnings") <-
-                                sep_warnings
-                        }
-                        if (length(grp_diags) > 0) {
-                            attr(m, "group_diagnostics") <-
-                                grp_diags
-                        }
-                        saveRDS(m, match_path_k)
-                        message("    Saved ", nrow(m), " matched rows")
-                        if (length(sep_warnings) > 0) {
-                            message(
-                                "    WARNING: separation detected in ",
-                                length(sep_warnings),
-                                " group(s) but matching succeeded"
-                            )
-                        }
-                    }
-                }
-                rep_elapsed <- (proc.time() - rep_timer)["elapsed"]
-                message(
-                    "    [TIMING] Replicate ", rep_k,
-                    " total: ", round(rep_elapsed, 1), "s"
-                )
-            }
-            # ---- End replicate loop ----
-            TRUE
         }
-    }, error = function(e) {
-        msg <- conditionMessage(e)
-        # Sites with no overlapping exact-match groups between treatment and
-        # control are an expected data condition, not a code failure.  They
-        # are recorded with a failure marker but are not reported to Rollbar
-        # and are not counted as hard failures.
-        is_no_overlap <- startsWith(msg, "NO_OVERLAP: ")
-        message("  ", if (is_no_overlap) "Skipping" else "ERROR processing",
-            " site_id ", this_site_id,
-            " (batch_index=", this_batch_index,
-            "): ", msg)
-        failure_info <- list(
-            id_numeric = this_id,
-            site_id = this_site_id,
-            site_name = this_site_name,
-            error = msg,
-            reason = if (is_no_overlap) "no_overlapping_groups" else "error",
-            timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ")
+        if (sep$separated) {
+            details <- sep$details
+            if (!SEPARATION_FALLBACK) {
+                return(list(result = NULL, diag = list(method = "none", separation_details = details)))
+            }
+            method <- "mahalanobis"
+            mf <- drop_formula_vars(f, sep$sep_vars)
+        }
+    }
+    gd$pscore <- if (is.null(lp)) NA_real_ else plogis(lp)
+    error <- NULL
+    result <- tryCatch(
+        suppressWarnings(run_matcher(gd, method, mf, lp)),
+        error = function(e) {
+            error <<- conditionMessage(e)
+            message("    Matching failed: ", error)
+            NULL
+        }
+    )
+    list(result = result, diag = list(method = method, separation_details = details, error = error))
+}
+
+
+match_strata <- function(d, f) {
+    d <- as.data.frame(d)
+    d$group <- as.character(d$group)
+    results <- list()
+    diags <- list()
+    for (g in unique(d$group)) {
+        gd <- d[d$group == g, , drop = FALSE]
+        out <- match_stratum(gd, f)
+        n_matched <- if (is.null(out$result)) 0L else sum(out$result$treatment)
+        message("    Stratum ", g, ": T=", sum(gd$treatment), " C=", sum(!gd$treatment),
+                " -> ", n_matched, " matched (", out$diag$method, ")")
+        diags[[length(diags) + 1]] <- c(
+            list(group = g, n_treatment = sum(gd$treatment),
+                 n_control = sum(!gd$treatment), n_matched = n_matched),
+            out$diag
         )
-        write_json(failure_info, failure_path,
-                    auto_unbox = TRUE, pretty = TRUE)
-        message("  Failure marker written to ", failure_path)
-        if (!is_no_overlap) rollbar_report_error(msg)
-        # Return TRUE for the expected no-overlap case so it is treated as a
-        # clean skip (consistent with the "no treatment cells" handling).
-        is_no_overlap
-    })
+        if (!is.null(out$result)) {
+            # Prefix with the stratum so set IDs are unique across strata.
+            out$result$match_group <- paste(g, out$result$match_group, sep = "_")
+            results[[length(results) + 1]] <- out$result
+        }
+    }
+    list(result = if (length(results) > 0) bind_rows(results) else NULL, diagnostics = diags)
+}
 
-    if (!ok) n_failed <- n_failed + 1L
-    # Free per-site temporaries and reclaim memory before next site
-    rm(list = intersect(
-        c("vals", "vals_base", "m", "treatment_cells",
-          "site_treatment_cells", "sample_sizes"),
-        ls()
+
+# -- Per-site processing -----------------------------------------------------
+
+match_file <- function(id, k) paste0("m_", id, "_rep", k, ".rds")
+
+write_failure <- function(site, k, error, reason = "error", diagnostics = NULL) {
+    write_json(
+        list(
+            id_numeric = site$id_numeric, site_id = site$site_id,
+            site_name = site$site_name, replicate = k, error = error,
+            reason = reason, match_file = match_file(site$id_numeric, k),
+            group_diagnostics = diagnostics
+        ),
+        file.path(config$matches_dir, paste0("failed_", site$id_numeric, "_rep", k, ".json")),
+        auto_unbox = TRUE, pretty = TRUE, null = "null"
+    )
+}
+
+write_na_exclusion <- function(site, vals, complete, required) {
+    na_counts <- vapply(required, function(v) sum(is.na(vals[[v]])), integer(1))
+    pct <- function(x, n) if (n > 0) round(x / n * 100, 2) else 0
+    n_t <- sum(vals$treatment)
+    n_c <- sum(!vals$treatment)
+    dropped_t <- sum(vals$treatment & !complete)
+    dropped_c <- sum(!vals$treatment & !complete)
+    write_json(
+        list(
+            id_numeric = site$id_numeric, site_id = site$site_id,
+            site_name = site$site_name, sub_site_index = site$sub_site_index,
+            n_before_exclusion = nrow(vals), n_dropped = sum(!complete),
+            pct_excluded_overall = pct(sum(!complete), nrow(vals)),
+            n_treatment_before = n_t, n_treatment_dropped = dropped_t,
+            pct_treatment_excluded = pct(dropped_t, n_t),
+            n_control_before = n_c, n_control_dropped = dropped_c,
+            pct_control_excluded = pct(dropped_c, n_c),
+            variables_with_na = as.list(na_counts[na_counts > 0]),
+            substantial_exclusion = pct(sum(!complete), nrow(vals)) > 10 ||
+                pct(dropped_t, n_t) > 10
+        ),
+        file.path(config$matches_dir, paste0("m_", site$id_numeric, "_na_exclusion.json")),
+        auto_unbox = TRUE, pretty = TRUE
+    )
+}
+
+replicate_seed <- function(id, k) {
+    bitwXor(RANDOM_SEED, bitwXor(bitwShiftL(as.integer(id) %% 65536L, 10L), as.integer(k)))
+}
+
+process_site <- function(site, pixels, replicates) {
+    this_id <- site$id_numeric
+    todo <- replicates[!file.exists(file.path(config$matches_dir, match_file(this_id, replicates)))]
+    if (length(todo) == 0) return(invisible())
+    message("  Site ", site$site_id, " (fragment ", site$sub_site_index,
+            ", id ", this_id, "), replicate(s) ", paste(todo, collapse = ","))
+
+    n_site_pixels <- sum(treatment_key$id_numeric == this_id)
+    vals <- filter(pixels, !treatment | id_numeric == this_id)
+
+    this_f <- f
+    defor <- defor_pre_intervention(vals, site$start_year, FC_YEARS)
+    if (!is.null(defor)) {
+        vals$defor_pre_intervention <- defor
+        this_f <- update(f, ~ . + defor_pre_intervention)
+    }
+
+    # Eligible pixels: complete covariates and outcome inputs, and forest at
+    # the site's baseline year (pixels without forest cannot lose any).
+    required <- unique(c(setdiff(all.vars(this_f), "treatment"), "total_biomass_2025", FC_COLS))
+    complete <- complete.cases(vals[required])
+    write_na_exclusion(site, vals, complete, required)
+    baseline <- paste0("fc_", baseline_year(site$start_year, min(FC_YEARS)))
+    vals <- vals[complete & vals[[baseline]] > 0, ]
+    vals <- filter_groups(vals, EXACT_MATCH_VARS)
+    if (sum(vals$treatment) == 0 || sum(!vals$treatment) == 0) {
+        msg <- paste0("No overlapping exact-match strata between eligible treatment and ",
+                      "control pixels (T=", sum(vals$treatment), ", C=", sum(!vals$treatment), ")")
+        for (k in todo) write_failure(site, k, msg, reason = "no_overlap")
+        return(invisible())
+    }
+    eligible <- vals %>%
+        filter(treatment) %>%
+        count(group, name = "n_eligible") %>%
+        mutate(group = as.character(group))
+    keep_cols <- unique(c(
+        "cell", "treatment", "group", "match_group", "match_weight", "pscore",
+        "area_ha", "total_biomass_2025", FC_COLS, setdiff(all.vars(this_f), "treatment")
     ))
-    gc()
+
+    for (k in todo) {
+        if (!is.null(RANDOM_SEED)) set.seed(replicate_seed(this_id, k))
+        sampled <- sample_strata(vals, MAX_TREATMENT, CONTROL_MULTIPLIER)
+        res <- match_strata(sampled, this_f)
+        if (is.null(res$result)) {
+            write_failure(site, k, paste0(
+                "No matches found (treatment=", sum(sampled$treatment),
+                ", control=", sum(!sampled$treatment), ")"
+            ), reason = "no_matches", diagnostics = res$diagnostics)
+            next
+        }
+        # Stratum weights scale matched treatment pixels (and their controls)
+        # to all eligible treatment pixels in the stratum.
+        weights <- res$result %>%
+            filter(treatment) %>%
+            count(group, name = "n_matched") %>%
+            inner_join(eligible, by = "group") %>%
+            mutate(sampling_weight = n_eligible / n_matched)
+        m <- res$result[, intersect(keep_cols, names(res$result))] %>%
+            as_tibble() %>%
+            inner_join(select(weights, group, sampling_weight), by = "group") %>%
+            mutate(
+                id_numeric = this_id, site_id = site$site_id, replicate = k,
+                n_site_pixels = n_site_pixels,
+                n_eligible = sum(eligible$n_eligible),
+                n_sampled = sum(sampled$treatment),
+                n_matched = sum(treatment),
+                n_control_pool = sum(!vals$treatment),
+                n_control_sampled = sum(!sampled$treatment)
+            )
+        attr(m, "group_diagnostics") <- res$diagnostics
+        saveRDS(m, file.path(config$matches_dir, match_file(this_id, k)))
+        message("    Replicate ", k, ": ", sum(m$treatment), " of ",
+                sum(sampled$treatment), " sampled treatment pixels matched")
+    }
 }
 
-if (n_failed > 0L) {
-    message("WARNING: ", n_failed, " site(s) failed matching ",
-            "(failure markers written)")
+
+# -- Main --------------------------------------------------------------------
+
+work <- select_work()
+message("Processing ", nrow(work$sites), " site fragment(s)")
+if (nrow(work$sites) > 0) {
+    pixels <- load_worker_pixels(work$sites)
+    for (i in seq_len(nrow(work$sites))) {
+        site <- work$sites[i, ]
+        tryCatch(
+            process_site(site, pixels, work$replicates),
+            error = function(e) {
+                msg <- conditionMessage(e)
+                message("  ERROR for site ", site$site_id, ": ", msg)
+                rollbar_report_error(msg)
+                done <- file.exists(file.path(
+                    config$matches_dir, match_file(site$id_numeric, work$replicates)
+                ))
+                for (k in work$replicates[!done]) write_failure(site, k, msg)
+            }
+        )
+        gc()
+    }
 }
 
-if (n_failed > 0L) {
-    message("WARNING: ", n_failed, " site(s) failed matching ",
-            "(failure markers written)")
-}
-
-step2_elapsed <- (proc.time() - step2_timer)["elapsed"]
-message("[TIMING] Step 2 total: ", round(step2_elapsed, 1), "s")
+message("[TIMING] Step 2 total: ", round((proc.time() - step2_timer)["elapsed"], 1), "s")
 message("Step 2 complete.")
 
 }, step_name = "02_perform_matching")

@@ -1,7 +1,7 @@
 """User-saved covariate and matching settings preset management."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from models import (
     CovariatePreset,
@@ -63,7 +63,7 @@ def save_covariate_preset(user_id, name, covariates, exact_match_vars=None):
             existing.exact_match_vars = (
                 list(exact_match_vars) if exact_match_vars else []
             )
-            existing.updated_at = datetime.now(timezone.utc)
+            existing.updated_at = datetime.now(UTC)
             db.commit()
             return str(existing.id)
 
@@ -159,7 +159,7 @@ def save_matching_settings_preset(user_id, name, settings):
         )
         if existing:
             existing.settings = dict(settings)
-            existing.updated_at = datetime.now(timezone.utc)
+            existing.updated_at = datetime.now(UTC)
             db.commit()
             return str(existing.id)
 

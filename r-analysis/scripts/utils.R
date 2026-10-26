@@ -1,15 +1,11 @@
 # Shared utility functions for avoided emissions analysis scripts.
 #
 # Loaded by each analysis step via source(). Provides configuration parsing,
-# covariate loading, filtering, matching helpers, area calculation, and
-# Rollbar error tracking.
+# exact-match group filtering, and Rollbar error tracking.
 
 library(sf)
-library(terra)
 library(tidyverse)
 library(jsonlite)
-library(units)
-library(foreach)
 library(httr)
 
 
@@ -179,6 +175,7 @@ parse_config <- function(args = commandArgs(trailingOnly = TRUE)) {
     }
 
     config <- fromJSON(config_path)
+    config$config_path <- config_path
 
     # Override data_dir if provided on command line
     if (!is.null(data_dir)) {
@@ -190,7 +187,7 @@ parse_config <- function(args = commandArgs(trailingOnly = TRUE)) {
 
     # Validate required parameters (no silent defaults)
     required_params <- c(
-        "max_treatment_pixels", "control_multiplier", "min_site_area_ha",
+        "max_treatment_pixels", "control_multiplier",
         "min_glm_treatment_pixels", "caliper_width", "max_controls_per_treatment"
     )
     missing <- required_params[!required_params %in% names(config)]
@@ -207,122 +204,6 @@ parse_config <- function(args = commandArgs(trailingOnly = TRUE)) {
     dir.create(config$matches_dir, showWarnings = FALSE, recursive = TRUE)
 
     return(config)
-}
-
-
-# -- Site loading ------------------------------------------------------------
-
-load_sites <- function(sites_path) {
-    # Load sites from GeoJSON or GeoPackage. Expects columns:
-    # site_id, site_name, start_date, end_date (optional)
-    ext <- tools::file_ext(sites_path)
-
-    if (ext == "geojson" || ext == "json") {
-        sites <- st_read(sites_path, quiet = TRUE)
-    } else if (ext == "gpkg") {
-        sites <- st_read(sites_path, quiet = TRUE)
-    } else {
-        stop(paste("Unsupported file format:", ext))
-    }
-
-    # Validate required columns
-    required_cols <- c("site_id", "site_name", "start_date")
-    missing <- setdiff(required_cols, names(sites))
-    if (length(missing) > 0) {
-        stop(paste("Missing required columns:", paste(missing, collapse = ", ")))
-    }
-
-    # Ensure CRS is EPSG:4326
-    sites <- st_transform(sites, "EPSG:4326")
-
-    # Parse dates
-    sites$start_date <- as.Date(sites$start_date)
-    if ("end_date" %in% names(sites)) {
-        sites$end_date <- as.Date(sites$end_date)
-    } else {
-        sites$end_date <- as.Date(NA)
-    }
-
-    sites$start_year <- as.integer(format(sites$start_date, "%Y"))
-    sites$end_year <- ifelse(
-        is.na(sites$end_date), 2099L,
-        as.integer(format(sites$end_date, "%Y"))
-    )
-
-    # Compute area in hectares
-    sites_cea <- st_transform(sites, "+proj=cea")
-    sites$area_ha <- as.numeric(st_area(sites_cea)) / 10000
-
-    # Assign numeric IDs for rasterization
-    sites$id_numeric <- seq_len(nrow(sites))
-
-    return(sites)
-}
-
-
-# -- Covariate loading -------------------------------------------------------
-
-load_covariates <- function(cog_bucket, cog_prefix, covariate_names) {
-    # Open merged covariate COGs from S3 via GDAL /vsis3/.
-    # No download is required — GDAL reads Cloud-Optimised GeoTIFFs
-    # through HTTP range requests, fetching only the tiles needed for
-    # the analysis extent.  AWS credentials are provided by the Batch
-    # instance role (no env vars needed).
-    #
-    # Args:
-    #   cog_bucket:      S3 bucket name
-    #   cog_prefix:      S3 key prefix (e.g. "avoided-emissions/cog")
-    #   covariate_names: character vector of covariate names
-    #
-    # Returns a terra SpatRaster stack with one layer per covariate.
-
-    # Tune GDAL for COG range-request performance
-    terra::gdalCache(1024)  # 1 GB GDAL block cache
-    Sys.setenv(
-        GDAL_HTTP_MULTIPLEX   = "YES",
-        GDAL_HTTP_MERGE_CONSECUTIVE_RANGES = "YES",
-        GDAL_HTTP_MAX_RETRY   = "5",
-        GDAL_HTTP_RETRY_DELAY = "2",
-        VSI_CACHE             = "TRUE",
-        VSI_CACHE_SIZE        = "50000000",  # 50 MB per file
-        AWS_NO_SIGN_REQUEST   = "NO"
-    )
-
-    s3_uris <- vapply(covariate_names, function(name) {
-        paste0("/vsis3/", cog_bucket, "/", cog_prefix, "/", name, ".tif")
-    }, character(1), USE.NAMES = FALSE)
-
-    rast_list <- lapply(seq_along(s3_uris), function(i) {
-        message(paste("  Opening:", covariate_names[i],
-                      "from s3://", cog_bucket, "/", cog_prefix))
-        terra::rast(s3_uris[i])
-    })
-    d <- do.call(c, rast_list)
-
-    return(d)
-}
-
-
-# -- Pixel area calculation --------------------------------------------------
-
-calc_pixel_area_ha <- function(y, yres, xres) {
-    # Calculate area of a raster cell in hectares on the WGS84 ellipsoid.
-    # Based on the slice area formula for an ellipsoid.
-    a <- 6378137       # semi-major axis (m)
-    b <- 6356752.3142  # semi-minor axis (m)
-    e <- sqrt(1 - (b / a)^2)
-
-    ymin_rad <- (y - yres / 2) * pi / 180
-    ymax_rad <- (y + yres / 2) * pi / 180
-
-    slice_area <- function(f) {
-        zp <- 1 + e * sin(f)
-        zm <- 1 - e * sin(f)
-        pi * b^2 * ((2 * atanh(e * sin(f))) / (2 * e) + sin(f) / (zp * zm))
-    }
-
-    area_m2 <- (slice_area(ymax_rad) - slice_area(ymin_rad)) * (xres / 360)
-    return(area_m2 / 10000)
 }
 
 
@@ -367,22 +248,4 @@ filter_groups <- function(vals, exact_match_vars) {
             sum(!vals$treatment), " control pixels")
 
     return(vals)
-}
-
-
-foreach_rbind <- function(d1, d2) {
-    # Robust rbind for use with foreach .combine, handles NULL inputs
-    if (is.null(d1) && is.null(d2)) return(NULL)
-    if (!is.null(d1) && is.null(d2)) return(d1)
-    if (is.null(d1) && !is.null(d2)) return(d2)
-    return(bind_rows(d1, d2))
-}
-
-
-# -- Formula building -------------------------------------------------------
-
-build_matching_formula <- function(covariates) {
-    # Build a formula object: treatment ~ cov1 + cov2 + ...
-    rhs <- paste(covariates, collapse = " + ")
-    as.formula(paste("treatment ~", rhs))
 }

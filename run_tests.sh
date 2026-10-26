@@ -16,6 +16,8 @@
 #
 # pytest is configured via pytest.ini at the repo root, which adds webapp/ to
 # sys.path so all app imports resolve without any PYTHONPATH manipulation.
+#
+# R analysis tests are run separately; see r-analysis/scripts/README.md.
 
 set -euo pipefail
 

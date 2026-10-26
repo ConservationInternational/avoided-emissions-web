@@ -46,7 +46,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -218,7 +218,7 @@ def _print_sql(
     merged_url = _esc(result["url"])
     size_bytes = result.get("size_bytes") or 0
     n_tiles = result.get("n_tiles") or 0
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S+00")
 
     sql = f"""\
 -- Run this on the server to register the merged COG in the covariates table.

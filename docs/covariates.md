@@ -33,12 +33,17 @@ The following covariates are pre-selected when submitting a new task:
 
 ```
 precip + temp + elev + slope + dist_cities + friction_surface +
-  pop_2015 + pop_growth + total_biomass_2025
+  pop_2015 + pop_growth
 ```
 
 These provide a broad representation of the biophysical and socioeconomic
 factors that influence both where conservation sites are established and
 where deforestation occurs, making them suitable propensity score predictors.
+
+Covariates should describe conditions before each site's intervention.
+`pop_2015` and `pop_growth` are treated as approximately time-invariant.
+`total_biomass_2025` is not a default because it is loss-masked to 2025 and
+can therefore reflect deforestation after a site's start date.
 
 ---
 
@@ -89,10 +94,11 @@ preserve total head-count semantics.
 | `soil_oc` | SoilGrids ISRIC (ocs_0–30 cm mean) | Soil organic carbon stock, 0–30 cm depth | t / ha | Static |
 | `irr_carbon_2024` | CI external asset (irrC v1a, 30 m, 2024) | Irrecoverable carbon (above + below ground + soil) | Mg C / ha | 2024 |
 
-`total_biomass_2025` is the biomass layer used in the emissions calculation
-(see [analysis-outputs.md](analysis-outputs.md#biomass-to-co2e-conversion)).
-It is also required as a non-optional input regardless of covariate selection
-and is always extracted during Step 1.
+`total_biomass_2025` is the biomass layer used in the emissions calculation,
+interpreted as whole-cell biomass density at baseline forest cover (see
+[analysis-outputs.md](analysis-outputs.md#biomass-to-co2e-conversion)). It is
+always extracted during Step 1, and pixels where it is missing are not
+eligible for matching.
 
 ### Land Use
 
@@ -109,12 +115,13 @@ and is always extracted during Step 1.
 
 | Variable | Source | Description | Units | Years |
 |---|---|---|---|---|
-| `fc_2000` … `fc_2025` | Hansen GFC v1.13 (derived annually) | Annual forest cover fraction | 0–1 | 2000–2025 (26 layers) |
+| `fc_2000` … `fc_2025` | Hansen GFC v1.13 (derived annually) | Annual forest cover | percent (0–100) | 2000–2025 (26 layers) |
 
 Forest cover layers are not used as covariates in the propensity score model
-directly. They are used by the summarisation step to calculate annual
-deforestation rates and biomass loss. All years from `fc_year_start` to
-`fc_year_end` (configured per task, default 2000–2025) are always extracted.
+directly. They define eligible pixels (forest at the site's baseline year),
+the pre-intervention deforestation covariate, and annual forest loss and
+emissions. Years from six years before the earliest site start to 2025 are
+extracted.
 
 ---
 
@@ -143,11 +150,10 @@ Default exact-match variables: `admin1`, `ecoregion`, `pa`.
 ## Pre-Intervention Deforestation Rate
 
 `defor_pre_intervention` is not a standalone covariate COG. It is computed
-on-the-fly during Step 1 (extraction) as the mean annual forest loss rate
-over the 5 years immediately before a site's `start_date`, using the annual
-`fc_YYYY` layers. It is automatically added to the propensity score formula
-for any site whose `start_date` is after 2005 (so that at least 5 years of
-forest cover data are available).
+during Step 2 (matching) as the percent change in forest cover from
+`start_year − 6` to `start_year − 1`, so it ends the year before the
+intervention starts. It is added to the propensity score formula for sites
+starting in 2006 or later, when that forest cover record is available.
 
 ---
 

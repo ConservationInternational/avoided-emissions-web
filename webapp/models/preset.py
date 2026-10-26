@@ -1,7 +1,7 @@
 """User-saved covariate and matching settings preset models."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import Column, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY, JSON, UUID
@@ -22,12 +22,8 @@ class CovariatePreset(Base):
     name = Column(String(255), nullable=False)
     covariates = Column(ARRAY(Text), nullable=False)
     exact_match_vars = Column(ARRAY(Text), nullable=True)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     user = relationship("User", back_populates="covariate_presets")
 
@@ -43,11 +39,7 @@ class MatchingSettingsPreset(Base):
     )
     name = Column(String(255), nullable=False)
     settings = Column(JSON, nullable=False)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     user = relationship("User", back_populates="matching_settings_presets")

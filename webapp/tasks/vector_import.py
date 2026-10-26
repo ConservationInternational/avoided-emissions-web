@@ -1,7 +1,7 @@
 """Celery tasks: import vector reference data and rasterize PostGIS vectors."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import boto3
 from celery_app import celery_app
@@ -181,14 +181,14 @@ def rasterize_vectors_task(self) -> dict:
                                 resolution_m=resolution_m,
                                 output_bucket=bucket,
                                 output_prefix=prefix,
-                                started_at=datetime.now(timezone.utc),
+                                started_at=datetime.now(UTC),
                             )
                             db.add(layer)
                             db.flush()
                         layer.status = "merged"
                         layer.merged_url = s3_info["url"]
                         layer.size_bytes = s3_info["size_bytes"]
-                        layer.completed_at = datetime.now(timezone.utc)
+                        layer.completed_at = datetime.now(UTC)
                         meta = dict(layer.extra_metadata or {})
                         meta["source"] = "postgis_rasterize"
                         meta["adopted_from_s3"] = True
@@ -232,7 +232,7 @@ def rasterize_vectors_task(self) -> dict:
                             resolution_m=resolution_m,
                             output_bucket=Config.S3_BUCKET,
                             output_prefix=prefix,
-                            started_at=datetime.now(timezone.utc),
+                            started_at=datetime.now(UTC),
                         )
                         db.add(layer)
                         db.flush()
@@ -248,7 +248,7 @@ def rasterize_vectors_task(self) -> dict:
                         layer.status = "merged"
                         layer.merged_url = result["cog_url"]
                         layer.size_bytes = result["size_bytes"]
-                        layer.completed_at = datetime.now(timezone.utc)
+                        layer.completed_at = datetime.now(UTC)
                         meta = dict(layer.extra_metadata or {})
                         if result.get("csv_url"):
                             meta["csv_key_url"] = result["csv_url"]
@@ -270,7 +270,7 @@ def rasterize_vectors_task(self) -> dict:
                         )
                         layer.status = "failed"
                         layer.error_message = str(exc)[:2000]
-                        layer.completed_at = datetime.now(timezone.utc)
+                        layer.completed_at = datetime.now(UTC)
                         db.commit()
                         results[result_key] = {"error": str(exc)[:500]}
 

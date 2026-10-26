@@ -1,7 +1,7 @@
 """Celery tasks: COG merge, GEE export polling, and auto-merge."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from celery_app import celery_app
@@ -114,7 +114,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
             )
 
         tile_hash = compute_tile_etag_hash(tile_details) if tile_details else None
-        merge_start = datetime.now(timezone.utc)
+        merge_start = datetime.now(UTC)
 
         # Create a metadata snapshot if one doesn't exist yet
         if not meta:
@@ -164,7 +164,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
         )
 
         # Re-check the record still exists after the (slow) merge
-        merge_end = datetime.now(timezone.utc)
+        merge_end = datetime.now(UTC)
         db.expire_all()
         layer = db.query(Covariate).filter(Covariate.id == layer_id).first()
         if not layer:
@@ -272,7 +272,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
             if layer:
                 layer.status = "failed"
                 layer.error_message = str(exc)[:2000]
-                layer.completed_at = datetime.now(timezone.utc)
+                layer.completed_at = datetime.now(UTC)
                 # Track retry count so auto_merge can retry up to 3 times
                 md = dict(layer.extra_metadata or {})
                 md["merge_retry_count"] = md.get("merge_retry_count", 0) + 1
@@ -298,7 +298,7 @@ def run_cog_merge(self, layer_id: str) -> dict:
             if meta:
                 meta.status = "failed"
                 meta.error_message = str(exc)[:2000]
-                meta.merge_completed_at = datetime.now(timezone.utc)
+                meta.merge_completed_at = datetime.now(UTC)
             db.commit()
         except Exception:  # noqa: BLE001
             db.rollback()
@@ -382,7 +382,7 @@ def poll_gee_exports() -> dict:
                     export.status = new_status
                     updated += 1
                     if new_status in ("exported", "failed", "cancelled"):
-                        export.completed_at = datetime.now(timezone.utc)
+                        export.completed_at = datetime.now(UTC)
                     if new_status == "exported":
                         from services import list_export_tiles
 
@@ -418,7 +418,7 @@ def poll_gee_exports() -> dict:
                             tile_count=len(tile_urls) if tile_urls else None,
                             gee_task_id=export.gee_task_id,
                             gee_completed_at=export.completed_at,
-                            tiles_detected_at=datetime.now(timezone.utc),
+                            tiles_detected_at=datetime.now(UTC),
                             status="pending_merge",
                         )
                         db.add(gee_meta)
@@ -428,7 +428,7 @@ def poll_gee_exports() -> dict:
                     export.error_message = error.get("message", str(error))
                     if export.status == "exporting":
                         export.status = "failed"
-                        export.completed_at = datetime.now(timezone.utc)
+                        export.completed_at = datetime.now(UTC)
                         updated += 1
 
             except Exception as exc:  # noqa: BLE001
@@ -565,7 +565,7 @@ def _auto_merge_unmerged_inner() -> dict:
     db = get_db()
     dispatched_ids: list[str] = []
     discovered = 0
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         # ---- Discover pre-existing S3 COGs without DB records ----

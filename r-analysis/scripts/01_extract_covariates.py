@@ -127,7 +127,6 @@ def parse_config(argv: list[str] | None = None) -> dict:
     required = [
         "max_treatment_pixels",
         "control_multiplier",
-        "min_site_area_ha",
         "min_glm_treatment_pixels",
     ]
     missing = [k for k in required if k not in config]
@@ -148,8 +147,12 @@ def parse_config(argv: list[str] | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def load_sites(sites_path: str, min_area_ha: float) -> gpd.GeoDataFrame:
-    """Load sites from GeoJSON, GeoPackage, or GeoParquet."""
+def load_sites(sites_path: str) -> gpd.GeoDataFrame:
+    """Load sites from GeoJSON, GeoPackage, or GeoParquet.
+
+    The minimum-area filter is applied to whole sites by the webapp before
+    they are split across exact-match regions, so it is not repeated here.
+    """
     if sites_path.lower().endswith(".parquet"):
         sites = gpd.read_parquet(sites_path)
     else:
@@ -179,18 +182,9 @@ def load_sites(sites_path: str, min_area_ha: float) -> gpd.GeoDataFrame:
 
     # Numeric IDs (1-based)
     sites["id_numeric"] = range(1, len(sites) + 1)
-
-    # Filter
-    n_before = len(sites)
-    sites = sites[sites["area_ha"] >= min_area_ha].copy()
-    log.info(
-        "Sites: %d loaded, %d after area filter (>= %.0f ha)",
-        n_before,
-        len(sites),
-        min_area_ha,
-    )
     if len(sites) == 0:
-        raise RuntimeError("No sites remaining after area filter.")
+        raise RuntimeError("No sites to process.")
+    log.info("Sites: %d loaded", len(sites))
 
     return sites.reset_index(drop=True)
 
@@ -247,6 +241,7 @@ def _load_layer_fresh(
     uri: str,
     layer_name: str,
     clip_bounds: tuple[float, float, float, float],
+    grid: tuple,
     rows: np.ndarray,
     cols: np.ndarray,
     max_attempts: int = 5,
@@ -256,13 +251,16 @@ def _load_layer_fresh(
 
     Thread-safe: does not use any shared xr.Dataset.  The full-grid array
     is freed before the function returns, so each caller only retains the
-    small candidate-pixel array.
+    small candidate-pixel array.  ``grid`` is the reference ``(transform,
+    shape)``; a layer on a different grid raises instead of being silently
+    misaligned.
     """
     delay = base_delay_seconds
     for attempt in range(1, max_attempts + 1):
         try:
             _, da = _open_single_cog(uri, layer_name)
             da = da.rio.clip_box(*clip_bounds)
+            _check_grid(layer_name, da, grid)
             arr = da.values
             del da  # free DataArray before full-grid array
             if arr.ndim == 3:
@@ -272,6 +270,8 @@ def _load_layer_fresh(
             if vals.dtype == np.float64:
                 vals = vals.astype(np.float32)
             return vals
+        except GridMismatchError:
+            raise
         except Exception as exc:
             if attempt == max_attempts or not _is_transient_raster_error(exc):
                 raise
@@ -290,104 +290,75 @@ def _load_layer_fresh(
     raise RuntimeError(f"Exhausted retries while reading layer '{layer_name}'.")
 
 
-def open_covariate_dataset(
+class GridMismatchError(RuntimeError):
+    """A covariate layer is not on the reference pixel grid."""
+
+
+def _check_grid(layer_name: str, da: xr.DataArray, grid: tuple) -> None:
+    """Raise unless *da* has the reference transform and shape.
+
+    All COGs are exported with the same ``crsTransform``, so valid layers
+    match exactly apart from floating-point noise in the pixel size.
+    """
+    ref_transform, ref_shape = grid
+    transform = da.rio.transform()
+    shape_ = (da.sizes["y"], da.sizes["x"])
+    tol = abs(ref_transform.a) * 1e-3
+    same = shape_ == ref_shape and all(
+        abs(a - b) <= tol for a, b in zip(transform[:6], ref_transform[:6])
+    )
+    if not same:
+        raise GridMismatchError(
+            f"Layer '{layer_name}' is not on the reference grid: "
+            f"transform {tuple(transform)[:6]}, shape {shape_}; expected "
+            f"{tuple(ref_transform)[:6]}, shape {ref_shape}"
+        )
+
+
+def open_reference_grid(
     cog_bucket: str,
     cog_prefix: str,
     covariate_names: list[str],
-) -> xr.Dataset:
-    """Open all covariate COGs and return a validated, coordinate-snapped Dataset.
+) -> xr.DataArray:
+    """Open all covariate COGs (metadata only) and return the first one.
 
-    Opens each COG in parallel via rioxarray / GDAL's ``/vsis3/`` virtual
-    filesystem (metadata only — no pixel data is fetched).  Validates that
-    all layers share the same CRS and resolution, and snaps their coordinate
-    arrays to a common reference grid.
-
-    The returned Dataset is used exclusively for grid metadata (transform,
-    shape, CRS) and spatial clipping.  Pixel data is loaded separately via
-    ``_load_layer_fresh`` to enable parallel, memory-efficient reads.
+    Fails early if any layer has a different CRS or pixel size.  Exact
+    alignment of the clipped window is checked for every layer when its
+    pixels are read (``_load_layer_fresh``).
     """
-    # -- Phase 1: open all COGs in parallel (metadata-only reads) ----------
     uris = {name: _s3_path(cog_bucket, cog_prefix, name) for name in covariate_names}
-    opened: dict[str, xr.DataArray] = {}
     n_workers = min(8, len(covariate_names))
     log.info(
         "  Opening %d COGs in parallel (%d workers)...", len(covariate_names), n_workers
     )
-
+    opened: dict[str, xr.DataArray] = {}
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {
             pool.submit(_open_single_cog, uri, name): name for name, uri in uris.items()
         }
         for future in as_completed(futures):
-            fname = futures[future]
+            name = futures[future]
             try:
-                _, da = future.result()
+                opened[name] = future.result()[1]
             except Exception as exc:
                 raise RuntimeError(
-                    f"Failed to open covariate '{fname}' at {uris[fname]}"
+                    f"Failed to open covariate '{name}' at {uris[name]}"
                 ) from exc
-            opened[fname] = da
-            log.info("  Opened: %s", uris[fname])
 
-    # -- Phase 2: validate CRS / resolution and snap coordinates -----------
-    arrays: dict[str, xr.DataArray] = {}
-    ref_crs = None
-    ref_res = None
-    ref_x = None
-    ref_y = None
-
-    for name in covariate_names:
+    ref = opened[covariate_names[0]]
+    ref_res = ref.rio.resolution()
+    for name in covariate_names[1:]:
         da = opened[name]
-
-        # Validate that all COGs share the same CRS and resolution
-        layer_crs = da.rio.crs
-        layer_res = da.rio.resolution()
-        if ref_crs is None:
-            ref_crs = layer_crs
-            ref_res = layer_res
-            ref_x = da.coords["x"].values
-            ref_y = da.coords["y"].values
-        else:
-            if layer_crs != ref_crs:
-                raise RuntimeError(
-                    f"CRS mismatch: '{name}' has {layer_crs}, expected {ref_crs}"
-                )
-            # Allow tiny floating-point differences in pixel size
-            # (e.g. 1/120 vs GEE's 30 arc-second grid constant).
-            if layer_res != ref_res and not all(
-                abs(a - b) < 1e-6 for a, b in zip(layer_res, ref_res)
-            ):
-                raise RuntimeError(
-                    f"Resolution mismatch: '{name}' has {layer_res}, expected {ref_res}"
-                )
-
-            # Snap coordinates to the reference grid so that all layers
-            # share identical x/y arrays.  Without this, layers whose
-            # resolution differs by a tiny amount (e.g. 1/120 vs GEE's
-            # 30 arc-second constant) end up with divergent coordinate
-            # values, causing rioxarray's clip_box to fail with
-            # "Bounds and transform are inconsistent".
-            if da.sizes["x"] == len(ref_x) and da.sizes["y"] == len(ref_y):
-                if not np.array_equal(da.coords["x"].values, ref_x):
-                    log.info("    Snapping '%s' coords to reference grid", name)
-                    da = da.assign_coords(x=ref_x, y=ref_y)
-            else:
-                log.warning(
-                    "Layer '%s' has different grid shape (%d×%d vs %d×%d) "
-                    "— reindexing to reference grid",
-                    name,
-                    da.sizes["x"],
-                    da.sizes["y"],
-                    len(ref_x),
-                    len(ref_y),
-                )
-                da = da.reindex(x=ref_x, y=ref_y, method="nearest", tolerance=0.01)
-
-        arrays[name] = da
-
-    ds = xr.Dataset(arrays)
-    log.info("  Covariate dataset: %s", dict(ds.sizes))
-    return ds
+        if da.rio.crs != ref.rio.crs:
+            raise GridMismatchError(
+                f"CRS mismatch: '{name}' has {da.rio.crs}, expected {ref.rio.crs}"
+            )
+        if any(abs(a - b) > 1e-9 for a, b in zip(da.rio.resolution(), ref_res)):
+            raise GridMismatchError(
+                f"Resolution mismatch: '{name}' has {da.rio.resolution()}, "
+                f"expected {ref_res}"
+            )
+    return ref
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +464,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     log.info("Loading %d covariate layers from S3", len(all_layers))
 
     # --- 1. open lazily ---
-    ds = open_covariate_dataset(cog_bucket, cog_prefix, all_layers)
+    ref = open_reference_grid(cog_bucket, cog_prefix, all_layers)
 
     # --- 2. spatial window from matching extent ---
     matching_extent_geojson = config.get("matching_extent")
@@ -515,17 +486,18 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     clip_bounds = clip_box.bounds
     log.info("Clipping covariates to matching extent bbox: %s", clip_box.bounds)
 
-    ds = ds.rio.clip_box(*clip_bounds)
+    ref = ref.rio.clip_box(*clip_bounds)
 
-    # --- 3. grid metadata from the *unloaded* dataset ---
+    # --- 3. grid metadata from the *unloaded* reference layer ---
     # rioxarray reads CRS, transform, and shape from COG headers;
     # no pixel data has been fetched yet.
-    first_var = ds[all_layers[0]]
-    transform = first_var.rio.transform()
+    transform = ref.rio.transform()
     xres = abs(transform.a)
     yres = abs(transform.e)
-    ys = ds.coords["y"].values
-    height, width = len(ys), len(ds.coords["x"].values)
+    ys = ref.coords["y"].values
+    height, width = len(ys), len(ref.coords["x"].values)
+    grid = (transform, (height, width))
+    del ref
 
     log.info("Grid: %d x %d (xres=%.6f, yres=%.6f)", width, height, xres, yres)
 
@@ -636,6 +608,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             layer_uris[_PRUNE_LAYER],
             _PRUNE_LAYER,
             clip_bounds,
+            grid,
             rows,
             cols,
         )
@@ -678,12 +651,6 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
                 "'%s' not in layer list — skipping non-forest pruning", _PRUNE_LAYER
             )
 
-    # Free the lazy Dataset — it is no longer needed for pixel reads.
-    # Subsequent reads open each COG fresh, bypassing the shared Dataset
-    # entirely and making the reads safe to issue from multiple threads.
-    del ds
-    gc.collect()
-
     # Load remaining layers in parallel.  Each thread opens its COG from
     # scratch, reads the clipped grid, extracts candidate-pixel values,
     # then frees the full-grid array before returning — so only the small
@@ -699,6 +666,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
                 layer_uris[layer_name],
                 layer_name,
                 clip_bounds,
+                grid,
                 rows,
                 cols,
             )
@@ -762,13 +730,15 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     # Cast the partition column to int32 in-place so BOTH treatment_pixels and
     # the control hive directory names use identical integer keys (otherwise the
     # match step would compare float32 treatment values against int32 control
-    # values parsed from the directory paths).  NaN/Inf -> 0; pixels in
-    # partition 0 are dropped by R's filter_groups() because no treatment pixel
-    # ever lands there.
+    # values parsed from the directory paths).  Missing values (NaN/Inf) become
+    # -1, which the match step treats as missing, so they never merge with a
+    # real value such as pa = 0.
     if _partition_var:
         _pv = data[_partition_var]
         data[_partition_var] = (
-            np.nan_to_num(_pv, nan=0.0, posinf=0.0, neginf=0.0).round().astype(np.int32)
+            np.nan_to_num(_pv, nan=-1.0, posinf=-1.0, neginf=-1.0)
+            .round()
+            .astype(np.int32)
         )
         del _pv
         gc.collect()
@@ -1094,7 +1064,7 @@ def main(argv: list[str] | None = None) -> None:
         log.info("  Config: %s", json.dumps(config, default=str))
 
         # Load & filter sites
-        sites = load_sites(config["sites_file"], config["min_site_area_ha"])
+        sites = load_sites(config["sites_file"])
 
         # Save site ID key (CSV for interop)
         key_cols = [
@@ -1125,20 +1095,6 @@ def main(argv: list[str] | None = None) -> None:
         with open(os.path.join(config["output_dir"], "formula.json"), "w") as f:
             json.dump(formula, f)
         log.info("  Formula: %s", formula["formula_str"])
-
-        # Save exact-match group mapping if cross-site grouping is enabled
-        if config.get("group_by_exact_matches") and config.get(
-            "exact_match_group_mapping"
-        ):
-            group_mapping = config["exact_match_group_mapping"]
-            # Convert tuple keys to strings for JSON serialization
-            # group_mapping is {group_id: [(site_id, sub_site_index), ...]}
-            group_mapping_json = {int(k): v for k, v in group_mapping.items()}
-            with open(
-                os.path.join(config["output_dir"], "exact_match_groups.json"), "w"
-            ) as f:
-                json.dump(group_mapping_json, f)
-            log.info("  Saved exact-match group mapping: %d groups", len(group_mapping))
 
         # Compute matching_extent and sites_exclusion_buffer when not already
         # provided in config.  Results are written to prep_summary.json so

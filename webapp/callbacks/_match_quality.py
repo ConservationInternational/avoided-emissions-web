@@ -230,23 +230,10 @@ def _assess_match_quality(balance_df=None, totals=None):
     # -- Matched-pixel percentage per site ----------------------------------
     if totals:
         for t in totals:
-            n_px = t.n_sample_pixels or 0
-            n_treatment = t.n_treatment_pixels
-            area_ha = t.area_ha
-            sampled_frac = t.sampled_fraction or 1.0
-
-            if n_treatment and n_treatment > 0:
-                eligible = n_treatment * sampled_frac
-                pct = (n_px / eligible * 100) if eligible > 0 else 0
-                pct = min(pct, 100)
-            elif area_ha and area_ha > 0:
-                # Fallback for old results without n_treatment_pixels
-                approx_pixels = area_ha / 86.0
-                eligible = approx_pixels * sampled_frac
-                pct = (n_px / eligible * 100) if eligible > 0 else 0
-                pct = min(pct, 100)
-            else:
-                pct = None
+            n_px = t.n_sample_pixels
+            # Matched pixels as a share of the eligible pixels that were sampled.
+            sampled = t.n_eligible_pixels * t.sampled_fraction
+            pct = n_px / sampled * 100 if sampled > 0 else None
 
             if pct is not None and pct < _PCT_MATCHED_CRITICAL:
                 warnings.append(
@@ -292,6 +279,20 @@ def _assess_match_quality(balance_df=None, totals=None):
 def _check_balance_warnings(balance_df, warnings, scope, site_filter):
     """Append SMD-based warnings for *site_filter* to *warnings*."""
     rows = balance_df[balance_df["site_id"].astype(str) == str(site_filter)]
+    undefined = rows.loc[rows["smd"].isna(), "covariate"].tolist()
+    if undefined:
+        warnings.append(
+            {
+                "level": "warning",
+                "scope": scope,
+                "message": (
+                    "Balance could not be assessed for "
+                    + ", ".join(f"\u2018{c}\u2019" for c in undefined)
+                    + " (the covariate is constant within treatment but differs "
+                    "from the matched controls)."
+                ),
+            }
+        )
     smds = rows["smd"].dropna()
     if smds.empty:
         return
@@ -532,7 +533,6 @@ def _compute_quality_warnings(task_id, task, totals):
         Warning dicts from :func:`_assess_match_quality`.
     """
     import io
-    import json
 
     balance_df = None
     if task.status == "succeeded":
@@ -546,47 +546,19 @@ def _compute_quality_warnings(task_id, task, totals):
 
     warnings = _assess_match_quality(balance_df=balance_df, totals=totals)
 
-    # Load methodology warnings from results_summary.json (if available)
-    if task.status == "succeeded":
-        summary_raw = download_results_csv(
-            task_id, "summary", results_s3_uri=task.results_s3_uri
-        )
-        if summary_raw:
-            try:
-                summary = json.loads(summary_raw)
-                methodology_warnings = summary.get("methodology_warnings", [])
-                for mw in methodology_warnings:
-                    code = mw.get("code", "")
-                    message = mw.get("message", "")
-                    if code == "ci_low_replicates":
-                        warnings.append(
-                            {
-                                "level": "warning",
-                                "scope": "aggregate",
-                                "message": message,
-                            }
-                        )
-                    elif code == "pre_2005_sites":
-                        affected = mw.get("affected_sites", [])
-                        site_names = [
-                            s.get("site_name") or s.get("site_id") for s in affected
-                        ]
-                        if len(site_names) <= 3:
-                            sites_str = ", ".join(site_names)
-                        else:
-                            sites_str = (
-                                f"{', '.join(site_names[:3])}, "
-                                f"and {len(site_names) - 3} more"
-                            )
-                        warnings.append(
-                            {
-                                "level": "warning",
-                                "scope": "aggregate",
-                                "message": (f"{message} Affected sites: {sites_str}."),
-                            }
-                        )
-            except (json.JSONDecodeError, ValueError, TypeError):
-                pass  # Summary not available or malformed
+    # Methodology warnings from the R summary step (stored on import).
+    meta = task.extra_metadata or {}
+    for mw in meta.get("methodology_warnings", []):
+        message = mw["message"]
+        affected = [
+            s.get("site_name") or s["site_id"] for s in mw.get("affected_sites", [])
+        ]
+        if affected:
+            shown = ", ".join(affected[:3])
+            if len(affected) > 3:
+                shown += f", and {len(affected) - 3} more"
+            message = f"{message} Affected sites: {shown}."
+        warnings.append({"level": "warning", "scope": "aggregate", "message": message})
 
     return warnings
 
@@ -754,28 +726,13 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
         except (json.JSONDecodeError, ValueError):
             summary = None
 
-    if not summary or not summary.get("histograms"):
-        # Summary not available — try to generate it in the background
-        # via a Celery task (routed to the merge queue which has more
-        # memory), then show a placeholder for now.
-        try:
-            from celery_app import celery_app
-
-            celery_app.send_task(
-                "tasks.generate_match_quality_summary",
-                args=[str(task_id)],
-                kwargs={"results_s3_uri": task.results_s3_uri},
-            )
-            logger.info("Dispatched backfill summary task for %s", task_id)
-        except Exception:  # noqa: BLE001, S110
-            pass  # best effort
-
+    if not summary:
         return html.Div(
             [
-                html.P(
-                    "Match quality plots are being generated. "
-                    "Please refresh the page in a few moments.",
-                    className="text-muted",
+                dbc.Alert(
+                    "The match quality summary (results_match_quality_summary.json) "
+                    "is missing for this task. Rerun the task to generate it.",
+                    color="warning",
                 ),
                 placeholder_ids,
             ]
@@ -866,7 +823,6 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
 
     # Store only the small summary data (not raw pixel rows)
     store_data = {
-        "has_summary": True,
         "summary_stats": summary.get("summary_stats", {}),
         "histograms": summary.get("histograms", {}),
         "qq_quantiles": summary.get("qq_quantiles", {}),
@@ -899,148 +855,6 @@ def _build_match_quality(task_id, task, sites=None, totals=None):
     content.append(dcc.Download(id="download-match-quality"))
 
     return html.Div(content)
-
-
-def _build_all_match_quality_plots(
-    df,
-    covariate_cols,
-    balance_df,
-    pscore_df,
-    site_filter=None,
-    site_areas=None,
-):
-    """Build summary stats, Love plot, QQ plot, and covariate histograms.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Matched-pixel covariate data (already filtered to the target site
-        when *site_filter* is not ``None``).
-    covariate_cols : list[str]
-        Covariate column names.
-    balance_df : pd.DataFrame | None
-        Balance statistics with ``site_id``, ``covariate``, ``smd``.
-    pscore_df : pd.DataFrame | None
-        Propensity scores with ``treatment``, ``pscore``, ``site_id``.
-    site_filter : str | None
-        ``None`` (or ``"__all__"``) for aggregate; otherwise the site id
-        string to show per-site diagnostics.
-    site_areas : dict | None
-        Mapping of ``str(site_id)`` to area in hectares.
-    """
-    if site_areas is None:
-        site_areas = {}
-
-    components = []
-
-    # --- Summary stat boxes ------------------------------------------------
-    n_treatment = int(df["treatment"].sum())
-    n_control = int((~df["treatment"]).sum())
-    n_sites = df["site_id"].nunique()
-
-    # Compute total area for the selected site(s)
-    if site_filter:
-        total_area = site_areas.get(str(site_filter), 0)
-    else:
-        total_area = sum(site_areas.values())
-
-    # Treatment pixels card body
-    treatment_body = [
-        html.H6("Treatment Pixels", className="text-muted mb-1"),
-        html.H4(f"{n_treatment:,}"),
-    ]
-
-    # Control pixels card body
-    control_body = [
-        html.H6("Control Pixels", className="text-muted mb-1"),
-        html.H4(f"{n_control:,}"),
-    ]
-
-    stat_cols = [
-        dbc.Col(
-            dbc.Card(
-                dbc.CardBody(treatment_body),
-                className="text-center",
-            ),
-            md=3,
-        ),
-        dbc.Col(
-            dbc.Card(
-                dbc.CardBody(control_body),
-                className="text-center",
-            ),
-            md=3,
-        ),
-        dbc.Col(
-            dbc.Card(
-                dbc.CardBody(
-                    [
-                        html.H6(
-                            "Site Area (ha)" if site_filter else "Total Area (ha)",
-                            className="text-muted mb-1",
-                        ),
-                        html.H4(f"{total_area:,.1f}"),
-                    ]
-                ),
-                className="text-center",
-            ),
-            md=3,
-        ),
-    ]
-
-    if not site_filter:
-        stat_cols.append(
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.H6("Sites", className="text-muted mb-1"),
-                            html.H4(f"{n_sites:,}"),
-                        ]
-                    ),
-                    className="text-center",
-                ),
-                md=3,
-            ),
-        )
-
-    components.append(dbc.Row(stat_cols, className="mb-4"))
-
-    # --- Love plot ---------------------------------------------------------
-    if balance_df is not None:
-        components.append(
-            html.H6("Covariate Balance (Love Plot)", className="mt-3 mb-2")
-        )
-        components.append(
-            html.P(
-                "Standardized mean differences (SMD) for each covariate "
-                "after matching.  Values within the dashed lines "
-                "(|SMD| < 0.1) indicate good balance between treatment "
-                "and control groups.",
-                className="text-muted mb-2",
-            )
-        )
-        components.append(_build_love_plot(balance_df, df, site_filter))
-
-    # --- Propensity score QQ plot ------------------------------------------
-    if pscore_df is not None:
-        components.append(html.H6("Propensity Score QQ Plot", className="mt-3 mb-2"))
-        components.append(
-            html.P(
-                "Empirical quantile-quantile plot comparing the propensity "
-                "score distributions of matched treatment and control "
-                "pixels. Points close to the 45┬░ line indicate similar "
-                "distributions.",
-                className="text-muted mb-2",
-            )
-        )
-        components.append(_build_pscore_qq_plot(pscore_df, df, site_filter))
-
-    # --- Covariate histograms ----------------------------------------------
-    components.append(html.H6("Covariate Distributions", className="mt-3 mb-2"))
-    components.extend(_build_match_quality_plots(df, covariate_cols))
-
-    return components
 
 
 def _build_love_plot(balance_df, cov_df, site_filter=None):
@@ -1113,88 +927,6 @@ def _build_love_plot(balance_df, cov_df, site_filter=None):
         height=max(300, 40 * len(agg) + 100),
         margin={"l": 200, "r": 40, "t": 50, "b": 50},
         xaxis={"zeroline": True},
-    )
-
-    return dcc.Graph(figure=fig)
-
-
-def _build_pscore_qq_plot(pscore_df, cov_df, site_filter=None):
-    """Build an empirical QQ plot comparing treatment vs control propensity
-    score distributions.
-
-    For each group, scores are sorted and quantile-aligned.  If the two
-    groups have different sizes, the smaller set is linearly interpolated
-    to match the larger set's quantile positions.
-
-    Parameters
-    ----------
-    pscore_df : pd.DataFrame
-        Propensity scores with columns ``treatment``, ``pscore``,
-        ``site_id``.
-    cov_df : pd.DataFrame
-        Unused; kept for API consistency with other helpers.
-    site_filter : str | None
-        ``None`` for aggregate view; otherwise the site id to display.
-    """
-    import numpy as np
-
-    if site_filter:
-        pscore_df = pscore_df[pscore_df["site_id"].astype(str) == str(site_filter)]
-
-    treatment_scores = np.sort(
-        pscore_df.loc[pscore_df["treatment"], "pscore"].dropna().values
-    )
-    control_scores = np.sort(
-        pscore_df.loc[~pscore_df["treatment"], "pscore"].dropna().values
-    )
-
-    if len(treatment_scores) < 2 or len(control_scores) < 2:
-        return html.P(
-            "Insufficient propensity scores for a QQ plot.",
-            className="text-muted",
-        )
-
-    # Align quantiles via linear interpolation to the larger sample
-    n_points = max(len(treatment_scores), len(control_scores))
-    quantiles = np.linspace(0, 1, n_points)
-    t_quantiles = np.quantile(treatment_scores, quantiles)
-    c_quantiles = np.quantile(control_scores, quantiles)
-
-    fig = go.Figure()
-    # 45┬░ reference line
-    q_min = min(t_quantiles.min(), c_quantiles.min())
-    q_max = max(t_quantiles.max(), c_quantiles.max())
-    fig.add_trace(
-        go.Scatter(
-            x=[q_min, q_max],
-            y=[q_min, q_max],
-            mode="lines",
-            line={"color": "gray", "dash": "dash"},
-            name="45┬░ line",
-            hoverinfo="skip",
-        )
-    )
-    fig.add_trace(
-        go.Scattergl(
-            x=c_quantiles,
-            y=t_quantiles,
-            mode="markers",
-            marker={"size": 4, "color": "#1f77b4", "opacity": 0.6},
-            name="Matched Pixels",
-            hovertemplate=(
-                "Control quantile: %{x:.3f}<br>"
-                "Treatment quantile: %{y:.3f}<extra></extra>"
-            ),
-        )
-    )
-    fig.update_layout(
-        title="Propensity Score QQ Plot (Treatment vs Control)",
-        xaxis_title="Control Quantiles",
-        yaxis_title="Treatment Quantiles",
-        height=450,
-        margin={"t": 50, "b": 50, "l": 60, "r": 30},
-        legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
-        xaxis={"scaleanchor": "y", "scaleratio": 1},
     )
 
     return dcc.Graph(figure=fig)
@@ -1454,70 +1186,6 @@ def _build_histograms_from_summary(hist_data):
                 opacity=0.6,
                 marker_color="#d62728",
                 width=bin_width,
-            )
-        )
-        fig.update_layout(
-            title=f"Covariate: {col}",
-            xaxis_title=col,
-            yaxis_title="Frequency (%)",
-            barmode="overlay",
-            legend={"yanchor": "top", "y": 0.99, "xanchor": "right", "x": 0.99},
-            height=350,
-            margin={"t": 40, "b": 40, "l": 50, "r": 20},
-        )
-        plots.append(dcc.Graph(figure=fig))
-
-    if not plots:
-        return [html.P("No numeric covariates to display.", className="text-muted")]
-
-    return plots
-
-
-def _build_match_quality_plots(df, covariate_cols):
-    """Build overlaid histogram figures for each covariate.
-
-    Returns a list of ``dcc.Graph`` components comparing treatment vs
-    control distributions.  Both traces share identical bin edges so
-    their bar widths are directly comparable.
-    """
-
-    plots = []
-    n_bins = 40
-
-    treatment_df = df[df["treatment"]]
-    control_df = df[~df["treatment"]]
-
-    for col in covariate_cols:
-        # Skip columns with no variance
-        col_vals = df[col].dropna()
-        if col_vals.empty or col_vals.nunique() < 2:
-            continue
-
-        # Compute shared bin edges from the combined data
-        col_min = float(col_vals.min())
-        col_max = float(col_vals.max())
-        bin_size = (col_max - col_min) / n_bins if col_max > col_min else 1
-        xbins = {"start": col_min, "end": col_max + bin_size, "size": bin_size}
-
-        fig = go.Figure()
-        fig.add_trace(
-            go.Histogram(
-                x=treatment_df[col].dropna(),
-                name="Treatment",
-                histnorm="percent",
-                opacity=0.6,
-                marker_color="#2ca02c",
-                xbins=xbins,
-            )
-        )
-        fig.add_trace(
-            go.Histogram(
-                x=control_df[col].dropna(),
-                name="Control",
-                histnorm="percent",
-                opacity=0.6,
-                marker_color="#d62728",
-                xbins=xbins,
             )
         )
         fig.update_layout(

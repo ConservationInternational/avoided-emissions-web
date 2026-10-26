@@ -1,7 +1,7 @@
 """Celery tasks: Batch polling, analysis task submission, and match quality."""
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from celery_app import celery_app
 from config import report_exception, report_message
@@ -35,7 +35,7 @@ def poll_batch_tasks() -> dict:
             .all()
         )
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         updated = 0
         client = None  # may be shared between polling and discovery
 
@@ -96,40 +96,39 @@ def poll_batch_tasks() -> dict:
                             task.extra_metadata = meta
 
                         if api_status == "FINISHED":
-                            task.status = "succeeded"
-                            task.completed_at = now
-                            # Fetch and import results into the local DB
-                            try:
-                                results_payload = client.get_execution_results(exec_id)
-                                if results_payload:
-                                    from services import import_execution_results
+                            from services import (
+                                ResultImportError,
+                                import_execution_results,
+                            )
 
+                            # Results are imported before the task is marked
+                            # succeeded.  An invalid payload fails the task;
+                            # other errors (e.g. a database error) leave the
+                            # status unchanged so the next poll retries.  The
+                            # savepoint confines a failed import to this task
+                            # so other tasks' updates in this session survive.
+                            try:
+                                payload = client.get_execution_results(exec_id)
+                                with db.begin_nested():
                                     import_execution_results(
-                                        str(task.id), results_payload, db=db
+                                        task_id_str, payload, db=db
                                     )
-                                else:
-                                    logger.warning(
-                                        "Task %s finished but no results "
-                                        "returned by API",
-                                        task.id,
-                                    )
+                                task.status = "succeeded"
+                                task.completed_at = now
+                            except ResultImportError as import_exc:
+                                task.status = "failed"
+                                task.error_message = (
+                                    f"Results could not be imported: {import_exc}"
+                                )
+                                task.completed_at = now
                             except Exception as results_exc:  # noqa: BLE001
-                                # Roll back the session FIRST.  If import_execution_results
-                                # raised a SQLAlchemy exception (e.g. IntegrityError from
-                                # an autoflush) the session is in PendingRollbackError state
-                                # and any further ORM attribute access — including task.id —
-                                # will raise another exception before we can recover.
-                                db.rollback()
                                 logger.warning(
-                                    "Task %s finished but failed to import results: %s",
+                                    "Task %s finished but importing results failed "
+                                    "(will retry): %s",
                                     task_id_str,
                                     results_exc,
                                 )
                                 report_exception(task_id=task_id_str)
-                                # Re-apply the status after the rollback (which expires
-                                # all ORM-tracked attributes).
-                                task.status = "succeeded"
-                                task.completed_at = now
                         elif api_status == "FAILED":
                             task.status = "failed"
                             task.error_message = exec_data.get("results", {}).get(
@@ -215,6 +214,7 @@ def poll_batch_tasks() -> dict:
                         if eid and eid not in known_exec_ids:
                             try:
                                 from services import (
+                                    ResultImportError,
                                     adopt_api_execution,
                                     import_execution_results,
                                 )
@@ -224,14 +224,17 @@ def poll_batch_tasks() -> dict:
                                     # If finished, also import results
                                     api_status = exec_data.get("status", "").upper()
                                     if api_status == "FINISHED":
-                                        results_payload = client.get_execution_results(
-                                            eid
-                                        )
-                                        if results_payload:
+                                        try:
                                             import_execution_results(
                                                 str(task_obj.id),
-                                                results_payload,
+                                                client.get_execution_results(eid),
                                                 db=db,
+                                            )
+                                        except ResultImportError as import_exc:
+                                            task_obj.status = "failed"
+                                            task_obj.error_message = (
+                                                "Results could not be imported: "
+                                                f"{import_exc}"
                                             )
                                 # Commit each adoption individually so that
                                 # rows added by import_execution_results are
@@ -302,7 +305,7 @@ def expire_stale_submitting_tasks() -> dict:
     """
     from models import AnalysisTask, get_db
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     lost_cutoff = now - timedelta(minutes=5)
     stuck_cutoff = now - timedelta(minutes=70)
 
@@ -430,28 +433,3 @@ def submit_analysis_task_worker(self, task_id: str, user_id: str) -> None:
         )
         report_exception()
         raise
-
-
-@celery_app.task(
-    name="tasks.generate_match_quality_summary",
-    soft_time_limit=3600,
-    time_limit=3900,
-)
-def generate_match_quality_summary_task(
-    task_id: str, results_s3_uri: str | None = None
-) -> dict:
-    """Generate the pre-computed match quality summary JSON for a task.
-
-    This is the *backfill* path for tasks that completed before the R
-    summarize script started producing ``results_match_quality_summary.json``.
-    It downloads the raw pixel-level CSVs to temporary files and processes
-    them with chunked reads to keep memory usage low, then uploads the
-    summary JSON to S3.
-
-    Routed to the ``merge`` queue (higher memory limit) via
-    ``celery_app.conf.task_routes``.
-    """
-    from services import generate_match_quality_summary
-
-    summary = generate_match_quality_summary(task_id, results_s3_uri)
-    return {"task_id": task_id, "success": summary is not None}

@@ -7,7 +7,7 @@ at rest in the database.
 
 import base64
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from config import Config
 from cryptography.fernet import Fernet
@@ -106,7 +106,7 @@ def save_credential(
             existing.api_client_db_id = api_client_db_id
             if te_user_id is not None:
                 existing.te_user_id = te_user_id
-            existing.updated_at = datetime.now(timezone.utc)
+            existing.updated_at = datetime.now(UTC)
             db.commit()
             db.refresh(existing)
             return existing

@@ -1,7 +1,7 @@
 """User site set, feature, and upload models."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from geoalchemy2 import Geometry
 from sqlalchemy import (
@@ -36,9 +36,7 @@ class UserSiteSet(Base):
     original_filename = Column(String(500), nullable=False)
     file_size_bytes = Column(BigInteger, nullable=False)
     file_format = Column(String(20), nullable=False)
-    uploaded_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    uploaded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     n_sites = Column(Integer, nullable=False)
     bounds = Column(JSON)
     extra_metadata = Column("metadata", JSON, default=dict)
@@ -108,9 +106,7 @@ class UserSiteUpload(Base):
         nullable=False,
         default="pending",
     )
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
     error_message = Column(Text)

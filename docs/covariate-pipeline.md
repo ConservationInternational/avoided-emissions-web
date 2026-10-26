@@ -170,29 +170,30 @@ the site polygons uploaded for the task.
 2. **Define treatment pixels** — for each site polygon, rasterize the
    polygon boundary against the 1 km grid to identify all treatment cell
    indices.
-3. **Define control candidate pixels** — for each site, sample a pool of
-   control candidate pixels from within the same country (or configurable
-   spatial extent), excluding pixels within `min_control_distance_km` of
-   any treatment polygon.
-4. **Extract covariate values** — for each treatment and control candidate
-   pixel, open the relevant COG file (via GDAL with cloud range requests),
-   read the pixel value at the cell index, and append it to a running
-   data frame.
-5. **Compute `defor_pre_intervention`** — for sites with `start_date` after
-   2005, compute the 5-year pre-intervention mean annual deforestation rate
-   from the `fc_YYYY` layers.
-6. **Write outputs** to local disk, then upload to the intermediate S3
+3. **Define control candidate pixels** — pixels inside the matching extent
+   (the intersection of the polygon exact-match layers around the sites)
+   with forest cover in the first forest-cover year.
+4. **Extract covariate values** — for each candidate pixel, read every layer
+   on the shared pixel grid. Extraction fails if a layer's transform or shape
+   differs from the reference layer.
+5. **Write outputs** to local disk, then upload to the intermediate S3
    prefix:
 
 ```
 s3://{intermediate_s3_uri}/
-  sites_processed.parquet       # site metadata + area_ha
-  treatment_cell_key.parquet    # cell → site_id mapping for treatment pixels
-  treatments_and_controls.parquet  # all pixels with covariate values
+  sites_processed.parquet       # site fragments + area_ha
+  treatment_cell_key.parquet    # cell → id_numeric for treatment pixels
+  treatment_pixels.parquet      # treatment pixel values
+  control_pixels/               # control pixel values, partitioned by the
+                                #   first exact-match variable
   formula.json                  # propensity score formula string
   site_id_key.csv               # integer id_numeric ↔ site_id mapping
-  grid_metadata.json            # grid origin, resolution, CRS
+  grid_metadata.json            # grid transform and size
+  prep_summary.json             # matching extent and exclusion buffer
 ```
+
+The control distance exclusion and `defor_pre_intervention` are applied in
+Step 2 (see [matching.md](matching.md)).
 
 ### Covariate value extraction details
 

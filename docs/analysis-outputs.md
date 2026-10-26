@@ -22,7 +22,7 @@ covers how results are imported back into the web application database.
   - [results\_failed\_sites.csv](#results_failed_sitescsv)
 - [Failure Markers](#failure-markers)
 - [Biomass-to-CO₂e Conversion](#biomass-to-co2e-conversion)
-- [Confidence Intervals](#confidence-intervals)
+- [Replicate Ranges](#replicate-ranges)
 - [Database Import](#database-import)
 
 ---
@@ -59,13 +59,17 @@ s3://{S3_BUCKET}/{S3_PREFIX}/
 │   ├── intermediate/               # Step 1 → Step 2 hand-off
 │   │   ├── sites_processed.parquet
 │   │   ├── treatment_cell_key.parquet
-│   │   ├── treatments_and_controls.parquet
+│   │   ├── treatment_pixels.parquet
+│   │   ├── control_pixels/          # hive-partitioned by first exact-match var
 │   │   ├── formula.json
 │   │   ├── site_id_key.csv
 │   │   ├── grid_metadata.json
+│   │   ├── prep_summary.json
 │   │   └── matches/
-│   │       ├── m_{id_numeric}[_rep{k}].rds
-│   │       └── failed_{id_numeric}[_rep{k}].json
+│   │       ├── m_{id_numeric}_rep{k}.rds
+│   │       ├── m_{id_numeric}_na_exclusion.json
+│   │       ├── failed_{id_numeric}_rep{k}.json
+│   │       └── failed_array_{index}.json
 │   │
 │   └── results/                    # Step 3 final outputs
 │       ├── results_by_site_year.csv
@@ -89,346 +93,323 @@ These files are produced by `01_extract_covariates.py` and consumed by
 
 | File | Format | Description |
 |---|---|---|
-| `sites_processed.parquet` | GeoParquet | Site polygons with computed `area_ha`, `start_year`, `end_year`, `id_numeric` |
-| `treatment_cell_key.parquet` | Parquet | Mapping from raster cell index → `site_id` + `id_numeric` for all treatment pixels |
-| `treatments_and_controls.parquet` | Parquet | All treatment and control candidate pixels with covariate values; columns: `cell`, `site_id`, `id_numeric`, `treatment`, `area_ha`, all covariate columns, `fc_YYYY` columns |
-| `formula.json` | JSON | Propensity score formula string (e.g. `"treatment ~ precip + temp + ..."`) |
+| `sites_processed.parquet` | Parquet | One row per site fragment (sites split across exact-match regions have several), with `site_id`, `sub_site_index`, `id_numeric`, `start_year`, `end_year`, `area_ha` |
+| `treatment_cell_key.parquet` | Parquet | Raster cell index → `id_numeric` for every treatment pixel |
+| `treatment_pixels.parquet` | Parquet | Covariate, `area_ha` (cell area), `total_biomass_2025`, and `fc_YYYY` values for treatment pixels |
+| `control_pixels/` | Parquet dataset | The same columns for candidate control pixels, partitioned by the first exact-match variable. A missing partition value is stored as `-1` |
+| `formula.json` | JSON | Propensity score formula (e.g. `"treatment ~ precip + temp + ..."`) |
 | `site_id_key.csv` | CSV | Integer `id_numeric` ↔ string `site_id` mapping |
-| `grid_metadata.json` | JSON | Grid origin, resolution, CRS — used to convert cell indices to lon/lat coordinates |
+| `grid_metadata.json` | JSON | Grid transform and size, used to convert cell indices to lon/lat |
+| `prep_summary.json` | JSON | `matching_extent` and `sites_exclusion_buffer` |
+
+Every covariate layer must be on the same pixel grid; extraction fails if a
+layer's transform or shape differs from the reference layer.
 
 ---
 
 ## Match Files (Step 2 → Step 3)
 
-These files are produced by `02_perform_matching.R` (one per site per
-replicate) and consumed by `03_summarize_results.R`.
+These files are produced by `02_perform_matching.R` (one per site fragment
+and replicate) and consumed by `03_summarize_results.R`.
 
-### Per-site match file
+### Per-fragment match file
 
-**Pattern**: `matches/m_{id_numeric}[_rep{k}].rds`  
+**Pattern**: `matches/m_{id_numeric}_rep{k}.rds`  
 **Format**: R data frame serialised with `saveRDS()`
 
 | Column | Type | Description |
 |---|---|---|
 | `cell` | integer | Raster cell index |
-| `site_id` | character | Site identifier |
-| `id_numeric` | integer | Integer site index |
-| `area_ha` | numeric | Site area in hectares |
+| `site_id`, `id_numeric` | character, integer | Site and fragment identifiers |
+| `replicate` | integer | Replicate number |
 | `treatment` | logical | `TRUE` = treatment pixel; `FALSE` = control |
-| `sampled_fraction` | numeric | Fraction of treatment pixels included (< 1 if subsampled) |
-| `total_biomass_2025` | numeric | Total biomass (Mg/ha) — always extracted regardless of formula |
-| `match_group` | integer | Matched set identifier; treatment and its controls share the same value |
-| `match_weight` | numeric | Matching weight (controls sum to equal the number of matched treatment pixels) |
-| `sampling_weight` | numeric | Inverse of `sampled_fraction`; scales sample estimates to full-site estimates |
-| `fc_YYYY` | numeric | Forest cover fraction (0–1) for each analysis year |
-| `pscore` | numeric | Fitted propensity score (`NA` if Mahalanobis distance was used) |
-| `n_control_sampled` | integer | Number of control pixels sampled for this site |
-| `n_control_pool` | integer | Total eligible control pixels before sampling |
-| `sub_site_index` | integer | `0` for standard sites; `1+` when cross-site grouping splits a site |
+| `group` | character | Exact-match stratum |
+| `match_group` | character | Matched set identifier, prefixed with the stratum |
+| `match_weight` | numeric | 1 for treatment; controls in a set sum to the number of treated pixels in it |
+| `sampling_weight` | numeric | `n_eligible / n_matched` for the pixel's stratum |
+| `pscore` | numeric | Fitted propensity score (`NA` for Mahalanobis matching) |
+| `area_ha` | numeric | Cell area (ha) |
+| `total_biomass_2025` | numeric | Whole-cell biomass density (Mg/ha) |
+| `fc_YYYY` | numeric | Forest cover (percent, 0–100) per year |
+| covariates | numeric | Matching covariates, including `defor_pre_intervention` when used |
+| `n_site_pixels`, `n_eligible`, `n_sampled`, `n_matched` | integer | Treatment pixel counts for the fragment |
+| `n_control_pool`, `n_control_sampled` | integer | Control pixel counts for the fragment |
+
+The `group_diagnostics` attribute lists, per stratum, the treatment and
+control counts, the number matched, the distance used, and any separation
+or matching error.
 
 ---
 
 ## Final Result Files (Step 3)
 
 All files are produced by `03_summarize_results.R` and written to
-`{results_s3_uri}`.
+`{results_s3_uri}`. A site fragment is included only when it has a match file
+for every replicate; site results sum their included fragments.
+
+Columns prefixed `extrapolated_` are scaled to all eligible treatment pixels
+(see [matching.md](matching.md#sampling-weights-and-coverage)); columns
+prefixed `sample_` use matched pixels only. When `n_replicates > 1`, each
+metric is the mean across replicates and has `_ci_lower` / `_ci_upper`
+columns with the 2.5% / 97.5% quantiles across replicates (see
+[Replicate Ranges](#replicate-ranges)).
 
 ---
 
 ### results\_by\_site\_year.csv
 
-**Granularity**: One row per `(site_id, year)`  
-**Includes**: Pre-intervention baseline years and all intervention years
+**Granularity**: One row per `(site_id, year)`, including five
+pre-intervention years
 
 | Column | Type | Description |
 |---|---|---|
-| `site_id` | string | Site identifier |
-| `site_name` | string | Human-readable site name |
+| `site_id`, `site_name` | string | Site |
 | `year` | integer | Calendar year |
-| `is_pre_intervention` | boolean | `TRUE` if year is before `start_date` |
-| `is_post_intervention` | boolean | `TRUE` if year is on or after `start_date` |
-| `extrapolated_treatment_defor_ha` | numeric | Estimated treatment deforestation (ha) extrapolated to full site area |
-| `extrapolated_control_defor_ha` | numeric | Estimated counterfactual deforestation (ha) extrapolated to full site area |
-| `extrapolated_forest_loss_avoided_ha` | numeric | Avoided deforestation (ha) = control − treatment, extrapolated |
-| `extrapolated_treatment_emissions_mgco2e` | numeric | Treatment emissions (MgCO₂e), extrapolated |
-| `extrapolated_control_emissions_mgco2e` | numeric | Counterfactual emissions (MgCO₂e), extrapolated |
-| `extrapolated_emissions_avoided_mgco2e` | numeric | **Primary result**: avoided emissions (MgCO₂e), extrapolated to full site |
-| `sample_treatment_defor_ha` | numeric | Treatment deforestation (ha) from matched sample only (no extrapolation) |
-| `sample_control_defor_ha` | numeric | Counterfactual deforestation (ha) from matched sample only |
-| `sample_forest_loss_avoided_ha` | numeric | Avoided deforestation (ha) from matched sample only |
-| `sample_treatment_emissions_mgco2e` | numeric | Treatment emissions (MgCO₂e), matched sample only |
-| `sample_control_emissions_mgco2e` | numeric | Counterfactual emissions (MgCO₂e), matched sample only |
-| `sample_emissions_avoided_mgco2e` | numeric | Avoided emissions (MgCO₂e), matched sample only |
-| `*_ci_lower`, `*_ci_upper` | numeric | 2.5th / 97.5th percentile CI bounds (present only when `n_replicates > 1`) |
+| `is_pre_intervention` | boolean | `year < start_year` |
+| `is_post_intervention` | boolean | `year > end_year` |
+| `{prefix}_treatment_defor_ha` | numeric | Treatment forest loss (ha) |
+| `{prefix}_control_defor_ha` | numeric | Counterfactual (matched control) forest loss (ha) |
+| `{prefix}_forest_loss_avoided_ha` | numeric | Control − treatment forest loss (ha) |
+| `{prefix}_treatment_emissions_mgco2e` | numeric | Treatment emissions (MgCO₂e) |
+| `{prefix}_control_emissions_mgco2e` | numeric | Counterfactual emissions (MgCO₂e) |
+| `{prefix}_emissions_avoided_mgco2e` | numeric | **Primary result** with the `extrapolated` prefix |
+| `n_sample_pixels` | integer | Matched treatment pixels (mean across replicates) |
+| `sampled_fraction` | numeric | Sampled / eligible treatment pixels |
+
+`{prefix}` is `extrapolated` or `sample`.
 
 ---
 
 ### results\_by\_site\_total.csv
 
-**Granularity**: One row per `site_id`  
-**Covers**: Intervention period only (`start_date` ≤ year ≤ `end_date`)
+**Granularity**: One row per site; sums over the intervention period
+(`start_year` ≤ year ≤ `end_year`), computed within each replicate
 
 | Column | Type | Description |
 |---|---|---|
-| `site_id` | string | Site identifier |
-| `site_name` | string | Human-readable site name |
+| `site_id`, `site_name` | string | Site |
 | `area_ha` | numeric | Site area (ha) |
-| `first_year` | integer | First year of intervention period |
-| `last_year` | integer | Last year of intervention period |
-| `n_years` | integer | Number of analysis years in intervention period |
-| `extrapolated_forest_loss_avoided_ha` | numeric | Total avoided deforestation (ha) over intervention period, extrapolated |
-| `extrapolated_emissions_avoided_mgco2e` | numeric | **Primary result**: total avoided emissions (MgCO₂e), extrapolated |
-| `sample_forest_loss_avoided_ha` | numeric | Total avoided deforestation (ha), matched sample only |
-| `sample_emissions_avoided_mgco2e` | numeric | Total avoided emissions (MgCO₂e), matched sample only |
-| `n_sample_pixels` | integer | Total matched treatment pixels (summed across all years) |
-| `sampled_fraction` | numeric | Pixel-count-weighted mean sampling fraction |
-| `n_treatment_pixels` | integer | Total treatment pixels before subsampling |
-| `*_ci_lower`, `*_ci_upper` | numeric | CI bounds for extrapolated metrics (when `n_replicates > 1`) |
+| `first_year`, `last_year`, `n_years` | integer | Intervention years covered |
+| metric columns | numeric | As in `results_by_site_year.csv` |
+| `n_treatment_pixels` | integer | All treatment pixels in the site |
+| `n_eligible_pixels` | integer | Treatment pixels eligible for matching |
+| `n_sample_pixels` | integer | Matched treatment pixels (mean across replicates) |
+| `sampled_fraction` | numeric | Sampled / eligible treatment pixels |
+| `coverage_fraction` | numeric | Eligible / all treatment pixels |
+| `match_rate` | numeric | Matched / sampled treatment pixels |
+| `n_control_pool`, `n_control_sampled` | numeric | Control pixel counts |
 
 ---
 
 ### results\_pixel\_year\_emissions.csv
 
-**Granularity**: One row per `(cell, year)` for matched pixels  
-**Note**: Only replicate 1 is included when `n_replicates > 1`
+**Granularity**: One row per `(cell, year)` for matched pixels in replicate 1
 
 | Column | Type | Description |
 |---|---|---|
-| `cell` | integer | Raster cell index |
-| `site_id` | string | Site identifier |
-| `year` | integer | Calendar year |
-| `treatment` | boolean | `TRUE` = treatment pixel |
-| `sampled_fraction` | numeric | Sampling fraction for this pixel's site |
-| `sampling_weight` | numeric | Inverse of `sampled_fraction` |
-| `match_group` | integer | Matched set identifier |
-| `match_weight` | numeric | Matching weight |
-| `forest_at_year_end` | numeric | Forest cover fraction at end of year |
-| `forest_change_ha` | numeric | Annual forest area change (ha), negative = loss |
-| `emissions_mgco2e` | numeric | Annual emissions (MgCO₂e) for this pixel |
+| `cell`, `site_id`, `year`, `treatment` | | Pixel, site, year, and group |
+| `match_group`, `match_weight`, `sampling_weight` | | Matching and stratum weights |
+| `forest_loss_ha` | numeric | Forest lost during the year (ha) |
+| `emissions_mgco2e` | numeric | Emissions from that loss (MgCO₂e) |
 
 ---
 
 ### results\_pixel\_covariates.csv
 
-**Granularity**: One row per matched pixel (all replicates, all sites)
+**Granularity**: One row per matched pixel in replicate 1
 
-| Column | Type | Description |
-|---|---|---|
-| `cell` | integer | Raster cell index |
-| `site_id` | string | Site identifier |
-| `treatment` | boolean | `TRUE` = treatment pixel |
-| `match_group` | integer | Matched set identifier |
-| `match_weight` | numeric | Matching weight |
-| *covariate columns* | numeric | One column per covariate in the matching formula (e.g. `precip`, `temp`, …) |
-| `defor_pre_intervention` | numeric | Pre-intervention deforestation rate (if included in formula) |
+Columns: `site_id`, `cell`, `treatment`, `match_group`, `match_weight`, and
+one column per matching covariate (including `defor_pre_intervention` when
+used).
 
 ---
 
 ### results\_covariate\_balance.csv
 
-**Granularity**: One row per `(site_id, covariate)`, plus an aggregate `"__all__"` row per covariate
+**Granularity**: One row per `(site_id, covariate)` (categorical covariates:
+one row per level, named `covariate=level`), plus aggregate rows with
+`site_id = "__all__"`
 
 | Column | Type | Description |
 |---|---|---|
-| `site_id` | string | Site identifier, or `"__all__"` for aggregate |
-| `covariate` | string | Covariate name |
-| `mean_treatment` | numeric | Weighted mean among treatment pixels |
-| `mean_control` | numeric | Weighted mean among matched control pixels |
-| `pooled_sd` | numeric | Pooled standard deviation (from unmatched distributions) |
-| `smd` | numeric | Standardized Mean Difference = (mean_T − mean_C) / pooled_sd |
+| `site_id` | string | Site identifier, or `"__all__"` |
+| `covariate` | string | Covariate (or `covariate=level`) |
+| `mean_treatment`, `mean_control` | numeric | Match-weighted means |
+| `sd_treatment` | numeric | Standard deviation among treatment pixels |
+| `smd` | numeric | (mean_T − mean_C) / sd_treatment; difference in proportions for levels; `NA` when undefined |
 
 ---
 
 ### results\_propensity\_scores.csv
 
-**Granularity**: One row per matched pixel (treatment and control)
+**Granularity**: One row per matched pixel in replicate 1
 
-| Column | Type | Description |
-|---|---|---|
-| `cell` | integer | Raster cell index |
-| `site_id` | string | Site identifier |
-| `treatment` | boolean | `TRUE` = treatment pixel |
-| `match_group` | integer | Matched set identifier |
-| `match_weight` | numeric | Matching weight |
-| `pscore` | numeric | Fitted propensity score; `NA` if Mahalanobis distance matching was used |
+Columns: `cell`, `site_id`, `treatment`, `match_group`, `match_weight`,
+`pscore` (`NA` for Mahalanobis matching).
 
 ---
 
 ### results\_match\_quality\_summary.json
 
-**Format**: Nested JSON (pre-aggregated for web UI rendering)
+**Format**: Nested JSON, pre-aggregated for the web app
 
 ```json
 {
   "summary_stats": {
     "__all__": {
-      "n_treatment": 1234,
-      "n_control": 1234,
-      "n_sites": 10
+      "n_treatment": 1234, "n_control": 2468, "n_sites": 10,
+      "n_treatment_total": 50000, "n_control_sampled": 60000,
+      "n_control_pool": 900000
     },
-    "{site_id}": { "n_treatment": 98, "n_control": 98 }
+    "{site_id}": { "...": "..." }
   },
   "histograms": {
     "__all__": {
       "{covariate}": {
-        "bin_edges": [0.0, 0.1, ...],
-        "treatment_pct": [0.05, 0.12, ...],
-        "control_pct": [0.06, 0.11, ...]
+        "bin_edges": [0.0, 0.1],
+        "treatment_pct": [5.0],
+        "control_pct": [6.0]
       }
-    },
-    "{site_id}": { ... }
+    }
   },
   "qq_quantiles": {
     "__all__": {
-      "quantiles": [0.01, 0.05, ...],
-      "treatment_values": [0.12, 0.18, ...],
-      "control_values": [0.11, 0.17, ...]
-    },
-    "{site_id}": { ... }
+      "quantiles": [0.0, 0.002],
+      "treatment_values": [0.12],
+      "control_values": [0.11]
+    }
   },
-  "covariate_cols": ["precip", "temp", ...]
+  "covariate_cols": ["precip", "temp"]
 }
 ```
 
-This compact summary is loaded by the web app to render the Love plot and
-QQ plot without downloading the full covariate or propensity score CSV files.
+Histograms (numeric covariates) and QQ quantiles use the matching weights.
+The web app requires this file; it is not regenerated from other outputs.
 
 ---
 
 ### results\_sampling\_by\_site.csv
 
-**Granularity**: One row per site
-
-| Column | Type | Description |
-|---|---|---|
-| `id_numeric` | integer | Integer site index |
-| `site_id` | string | Site identifier |
-| `sampled_fraction` | numeric | Fraction of treatment pixels used (1.0 if no subsampling) |
-| `sampled_percent` | numeric | `sampled_fraction × 100` |
-| `was_subsampled` | boolean | `TRUE` if treatment was subsampled |
+One row per site: `site_id`, `sampled_fraction`, `sampled_percent`,
+`was_subsampled`.
 
 ---
 
 ### results\_pixel\_locations.csv
 
-**Granularity**: One row per matched pixel
-
-| Column | Type | Description |
-|---|---|---|
-| `cell` | integer | Raster cell index |
-| `site_id` | string | Site identifier |
-| `treatment` | boolean | `TRUE` = treatment pixel |
-| `lon` | numeric | Pixel centroid longitude (EPSG:4326) |
-| `lat` | numeric | Pixel centroid latitude (EPSG:4326) |
-
-Used to plot treatment (green) and control (blue) pixel locations on the
-Task Detail map.
+One row per matched pixel in replicate 1: `cell`, `site_id`, `treatment`,
+`match_group`, `lon`, `lat` (pixel centre, EPSG:4326). Used to plot matched
+pixels on the Task Detail map.
 
 ---
 
 ### results\_failed\_sites.csv
 
-**Granularity**: One row per site that failed during Step 2 matching
+**Granularity**: One row per site fragment that was not included
 
 | Column | Type | Description |
 |---|---|---|
-| `id_numeric` | integer | Integer site index |
-| `site_id` | string | Site identifier |
-| `site_name` | string | Human-readable site name |
-| `error` | string | Error message from the R subprocess or failure marker |
-| `timestamp` | string | ISO 8601 timestamp of failure |
-| `array_index` | integer | AWS Batch array job index |
-| `failure_marker_file` | string | S3 key of the `failed_*.json` marker |
+| `id_numeric` | integer | Fragment index |
+| `site_id`, `site_name` | string | Site |
+| `sub_site_index` | integer | Fragment within the site (0 for unsplit sites) |
+| `error` | string | Reason the fragment was not included |
+
+---
+
+### results\_summary.json
+
+Task-level summary: `n_sites`, `n_failed_sites` (distinct sites), `n_replicates`,
+`bounds_label`, extrapolated and sample totals, `total_area_ha`,
+`year_range`, `failed_sites`, `worker_failures`, `subsampled_sites`,
+`na_exclusion_summary`, `methodology_warnings`, `group_diagnostics`, and
+`portfolio`. `portfolio.yearly` holds the all-site series plotted by the web
+app (`treatment_defor_ha`, `control_defor_ha`, `forest_loss_avoided_ha`,
+`emissions_avoided_mgco2e`, `treatment_emissions_mgco2e`,
+`control_emissions_mgco2e`, `cum_treatment_defor_ha`,
+`cum_control_defor_ha`, their bounds, and `n_sites`); `portfolio.total`
+holds the all-site totals and bounds.
 
 ---
 
 ## Failure Markers
 
-When an individual site's matching step crashes (out-of-memory, R error,
-timeout), the batch array job writes a JSON failure marker to
-`intermediate/matches/`:
+Step 2 writes `matches/failed_{id_numeric}_rep{k}.json` when a fragment
+cannot be matched (for example, no shared exact-match stratum, separation
+without the fallback, or no feasible match):
 
 ```json
 {
-  "array_index": 42,
   "id_numeric": 7,
   "site_id": "SITE_ABC",
-  "error": "Error in optmatch: ...",
-  "timestamp": "2025-06-01T14:32:11Z",
-  "replicate": 0
+  "site_name": "Site ABC",
+  "replicate": 1,
+  "error": "No matches found (treatment=40, control=2000)",
+  "reason": "no_matches",
+  "match_file": "m_7_rep1.rds",
+  "group_diagnostics": [ ... ]
 }
 ```
 
-The summarisation step collects these markers and writes them into
-`results_failed_sites.csv`. Failed sites are excluded from the aggregated
-results but are surfaced as warnings in the web UI.
+If the R process crashes, the Python wrapper writes
+`matches/failed_array_{index}.json` with the array index and error, without
+attributing it to a site. Step 3 ignores a marker whose `match_file` exists
+(a retry succeeded) and reports every fragment without a match file for
+every replicate as failed, using the marker's error when available.
 
 ---
 
 ## Biomass-to-CO₂e Conversion
 
-Annual emissions for each matched pixel are computed in
-`03_summarize_results.R` as follows:
+`total_biomass_2025` is whole-cell biomass density (Mg per hectare of cell)
+at the baseline forest cover. For each matched pixel with cell area $A$
+(ha), baseline forest cover $\text{fc}_0$ (percent, in the site's baseline
+year), and forest cover $\text{fc}_t$:
 
-$$\text{biomass}_{t} = \text{total\_biomass\_2025} \times \text{fc}_{t}$$
+$$\text{biomass}_t = \text{total\_biomass\_2025} \times A \times \frac{\text{fc}_t}{\text{fc}_0}$$
 
-$$\Delta \text{biomass}_{t} = \text{biomass}_{t-1} - \text{biomass}_{t}$$
+$$\text{emissions}_t = (\text{biomass}_{t-1} - \text{biomass}_t) \times 0.5 \times \frac{44}{12}$$
 
-$$\text{emissions}_t = \Delta \text{biomass}_{t} \times 0.5 \times 3.67$$
+- **0.5** is the carbon fraction of dry biomass.
+- **44/12** converts carbon to CO₂.
+- Annual forest loss is $(\text{fc}_{t-1} - \text{fc}_t) / 100 \times A$.
 
-where:
-
-- $\text{total\_biomass\_2025}$ is total live biomass (Mg/ha) at the
-  reference year 2025, loss-masked so pixels that were deforested before
-  2025 carry their biomass at the time of loss.
-- $\text{fc}_t$ is the Hansen GFC forest cover fraction (0–1) at year $t$.
-- **0.5** is the biomass-to-carbon conversion factor (carbon is ~50 % of
-  dry biomass by mass).
-- **3.67** is the carbon-to-CO₂ molecular weight ratio ($44 / 12$).
-- Positive $\Delta \text{biomass}$ (loss) produces positive emissions.
-
-Avoided emissions for a site-year is the difference between the counterfactual
-(control) emissions and the observed (treatment) emissions:
-
-$$\text{avoided\_emissions}_{s,t} = \text{emissions}_{C,s,t} - \text{emissions}_{T,s,t}$$
-
-Extrapolated site-level values scale the sample estimate by the inverse of
-`sampled_fraction` to account for treatment subsampling:
-
-$$\text{extrapolated\_avoided} = \text{sample\_avoided} \times \frac{1}{\text{sampled\_fraction}}$$
+Avoided emissions are the weighted control emissions minus the treatment
+emissions. Extrapolated values multiply each matched pixel by its stratum's
+`sampling_weight`.
 
 ---
 
-## Confidence Intervals
+## Replicate Ranges
 
-When `n_replicates > 1`, the summarisation step computes per-metric
-confidence intervals across the replicate distribution:
+When `n_replicates > 1`, every metric is first aggregated within each
+replicate at the reported level (site-year, site total, all-site year,
+all-site cumulative, all-site total). The reported value is the mean across
+replicates and the bounds are the 2.5% and 97.5% quantiles:
 
-$$\text{CI lower} = \text{quantile}_{0.025}(\text{metric across replicates})$$
+$$\text{lower} = Q_{0.025}(\text{metric}_1, \ldots, \text{metric}_R)$$
 
-$$\text{CI upper} = \text{quantile}_{0.975}(\text{metric across replicates})$$
-
-The 95 % CI columns are appended with `_ci_lower` and `_ci_upper` suffixes
-to the corresponding point-estimate column names. When `n_replicates = 1`
-these columns are absent from the output files.
+These bounds are the range across matching replicates (pixel sampling and
+matching variability only), not confidence intervals. They are not additive:
+the all-site bounds come from all-site replicate totals, never from summing
+site bounds. With one replicate there are no bound columns.
 
 ---
 
 ## Database Import
 
-When the Celery task detects that an execution has succeeded it downloads
-the results from S3 and imports them into two database tables:
+When an execution finishes, the polling task validates the results payload
+and imports it:
 
 | CSV file | Database table | Notes |
 |---|---|---|
-| `results_by_site_year.csv` | `task_result` | One row per (site, year); primary source for time series charts |
-| `results_by_site_total.csv` | `task_result_total` | One row per site; used for summary tables and downloads |
+| `results_by_site_year.csv` | `task_results` | One row per (site, year) |
+| `results_by_site_total.csv` | `task_results_total` | One row per site |
+| `results_summary.json` | `analysis_tasks.metadata` | Failures, warnings, bounds label, and the all-site `portfolio` series |
 
-Columns from the CSVs are mapped directly to ORM model fields in
-`webapp/models/`. Rows are inserted in batches of ~1,000 to avoid
-PostgreSQL parameter limits.
+A payload with missing values or duplicate site rows is rejected and the task
+is marked failed. Other import errors leave the task running so the next
+poll retries. Rows are inserted in bulk, replacing any earlier rows for the
+task. The task is marked succeeded only after a successful import.
 
-After import the `AnalysisTask.status` is set to `"succeeded"` and
-`AnalysisTask.completed_at` is recorded. The full result CSVs remain
-accessible on S3 for the lifetime of the task and are served as pre-signed
-download links from the Task Detail page.
+Results from earlier versions of the pipeline are not supported; rerun those
+tasks.

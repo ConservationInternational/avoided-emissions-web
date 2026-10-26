@@ -2,7 +2,7 @@
 
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
@@ -37,9 +37,7 @@ class TaskShareLink(Base):
     created_by = Column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
     )
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     expires_at = Column(DateTime(timezone=True), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     access_count = Column(Integer, default=0, nullable=False)
@@ -51,13 +49,13 @@ class TaskShareLink(Base):
     @property
     def is_valid(self):
         """Return True if the link is active and has not expired."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return self.is_active and now < self.expires_at
 
     def record_access(self):
         """Increment access counter and update last-accessed timestamp."""
         self.access_count = (self.access_count or 0) + 1
-        self.last_accessed_at = datetime.now(timezone.utc)
+        self.last_accessed_at = datetime.now(UTC)
 
     @classmethod
     def get_valid_link(cls, token_string, db):
@@ -95,12 +93,8 @@ class TrendsEarthCredential(Base):
     client_name = Column(String(255), nullable=False, default="avoided-emissions-web")
     # The database UUID of the client on the API side (for revocation)
     api_client_db_id = Column(String(128))
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     user = relationship(
         "User",
@@ -128,12 +122,10 @@ class PasswordResetToken(Base):
         nullable=False,
         default=lambda: secrets.token_urlsafe(64),
     )
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     expires_at = Column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc) + timedelta(hours=1),
+        default=lambda: datetime.now(UTC) + timedelta(hours=1),
     )
     used_at = Column(DateTime(timezone=True))
 
@@ -142,12 +134,12 @@ class PasswordResetToken(Base):
     @property
     def is_valid(self):
         """Return True if the token has not expired and has not been used."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return self.used_at is None and now < self.expires_at
 
     def mark_used(self):
         """Mark this token as consumed."""
-        self.used_at = datetime.now(timezone.utc)
+        self.used_at = datetime.now(UTC)
 
     @classmethod
     def get_valid_token(cls, token_string, db):
@@ -160,7 +152,7 @@ class PasswordResetToken(Base):
     @classmethod
     def invalidate_user_tokens(cls, user_id, db):
         """Mark all existing tokens for a user as used."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db.query(cls).filter(cls.user_id == user_id, cls.used_at.is_(None)).update(
             {cls.used_at: now}
         )
@@ -187,16 +179,12 @@ class RefreshToken(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
     )
     token_hash = Column(String(255), unique=True, nullable=False)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     expires_at = Column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc) + timedelta(days=30),
+        default=lambda: datetime.now(UTC) + timedelta(days=30),
     )
-    last_activity = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    last_activity = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     revoked_at = Column(DateTime(timezone=True))
 
     user = relationship("User")
@@ -205,7 +193,7 @@ class RefreshToken(Base):
     def is_valid(self):
         """Return True if the token has not expired, not been revoked,
         and was used within the inactivity window."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if self.revoked_at is not None:
             return False
         if now >= self.expires_at:
@@ -221,7 +209,7 @@ class RefreshToken(Base):
         Returns True if the timestamp was actually updated (caller
         should flush/commit), False if skipped to reduce DB writes.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         elapsed = (now - self.last_activity).total_seconds()
         if elapsed >= self.ACTIVITY_UPDATE_INTERVAL_SECONDS:
             self.last_activity = now
@@ -230,7 +218,7 @@ class RefreshToken(Base):
 
     def revoke(self):
         """Mark this token as revoked."""
-        self.revoked_at = datetime.now(timezone.utc)
+        self.revoked_at = datetime.now(UTC)
 
     @classmethod
     def create_token(cls, user_id, db):
@@ -260,7 +248,7 @@ class RefreshToken(Base):
     @classmethod
     def revoke_all_for_user(cls, user_id, db):
         """Revoke all active refresh tokens for a user."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db.query(cls).filter(cls.user_id == user_id, cls.revoked_at.is_(None)).update(
             {cls.revoked_at: now}
         )

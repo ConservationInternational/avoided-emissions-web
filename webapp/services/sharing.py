@@ -1,7 +1,7 @@
 """Task share link management and task resubmission."""
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from models import (
     AnalysisTask,
@@ -55,7 +55,7 @@ def create_share_link(task_id, user_id, expiry_days=7):
         link = TaskShareLink(
             task_id=task_id,
             created_by=user_id,
-            expires_at=datetime.now(timezone.utc) + timedelta(days=expiry_days),
+            expires_at=datetime.now(UTC) + timedelta(days=expiry_days),
         )
         db.add(link)
         db.commit()
@@ -270,7 +270,6 @@ def get_recompute_config(task_id, user_id):
             "separation_fallback_mahalanobis": config.get(
                 "separation_fallback_mahalanobis", False
             ),
-            "group_by_exact_matches": config.get("group_by_exact_matches", False),
             "matching_method": config.get("matching_method", "optimal"),
             "n_replicates": config.get("n_replicates", 1),
             "random_seed": _random.randint(1, 2_147_483_647),
@@ -363,7 +362,6 @@ def resubmit_analysis_task(task_id, user_id):
             separation_fallback_mahalanobis=config.get(
                 "separation_fallback_mahalanobis", False
             ),
-            group_by_exact_matches=config.get("group_by_exact_matches", False),
             matching_method=config.get("matching_method", "optimal"),
             n_replicates=config.get("n_replicates", 1),
             match_batch_size=config.get(

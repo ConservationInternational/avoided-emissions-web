@@ -19,16 +19,15 @@ Environment variables read by this module:
 import csv
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import boto3
-import pandas as pd
 from bootstrap import ensure_scripts_dir_on_path
-
 from te_schemas.analysis import AnalysisRecord, AnalysisResults, AnalysisTimeStep
 
 logger = logging.getLogger(__name__)
@@ -36,8 +35,7 @@ logger = logging.getLogger(__name__)
 
 ensure_scripts_dir_on_path(__file__)
 
-from logging_utils import configure_third_party_logging  # noqa: E402
-
+from logging_utils import configure_third_party_logging
 
 configure_third_party_logging()
 
@@ -255,7 +253,6 @@ def run(params, log=None):
         "fc_years": params["fc_years"],
         "max_treatment_pixels": params["max_treatment_pixels"],
         "control_multiplier": params["control_multiplier"],
-        "min_site_area_ha": params["min_site_area_ha"],
         "min_glm_treatment_pixels": params["min_glm_treatment_pixels"],
         "caliper_width": params["caliper_width"],
         "max_controls_per_treatment": params["max_controls_per_treatment"],
@@ -270,18 +267,23 @@ def run(params, log=None):
         config["sites_exclusion_buffer"] = params["sites_exclusion_buffer"]
     if params.get("min_control_distance_km") is not None:
         config["min_control_distance_km"] = float(params["min_control_distance_km"])
-    if params.get("group_by_exact_matches") is not None:
-        config["group_by_exact_matches"] = bool(params["group_by_exact_matches"])
-    if params.get("batch_group_sites") is not None:
-        config["batch_group_sites"] = bool(params["batch_group_sites"])
     if params.get("match_batch_size") is not None:
         config["match_batch_size"] = int(params["match_batch_size"])
     if params.get("separation_fallback_mahalanobis") is not None:
         config["separation_fallback_mahalanobis"] = bool(
             params["separation_fallback_mahalanobis"]
         )
-    if params.get("exact_match_group_mapping") is not None:
-        config["exact_match_group_mapping"] = params["exact_match_group_mapping"]
+    group_mapping = params.get("exact_match_group_mapping")
+    if group_mapping is not None and step.startswith("match_chunk_"):
+        # Each match chunk processes only its own groups.
+        chunk_idx = int(step.split("_")[-1])
+        group_mapping = {
+            gid: group_mapping[gid]
+            for gid in map(str, params["match_chunks"][chunk_idx])
+            if gid in group_mapping
+        }
+    if group_mapping is not None:
+        config["exact_match_group_mapping"] = group_mapping
     if params.get("site_id"):
         config["site_id"] = params["site_id"]
     if params.get("resolution_m") is not None:
@@ -334,25 +336,6 @@ def run(params, log=None):
             f"Step {step_idx}/{len(steps)}: {label} (starting)",
         )
 
-        # Before running a match or match_chunk step, write the group
-        # mapping to exact_match_groups.json so the R script can find it.
-        # For match_chunk_N steps, only the chunk's groups are written,
-        # re-indexed 1..N so the array index maps correctly.
-        if s == "match" or s.startswith("match_chunk_"):
-            _group_mapping = params.get("exact_match_group_mapping")
-            if _group_mapping is not None:
-                if s.startswith("match_chunk_"):
-                    _chunk_idx = int(s.split("_")[-1])
-                    _match_chunks = params.get("match_chunks", [])
-                    if _chunk_idx < len(_match_chunks):
-                        _group_mapping = _make_chunk_group_mapping(
-                            _group_mapping, _match_chunks[_chunk_idx]
-                        )
-                _groups_path = os.path.join(output_dir, "exact_match_groups.json")
-                with open(_groups_path, "w") as _fh:
-                    json.dump(_group_mapping, _fh)
-                log.info("Wrote exact_match_groups.json to %s", _groups_path)
-
         if pipeline_mode and (s == "match" or s.startswith("match_chunk_")):
             # In pipeline mode the match step runs as an AWS Batch array
             # job — one child per site.  If the R subprocess crashes
@@ -374,12 +357,7 @@ def run(params, log=None):
                     "Match step failed — writing failure marker: %s",
                     exc,
                 )
-                _write_match_failure_marker(
-                    matches_dir,
-                    output_dir,
-                    str(exc),
-                    log,
-                )
+                _write_match_failure_marker(matches_dir, str(exc), log)
         else:
             _run_r_script(
                 script_path,
@@ -406,11 +384,6 @@ def run(params, log=None):
         log.info("avoided_emissions: match step complete (task %s)", task_id)
         return None  # no final results yet
 
-    # ----- delete stale failure markers before uploading -----
-    # When using spot instances, jobs may fail on one attempt but succeed on
-    # retry, leaving orphan failure markers.  Remove them before upload.
-    _delete_stale_failure_markers(matches_dir, log)
-
     # ----- collect results (for "all" or "summarize") -----
     results = _collect_results(output_dir, task_id, log)
 
@@ -427,22 +400,6 @@ def run(params, log=None):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_chunk_group_mapping(full_mapping, chunk_group_ids):
-    """Build a positional group mapping containing only *chunk_group_ids*.
-
-    *full_mapping* is ``params["exact_match_group_mapping"]`` — a dict
-    keyed by stringified group IDs.  Returns a new dict keyed ``"1"``,
-    ``"2"``, … so that the R script can access entries by 1-based position
-    (``GROUP_MAPPING[[group_idx]]``).
-    """
-    result = {}
-    for local_idx, gid in enumerate(chunk_group_ids):
-        key = str(gid)
-        if key in full_mapping:
-            result[str(local_idx + 1)] = full_mapping[key]
-    return result
 
 
 def _expand_steps(step):
@@ -525,122 +482,23 @@ def _run_r_script(script_path, config_path, site_id, log):
         )
 
 
-def _write_match_failure_marker(matches_dir, output_dir, error_msg, log):
-    """Write a JSON failure marker for a site whose matching crashed.
+def _write_match_failure_marker(matches_dir, error_msg, log):
+    """Write a worker-level failure marker after the R subprocess crashed.
 
-    Called when the R subprocess was killed (e.g. OOM exit -9) rather
-    than exiting cleanly.  We map the ``AWS_BATCH_JOB_ARRAY_INDEX`` env
-    var back to a site ``id_numeric`` by reading the treatment key
-    written by the extract step.  If the index cannot be resolved we
-    still write a marker with just the array index so the summarize step
-    can report the failure.
+    One array element can process several site fragments, so the marker does
+    not name a site.  The summarize step reports every fragment and
+    replicate without a match file as failed.
     """
-    array_index = os.environ.get("AWS_BATCH_JOB_ARRAY_INDEX")
-    id_numeric = None
-    site_id = None
-
-    # Try to resolve the array index → id_numeric using the treatment key.
-    # When n_replicates > 1 the array uses a composite index:
-    #   site_index = array_index // n_replicates
-    # so we divide before looking up the site.
-    tk_path = os.path.join(output_dir, "treatment_cell_key.parquet")
-    config_path = os.path.join(os.path.dirname(output_dir), "config.json")
-    if array_index is not None and os.path.isfile(tk_path):
-        try:
-            tk = pd.read_parquet(tk_path, columns=["id_numeric"])
-            unique_ids = tk["id_numeric"].unique()  # preserves first-seen order
-            idx = int(array_index)
-            # Read n_replicates from the config written by run()
-            n_rep = 1
-            if os.path.isfile(config_path):
-                with open(config_path) as _cf:
-                    n_rep = int(json.load(_cf).get("n_replicates", 1))
-            site_idx = idx // max(n_rep, 1)
-            if 0 <= site_idx < len(unique_ids):
-                id_numeric = int(unique_ids[site_idx])
-        except Exception:  # noqa: BLE001
-            log.debug("Could not resolve array index to id_numeric", exc_info=True)
-
-    # Compute which replicate this array element represents
-    rep_k = None
-    if array_index is not None and n_rep > 1:
-        rep_k = int(array_index) % n_rep + 1
-
+    array_index = os.environ.get("AWS_BATCH_JOB_ARRAY_INDEX", "unknown")
     marker = {
         "array_index": array_index,
-        "id_numeric": id_numeric,
-        "site_id": site_id,
-        "replicate": rep_k,
         "error": error_msg,
-        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "timestamp": datetime.now(tz=UTC).isoformat(),
     }
-
-    if id_numeric is not None and rep_k is not None:
-        name = f"failed_{id_numeric}_rep{rep_k}.json"
-    elif id_numeric is not None:
-        name = f"failed_{id_numeric}.json"
-    elif array_index is not None:
-        name = f"failed_array_{array_index}.json"
-    else:
-        name = "failed_unknown.json"
-
-    path = os.path.join(matches_dir, name)
+    path = os.path.join(matches_dir, f"failed_array_{array_index}.json")
     with open(path, "w") as f:
         json.dump(marker, f)
     log.info("Failure marker written to %s", path)
-
-
-def _delete_stale_failure_markers(matches_dir, log):
-    """Delete failure markers for jobs that succeeded on retry.
-
-    When using spot instances, a job may fail on one attempt (writing a
-    failure marker) but succeed after retry (writing a match file).  This
-    function is called after the summarize step to remove stale markers
-    before uploading results.
-    """
-    import re
-
-    # Get all success files (m_*.rds)
-    success_files = [
-        f for f in os.listdir(matches_dir) if f.startswith("m_") and f.endswith(".rds")
-    ]
-    success_basenames = set(success_files)
-
-    # Get all failure markers
-    failure_files = [
-        f
-        for f in os.listdir(matches_dir)
-        if f.startswith("failed_") and f.endswith(".json")
-    ]
-
-    deleted_count = 0
-    for fname in failure_files:
-        # Parse failed_{id_numeric}_rep{k}.json -> m_{id_numeric}_rep{k}.rds
-        m = re.match(r"^failed_(\d+)_rep(\d+)\.json$", fname)
-        if m:
-            success_name = f"m_{m.group(1)}_rep{m.group(2)}.rds"
-            if success_name in success_basenames:
-                os.remove(os.path.join(matches_dir, fname))
-                log.info(
-                    "Deleted stale failure marker: %s (success file exists)", fname
-                )
-                deleted_count += 1
-                continue
-
-        # Parse failed_{id_numeric}.json -> m_{id_numeric}.rds
-        m = re.match(r"^failed_(\d+)\.json$", fname)
-        if m:
-            success_name = f"m_{m.group(1)}.rds"
-            if success_name in success_basenames:
-                os.remove(os.path.join(matches_dir, fname))
-                log.info(
-                    "Deleted stale failure marker: %s (success file exists)", fname
-                )
-                deleted_count += 1
-                continue
-
-    if deleted_count > 0:
-        log.info("Deleted %d stale failure marker(s) from retried jobs", deleted_count)
 
 
 def _download_s3(s3_uri, local_path, log):
@@ -666,8 +524,7 @@ def _upload_results(output_dir, s3_uri, log):
 
 def _parse_s3_uri(uri):
     """Split ``s3://bucket/key`` into ``(bucket, key)``."""
-    if uri.startswith("s3://"):
-        uri = uri[5:]
+    uri = uri.removeprefix("s3://")
     parts = uri.split("/", 1)
     return parts[0], parts[1] if len(parts) > 1 else ""
 
@@ -732,187 +589,129 @@ def _download_s3_files(s3_uri, local_dir, filenames, log):
         s3.download_file(bucket, key, local_path)
 
 
-def _safe_float(row, key, default=0.0):
-    """Return float(row[key]) if the key exists and is non-empty, else default."""
-    val = row.get(key, "")
-    if val == "" or val is None:
-        return default
-    return float(val)
+YEAR_METRICS = [
+    "extrapolated_forest_loss_avoided_ha",
+    "extrapolated_emissions_avoided_mgco2e",
+    "extrapolated_treatment_defor_ha",
+    "extrapolated_control_defor_ha",
+    "extrapolated_treatment_emissions_mgco2e",
+    "extrapolated_control_emissions_mgco2e",
+]
+TOTAL_METRICS = [
+    "extrapolated_forest_loss_avoided_ha",
+    "extrapolated_emissions_avoided_mgco2e",
+]
 
 
-def _build_time_step_values(row):
-    """Build the values dict for an AnalysisTimeStep, including CI columns if present.
-
-    Note: The R script writes columns with 'extrapolated_' prefix. We preserve
-    that prefix so import_execution_results() can find the values correctly.
-    """
-    vals = {
-        "extrapolated_forest_loss_avoided_ha": _safe_float(
-            row, "extrapolated_forest_loss_avoided_ha"
-        ),
-        "extrapolated_emissions_avoided_mgco2e": _safe_float(
-            row, "extrapolated_emissions_avoided_mgco2e"
-        ),
-        "extrapolated_treatment_defor_ha": _safe_float(
-            row, "extrapolated_treatment_defor_ha"
-        ),
-        "extrapolated_control_defor_ha": _safe_float(
-            row, "extrapolated_control_defor_ha"
-        ),
-        "extrapolated_treatment_emissions_mgco2e": _safe_float(
-            row, "extrapolated_treatment_emissions_mgco2e"
-        ),
-        "extrapolated_control_emissions_mgco2e": _safe_float(
-            row, "extrapolated_control_emissions_mgco2e"
-        ),
-    }
-    # CI columns are present only when n_replicates > 1
-    ci_keys = [
-        "extrapolated_treatment_defor_ha_ci_lower",
-        "extrapolated_treatment_defor_ha_ci_upper",
-        "extrapolated_control_defor_ha_ci_lower",
-        "extrapolated_control_defor_ha_ci_upper",
-        "extrapolated_forest_loss_avoided_ha_ci_lower",
-        "extrapolated_forest_loss_avoided_ha_ci_upper",
-        "extrapolated_treatment_emissions_mgco2e_ci_lower",
-        "extrapolated_treatment_emissions_mgco2e_ci_upper",
-        "extrapolated_control_emissions_mgco2e_ci_lower",
-        "extrapolated_control_emissions_mgco2e_ci_upper",
-        "extrapolated_emissions_avoided_mgco2e_ci_lower",
-        "extrapolated_emissions_avoided_mgco2e_ci_upper",
-    ]
-    for k in ci_keys:
-        val = row.get(k, "")
-        if val not in ("", None):
-            vals[k] = float(val)
-    return vals
+def _number(row, key):
+    """Return a required finite number from a result CSV row."""
+    try:
+        value = float(row[key])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid result value {key}={row.get(key)!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"Invalid result value {key}={row[key]!r}")
+    return value
 
 
-def _build_record_values(row):
-    """Build the values dict for an AnalysisRecord, including CI columns if present.
+def _metric_values(row, metrics, n_replicates):
+    """Required metrics plus their replicate bounds when n_replicates > 1."""
+    values = {key: _number(row, key) for key in metrics}
+    if n_replicates > 1:
+        for key in metrics:
+            for suffix in ("_ci_lower", "_ci_upper"):
+                values[key + suffix] = _number(row, key + suffix)
+    return values
 
-    Note: The R script writes columns with 'extrapolated_' prefix. We preserve
-    that prefix so import_execution_results() can find the values correctly.
-    """
-    vals = {
-        "extrapolated_forest_loss_avoided_ha": _safe_float(
-            row, "extrapolated_forest_loss_avoided_ha"
-        ),
-        "extrapolated_emissions_avoided_mgco2e": _safe_float(
-            row, "extrapolated_emissions_avoided_mgco2e"
-        ),
-        "area_ha": _safe_float(row, "area_ha"),
-    }
-    ci_keys = [
-        "extrapolated_forest_loss_avoided_ha_ci_lower",
-        "extrapolated_forest_loss_avoided_ha_ci_upper",
-        "extrapolated_emissions_avoided_mgco2e_ci_lower",
-        "extrapolated_emissions_avoided_mgco2e_ci_upper",
-    ]
-    for k in ci_keys:
-        val = row.get(k, "")
-        if val not in ("", None):
-            vals[k] = float(val)
-    return vals
+
+def _flag(row, key):
+    value = row[key]
+    if value not in ("TRUE", "FALSE"):
+        raise ValueError(f"Invalid result flag {key}={value!r}")
+    return value == "TRUE"
 
 
 def _collect_results(output_dir, task_id, log):
     """Read the summary files written by step 3 and build an AnalysisResults dict.
 
     Returns a plain dict produced by ``AnalysisResults.dump()`` so it can be
-    serialised to JSON and stored in ``Execution.results``.
+    serialised to JSON and stored in ``Execution.results``.  Missing files or
+    values raise, so an incomplete run is never reported as a result.
     """
-    summary_path = os.path.join(output_dir, "results_summary.json")
-    by_year_path = os.path.join(output_dir, "results_by_site_year.csv")
-    by_total_path = os.path.join(output_dir, "results_by_site_total.csv")
+    with open(os.path.join(output_dir, "results_summary.json")) as f:
+        summary = json.load(f)
+    n_replicates = int(summary["n_replicates"])
 
-    # --- summary ---
-    summary = {}
-    if os.path.isfile(summary_path):
-        with open(summary_path) as f:
-            summary = json.load(f)
-
-    year_range = summary.get("year_range", {})
     summary_dict = {
         "task_id": task_id,
-        "n_sites": summary.get("n_sites", 0),
-        "n_failed_sites": summary.get("n_failed_sites", 0),
-        "n_replicates": summary.get("n_replicates", 1),
+        "n_sites": summary["n_sites"],
+        "n_failed_sites": summary["n_failed_sites"],
+        "n_replicates": n_replicates,
+        "bounds_label": summary["bounds_label"],
         "r_analysis_git_sha": summary.get("r_analysis_git_sha"),
-        "total_emissions_avoided_mgco2e": summary.get(
-            "extrapolated_total_emissions_avoided_mgco2e", 0.0
-        ),
-        "total_forest_loss_avoided_ha": summary.get(
-            "extrapolated_total_forest_loss_avoided_ha", 0.0
-        ),
-        "sample_total_emissions_avoided_mgco2e": summary.get(
-            "sample_total_emissions_avoided_mgco2e", 0.0
-        ),
-        "sample_total_forest_loss_avoided_ha": summary.get(
-            "sample_total_forest_loss_avoided_ha", 0.0
-        ),
-        "total_area_ha": summary.get("total_area_ha", 0.0),
-        "year_range_min": year_range.get("min"),
-        "year_range_max": year_range.get("max"),
-        "failed_sites": summary.get("failed_sites", []),
-        "subsampled_sites": summary.get("subsampled_sites", []),
+        "total_emissions_avoided_mgco2e": summary[
+            "extrapolated_total_emissions_avoided_mgco2e"
+        ],
+        "total_forest_loss_avoided_ha": summary[
+            "extrapolated_total_forest_loss_avoided_ha"
+        ],
+        "sample_total_emissions_avoided_mgco2e": summary[
+            "sample_total_emissions_avoided_mgco2e"
+        ],
+        "sample_total_forest_loss_avoided_ha": summary[
+            "sample_total_forest_loss_avoided_ha"
+        ],
+        "total_area_ha": summary["total_area_ha"],
+        "year_range_min": summary["year_range"]["min"],
+        "year_range_max": summary["year_range"]["max"],
+        "failed_sites": summary["failed_sites"],
+        "worker_failures": summary["worker_failures"],
+        "subsampled_sites": summary["subsampled_sites"],
+        "methodology_warnings": summary["methodology_warnings"],
+        "portfolio": summary["portfolio"],
     }
 
-    # --- per-site-year time series ---
     time_series = []
-    if os.path.isfile(by_year_path):
-        with open(by_year_path, newline="") as f:
-            for row in csv.DictReader(f):
-                time_series.append(
-                    AnalysisTimeStep(
-                        entity_id=row["site_id"],
-                        year=int(row["year"]),
-                        values=_build_time_step_values(row),
-                        entity_name=row.get("site_name") or None,
-                        metadata={
-                            "n_sample_pixels": int(row.get("n_sample_pixels", 0)),
-                            "sampled_fraction": float(row.get("sampled_fraction", 1)),
-                            "is_pre_intervention": row.get(
-                                "is_pre_intervention", ""
-                            ).upper()
-                            == "TRUE",
-                            "is_post_intervention": row.get(
-                                "is_post_intervention", ""
-                            ).upper()
-                            == "TRUE",
-                            "sub_site_index": int(row.get("sub_site_index", 0) or 0),
-                        },
-                    )
+    with open(os.path.join(output_dir, "results_by_site_year.csv"), newline="") as f:
+        for row in csv.DictReader(f):
+            time_series.append(
+                AnalysisTimeStep(
+                    entity_id=row["site_id"],
+                    year=int(row["year"]),
+                    values=_metric_values(row, YEAR_METRICS, n_replicates),
+                    entity_name=row["site_name"] or None,
+                    metadata={
+                        "n_sample_pixels": int(_number(row, "n_sample_pixels")),
+                        "sampled_fraction": _number(row, "sampled_fraction"),
+                        "is_pre_intervention": _flag(row, "is_pre_intervention"),
+                        "is_post_intervention": _flag(row, "is_post_intervention"),
+                    },
                 )
+            )
 
-    # --- per-site totals ---
     records = []
-    if os.path.isfile(by_total_path):
-        with open(by_total_path, newline="") as f:
-            for row in csv.DictReader(f):
-                records.append(
-                    AnalysisRecord(
-                        entity_id=row["site_id"],
-                        values=_build_record_values(row),
-                        entity_name=row.get("site_name") or None,
-                        period_start=(
-                            int(row["first_year"]) if row.get("first_year") else None
-                        ),
-                        period_end=(
-                            int(row["last_year"]) if row.get("last_year") else None
-                        ),
-                        metadata={
-                            "n_sample_pixels": int(row.get("n_sample_pixels", 0)),
-                            "sampled_fraction": float(row.get("sampled_fraction", 1)),
-                            "n_years": int(row.get("n_years", 0)),
-                            "n_treatment_pixels": (
-                                int(row["n_treatment_pixels"])
-                                if row.get("n_treatment_pixels")
-                                else None
-                            ),
-                        },
-                    )
+    with open(os.path.join(output_dir, "results_by_site_total.csv"), newline="") as f:
+        for row in csv.DictReader(f):
+            values = _metric_values(row, TOTAL_METRICS, n_replicates)
+            values["area_ha"] = _number(row, "area_ha")
+            records.append(
+                AnalysisRecord(
+                    entity_id=row["site_id"],
+                    values=values,
+                    entity_name=row["site_name"] or None,
+                    period_start=int(row["first_year"]),
+                    period_end=int(row["last_year"]),
+                    metadata={
+                        "n_sample_pixels": int(_number(row, "n_sample_pixels")),
+                        "n_eligible_pixels": int(_number(row, "n_eligible_pixels")),
+                        "n_treatment_pixels": int(_number(row, "n_treatment_pixels")),
+                        "sampled_fraction": _number(row, "sampled_fraction"),
+                        "coverage_fraction": _number(row, "coverage_fraction"),
+                        "match_rate": _number(row, "match_rate"),
+                        "n_years": int(row["n_years"]),
+                    },
                 )
+            )
 
     analysis = AnalysisResults(
         name="Avoided emissions",
@@ -931,4 +730,4 @@ def _collect_results(output_dir, task_id, log):
     return analysis.dump()
 
 
-__all__ = ["run", "REQUIRES_GEE"]
+__all__ = ["REQUIRES_GEE", "run"]

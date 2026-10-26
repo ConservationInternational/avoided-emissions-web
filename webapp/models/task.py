@@ -1,7 +1,7 @@
 """Analysis task, site, and result models."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
@@ -56,9 +56,7 @@ class AnalysisTask(Base):
     sites_s3_uri = Column(String(500))
     config_s3_uri = Column(String(500))
     results_s3_uri = Column(String(500))
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     submitted_at = Column(DateTime(timezone=True))
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
@@ -115,9 +113,8 @@ class TaskResult(Base):
         UniqueConstraint(
             "task_id",
             "site_id",
-            "sub_site_index",
             "year",
-            name="task_results_task_id_site_id_sub_site_index_year_key",
+            name="task_results_task_id_site_id_year_key",
         ),
     )
 
@@ -129,9 +126,6 @@ class TaskResult(Base):
         index=True,
     )
     site_id = Column(String(100), nullable=False)
-    # 0 = no sub-site (ordinary site); 1+ = sub-site index within a
-    # cross-site grouping group (set by step 2 of the R analysis).
-    sub_site_index = Column(Integer, nullable=False, default=0)
     year = Column(Integer, nullable=False)
     extrapolated_forest_loss_avoided_ha = Column(Float)
     extrapolated_emissions_avoided_mgco2e = Column(Float)
@@ -144,7 +138,7 @@ class TaskResult(Base):
     n_sample_pixels = Column(Integer)
     sampled_fraction = Column(Float)
 
-    # Confidence interval bounds (populated when n_replicates > 1)
+    # Range across matching replicates (populated when n_replicates > 1)
     extrapolated_treatment_defor_ha_ci_lower = Column(Float)
     extrapolated_treatment_defor_ha_ci_upper = Column(Float)
     extrapolated_control_defor_ha_ci_lower = Column(Float)
@@ -177,13 +171,14 @@ class TaskResultTotal(Base):
     extrapolated_emissions_avoided_mgco2e = Column(Float)
     area_ha = Column(Float)
     n_sample_pixels = Column(Integer)
+    n_eligible_pixels = Column(Integer)
     n_treatment_pixels = Column(Integer)
     sampled_fraction = Column(Float)
     first_year = Column(Integer)
     last_year = Column(Integer)
     n_years = Column(Integer)
 
-    # Confidence interval bounds (populated when n_replicates > 1)
+    # Range across matching replicates (populated when n_replicates > 1)
     extrapolated_forest_loss_avoided_ha_ci_lower = Column(Float)
     extrapolated_forest_loss_avoided_ha_ci_upper = Column(Float)
     extrapolated_emissions_avoided_mgco2e_ci_lower = Column(Float)

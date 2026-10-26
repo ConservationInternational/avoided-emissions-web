@@ -3,7 +3,6 @@
 
 External I/O is mocked via:
   - services.analysis_task.get_db                      → MagicMock session
-  - services.analysis_task._get_task_results_aggregated → returns list
   - services.analysis_task.get_user_site_set_geojson    → returns None
 
 No DB connection or S3 access is made during these tests.
@@ -25,7 +24,6 @@ from services.analysis_task import (
 # ---------------------------------------------------------------------------
 
 _GET_DB = "services.analysis_task.get_db"
-_GET_AGG = "services.analysis_task._get_task_results_aggregated"
 _GET_GEOJSON = "services.analysis_task.get_user_site_set_geojson"
 
 
@@ -37,6 +35,7 @@ def _make_mock_task(n_sites=5, task_id="test-task-id"):
     t.site_set_id = None  # skip PostGIS geojson lookup
     t.sites_s3_uri = None  # skip S3 fallback
     t.config = {}
+    t.extra_metadata = {"portfolio": {"yearly": [{"year": 2020, "n_sites": n_sites}]}}
     return t
 
 
@@ -101,14 +100,12 @@ class TestGetTaskDetailStructure:
             task_obj = _make_mock_task(n_sites=n_sites)
         mock_db = _build_mock_db(task_obj, totals=totals)
         mocker.patch(_GET_DB, return_value=mock_db)
-        mocker.patch(_GET_AGG, return_value=[])
         mocker.patch(_GET_GEOJSON, return_value=None)
         return get_task_detail("any-task-id")
 
     def test_returns_none_for_missing_task(self, mocker):
         mock_db = _build_mock_db(None)
         mocker.patch(_GET_DB, return_value=mock_db)
-        mocker.patch(_GET_AGG, return_value=[])
         mocker.patch(_GET_GEOJSON, return_value=None)
 
         result = get_task_detail("nonexistent-task-id")
@@ -128,10 +125,13 @@ class TestGetTaskDetailStructure:
         }
         assert expected_keys.issubset(detail.keys())
 
+    def test_agg_yearly_is_the_portfolio_series_from_r(self, mocker):
+        detail = self._call(mocker)
+        assert detail["agg_yearly"] == [{"year": 2020, "n_sites": 5}]
+
     def test_closes_db_session_on_success(self, mocker):
         mock_db = _build_mock_db(_make_mock_task())
         mocker.patch(_GET_DB, return_value=mock_db)
-        mocker.patch(_GET_AGG, return_value=[])
         mocker.patch(_GET_GEOJSON, return_value=None)
 
         get_task_detail("any-task-id")
@@ -150,7 +150,6 @@ class TestGetTaskDetailRouting:
         task_obj = _make_mock_task(n_sites=n_sites)
         mock_db = _build_mock_db(task_obj)
         mocker.patch(_GET_DB, return_value=mock_db)
-        mocker.patch(_GET_AGG, return_value=[])
         mocker.patch(_GET_GEOJSON, return_value=None)
         return get_task_detail("any-task-id")
 
@@ -180,7 +179,6 @@ class TestGetTaskDetailRouting:
         task_obj = _make_mock_task(n_sites=5)
         mock_db = _build_mock_db(task_obj, totals=[mock_total])
         mocker.patch(_GET_DB, return_value=mock_db)
-        mocker.patch(_GET_AGG, return_value=[])
         mocker.patch(_GET_GEOJSON, return_value=None)
 
         detail = get_task_detail("any-task-id")
@@ -192,7 +190,6 @@ class TestGetTaskDetailRouting:
         task_obj = _make_mock_task(n_sites=LARGE_TASK_THRESHOLD + 1)
         mock_db = _build_mock_db(task_obj, totals=[mock_total])
         mocker.patch(_GET_DB, return_value=mock_db)
-        mocker.patch(_GET_AGG, return_value=[])
         mocker.patch(_GET_GEOJSON, return_value=None)
 
         detail = get_task_detail("any-task-id")
