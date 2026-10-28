@@ -19,12 +19,12 @@ wait_for_postgres() {
     attempts=0
     max_attempts=15
     while [ $attempts -lt $max_attempts ]; do
-        # Use Python+psycopg2 (already installed) for a lightweight probe.
+        # Use Python+psycopg (already installed) for a lightweight probe.
         if python -c "
 import os, sys
 try:
-    import psycopg2
-    psycopg2.connect(os.environ['DATABASE_URL'], connect_timeout=2).close()
+    import psycopg
+    psycopg.connect(os.environ['DATABASE_URL'], connect_timeout=2).close()
     sys.exit(0)
 except Exception:
     sys.exit(1)

@@ -8,17 +8,25 @@ import sys
 _logger = logging.getLogger(__name__)
 
 
+def _with_psycopg_driver(url: str) -> str:
+    """Pin SQLAlchemy to the psycopg (v3) driver for bare postgres URLs."""
+    for prefix in ("postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix) :]
+    return url
+
+
 def _build_database_url() -> str:
     """Construct DATABASE_URL from individual POSTGRES_* vars if not set."""
     explicit = os.environ.get("DATABASE_URL")
     if explicit:
-        return explicit
+        return _with_psycopg_driver(explicit)
     user = os.environ.get("POSTGRES_USER", "ae_user")
     password = os.environ.get("POSTGRES_PASSWORD", "ae_password")
     host = os.environ.get("POSTGRES_HOST", "postgres")
     port = os.environ.get("POSTGRES_PORT", "5432")
     db = os.environ.get("POSTGRES_DB", "avoided_emissions")
-    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+    return _with_psycopg_driver(f"postgresql://{user}:{password}@{host}:{port}/{db}")
 
 
 def _get_git_revision() -> str:
