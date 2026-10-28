@@ -1,266 +1,180 @@
-"""User management, trends.earth admin integration, and result exports."""
+"""App user administration through Trends.Earth, and local user-data removal.
+
+Access to this app is managed in Trends.Earth: users request access when they
+first sign in, and app admins approve, revoke or change roles through the
+Trends.Earth app-users API using their own access token.  This app keeps no
+user table; analysis data is keyed by the Trends.Earth subject (``sub``).
+"""
 
 import logging
-from datetime import UTC, datetime
 
-from config import Config, report_exception
+import requests
+from config import Config
 from models import (
     AnalysisTask,
+    CovariatePreset,
+    MatchingSettingsPreset,
+    TaskShareLink,
+    UserSiteSet,
+    UserSiteUpload,
     get_db,
 )
 
 logger = logging.getLogger(__name__)
 
+_HTTP_TIMEOUT = 30
+APP_ROLES = ("member", "admin")
+ACCESS_STATUSES = ("pending", "active", "revoked")
 
-def get_user_list():
-    """Return all users ordered by creation date (admin only)."""
-    db = get_db()
+_ERROR_MESSAGES = {
+    "app_role_required": "You need the admin role in this app to manage users.",
+    "insufficient_scope": (
+        "Your sign-in does not permit managing users. Sign out and sign in again."
+    ),
+    "superadmin_protected": (
+        "Trends.Earth superadmins always have admin access and cannot be "
+        "revoked or demoted."
+    ),
+    "self_demotion_forbidden": "You cannot revoke or demote your own access.",
+    "email_unverified": "Your Trends.Earth email address is not verified.",
+    "not_found": "User not found.",
+}
+
+
+class AppUsersError(Exception):
+    """A Trends.Earth app-users API call failed."""
+
+    def __init__(self, message, status=None, code=None):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+def _app_url(path=""):
+    base = Config.TRENDSEARTH_API_URL.rstrip("/")
+    return f"{base}/apps/{Config.OIDC_APP_KEY}{path}"
+
+
+def _call(method, path, access_token, **kwargs):
     try:
-        from models import User
+        resp = requests.request(
+            method,
+            _app_url(path),
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=_HTTP_TIMEOUT,
+            **kwargs,
+        )
+    except requests.RequestException as exc:
+        raise AppUsersError("Could not reach Trends.Earth.") from exc
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    if resp.status_code >= 400:
+        code = body.get("error") if isinstance(body, dict) else None
+        detail = body.get("detail") if isinstance(body, dict) else None
+        message = (
+            _ERROR_MESSAGES.get(code)
+            or detail
+            or (f"Trends.Earth returned an error ({resp.status_code}).")
+        )
+        raise AppUsersError(message, status=resp.status_code, code=code)
+    return body
 
-        return db.query(User).order_by(User.created_at.desc()).all()
-    finally:
-        db.close()
+
+def list_app_users(access_token, status=None, max_pages=20):
+    """Return every user with a grant for this app (optionally by status)."""
+    if status is not None and status not in ACCESS_STATUSES:
+        raise ValueError(f"status must be one of: {', '.join(ACCESS_STATUSES)}")
+    users = []
+    page = 1
+    while page <= max_pages:
+        params = {"page": page, "per_page": 100}
+        if status:
+            params["status"] = status
+        body = _call("GET", "/users", access_token, params=params)
+        batch = body.get("data") or []
+        users.extend(batch)
+        if not batch or len(users) >= int(body.get("total") or 0):
+            break
+        page += 1
+    return users
 
 
-def approve_user(user_id):
-    """Approve a pending user account and email them a set-password link.
+def set_app_user_access(access_token, subject, status, role=None, note=None):
+    """Approve, revoke or change the role of a user; returns their profile."""
+    if status not in ACCESS_STATUSES:
+        raise ValueError(f"status must be one of: {', '.join(ACCESS_STATUSES)}")
+    if role is not None and role not in APP_ROLES:
+        raise ValueError(f"role must be one of: {', '.join(APP_ROLES)}")
+    payload = {"status": status}
+    if role is not None:
+        payload["role"] = role
+    if note:
+        payload["note"] = note
+    body = _call("PUT", f"/users/{subject}/access", access_token, json=payload)
+    return body.get("data") or {}
 
-    Returns (success, message).
+
+def delete_user_data(user_id):
+    """Delete all of a user's analysis data from this app.
+
+    Removes the user's analysis tasks (with their sites and results), share
+    links, site sets, site uploads and presets.  The Trends.Earth account
+    and its access to this app are not affected.  Returns a dict of counts.
     """
     db = get_db()
     try:
-        from models import PasswordResetToken, User
+        tasks = db.query(AnalysisTask).filter(AnalysisTask.submitted_by == user_id)
+        task_ids = [t.id for t in tasks]
+        site_sets = db.query(UserSiteSet).filter(UserSiteSet.user_id == user_id).all()
+        site_set_ids = [s.id for s in site_sets]
 
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            return False, "User not found."
-        if user.is_approved:
-            return False, "User is already approved."
-        user.is_approved = True
-        user.updated_at = datetime.now(UTC)
-        db.commit()
-
-        # Send the newly-approved user a link to set their password.
-        try:
-            PasswordResetToken.invalidate_user_tokens(user.id, db)
-            reset_token = PasswordResetToken(user_id=user.id)
-            db.add(reset_token)
-            db.commit()
-
-            from config import Config
-
-            set_pw_url = f"{Config.APP_URL}/reset-password?token={reset_token.token}"
-            html_body = f"""
-            <p>Hello {user.name},</p>
-
-            <p>Your Avoided Emissions account has been approved! To get
-            started, please set your password by clicking the link below.
-            This link will expire in 1 hour.</p>
-
-            <p><a href=\"{set_pw_url}\">Set Your Password</a></p>
-
-            <p>If you cannot click the link, copy and paste this URL into
-            your browser:</p>
-            <p>{set_pw_url}</p>
-            """
-            from email_service import send_html_email
-
-            send_html_email(
-                recipients=[user.email],
-                html=html_body,
-                subject="[Avoided Emissions] Account Approved — Set Your Password",
+        n_links = (
+            db.query(TaskShareLink)
+            .filter(
+                (TaskShareLink.created_by == user_id)
+                | TaskShareLink.task_id.in_(task_ids)
             )
-        except Exception:
-            logger.exception(
-                "Failed to send set-password email to newly approved user %s",
-                user.email,
-            )
-            report_exception(approved_user_email=user.email)
-
-        return True, f"User {user.email} approved."
-    except Exception:  # noqa: BLE001
-        db.rollback()
-        return False, "Failed to approve user."
-    finally:
-        db.close()
-
-
-def change_user_role(user_id, new_role, acting_user_id=None):
-    """Change a user's role. Returns (success, message)."""
-    if new_role not in ("admin", "user"):
-        return False, "Invalid role."
-    if acting_user_id and str(acting_user_id) == str(user_id) and new_role == "user":
-        return False, "You cannot change your own role to user."
-    db = get_db()
-    try:
-        from models import User
-
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            return False, "User not found."
-        user.role = new_role
-        user.updated_at = datetime.now(UTC)
-        db.commit()
-        return True, f"User {user.email} role changed to {new_role}."
-    except Exception:  # noqa: BLE001
-        db.rollback()
-        return False, "Failed to change role."
-    finally:
-        db.close()
-
-
-# ---------------------------------------------------------------------------
-# trends.earth script access management
-# ---------------------------------------------------------------------------
-
-
-def _get_te_admin_client():
-    """Return a ``TrendsEarthClient`` authenticated with the webapp's
-    service-account credentials (``TRENDSEARTH_CLIENT_ID`` /
-    ``TRENDSEARTH_CLIENT_SECRET``).
-
-    These credentials must belong to a trends.earth ADMIN or SUPERADMIN
-    user so that the script access endpoints are accessible.
-
-    Returns ``None`` if the service-account credentials or script ID are
-    not configured.
-    """
-    from trendsearth_client import TrendsEarthClient
-
-    client_id = Config.TRENDSEARTH_CLIENT_ID
-    client_secret = Config.TRENDSEARTH_CLIENT_SECRET
-    script_id = Config.TRENDSEARTH_SCRIPT_ID
-
-    if not client_id or not client_secret or not script_id:
-        logger.debug(
-            "TE admin client not available — TRENDSEARTH_CLIENT_ID, "
-            "TRENDSEARTH_CLIENT_SECRET, or TRENDSEARTH_SCRIPT_ID is not set."
+            .delete(synchronize_session=False)
         )
-        return None
-
-    return TrendsEarthClient.from_oauth2_credentials(
-        api_url=Config.TRENDSEARTH_API_URL,
-        client_id=client_id,
-        client_secret=client_secret,
-    )
-
-
-def grant_te_script_access(user_id):
-    """Grant a webapp user access to the avoided-emissions TE API script.
-
-    Looks up the user's ``te_user_id`` from the stored credential and
-    adds that ID to the script's allowed-users list on the TE API using
-    the webapp's service-account credentials.
-
-    Does nothing (and logs a warning) if:
-    - The user has no linked TE credential or no ``te_user_id``.
-    - The webapp service-account credentials are not configured.
-
-    Raises on HTTP errors so callers can decide whether to treat the
-    failure as blocking or best-effort.
-    """
-    from credential_store import get_credential
-
-    cred = get_credential(user_id)
-    if not cred or not cred.te_user_id:
-        logger.warning(
-            "Cannot grant TE script access for user %s — no te_user_id", user_id
-        )
-        return
-
-    client = _get_te_admin_client()
-    if not client:
-        logger.warning(
-            "Cannot grant TE script access — webapp service-account "
-            "credentials are not configured."
-        )
-        return
-
-    script_id = Config.TRENDSEARTH_SCRIPT_ID
-    logger.info(
-        "Granting TE script %s access to TE user %s (webapp user %s)",
-        script_id,
-        cred.te_user_id,
-        user_id,
-    )
-    client.add_user_to_script(script_id, cred.te_user_id)
-
-
-def revoke_te_script_access(user_id):
-    """Revoke a webapp user's access to the avoided-emissions TE API script.
-
-    Looks up the user's ``te_user_id`` from the stored credential and
-    removes that ID from the script's allowed-users list on the TE API
-    using the webapp's service-account credentials.
-
-    Does nothing (and logs a warning) if:
-    - The user has no linked TE credential or no ``te_user_id``.
-    - The webapp service-account credentials are not configured.
-
-    Raises on HTTP errors so callers can decide whether to treat the
-    failure as blocking or best-effort.
-    """
-    from credential_store import get_credential
-
-    cred = get_credential(user_id)
-    if not cred or not cred.te_user_id:
-        logger.warning(
-            "Cannot revoke TE script access for user %s — no te_user_id", user_id
-        )
-        return
-
-    client = _get_te_admin_client()
-    if not client:
-        logger.warning(
-            "Cannot revoke TE script access — webapp service-account "
-            "credentials are not configured."
-        )
-        return
-
-    script_id = Config.TRENDSEARTH_SCRIPT_ID
-    logger.info(
-        "Revoking TE script %s access from TE user %s (webapp user %s)",
-        script_id,
-        cred.te_user_id,
-        user_id,
-    )
-    client.remove_user_from_script(script_id, cred.te_user_id)
-
-
-def delete_user(user_id):
-    """Delete a user account and their analysis tasks. Returns (success, message)."""
-    # Revoke TE script access *before* deleting the DB row so that
-    # the credential lookup still works.
-    try:
-        revoke_te_script_access(user_id)
-    except Exception:
-        logger.warning(
-            "Failed to revoke TE script access for user %s during deletion "
-            "(continuing with deletion)",
-            user_id,
-            exc_info=True,
-        )
-
-    db = get_db()
-    try:
-        from models import User
-
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            return False, "User not found."
-        email = user.email
-        # Delete the user's analysis tasks (cascades to sites/results via DB)
-        tasks = (
-            db.query(AnalysisTask).filter(AnalysisTask.submitted_by == user_id).all()
-        )
-        for task in tasks:
+        n_tasks = 0
+        for task in tasks.all():
             db.delete(task)
-        db.delete(user)
+            n_tasks += 1
+        db.flush()
+        if site_set_ids:
+            # Other users' tasks (e.g. admin recomputes) may reference these
+            # site sets; keep those tasks and drop the reference.
+            db.query(AnalysisTask).filter(
+                AnalysisTask.site_set_id.in_(site_set_ids)
+            ).update({AnalysisTask.site_set_id: None}, synchronize_session=False)
+        for site_set in site_sets:
+            db.delete(site_set)
+        n_uploads = (
+            db.query(UserSiteUpload)
+            .filter(UserSiteUpload.user_id == user_id)
+            .delete(synchronize_session=False)
+        )
+        n_presets = 0
+        for model in (CovariatePreset, MatchingSettingsPreset):
+            n_presets += (
+                db.query(model)
+                .filter(model.user_id == user_id)
+                .delete(synchronize_session=False)
+            )
         db.commit()
-        return True, f"User {email} deleted."
-    except Exception:  # noqa: BLE001
+        counts = {
+            "tasks": n_tasks,
+            "share_links": n_links,
+            "site_sets": len(site_sets),
+            "site_uploads": n_uploads,
+            "presets": n_presets,
+        }
+        logger.info("Deleted app data for user %s: %s", user_id, counts)
+        return counts
+    except Exception:
         db.rollback()
-        return False, "Failed to delete user."
+        raise
     finally:
         db.close()

@@ -17,8 +17,6 @@ from models import (
     TaskResult,
     TaskResultTotal,
     TaskSite,
-    TrendsEarthCredential,
-    User,
     get_db,
 )
 from pyproj import Transformer as _ProjTransformer
@@ -138,6 +136,9 @@ def queue_analysis_task(
     resolution_m=ANALYSIS_DEFAULTS["resolution_m"],
     source_sites_s3_uri=None,
     source_sites_parquet_s3_uri=None,
+    session_id=None,
+    submitter_email=None,
+    submitter_name=None,
 ):
     """Create an analysis task record and queue it for async submission.
 
@@ -211,16 +212,15 @@ def queue_analysis_task(
             + ", ".join(sorted(ALLOWED_MATCHING_JOB_QUEUES))
         )
 
-    # Verify trends.earth credentials before any DB work so the user
-    # gets an immediate error rather than a stuck "submitting" task.
-    from credential_store import get_decrypted_secret
+    # The worker submits the analysis to trends.earth with the user's own
+    # access token, so check the session up front rather than leaving a
+    # stuck "submitting" task.
+    import session_store
 
-    user_creds = get_decrypted_secret(user_id)
-    if not user_creds:
+    if not session_id or session_store.get(session_id) is None:
         raise ValueError(
-            "You must link your trends.earth account before "
-            "submitting analysis tasks.  Go to Profile \u2192 "
-            "trends.earth API Integration to connect your account."
+            "Your Trends.Earth session has ended. Sign in again to submit "
+            "analysis tasks."
         )
     if not Config.TRENDSEARTH_SCRIPT_ID:
         raise ValueError(
@@ -237,6 +237,9 @@ def queue_analysis_task(
             name=task_name,
             description=description,
             submitted_by=user_id,
+            submitter_email=submitter_email,
+            submitter_name=submitter_name,
+            submit_session_id=session_id,
             site_set_id=site_set_id,
             status="submitting",
             config={
@@ -312,7 +315,7 @@ def _complete_analysis_task_submission(task_id, user_id):
     """
     import time as _time
 
-    from credential_store import get_decrypted_secret
+    import session_store
     from trendsearth_client import TrendsEarthClient
 
     _t0 = _time.perf_counter()
@@ -843,24 +846,25 @@ def _complete_analysis_task_submission(task_id, user_id):
             batch_overrides["job_definition"] = Config.BATCH_JOB_DEFINITION
         params["batch"] = batch_overrides
 
-        # Re-validate credentials (may have changed since queuing).
-        user_creds = get_decrypted_secret(user_id)
-        if not user_creds:
-            raise ValueError(
-                f"trends.earth credentials are no longer available for user "
-                f"{user_id}. Cannot complete submission."
-            )
+        # Submit as the user, with a fresh access token from their session
+        # (refreshed here if it is about to expire).
         script_id = Config.TRENDSEARTH_SCRIPT_ID
-        client_id, client_secret = user_creds
-
         _auth_t0 = _time.perf_counter()
-        client = TrendsEarthClient.from_oauth2_credentials(
-            api_url=Config.TRENDSEARTH_API_URL,
-            client_id=client_id,
-            client_secret=client_secret,
+        try:
+            access_token = session_store.get_access_token(
+                task.submit_session_id, margin=60
+            )
+        except session_store.SessionExpired as exc:
+            raise ValueError(
+                "Your Trends.Earth session ended before the analysis could be "
+                "submitted. Sign in again and resubmit the task."
+            ) from exc
+        client = TrendsEarthClient(
+            api_url=Config.TRENDSEARTH_API_URL, access_token=access_token
         )
         logger.info(
-            "[SUBMIT-WORKER] Task %s: OAuth2 auth in %.2fs, calling API (script=%s)",
+            "[SUBMIT-WORKER] Task %s: user token ready in %.2fs, calling API "
+            "(script=%s)",
             task_id,
             _time.perf_counter() - _auth_t0,
             script_id,
@@ -922,6 +926,30 @@ def _complete_analysis_task_submission(task_id, user_id):
         db.close()
 
 
+def _cancel_api_execution(task, user, api_exec_id):
+    """Cancel an execution on trends.earth.
+
+    The owner cancels with their own token.  When an app admin cancels
+    someone else's task, the service client is used, since the admin's
+    Trends.Earth account does not own the execution.
+    """
+    import session_store
+    from trendsearth_client import TrendsEarthClient
+
+    if str(task.submitted_by) == str(user.id):
+        client = TrendsEarthClient(
+            api_url=Config.TRENDSEARTH_API_URL,
+            access_token=session_store.get_access_token(user.session_id),
+        )
+    else:
+        client = TrendsEarthClient.from_oauth2_credentials(
+            api_url=Config.TRENDSEARTH_API_URL,
+            client_id=Config.TRENDSEARTH_CLIENT_ID,
+            client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
+        )
+    client.cancel_execution(api_exec_id)
+
+
 def cancel_task(task_id, user):
     """Cancel a running task and its API execution.
 
@@ -945,22 +973,12 @@ def cancel_task(task_id, user):
         if exec_ref.startswith("api:"):
             api_exec_id = exec_ref[4:]
             try:
-                from credential_store import get_decrypted_secret
-                from trendsearth_client import TrendsEarthClient
-
-                user_creds = get_decrypted_secret(user.id)
-                if user_creds:
-                    client = TrendsEarthClient.from_oauth2_credentials(
-                        api_url=Config.TRENDSEARTH_API_URL,
-                        client_id=user_creds[0],
-                        client_secret=user_creds[1],
-                    )
-                    client.cancel_execution(api_exec_id)
-                    logger.info(
-                        "[CANCEL] Task %s: API execution %s cancelled",
-                        task_id,
-                        api_exec_id,
-                    )
+                _cancel_api_execution(task, user, api_exec_id)
+                logger.info(
+                    "[CANCEL] Task %s: API execution %s cancelled",
+                    task_id,
+                    api_exec_id,
+                )
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "[CANCEL] Task %s: failed to cancel API execution %s: %s",
@@ -984,7 +1002,7 @@ def get_task_list(user_id=None, limit=None):
     defaults to no limit so the full history is available for
     client-side sort/filter in the dashboard.
     """
-    from sqlalchemy.orm import joinedload, load_only
+    from sqlalchemy.orm import load_only
 
     db = get_db()
     try:
@@ -997,6 +1015,8 @@ def get_task_list(user_id=None, limit=None):
                     AnalysisTask.status,
                     AnalysisTask.n_sites,
                     AnalysisTask.submitted_by,
+                    AnalysisTask.submitter_name,
+                    AnalysisTask.submitter_email,
                     AnalysisTask.config,
                     AnalysisTask.covariates,
                     AnalysisTask.created_at,
@@ -1004,7 +1024,6 @@ def get_task_list(user_id=None, limit=None):
                     AnalysisTask.completed_at,
                     AnalysisTask.error_message,
                 ),
-                joinedload(AnalysisTask.user).load_only(User.id, User.name),
             )
             .order_by(AnalysisTask.created_at.desc())
         )
@@ -1432,28 +1451,12 @@ def adopt_api_execution(exec_data, db):
     }
     local_status = status_map.get(api_status, "submitted")
 
-    # Try to match the execution to the local user who submitted it,
-    # via the trends.earth user ID stored in TrendsEarthCredential.
-    from models import User
-
-    owner = None
-    api_user_id = exec_data.get("user_id")
-    if api_user_id:
-        cred = (
-            db.query(TrendsEarthCredential)
-            .filter(TrendsEarthCredential.te_user_id == str(api_user_id))
-            .first()
-        )
-        if cred:
-            owner = db.query(User).filter(User.id == cred.user_id).first()
-
-    # Fall back to the first admin, then any user
-    if not owner:
-        owner = db.query(User).filter(User.role == "admin").first()
-    if not owner:
-        owner = db.query(User).first()
-    if not owner:
-        # Caller should check for this and log once, not per-execution
+    # Users are identified by their trends.earth user id (the OIDC
+    # subject), so the execution's owner is the task's owner.
+    try:
+        owner_id = uuid.UUID(str(exec_data.get("user_id")))
+    except (TypeError, ValueError):
+        logger.warning("[ADOPT] Execution %s has no usable user_id; skipping", exec_id)
         return None
 
     # Reconstruct n_sites from the pipeline array_size if available,
@@ -1482,7 +1485,7 @@ def adopt_api_execution(exec_data, db):
         or params.get("task_id", f"Discovered: {exec_id[:8]}"),
         description=params.get("task_description")
         or f"Auto-discovered from trends.earth API execution {exec_id}",
-        submitted_by=owner.id,
+        submitted_by=owner_id,
         status=local_status,
         extract_job_id=f"api:{exec_id}",
         config=params,

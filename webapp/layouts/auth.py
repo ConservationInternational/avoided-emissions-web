@@ -1,15 +1,50 @@
-"""Authentication page layouts: login, register, forgot/reset password."""
+"""Sign-in page layouts: login landing, app-access status and sign-out."""
+
+from urllib.parse import urlencode
 
 import dash_bootstrap_components as dbc
-from dash import dcc, html
+from dash import html
 
-from layouts.common import (
-    navbar,
-)
+from layouts.common import logout_form, navbar
+
+_LOGIN_ERRORS = {
+    "unavailable": (
+        "The Trends.Earth sign-in service could not be reached. Please try "
+        "again in a few minutes."
+    ),
+    "failed": "Sign-in did not complete. Please try again.",
+}
+
+_ACCESS_MESSAGES = {
+    "pending": (
+        "Access requested",
+        "info",
+        (
+            "Your request to use the Avoided Emissions app has been sent to the "
+            "app administrators. You will receive an email from Trends.Earth "
+            "once it has been reviewed."
+        ),
+    ),
+    "revoked": (
+        "Access removed",
+        "warning",
+        (
+            "Your access to the Avoided Emissions app has been removed. Contact "
+            "an administrator if you believe this is a mistake."
+        ),
+    ),
+    "unavailable": (
+        "Access could not be checked",
+        "warning",
+        (
+            "Trends.Earth could not check your access to this app right now. "
+            "Please try again later."
+        ),
+    ),
+}
 
 
-def login_layout():
-    """Login page layout."""
+def _auth_card(title, body):
     return dbc.Container(
         [
             navbar(),
@@ -27,7 +62,7 @@ def login_layout():
                                                 style={"color": "white"},
                                             ),
                                             html.H6(
-                                                "Login",
+                                                title,
                                                 className="text-center",
                                                 style={"color": "#ffffffcc"},
                                             ),
@@ -35,53 +70,7 @@ def login_layout():
                                     ),
                                     style={"backgroundColor": "#2c3e50"},
                                 ),
-                                dbc.CardBody(
-                                    [
-                                        dbc.Label("Email"),
-                                        dbc.Input(
-                                            id="login-email",
-                                            type="email",
-                                            placeholder="user@example.com",
-                                            className="mb-2",
-                                        ),
-                                        dbc.Label("Password"),
-                                        dbc.Input(
-                                            id="login-password",
-                                            type="password",
-                                            className="mb-2",
-                                        ),
-                                        html.Div(
-                                            id="login-error",
-                                            className="text-danger mb-2",
-                                        ),
-                                        dbc.Button(
-                                            "Login",
-                                            id="login-button",
-                                            color="primary",
-                                            className="w-100",
-                                        ),
-                                        html.Hr(),
-                                        html.P(
-                                            [
-                                                "Don't have an account? ",
-                                                dcc.Link(
-                                                    "Register here",
-                                                    href="/register",
-                                                    className="fw-bold",
-                                                ),
-                                            ],
-                                            className="text-center mb-1 small",
-                                        ),
-                                        html.Div(
-                                            dcc.Link(
-                                                "Forgot password?",
-                                                href="/forgot-password",
-                                                className="small",
-                                            ),
-                                            className="text-center mb-0",
-                                        ),
-                                    ]
-                                ),
+                                dbc.CardBody(body),
                             ],
                             className="mt-5 shadow-sm ae-auth-card",
                         ),
@@ -140,308 +129,91 @@ def login_layout():
     )
 
 
-def register_layout():
-    """Registration page layout.
+def _sign_in_url(next_url=""):
+    if next_url:
+        return "/auth/login?" + urlencode({"next": next_url})
+    return "/auth/login"
 
-    Collects only name and email.  Once an admin approves the account
-    the user receives an email with a link to set their password.
-    """
-    return dbc.Container(
+
+def login_layout(error="", next_url=""):
+    """Landing page offering sign-in with Trends.Earth."""
+    body = []
+    if error:
+        body.append(
+            dbc.Alert(
+                _LOGIN_ERRORS.get(error, _LOGIN_ERRORS["failed"]),
+                color="danger",
+                className="small",
+            )
+        )
+    body += [
+        html.P(
+            "Sign in with your Trends.Earth account. The first time you sign "
+            "in, an access request is sent to the app administrators.",
+            className="small",
+        ),
+        # A plain link (not dcc.Link) so the browser leaves the Dash app.
+        html.A(
+            "Sign in with Trends.Earth",
+            href=_sign_in_url(next_url),
+            className="btn btn-primary w-100",
+            id="login-button",
+        ),
+        html.Hr(),
+        html.P(
+            "No Trends.Earth account?",
+            className="text-center small",
+        ),
+        html.A(
+            "Register with Trends.Earth",
+            href="https://api.trends.earth/register",
+            className="btn btn-outline-primary w-100",
+            id="register-button",
+        ),
+    ]
+    return _auth_card("Sign in", body)
+
+
+def access_layout(status=""):
+    """Shown when Trends.Earth declined access to this app."""
+    title, color, message = _ACCESS_MESSAGES.get(
+        status,
+        (
+            "Access denied",
+            "warning",
+            "Your Trends.Earth account does not have access to this app.",
+        ),
+    )
+    return _auth_card(
+        title,
         [
-            navbar(),
-            dbc.Row(
-                dbc.Col(
-                    [
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    html.Div(
-                                        [
-                                            html.H4(
-                                                "Avoided Emissions",
-                                                className="text-center mb-1",
-                                                style={"color": "white"},
-                                            ),
-                                            html.H6(
-                                                "Create Account",
-                                                className="text-center",
-                                                style={"color": "#ffffffcc"},
-                                            ),
-                                        ]
-                                    ),
-                                    style={"backgroundColor": "#2c3e50"},
-                                ),
-                                dbc.CardBody(
-                                    [
-                                        dbc.Label("Full Name"),
-                                        dbc.Input(
-                                            id="register-name",
-                                            type="text",
-                                            className="mb-2",
-                                        ),
-                                        dbc.Label("Email"),
-                                        dbc.Input(
-                                            id="register-email",
-                                            type="email",
-                                            placeholder="user@example.com",
-                                            className="mb-3",
-                                        ),
-                                        html.Small(
-                                            "After registration, an administrator "
-                                            "will review your request. Once "
-                                            "approved, you'll receive an email "
-                                            "with a link to set your password.",
-                                            className="text-muted d-block mb-3",
-                                        ),
-                                        html.Div(
-                                            id="register-message", className="mb-2"
-                                        ),
-                                        dbc.Button(
-                                            "Register",
-                                            id="register-button",
-                                            color="primary",
-                                            className="w-100",
-                                        ),
-                                        html.Hr(),
-                                        html.P(
-                                            [
-                                                "Already have an account? ",
-                                                dcc.Link(
-                                                    "Login here",
-                                                    href="/login",
-                                                    className="fw-bold",
-                                                ),
-                                            ],
-                                            className="text-center mb-0 small",
-                                        ),
-                                    ]
-                                ),
-                            ],
-                            className="mt-5 shadow-sm ae-auth-card",
-                        ),
-                    ],
-                    xs=12,
-                    sm={"size": 10, "offset": 1},
-                    md={"size": 6, "offset": 3},
-                    lg={"size": 4, "offset": 4},
-                )
+            dbc.Alert(message, color=color, className="small"),
+            html.A(
+                "Back to sign in",
+                href="/login",
+                className="btn btn-outline-primary w-100",
             ),
-        ]
+        ],
     )
 
 
-def forgot_password_layout():
-    """Forgot-password page — accepts an email and sends a reset link."""
-    return dbc.Container(
+def logout_layout(user=None):
+    """Sign-out confirmation (the navbar posts directly; this is a fallback)."""
+    if not user:
+        return _auth_card(
+            "Signed out",
+            [
+                html.P("You are signed out.", className="small"),
+                html.A("Sign in", href="/login", className="btn btn-primary w-100"),
+            ],
+        )
+    return _auth_card(
+        "Sign out",
         [
-            navbar(),
-            dbc.Row(
-                dbc.Col(
-                    [
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    html.Div(
-                                        [
-                                            html.H4(
-                                                "Avoided Emissions",
-                                                className="text-center mb-1",
-                                                style={"color": "white"},
-                                            ),
-                                            html.H6(
-                                                "Reset Password",
-                                                className="text-center",
-                                                style={"color": "#ffffffcc"},
-                                            ),
-                                        ]
-                                    ),
-                                    style={"backgroundColor": "#2c3e50"},
-                                ),
-                                dbc.CardBody(
-                                    [
-                                        html.P(
-                                            "Enter the email address associated "
-                                            "with your account and we'll send you "
-                                            "a link to reset your password.",
-                                            className="mb-3",
-                                        ),
-                                        dbc.Label("Email"),
-                                        dbc.Input(
-                                            id="forgot-email",
-                                            type="email",
-                                            placeholder="user@example.com",
-                                            className="mb-3",
-                                        ),
-                                        html.Div(id="forgot-message", className="mb-2"),
-                                        dbc.Button(
-                                            "Send Reset Link",
-                                            id="forgot-button",
-                                            color="primary",
-                                            className="w-100",
-                                        ),
-                                        html.Hr(),
-                                        html.P(
-                                            [
-                                                "Remember your password? ",
-                                                dcc.Link(
-                                                    "Login here",
-                                                    href="/login",
-                                                    className="fw-bold",
-                                                ),
-                                            ],
-                                            className="text-center mb-0 small",
-                                        ),
-                                    ]
-                                ),
-                            ],
-                            className="mt-5 shadow-sm ae-auth-card",
-                        ),
-                    ],
-                    xs=12,
-                    sm={"size": 10, "offset": 1},
-                    md={"size": 6, "offset": 3},
-                    lg={"size": 4, "offset": 4},
-                )
+            html.P(
+                "Signing out also ends your Trends.Earth sign-in in this browser.",
+                className="small",
             ),
-        ]
-    )
-
-
-def reset_password_layout(token=""):
-    """Reset-password page — sets a new password using the emailed token.
-
-    Includes real-time password requirements hints that update as the
-    user types (driven by a Dash callback).
-    """
-    req_item_style = {"fontSize": "0.85rem", "lineHeight": "1.6"}
-
-    return dbc.Container(
-        [
-            navbar(),
-            # Hidden store carries the token from the URL query string
-            dcc.Store(id="reset-token-store", data=token),
-            dbc.Row(
-                dbc.Col(
-                    [
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    html.Div(
-                                        [
-                                            html.H4(
-                                                "Avoided Emissions",
-                                                className="text-center mb-1",
-                                                style={"color": "white"},
-                                            ),
-                                            html.H6(
-                                                "Set New Password",
-                                                className="text-center",
-                                                style={"color": "#ffffffcc"},
-                                            ),
-                                        ]
-                                    ),
-                                    style={"backgroundColor": "#2c3e50"},
-                                ),
-                                dbc.CardBody(
-                                    [
-                                        dbc.Label("New Password"),
-                                        dbc.Input(
-                                            id="reset-password",
-                                            type="password",
-                                            className="mb-1",
-                                            debounce=False,
-                                        ),
-                                        dbc.Label("Confirm New Password"),
-                                        dbc.Input(
-                                            id="reset-password-confirm",
-                                            type="password",
-                                            className="mb-2",
-                                            debounce=False,
-                                        ),
-                                        # Password requirements checklist
-                                        html.Div(
-                                            [
-                                                html.Small(
-                                                    "Password requirements:",
-                                                    className="fw-bold",
-                                                ),
-                                                html.Ul(
-                                                    [
-                                                        html.Li(
-                                                            "At least 12 characters",
-                                                            id="req-length",
-                                                            className="text-muted",
-                                                            style=req_item_style,
-                                                        ),
-                                                        html.Li(
-                                                            "One uppercase letter",
-                                                            id="req-uppercase",
-                                                            className="text-muted",
-                                                            style=req_item_style,
-                                                        ),
-                                                        html.Li(
-                                                            "One lowercase letter",
-                                                            id="req-lowercase",
-                                                            className="text-muted",
-                                                            style=req_item_style,
-                                                        ),
-                                                        html.Li(
-                                                            "One number",
-                                                            id="req-number",
-                                                            className="text-muted",
-                                                            style=req_item_style,
-                                                        ),
-                                                        html.Li(
-                                                            "One special character",
-                                                            id="req-special",
-                                                            className="text-muted",
-                                                            style=req_item_style,
-                                                        ),
-                                                        html.Li(
-                                                            "Passwords match",
-                                                            id="req-match",
-                                                            className="text-muted",
-                                                            style=req_item_style,
-                                                        ),
-                                                    ],
-                                                    className="mb-2",
-                                                    style={
-                                                        "listStyleType": "none",
-                                                        "paddingLeft": "0.5rem",
-                                                    },
-                                                ),
-                                            ],
-                                            className="mb-2",
-                                        ),
-                                        html.Div(id="reset-message", className="mb-2"),
-                                        dbc.Button(
-                                            "Set Password",
-                                            id="reset-button",
-                                            color="primary",
-                                            className="w-100",
-                                        ),
-                                        html.Hr(),
-                                        html.P(
-                                            [
-                                                dcc.Link(
-                                                    "Back to login",
-                                                    href="/login",
-                                                    className="fw-bold",
-                                                ),
-                                            ],
-                                            className="text-center mb-0 small",
-                                        ),
-                                    ]
-                                ),
-                            ],
-                            className="mt-5 shadow-sm ae-auth-card",
-                        ),
-                    ],
-                    xs=12,
-                    sm={"size": 10, "offset": 1},
-                    md={"size": 6, "offset": 3},
-                    lg={"size": 4, "offset": 4},
-                )
-            ),
-        ]
+            logout_form("Sign out", button_class="btn btn-primary w-100"),
+        ],
     )

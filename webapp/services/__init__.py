@@ -17,7 +17,6 @@ from models import (
     TaskResult,
     TaskResultTotal,
     TaskSite,
-    User,
     UserSiteSet,
     UserSiteUpload,
     get_db,
@@ -126,12 +125,10 @@ from services.site_upload import (
 
 # -- User administration --
 from services.user_admin import (
-    approve_user,
-    change_user_role,
-    delete_user,
-    get_user_list,
-    grant_te_script_access,
-    revoke_te_script_access,
+    AppUsersError,
+    delete_user_data,
+    list_app_users,
+    set_app_user_access,
 )
 
 __all__ = [
@@ -147,6 +144,8 @@ __all__ = [
     "S3_COST_TAGGING",
     # models re-exported
     "AnalysisTask",
+    # user_admin
+    "AppUsersError",
     "Covariate",
     "CovariatePreset",
     "MatchingSettingsPreset",
@@ -155,19 +154,15 @@ __all__ = [
     "TaskResult",
     "TaskResultTotal",
     "TaskSite",
-    "User",
     "UserSiteSet",
     "UserSiteUpload",
     "_complete_analysis_task_submission",
     "adopt_api_execution",
     "apply_site_column_mapping",
-    # user_admin
-    "approve_user",
     # site_set
     "archive_user_site_set",
     "cancel_task",
     "cancel_user_site_upload",
-    "change_user_role",
     # reference_layers
     "compute_exact_match_groups_with_splitting",
     "compute_matching_extent",
@@ -178,7 +173,7 @@ __all__ = [
     # preset
     "delete_covariate_preset",
     "delete_matching_settings_preset",
-    "delete_user",
+    "delete_user_data",
     "delete_user_site_set",
     "delete_user_site_upload",
     "discard_staged_site_upload",
@@ -201,14 +196,13 @@ __all__ = [
     "get_task_detail",
     "get_task_list",
     "get_task_site_results",
-    "get_user_list",
     "get_user_site_set_centroids_geojson",
     "get_user_site_set_detail",
     "get_user_site_set_gdf",
     "get_user_site_set_geojson",
     "get_user_site_set_preview_rows",
-    "grant_te_script_access",
     "import_execution_results",
+    "list_app_users",
     "list_export_tiles",
     "list_share_links",
     "list_task_s3_files",
@@ -218,11 +212,11 @@ __all__ = [
     "rename_user_site_set",
     "resubmit_analysis_task",
     "revoke_share_link",
-    "revoke_te_script_access",
     "save_covariate_preset",
     "save_matching_settings_preset",
     "save_user_site_set",
     "save_user_site_set_from_staged",
+    "set_app_user_access",
     "stage_site_upload",
     "start_gee_export",
     "stream_stage_site_upload",

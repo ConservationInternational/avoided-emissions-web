@@ -8,11 +8,10 @@ import logging
 import os
 import sys
 import uuid as _uuid
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 import dash
 import dash_bootstrap_components as dbc
-import flask
 import flask_login
 import rollbar
 import rollbar.contrib.flask
@@ -22,13 +21,8 @@ import rollbar.contrib.flask
 # other import has a chance to bind a different module to that name.
 import tasks as _webapp_tasks  # noqa: F401 — side-effect: registers Celery tasks
 from api_routes import create_api_blueprint
-from auth import (
-    REFRESH_TOKEN_COOKIE,
-    clear_refresh_cookie,
-    login_manager,
-    touch_refresh_token,
-    validate_and_refresh,
-)
+from auth import login_manager, refresh_current_session
+from auth_routes import create_auth_blueprint
 from callbacks import register_callbacks
 from config import Config
 from dash import Input, Output, State, dcc, html
@@ -37,14 +31,13 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_wtf.csrf import CSRFProtect
 from layouts import (
+    access_layout,
     admin_layout,
     dashboard_layout,
     footer,
-    forgot_password_layout,
     login_layout,
+    logout_layout,
     not_found_layout,
-    register_layout,
-    reset_password_layout,
     settings_layout,
     submit_layout,
     task_detail_layout,
@@ -139,6 +132,11 @@ if not Config.DEBUG and Config.SECRET_KEY in ("change-me-in-production", ""):
         "SECRET_KEY is not set. Refusing to start in production with the "
         "default key. Set SECRET_KEY in your environment."
     )
+if not Config.DEBUG and not Config.OIDC_CLIENT_SECRET:
+    raise RuntimeError(
+        "OIDC_CLIENT_SECRET is not set. Register the Trends.Earth OIDC client "
+        "and set OIDC_CLIENT_SECRET in your environment."
+    )
 if not Config.DEBUG and not (Config.APP_URL or "").strip().lower().startswith(
     "https://"
 ):
@@ -149,6 +147,7 @@ if not Config.DEBUG and not (Config.APP_URL or "").strip().lower().startswith(
 server.config["SECRET_KEY"] = Config.SECRET_KEY
 server.config["SESSION_COOKIE_HTTPONLY"] = True
 server.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+server.config["PERMANENT_SESSION_LIFETIME"] = Config.OIDC_SESSION_MAX_AGE
 if not Config.DEBUG:
     server.config["SESSION_COOKIE_SECURE"] = True
 
@@ -199,53 +198,29 @@ else:
 
 # Register API Blueprint (all /health, /api/* routes)
 server.register_blueprint(create_api_blueprint(limiter))
+server.register_blueprint(create_auth_blueprint(limiter))
 
 
-# -- Refresh-token based session management -----------------------------------
-# On every request:
-#   1. If the user already has a valid Flask-Login session *and* a refresh
-#      token cookie, touch the token's ``last_activity`` so the 4-hour
-#      inactivity window keeps rolling.
-#   2. If the Flask-Login session has expired but a valid refresh token
-#      exists (last activity < 4 h ago), transparently re-login the user.
-#   3. If the token has expired or been revoked, force logout.
+# -- Trends.Earth session maintenance -----------------------------------------
+# Trends.Earth access tokens live for five minutes.  Before handling a
+# request, refresh the signed-in user's token when it is about to expire.
+# A refusal from Trends.Earth (account disabled, app access removed, refresh
+# token revoked) ends the session, so revocations take effect promptly.
 
-_REFRESH_SKIP_PREFIXES = ("/health", "/_dash-", "/assets/")
+_REFRESH_SKIP_PREFIXES = (
+    "/health",
+    "/assets/",
+    "/auth/",
+    "/_dash-component-suites/",
+    "/_favicon",
+)
 
 
 @server.before_request
-def _refresh_token_check():
-    cookie_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
-
-    # Skip for paths that don't need auth checks
-    path = request.path
-    if any(path.startswith(p) for p in _REFRESH_SKIP_PREFIXES):
+def _refresh_session():
+    if any(request.path.startswith(p) for p in _REFRESH_SKIP_PREFIXES):
         return
-
-    if flask_login.current_user.is_authenticated:
-        # User has a live session — just keep the refresh token alive
-        if cookie_token:
-            touch_refresh_token(cookie_token)
-        return
-
-    # No active session — try to restore from refresh token
-    if not cookie_token:
-        return
-
-    session_user, new_token = validate_and_refresh(cookie_token)
-    if session_user and new_token:
-        flask_login.login_user(session_user)
-        # Store the rotated token so the after_request hook sets the
-        # new cookie (replacing the old one).
-        flask.session["_pending_refresh_token"] = new_token
-    else:
-        # Token invalid/expired — clear the stale cookie on this response
-        @flask.after_this_request
-        def _clear_cookie(response):
-            clear_refresh_cookie(response)
-            return response
-
-    return
+    refresh_current_session()
 
 
 # -- Security headers -------------------------------------------------------
@@ -264,18 +239,6 @@ def _set_security_headers(response):
             "max-age=63072000; includeSubDomains"
         )
 
-    # -- Refresh token cookie management ------------------------------------
-    # The login callback stores a plaintext token in the Flask session;
-    # we move it to a dedicated HTTP-only cookie here so it persists
-    # across browser sessions.  Logout sets a clear flag instead.
-    from auth import set_refresh_cookie
-
-    pending_token = flask.session.pop("_pending_refresh_token", None)
-    if pending_token:
-        set_refresh_cookie(response, pending_token)
-
-    if flask.session.pop("_clear_refresh_cookie", None):
-        clear_refresh_cookie(response)
     # CSP: allow Dash inline scripts/styles, CDN assets (OL, GeoTIFF),
     # Google Fonts, and S3-hosted resources used by presigned URLs.
     # Keep sources centralised in module-level lists for easier updates.
@@ -301,16 +264,16 @@ def _set_security_headers(response):
 
 # Initialize Flask-Login
 login_manager.init_app(server)
-login_manager.login_view = "/login"
+login_manager.login_view = "/auth/login"
 
 # Root layout with URL routing
 app.layout = html.Div(
     [
         dcc.Location(id="url", refresh=True),
         html.Div(id="page-content"),
-        # Fires every 5 minutes to detect inactivity-based logouts.
-        # The callback hits /api/session-check which triggers the
-        # before_request refresh-token validation.
+        # Fires every 5 minutes so that sessions ended in Trends.Earth
+        # (access removed, account disabled) are noticed promptly; the
+        # request runs the before_request session refresh.
         dcc.Interval(
             id="session-check-interval",
             interval=5 * 60 * 1000,  # 5 minutes in ms
@@ -332,29 +295,20 @@ def display_page(pathname, search):
     if flask_login.current_user.is_authenticated:
         user = flask_login.current_user
 
+    query = parse_qs((search or "").lstrip("?"))
+
     if pathname == "/login":
-        return login_layout()
+        if user:
+            return dcc.Location(pathname="/", id="redirect-logged-in")
+        return login_layout(
+            error=query.get("error", [""])[0], next_url=query.get("next", [""])[0]
+        )
 
-    if pathname == "/register":
-        return register_layout()
-
-    if pathname == "/forgot-password":
-        return forgot_password_layout()
-
-    if pathname == "/reset-password":
-        # Token is passed as a query parameter; extract from dcc.Location
-        # search string (e.g. "?token=abc123")
-        token = parse_qs((search or "").lstrip("?")).get("token", [""])[0]
-        return reset_password_layout(token)
+    if pathname == "/access":
+        return access_layout(query.get("status", [""])[0])
 
     if pathname == "/logout":
-        from auth import revoke_refresh_token
-
-        cookie_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
-        revoke_refresh_token(cookie_token)
-        flask_login.logout_user()
-        flask.session["_clear_refresh_cookie"] = True
-        return dcc.Location(pathname="/login", id="redirect-logout")
+        return logout_layout(user)
 
     # Shared task view — no login required
     if pathname and pathname.startswith("/shared/"):
@@ -391,26 +345,31 @@ def display_page(pathname, search):
 
     # All other pages require login
     if not user:
-        return dcc.Location(pathname="/login", id="redirect-to-login")
+        return dcc.Location(
+            href="/login?" + urlencode({"next": (pathname or "/") + (search or "")}),
+            id="redirect-to-login",
+        )
 
     if pathname == "/" or pathname == "/dashboard":
         page = dashboard_layout(user)
     elif pathname == "/submit":
         recompute_config = None
-        recompute_id = parse_qs((search or "").lstrip("?")).get("recompute", [""])[0]
+        recompute_id = query.get("recompute", [""])[0]
         if recompute_id:
             try:
                 _uuid.UUID(recompute_id)
                 from services import get_recompute_config
 
-                recompute_config = get_recompute_config(recompute_id, str(user.id))
+                recompute_config = get_recompute_config(
+                    recompute_id, str(user.id), is_admin=user.is_admin
+                )
             except (ValueError, AttributeError):
                 pass
         page = submit_layout(user, recompute_config=recompute_config)
     elif pathname == "/settings":
         page = settings_layout(user)
     elif pathname == "/admin":
-        page = admin_layout(user)
+        page = admin_layout(user, user_status=query.get("status", [""])[0])
     elif pathname and pathname.startswith("/task/"):
         task_id = pathname.split("/task/")[1]
         # Validate task_id is a proper UUID to prevent injection

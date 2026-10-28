@@ -4,12 +4,7 @@ Re-exports the public API used by app.py and callbacks.py.
 """
 
 from layouts.admin import admin_layout
-from layouts.auth import (
-    forgot_password_layout,
-    login_layout,
-    register_layout,
-    reset_password_layout,
-)
+from layouts.auth import access_layout, login_layout, logout_layout
 from layouts.common import (
     ALL_COVARIATES,
     DEFAULT_COVARIATES,
@@ -41,15 +36,14 @@ __all__ = [
     # shared UI helpers
     "_make_ag_grid",
     # page layouts
+    "access_layout",
     "admin_layout",
     "dashboard_layout",
     "footer",
-    "forgot_password_layout",
     "login_layout",
+    "logout_layout",
     "navbar",
     "not_found_layout",
-    "register_layout",
-    "reset_password_layout",
     "settings_layout",
     "submit_layout",
     "task_detail_layout",

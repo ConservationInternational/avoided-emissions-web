@@ -29,9 +29,7 @@ class UserSiteSet(Base):
     __tablename__ = "user_site_sets"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     original_filename = Column(String(500), nullable=False)
     file_size_bytes = Column(BigInteger, nullable=False)
@@ -42,7 +40,6 @@ class UserSiteSet(Base):
     extra_metadata = Column("metadata", JSON, default=dict)
     is_archived = Column(Boolean, default=False, nullable=False, server_default="false")
 
-    user = relationship("User", back_populates="site_sets")
     sites = relationship(
         "UserSiteFeature", back_populates="site_set", cascade="all, delete-orphan"
     )
@@ -85,9 +82,7 @@ class UserSiteUpload(Base):
     __tablename__ = "user_site_uploads"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     original_filename = Column(String(500), nullable=False)
     celery_task_id = Column(String(255), index=True)
     site_set_id = Column(UUID(as_uuid=True), nullable=True, index=True)
@@ -111,5 +106,3 @@ class UserSiteUpload(Base):
     completed_at = Column(DateTime(timezone=True))
     error_message = Column(Text)
     extra_metadata = Column("metadata", JSON, default=dict)
-
-    user = relationship("User", back_populates="site_uploads")

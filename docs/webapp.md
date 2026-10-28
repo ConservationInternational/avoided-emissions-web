@@ -20,25 +20,59 @@ progress, and viewing results.
 
 ## Authentication and Roles
 
-The app uses Flask-Login with bcrypt password hashing. Two roles exist:
+Users sign in with their Trends.Earth account using OpenID Connect
+(authorization code + PKCE, confidential client). There are no local
+passwords or registrations; the app keeps no user table and keys all data by
+the Trends.Earth subject (`sub`).
+
+New users can select **Register with Trends.Earth** on the sign-in page to
+open the [Trends.Earth registration page](https://api.trends.earth/register).
+After registering, return to this app and sign in to request access.
+
+Two app roles exist, granted in Trends.Earth:
 
 | Role | Capabilities |
 |---|---|
-| `user` | Upload sites, submit tasks, view their own results, share links |
-| `admin` | All user capabilities plus: approve/reject new users, trigger GEE exports, manage covariates, view all tasks |
+| `member` | Upload sites, submit tasks, view their own results, share links |
+| `admin` | All member capabilities plus: approve users and change roles, trigger GEE exports, manage covariates, view and manage all tasks |
 
-### Sign-up and approval
+Trends.Earth superadmins are always `admin`.
 
-New users register with an email address and password. They are created with
-`is_approved = False` and cannot submit tasks until an admin approves them.
-Admins see pending registrations in the **Admin → Users** panel and can approve
-or reject each account.
+### Access requests and approval
 
-### Password reset
+The first sign-in records a **pending** access request in Trends.Earth, and
+the user sees an "Access requested" page. Trends.Earth emails:
 
-Users can request a password reset link from the login page. The link is sent
-via SparkPost (transactional email). If `SPARKPOST_API_KEY` is not set the
-reset URL is logged to the console instead. Reset tokens expire after 1 hour.
+- every app admin of Avoided Emissions who can approve users (linking to
+  **Admin → Users** in this app), and
+- the Trends.Earth admins/superadmins configured as notification recipients
+  for the app in the Trends.Earth API UI (linking to its **App Access** tab).
+
+Anyone in both groups gets one email. Admins approve, revoke or change roles
+from **Admin → Users**; the app calls the Trends.Earth app-users API with the
+admin's own access token. Revoked users are signed out the next time their
+access token is refreshed (within about five minutes).
+
+### Sessions and tokens
+
+The Flask session cookie holds only an opaque session id. The session record
+(identity, access token, rotating refresh token and ID token) lives in Redis
+so the Celery workers can submit analyses with the user's token. Refreshes
+are serialised per session with a Redis lock, because Trends.Earth revokes the
+whole refresh-token family if a rotated token is reused. Sessions last up to
+30 days (`OIDC_SESSION_MAX_AGE`) while Trends.Earth keeps honouring the
+refresh token.
+
+Signing out revokes the refresh token, clears the session and ends the
+Trends.Earth browser session via its logout endpoint. Password resets happen
+on Trends.Earth (a link is on the **Profile** page).
+
+### Profile
+
+The **Profile** page shows the Trends.Earth name, email and app role, and lets
+users delete all of their Avoided Emissions data (tasks, results, share links,
+site sets, uploads and presets). This does not affect their Trends.Earth
+account or their access to the app.
 
 ---
 
@@ -225,16 +259,19 @@ request.
 
 ## Admin Panel
 
-The Admin panel is accessible only to users with `role = "admin"`. It has
+The Admin panel is accessible only to users with the `admin` app role. It has
 three sections:
 
 ### Users
 
-A table of all registered users. Admins can:
+A table of the Trends.Earth users who have requested or been granted access
+to this app, filterable by status (pending, active, revoked). The
+access-request email links to `/admin?status=pending`. Admins can:
 
-- Approve or reject pending registrations.
-- Change a user's role.
-- Deactivate accounts.
+- Approve a pending request (with the selected role).
+- Change a user's role (`member` / `admin`).
+- Revoke access.
+- Delete a user's Avoided Emissions data.
 
 ### Covariates
 

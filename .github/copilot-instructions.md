@@ -17,8 +17,11 @@ appspec.yml                   # AWS CodeDeploy hooks
 webapp/                       # Dash web application (main component)
   app.py                      # Entry point — creates Dash app, Flask server, URL routing
   config.py                   # Config class reading from env vars
-  models.py                   # SQLAlchemy models (User, Covariate, AnalysisTask, TaskResult, etc.)
-  auth.py                     # Flask-Login + bcrypt authentication
+  models.py                   # SQLAlchemy models (Covariate, AnalysisTask, TaskResult, etc.; no user table)
+  auth.py                     # Flask-Login SessionUser backed by Trends.Earth OIDC sessions
+  auth_routes.py              # /auth/login, /auth/callback, /auth/logout (OIDC flow)
+  oidc.py                     # Trends.Earth OIDC client: PKCE, JWKS token verification, refresh/revoke
+  session_store.py            # Redis session records holding Trends.Earth tokens (shared with workers)
   callbacks.py                # All Dash interactive callbacks (~1500 lines)
   layouts.py                  # Page layouts and AG Grid column definitions (~1700 lines)
   services.py                 # Business logic: AWS Batch, GEE, S3, task management (~1000 lines)
@@ -28,8 +31,7 @@ webapp/                       # Dash web application (main component)
   layer_config.py             # Visualization styles for covariate COG map overlays
   import_vector_data.py       # Import geoBoundaries/ecoregions/WDPA into PostGIS
   rasterize_vectors.py        # Rasterize PostGIS vectors to COGs aligned with GEE grid
-  trendsearth_client.py       # OAuth2 client for trends.earth API
-  credential_store.py         # Fernet-encrypted credential storage
+  trendsearth_client.py       # trends.earth API client (user access token or service client)
   entrypoint.sh               # Runs `alembic upgrade head` then exec's CMD
   Dockerfile                  # Python 3.13-slim with GDAL, gunicorn
   requirements.txt            # pip dependencies (no pyproject.toml)
@@ -38,7 +40,7 @@ webapp/                       # Dash web application (main component)
     env.py                    # Uses Config.DATABASE_URL and models.Base.metadata
     versions/                 # Migration files (revision IDs are hex-like strings)
   scripts/
-    create_service_client.py  # CLI to register OAuth2 client on trends.earth API
+    create_service_client.py  # CLI to create the background service client on trends.earth API
     analyze_cog_distributions.py  # Pixel distribution analysis for styling COG layers
   assets/                     # CSS, JS (AG Grid renderers), images
 gee_export/                   # GEE covariate export scripts
@@ -90,24 +92,8 @@ docker compose -f deploy/docker-compose.develop.yml up --build
 ```
 Services started: `postgres` (PostGIS 18), `redis`, `webapp`, `worker` (default queue), `merge-worker` (merge queue), `beat` (Celery scheduler). The webapp entrypoint automatically runs `alembic upgrade head` before starting.
 
-### Creating an Admin User
-No default admin is seeded. After the first startup:
-```bash
-docker compose -f deploy/docker-compose.develop.yml exec webapp python -c "
-from auth import hash_password
-from models import User, get_db
-db = get_db()
-db.add(User(
-    email='admin@avoided-emissions.org',
-    password_hash=hash_password('CHANGE_ME'),
-    name='Administrator',
-    role='admin',
-    is_approved=True,
-))
-db.commit()
-db.close()
-"
-```
+### Sign-in and Admin Users
+Users sign in with their Trends.Earth account via OIDC; there are no local accounts or passwords. Set `OIDC_CLIENT_SECRET` (staging client `avoided-emissions-web-staging` for local development, with `http://localhost:8050/auth/callback` registered as a redirect URI). No admin is seeded: grant the first users the `admin` role for the `avoided_emissions` (or `avoided_emissions_staging`) app in the Trends.Earth API UI **App Access** tab; afterwards app admins manage access from **Admin → Users**.
 
 ### Code Quality (MANDATORY before submitting changes)
 
@@ -194,6 +180,7 @@ There is **no CI linting or test workflow** — linting and formatting must be d
 - **Celery task routing**: Tasks named `tasks.run_cog_merge` and `tasks.rasterize_vectors` are routed to the `merge` queue; all others go to the default `celery` queue. The `worker` service handles the default queue; `merge-worker` handles the merge queue.
 - **Celery beat schedule**: Polls GEE export status (60s), AWS Batch task status (30s), auto-merge unmerged covariates (120s).
 - **Database**: PostgreSQL with PostGIS extensions (`uuid-ossp`, `postgis`). Session management is manual — callers of `get_db()` must close the session.
+- **Identity**: Users are Trends.Earth OIDC subjects (`sub`, a UUID string) stored in `submitted_by` / `user_id` columns without foreign keys. `SessionUser.is_admin` comes from the access token's `app_roles`. Tasks store `submit_session_id`; the Celery worker submits with that session's (refreshed) access token, so refreshes must go through `session_store.ensure_fresh` (Redis-locked; Trends.Earth rotates refresh tokens and revokes the family on reuse).
 - **Environment variables**: `Config` class in `webapp/config.py` reads all settings from env vars with sensible defaults. `DATABASE_URL` is auto-constructed from `POSTGRES_*` vars if not set explicitly.
 - **Vector data import**: On first webapp startup, `import_vector_data_task` is dispatched to the Celery worker to download and import geoBoundaries, ecoregions, and WDPA data into PostGIS. This chains to `rasterize_vectors_task`.
 - **Grid alignment**: All covariates share a fixed 30 arc-second (~1 km) grid defined in `gee_export/gee_config.py` (EPSG:4326, origin at 0°E/0°N). The rasterize step in `webapp/rasterize_vectors.py` must stay in sync with these constants.

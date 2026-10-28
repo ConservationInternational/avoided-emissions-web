@@ -3,7 +3,7 @@
 All external I/O is mocked:
   - services.analysis_task.get_db          → MagicMock session
   - services.analysis_task.get_ready_covariate_names → list of names
-  - credential_store.get_decrypted_secret  → (client_id, client_secret)
+  - session_store.get                      → the submitter's OIDC session
   - tasks.submit_analysis_task_worker      → MagicMock Celery task
 
 No database connection, Redis broker, or trends.earth API call is made.
@@ -25,10 +25,11 @@ _BASE_KWARGS = {
     "site_set_id": str(uuid.uuid4()),
     "covariates": ["elev", "precip"],
     "exact_match_vars": ["admin0"],
+    "session_id": "test-session-id",
 }
 
 
-def _setup_happy_path(mocker, creds=("cid", "csecret")):
+def _setup_happy_path(mocker, session=None):
     """Patch all external dependencies so queue_analysis_task succeeds."""
     mock_db = MagicMock()
     mocker.patch("services.analysis_task.get_db", return_value=mock_db)
@@ -36,7 +37,10 @@ def _setup_happy_path(mocker, creds=("cid", "csecret")):
         "services.analysis_task.get_ready_covariate_names",
         return_value=["elev", "precip", "temp"],
     )
-    mocker.patch("credential_store.get_decrypted_secret", return_value=creds)
+    mocker.patch(
+        "session_store.get",
+        return_value=session or {"sub": "user", "refresh_token": "rt"},
+    )
     mock_submit = mocker.patch("tasks.submit_analysis_task_worker")
     return mock_db, mock_submit
 
@@ -128,6 +132,7 @@ class TestQueueAnalysisTaskValidation:
         with pytest.raises(ValueError, match="exact match variable"):
             queue_analysis_task(
                 user_id=str(uuid.uuid4()),
+                session_id="test-session-id",
                 task_name="Test",
                 description="",
                 site_set_id=str(uuid.uuid4()),
@@ -140,6 +145,7 @@ class TestQueueAnalysisTaskValidation:
         with pytest.raises(ValueError, match="both covariates and exact matches"):
             queue_analysis_task(
                 user_id=str(uuid.uuid4()),
+                session_id="test-session-id",
                 task_name="Test",
                 description="",
                 site_set_id=str(uuid.uuid4()),
@@ -164,12 +170,13 @@ class TestQueueAnalysisTaskValidation:
             "services.analysis_task.get_ready_covariate_names",
             return_value=["elev"],  # "precip" is not ready
         )
-        mocker.patch("credential_store.get_decrypted_secret", return_value=("a", "b"))
+        mocker.patch("session_store.get", return_value={"sub": "user"})
         mocker.patch("tasks.submit_analysis_task_worker")
 
         with pytest.raises(ValueError, match="not fully processed"):
             queue_analysis_task(
                 user_id=str(uuid.uuid4()),
+                session_id="test-session-id",
                 task_name="Test",
                 description="",
                 site_set_id=str(uuid.uuid4()),
@@ -177,18 +184,19 @@ class TestQueueAnalysisTaskValidation:
                 exact_match_vars=["admin0"],
             )
 
-    def test_raises_if_no_credentials(self, mocker):
+    def test_raises_if_session_ended(self, mocker):
         mock_db = MagicMock()
         mocker.patch("services.analysis_task.get_db", return_value=mock_db)
         mocker.patch(
             "services.analysis_task.get_ready_covariate_names",
             return_value=["elev"],
         )
-        mocker.patch("credential_store.get_decrypted_secret", return_value=None)
+        mocker.patch("session_store.get", return_value=None)
 
-        with pytest.raises(ValueError, match="trends.earth account"):
+        with pytest.raises(ValueError, match="session has ended"):
             queue_analysis_task(
                 user_id=str(uuid.uuid4()),
+                session_id="test-session-id",
                 task_name="Test",
                 description="",
                 site_set_id=str(uuid.uuid4()),
@@ -229,6 +237,7 @@ class TestQueueAnalysisTaskValidation:
         with pytest.raises(ValueError):
             queue_analysis_task(
                 user_id=str(uuid.uuid4()),
+                session_id="test-session-id",
                 task_name="Test",
                 description="",
                 site_set_id=str(uuid.uuid4()),

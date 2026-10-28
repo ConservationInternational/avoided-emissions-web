@@ -1,217 +1,117 @@
-"""Authentication helpers for the Dash application.
+"""Authentication for the Dash application via Trends.Earth OIDC.
 
-Provides password hashing/verification, session-based user management
-using Flask-Login integrated with the Dash server, and password reset
-via email.
+Users sign in with their Trends.Earth account.  Identity, app access and the
+user's role in this app come from Trends.Earth tokens; there is no local user
+table.  The Flask session holds only an opaque id pointing at a server-side
+session record (see :mod:`session_store`).
 """
 
 import functools
 import logging
-from datetime import UTC, datetime
 
-import bcrypt
 import flask
 import flask_login
-from config import Config, report_exception
-from models import PasswordResetToken, RefreshToken, User, get_db
+import oidc
+import session_store
+from config import Config
 
 logger = logging.getLogger(__name__)
 
+SESSION_ID_KEY = "ae_sid"
 
 login_manager = flask_login.LoginManager()
 
 
 class SessionUser(flask_login.UserMixin):
-    """Flask-Login user wrapper around the database User model."""
+    """The signed-in Trends.Earth user, built from the session record."""
 
-    def __init__(self, user_record):
-        self.id = str(user_record.id)
-        self.email = user_record.email
-        self.name = user_record.name
-        self.role = user_record.role
-        self.is_approved = user_record.is_approved
+    def __init__(self, record, session_id=None):
+        self.id = str(record["sub"])
+        self.email = record.get("email") or ""
+        self.name = record.get("name") or self.email
+        self.role = record.get("app_role") or "member"
+        self.te_role = record.get("te_role")
+        self.session_id = session_id
 
     @property
     def is_admin(self):
         return self.role == "admin"
 
+    def get_id(self):
+        return self.id
+
 
 @login_manager.user_loader
 def load_user(user_id):
-    db = get_db()
+    sid = flask.session.get(SESSION_ID_KEY)
+    if not sid:
+        return None
     try:
-        user = db.query(User).filter(User.id == user_id).first()
-        if user and user.is_active and user.is_approved:
-            return SessionUser(user)
-    except Exception:  # noqa: BLE001
-        # Database may be unavailable (migrations pending, connection
-        # issues, etc.).  Return None so Flask-Login treats the session
-        # as anonymous and redirects to the login page instead of
-        # surfacing a 500 error.
-        logger.warning("load_user failed for %s — treating as anonymous", user_id)
-    finally:
-        db.close()
-    return None
+        record = session_store.get(sid)
+    except session_store.SessionUnavailable:
+        logger.warning("Session storage unavailable — treating as anonymous")
+        return None
+    if not record or str(record.get("sub")) != str(user_id):
+        return None
+    return SessionUser(record, session_id=sid)
 
 
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+def start_session(record):
+    """Persist *record* and sign the user in for this browser."""
+    sid = session_store.create(record)
+    flask.session.clear()
+    flask.session[SESSION_ID_KEY] = sid
+    flask.session.permanent = True
+    flask_login.login_user(SessionUser(record, session_id=sid), remember=False)
+    return sid
 
 
-def verify_password(password: str, password_hash: str) -> bool:
-    return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+def end_session():
+    """Sign out locally and revoke the Trends.Earth refresh token.
 
-
-def validate_password(password: str) -> list[str]:
-    """Validate password complexity requirements.
-
-    Returns a list of human-readable error messages.  An empty list
-    means the password is acceptable.
-
-    Requirements (aligned with trends.earth API):
-      - 12–128 characters
-      - At least one uppercase letter
-      - At least one lowercase letter
-      - At least one digit
-      - At least one special character
+    Returns the ID token (if any) for use as ``id_token_hint`` at the
+    Trends.Earth logout endpoint.
     """
-    import re
-
-    errors: list[str] = []
-    if len(password) < 12:
-        errors.append("Password must be at least 12 characters.")
-    if len(password) > 128:
-        errors.append("Password must be at most 128 characters.")
-    if not re.search(r"[A-Z]", password):
-        errors.append("Password must contain at least one uppercase letter.")
-    if not re.search(r"[a-z]", password):
-        errors.append("Password must contain at least one lowercase letter.")
-    if not re.search(r"\d", password):
-        errors.append("Password must contain at least one digit.")
-    if not re.search(r"[^A-Za-z0-9]", password):
-        errors.append("Password must contain at least one special character.")
-    return errors
-
-
-def authenticate(email: str, password: str):
-    """Authenticate a user by email and password.
-
-    Returns a SessionUser on success, None on failure.  Updates last_login.
-    Returns the string ``"pending_approval"`` when the credentials are
-    correct but the account has not yet been approved by an admin.
-    """
-    db = get_db()
-    try:
-        user = db.query(User).filter(User.email == email).first()
-        if user and user.is_active and verify_password(password, user.password_hash):
-            if not user.is_approved:
-                return "pending_approval"
-            user.last_login = datetime.now(UTC)
-            db.commit()
-            return SessionUser(user)
-    finally:
-        db.close()
-    return None
-
-
-def register_user(email: str, name: str):
-    """Create a new user account pending admin approval.
-
-    No password is collected at registration.  Once an admin approves the
-    account, the user receives an email with a link to set their password
-    (reuses the password-reset flow).
-
-    Returns ``(True, message)`` on success or ``(False, error)`` on failure.
-    """
-    import secrets
-
-    db = get_db()
-    try:
-        existing = db.query(User).filter(User.email == email).first()
-        if existing:
-            return False, "An account with this email already exists."
-        # Store a random unusable hash — the user will set a real password
-        # via the emailed set-password link after admin approval.
-        placeholder_hash = hash_password(secrets.token_urlsafe(48))
-        user = User(
-            email=email,
-            password_hash=placeholder_hash,
-            name=name,
-            role="user",
-            is_approved=False,
-        )
-        db.add(user)
-        db.commit()
-
+    sid = flask.session.get(SESSION_ID_KEY)
+    id_token = None
+    if sid:
         try:
-            _notify_admins_new_pending_user(db, user)
-        except Exception:
-            # Don't fail registration if admin notification fails.
-            logger.exception(
-                "Failed to send new-user pending-approval notification for %s",
-                user.email,
-            )
-            report_exception(new_user_email=user.email)
-
-        return (
-            True,
-            (
-                "Account created. An administrator will review your request. "
-                "Once approved, you will receive an email with a link to set "
-                "your password."
-            ),
-        )
-    except Exception:  # noqa: BLE001
-        db.rollback()
-        return False, "Registration failed. Please try again."
-    finally:
-        db.close()
+            record = session_store.get(sid)
+        except session_store.SessionUnavailable:
+            record = None
+        if record:
+            id_token = record.get("id_token")
+            oidc.revoke(record.get("refresh_token"))
+        session_store.delete(sid)
+    flask_login.logout_user()
+    flask.session.clear()
+    return id_token
 
 
-def _notify_admins_new_pending_user(db, new_user):
-    """Email all active admin users about a new pending registration."""
-    admin_emails = [
-        admin.email
-        for admin in db.query(User)
-        .filter(User.role == "admin", User.is_active.is_(True))
-        .all()
-        if admin.email
-    ]
-    if not admin_emails:
-        logger.info(
-            "No active admin users found; skipping pending-user notification for %s",
-            new_user.email,
-        )
-        return
+def refresh_current_session():
+    """Keep the current session's access token fresh.
 
-    admin_url = f"{Config.APP_URL}/admin"
-    html = f"""
-    <p>Hello Avoided Emissions Admin,</p>
-
-    <p>A new user has registered for the Avoided Emissions app and is awaiting approval:</p>
-
-    <ul>
-      <li><strong>Name:</strong> {new_user.name}</li>
-      <li><strong>Email:</strong> {new_user.email}</li>
-    </ul>
-
-    <p>Review and approve users in the admin panel:</p>
-    <p><a href=\"{admin_url}\">Open Admin Panel</a></p>
+    Returns ``False`` if the session has ended (the caller should treat the
+    request as anonymous), ``True`` otherwise.  Transient provider or storage
+    failures keep the session.
     """
-
-    from email_service import send_html_email
-
-    result = send_html_email(
-        recipients=admin_emails,
-        html=html,
-        subject="[Avoided Emissions] New User Pending Approval",
-    )
-    if isinstance(result, dict) and result.get("errors"):
-        logger.error(
-            "Pending-user notification email not sent for %s: %s",
-            new_user.email,
-            result["errors"],
-        )
+    sid = flask.session.get(SESSION_ID_KEY)
+    if not sid:
+        return True
+    try:
+        record = session_store.ensure_fresh(sid)
+    except session_store.SessionExpired:
+        flask_login.logout_user()
+        flask.session.clear()
+        return False
+    except session_store.SessionUnavailable:
+        logger.warning("Could not refresh session; keeping it for now")
+        return True
+    user = flask_login.current_user
+    if getattr(user, "is_authenticated", False):
+        # Pick up role changes made in Trends.Earth since the last refresh.
+        user.role = record.get("app_role") or "member"
+    return True
 
 
 def get_current_user():
@@ -221,266 +121,9 @@ def get_current_user():
     return None
 
 
-def request_password_reset(email: str) -> bool:
-    """Create a password-reset token and email it to the user.
-
-    Always returns ``True`` regardless of whether the email exists so that
-    the caller can show a generic message (prevents user enumeration).
-    """
-    db = get_db()
-    try:
-        user = db.query(User).filter(User.email == email).first()
-        if not user or not user.is_active:
-            # Don't reveal whether the account exists
-            logger.info("Password reset requested for unknown email: %s", email)
-            return True
-
-        # Invalidate any previous tokens for this user
-        PasswordResetToken.invalidate_user_tokens(user.id, db)
-
-        # Create a new token
-        reset_token = PasswordResetToken(user_id=user.id)
-        db.add(reset_token)
-        db.commit()
-
-        # Build the reset link
-        reset_url = f"{Config.APP_URL}/reset-password?token={reset_token.token}"
-
-        html = f"""
-        <p>Hello {user.name},</p>
-
-        <p>A password reset was requested for your Avoided Emissions account.</p>
-
-        <p>Click the link below to reset your password. This link will expire
-        in 1 hour.</p>
-
-        <p><a href="{reset_url}">Reset Your Password</a></p>
-
-        <p>If you cannot click the link, copy and paste this URL into your
-        browser:</p>
-        <p>{reset_url}</p>
-
-        <p>If you did not request this password reset, please ignore this email.
-        Your password will remain unchanged.</p>
-        """
-
-        try:
-            from email_service import send_html_email
-
-            result = send_html_email(
-                recipients=[user.email],
-                html=html,
-                subject="[Avoided Emissions] Password Reset Request",
-            )
-            if isinstance(result, dict) and result.get("errors"):
-                logger.error(
-                    "Password reset email not sent to %s: %s",
-                    user.email,
-                    result["errors"],
-                )
-        except Exception:
-            logger.exception("Failed to send password reset email to %s", user.email)
-            report_exception(email=user.email)
-    except Exception:
-        db.rollback()
-        logger.exception("Error during password reset request for %s", email)
-        report_exception(email=email)
-    finally:
-        db.close()
-    return True
-
-
-def reset_password_with_token(token_string: str, new_password: str):
-    """Reset a user's password using a valid reset token.
-
-    Returns ``(True, message)`` on success or ``(False, error)`` on failure.
-    """
-    if not token_string or not new_password:
-        return False, "Token and new password are required."
-
-    errors = validate_password(new_password)
-    if errors:
-        return False, " ".join(errors)
-
-    db = get_db()
-    try:
-        reset_token = PasswordResetToken.get_valid_token(token_string, db)
-        if not reset_token:
-            return False, "This reset link is invalid or has expired."
-
-        user = db.query(User).filter(User.id == reset_token.user_id).first()
-        if not user:
-            return False, "User not found."
-
-        user.password_hash = hash_password(new_password)
-        reset_token.mark_used()
-        db.add(user)
-        db.add(reset_token)
-        db.commit()
-
-        logger.info("Password reset successful for %s", user.email)
-        return True, "Your password has been reset. You can now log in."
-    except Exception:
-        db.rollback()
-        logger.exception("Error during password reset with token")
-        return False, "An error occurred. Please try again."
-    finally:
-        db.close()
-
-
-def change_password(user_id: str, current_password: str, new_password: str):
-    """Change the password of an authenticated user.
-
-    Verifies *current_password* before accepting the new one.
-    Returns ``(True, message)`` on success or ``(False, error)`` on failure.
-    """
-    if not current_password or not new_password:
-        return False, "Current and new passwords are required."
-
-    errors = validate_password(new_password)
-    if errors:
-        return False, " ".join(errors)
-
-    db = get_db()
-    try:
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            return False, "User not found."
-
-        if not verify_password(current_password, user.password_hash):
-            return False, "Current password is incorrect."
-
-        user.password_hash = hash_password(new_password)
-        db.commit()
-        logger.info("Password changed for %s", user.email)
-        return True, "Your password has been changed."
-    except Exception:
-        db.rollback()
-        logger.exception("Error changing password for user %s", user_id)
-        return False, "An error occurred. Please try again."
-    finally:
-        db.close()
-
-
-# ---------------------------------------------------------------------------
-# Refresh token helpers
-# ---------------------------------------------------------------------------
-
-REFRESH_TOKEN_COOKIE = "ae_refresh_token"
-
-
-def create_refresh_token(user_id):
-    """Create a new refresh token and return the plaintext value.
-
-    Revokes any existing tokens for the user first.
-    """
-    db = get_db()
-    try:
-        RefreshToken.revoke_all_for_user(user_id, db)
-        _token_obj, plaintext = RefreshToken.create_token(user_id, db)
-        db.commit()
-        return plaintext
-    except Exception:
-        db.rollback()
-        logger.exception("Failed to create refresh token for user %s", user_id)
-        return None
-    finally:
-        db.close()
-
-
-def validate_and_refresh(plaintext_token):
-    """Validate a refresh token, rotate it, and return the new session.
-
-    Performs **token rotation**: the old token is revoked and a brand-new
-    token is issued.  This limits the window during which a stolen token
-    can be replayed.
-
-    Returns ``(SessionUser, new_plaintext_token)`` on success, or
-    ``(None, None)`` on failure.
-    """
-    if not plaintext_token:
-        return None, None
-    db = get_db()
-    try:
-        token = RefreshToken.get_by_plaintext(plaintext_token, db)
-        if not token or not token.is_valid:
-            return None, None
-        user = db.query(User).filter(User.id == token.user_id).first()
-        if not user or not user.is_active or not user.is_approved:
-            return None, None
-        # Rotate: revoke old, issue new
-        token.revoke()
-        _new_token_obj, new_plaintext = RefreshToken.create_token(user.id, db)
-        db.commit()
-        return SessionUser(user), new_plaintext
-    except Exception:
-        db.rollback()
-        logger.exception("Error validating refresh token")
-        return None, None
-    finally:
-        db.close()
-
-
-def touch_refresh_token(plaintext_token):
-    """Update the activity timestamp on an existing refresh token.
-
-    Called on authenticated requests to keep the inactivity timer alive.
-    """
-    if not plaintext_token:
-        return
-    db = get_db()
-    try:
-        token = RefreshToken.get_by_plaintext(plaintext_token, db)
-        if token and token.is_valid and token.touch_activity():
-            db.commit()
-    except Exception:
-        db.rollback()
-        logger.exception("Error touching refresh token")
-    finally:
-        db.close()
-
-
-def revoke_refresh_token(plaintext_token):
-    """Revoke a refresh token (used at logout)."""
-    if not plaintext_token:
-        return
-    db = get_db()
-    try:
-        token = RefreshToken.get_by_plaintext(plaintext_token, db)
-        if token:
-            token.revoke()
-            db.commit()
-    except Exception:
-        db.rollback()
-        logger.exception("Error revoking refresh token")
-    finally:
-        db.close()
-
-
-def set_refresh_cookie(response, plaintext_token):
-    """Set the refresh token cookie on a Flask response."""
-    response.set_cookie(
-        REFRESH_TOKEN_COOKIE,
-        plaintext_token,
-        max_age=RefreshToken.ABSOLUTE_EXPIRY_DAYS * 86400,
-        httponly=True,
-        samesite="Lax",
-        secure=not Config.DEBUG,
-        path="/",
-    )
-
-
-def clear_refresh_cookie(response):
-    """Remove the refresh token cookie from a Flask response."""
-    response.set_cookie(
-        REFRESH_TOKEN_COOKIE,
-        "",
-        max_age=0,
-        httponly=True,
-        samesite="Lax",
-        secure=not Config.DEBUG,
-        path="/",
-    )
+def te_password_reset_url():
+    """Trends.Earth page where users can reset their password."""
+    return f"{Config.OIDC_ISSUER}/oauth/forgot-password"
 
 
 def require_login(func):

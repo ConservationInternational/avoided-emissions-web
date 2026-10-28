@@ -29,7 +29,6 @@ _TEST_DEFAULTS = {
     "POSTGRES_PASSWORD": "ae_password",
     # Security
     "SECRET_KEY": "test-secret-key-for-unit-tests-only-minimum-32-chars!",
-    "ENCRYPTION_KEY": "test-encryption-key-for-unit-tests!!32c",
     # Storage
     "S3_BUCKET": "avoided-emissions-test-bucket",
     "S3_PREFIX": "test-prefix",
@@ -41,6 +40,13 @@ _TEST_DEFAULTS = {
     "TRENDSEARTH_SCRIPT_ID": "00000000-0000-0000-0000-000000000001",
     "TRENDSEARTH_CLIENT_ID": "test-client-id",
     "TRENDSEARTH_CLIENT_SECRET": "test-client-secret",
+    # Trends.Earth OIDC sign-in
+    "OIDC_ISSUER": "https://te.example.test",
+    "OIDC_CLIENT_ID": "avoided-emissions-web-test",
+    "OIDC_CLIENT_SECRET": "test-oidc-secret",
+    "OIDC_ACCESS_AUDIENCE": "avoided-emissions-test",
+    "OIDC_APP_KEY": "avoided_emissions_test",
+    "APP_URL": "http://localhost:8050",
     # Misc
     "ROLLBAR_ACCESS_TOKEN": "",
     "ENVIRONMENT": "test",

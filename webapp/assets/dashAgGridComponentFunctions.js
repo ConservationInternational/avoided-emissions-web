@@ -142,14 +142,15 @@ dagcomponentfuncs.StatusBadge = function (props) {
 };
 
 /**
- * ApprovalBadge – renders a boolean approval status as a colored badge.
+ * AccessBadge – renders a Trends.Earth app-access status as a colored badge.
  *
- * True → green "Approved" badge; False → orange "Pending" badge.
+ * "active" → green, "pending" → orange, "revoked" → grey.
  */
-dagcomponentfuncs.ApprovalBadge = function (props) {
-    var approved = props.value;
-    var label = approved ? "Approved" : "Pending";
-    var bg = approved ? "#198754" : "#fd7e14";
+dagcomponentfuncs.AccessBadge = function (props) {
+    var status = props.value || "none";
+    var colors = { active: "#198754", pending: "#fd7e14", revoked: "#6c757d" };
+    var label = status;
+    var bg = colors[status] || "#adb5bd";
     var text = "#ffffff";
 
     return React.createElement(

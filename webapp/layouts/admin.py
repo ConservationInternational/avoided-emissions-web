@@ -244,8 +244,191 @@ def _site_upload_card(footer_text):
     )
 
 
-def admin_layout(user):
-    """Admin panel for covariate management, site uploads, and users."""
+_USER_STATUS_OPTIONS = [
+    {"label": "Pending requests", "value": "pending"},
+    {"label": "Active", "value": "active"},
+    {"label": "Revoked", "value": "revoked"},
+    {"label": "All", "value": "all"},
+]
+
+
+def _users_tab(user_status=None):
+    """App-access management backed by the Trends.Earth app-users API."""
+    valid = {o["value"] for o in _USER_STATUS_OPTIONS}
+    status = user_status if user_status in valid else "pending"
+    return html.Div(
+        [
+            dbc.Card(
+                [
+                    dbc.CardHeader("User Access"),
+                    dbc.CardBody(
+                        [
+                            html.P(
+                                "Users sign in with their Trends.Earth account. New "
+                                "users appear here as pending requests; app admins "
+                                "who can approve users are emailed by Trends.Earth "
+                                "when a request arrives. Select a user from the "
+                                "table, then choose an action.",
+                                className="text-muted small mb-3",
+                            ),
+                            dbc.Row(
+                                [
+                                    dbc.Col(
+                                        [
+                                            dbc.Label("Selected user", size="sm"),
+                                            dbc.Select(
+                                                id="admin-user-select",
+                                                options=[],
+                                                placeholder="Select a user...",
+                                            ),
+                                        ],
+                                        xs=12,
+                                        md=4,
+                                    ),
+                                    dbc.Col(
+                                        [
+                                            dbc.Label("Role", size="sm"),
+                                            dbc.Select(
+                                                id="admin-role-select",
+                                                options=[
+                                                    {
+                                                        "label": "Member",
+                                                        "value": "member",
+                                                    },
+                                                    {
+                                                        "label": "Admin",
+                                                        "value": "admin",
+                                                    },
+                                                ],
+                                                value="member",
+                                            ),
+                                        ],
+                                        xs=6,
+                                        md=2,
+                                    ),
+                                    dbc.Col(
+                                        dbc.ButtonGroup(
+                                            [
+                                                dbc.Button(
+                                                    "Approve",
+                                                    id="admin-approve-btn",
+                                                    color="success",
+                                                    size="sm",
+                                                ),
+                                                dbc.Button(
+                                                    "Change Role",
+                                                    id="admin-role-btn",
+                                                    color="info",
+                                                    size="sm",
+                                                ),
+                                                dbc.Button(
+                                                    "Revoke Access",
+                                                    id="admin-revoke-btn",
+                                                    color="warning",
+                                                    size="sm",
+                                                ),
+                                                dbc.Button(
+                                                    "Delete App Data",
+                                                    id="admin-delete-btn",
+                                                    color="danger",
+                                                    size="sm",
+                                                ),
+                                            ]
+                                        ),
+                                        width="auto",
+                                        className="d-flex align-items-end",
+                                    ),
+                                ]
+                            ),
+                            html.Div(id="admin-user-action-result", className="mt-2"),
+                            dbc.Modal(
+                                [
+                                    dbc.ModalHeader(dbc.ModalTitle("Delete user data")),
+                                    dbc.ModalBody(
+                                        "Delete all of this user's analysis tasks, "
+                                        "results and other data from the Avoided "
+                                        "Emissions app? This cannot be undone. It does "
+                                        "not change their access or their Trends.Earth "
+                                        "account; use Revoke Access for that."
+                                    ),
+                                    dbc.ModalFooter(
+                                        [
+                                            dbc.Button(
+                                                "Cancel",
+                                                id="admin-delete-cancel",
+                                                color="secondary",
+                                                className="me-2",
+                                            ),
+                                            dbc.Button(
+                                                "Delete Data",
+                                                id="admin-delete-confirm",
+                                                color="danger",
+                                            ),
+                                        ]
+                                    ),
+                                ],
+                                id="admin-delete-modal",
+                                is_open=False,
+                                centered=True,
+                            ),
+                        ]
+                    ),
+                ],
+                className="ae-section-card mb-3",
+            ),
+            dbc.Card(
+                [
+                    dbc.CardBody(
+                        [
+                            dbc.Row(
+                                [
+                                    dbc.Col(
+                                        html.H5("Users", className="mb-0"),
+                                        width="auto",
+                                    ),
+                                    dbc.Col(
+                                        dbc.Select(
+                                            id="admin-user-status-filter",
+                                            options=_USER_STATUS_OPTIONS,
+                                            value=status,
+                                            size="sm",
+                                        ),
+                                        width="auto",
+                                    ),
+                                    dbc.Col(
+                                        html.Span(
+                                            id="user-management-total-count",
+                                            children="Total: 0",
+                                            className="text-muted fw-bold",
+                                        ),
+                                        width=True,
+                                        className="text-end",
+                                    ),
+                                ],
+                                className="ae-action-bar align-items-center mb-3",
+                            ),
+                            _make_ag_grid(
+                                table_id="user-management-table",
+                                column_defs=USER_MANAGEMENT_COLUMNS,
+                                row_model="clientSide",
+                                height="500px",
+                            ),
+                        ]
+                    )
+                ],
+                className="ae-section-card",
+            ),
+        ],
+        className="pt-3",
+    )
+
+
+def admin_layout(user, user_status=None):
+    """Admin panel for covariate management, site uploads, and users.
+
+    ``user_status`` (from ``/admin?status=pending``, the link in Trends.Earth
+    access-request emails) opens the Users tab filtered to that status.
+    """
     category_options = _build_category_options()
     admin_tab_style = {} if user.is_admin else {"display": "none"}
 
@@ -258,7 +441,7 @@ def admin_layout(user):
                         [
                             html.H2("Admin Panel", className="mb-1"),
                             html.P(
-                                "Manage covariates, asynchronous site uploads, and user accounts.",
+                                "Manage covariates, asynchronous site uploads, and user access.",
                                 className="text-muted mb-0",
                             ),
                         ],
@@ -504,177 +687,13 @@ def admin_layout(user):
                         label="Users",
                         tab_id="tab-users",
                         tab_style=admin_tab_style,
-                        children=[
-                            html.Div(
-                                [
-                                    dbc.Card(
-                                        [
-                                            dbc.CardHeader("User Actions"),
-                                            dbc.CardBody(
-                                                [
-                                                    html.P(
-                                                        "Select a user from the table below, then use these actions.",
-                                                        className="text-muted small mb-3",
-                                                    ),
-                                                    dbc.Row(
-                                                        [
-                                                            dbc.Col(
-                                                                [
-                                                                    dbc.Label(
-                                                                        "Selected User",
-                                                                        size="sm",
-                                                                    ),
-                                                                    dbc.Select(
-                                                                        id="admin-user-select",
-                                                                        options=[],
-                                                                        placeholder="Select a user...",
-                                                                    ),
-                                                                ],
-                                                                xs=12,
-                                                                md=4,
-                                                            ),
-                                                            dbc.Col(
-                                                                [
-                                                                    dbc.Label(
-                                                                        "Change Role",
-                                                                        size="sm",
-                                                                    ),
-                                                                    dbc.Select(
-                                                                        id="admin-role-select",
-                                                                        options=[
-                                                                            {
-                                                                                "label": "User",
-                                                                                "value": "user",
-                                                                            },
-                                                                            {
-                                                                                "label": "Admin",
-                                                                                "value": "admin",
-                                                                            },
-                                                                        ],
-                                                                        value="user",
-                                                                    ),
-                                                                ],
-                                                                xs=6,
-                                                                md=2,
-                                                            ),
-                                                            dbc.Col(
-                                                                [
-                                                                    html.Div(
-                                                                        style={
-                                                                            "height": "32px"
-                                                                        }
-                                                                    ),
-                                                                    dbc.ButtonGroup(
-                                                                        [
-                                                                            dbc.Button(
-                                                                                "Approve",
-                                                                                id="admin-approve-btn",
-                                                                                color="success",
-                                                                                size="sm",
-                                                                            ),
-                                                                            dbc.Button(
-                                                                                "Change Role",
-                                                                                id="admin-role-btn",
-                                                                                color="info",
-                                                                                size="sm",
-                                                                            ),
-                                                                            dbc.Button(
-                                                                                "Delete",
-                                                                                id="admin-delete-btn",
-                                                                                color="danger",
-                                                                                size="sm",
-                                                                            ),
-                                                                        ]
-                                                                    ),
-                                                                ],
-                                                                width="auto",
-                                                                className="d-flex align-items-end",
-                                                            ),
-                                                        ]
-                                                    ),
-                                                    html.Div(
-                                                        id="admin-user-action-result",
-                                                        className="mt-2",
-                                                    ),
-                                                    dbc.Modal(
-                                                        [
-                                                            dbc.ModalHeader(
-                                                                dbc.ModalTitle(
-                                                                    "Confirm Delete User"
-                                                                )
-                                                            ),
-                                                            dbc.ModalBody(
-                                                                "Are you sure you want to delete this user and all their analysis tasks? This cannot be undone."
-                                                            ),
-                                                            dbc.ModalFooter(
-                                                                [
-                                                                    dbc.Button(
-                                                                        "Cancel",
-                                                                        id="admin-delete-cancel",
-                                                                        color="secondary",
-                                                                        className="me-2",
-                                                                    ),
-                                                                    dbc.Button(
-                                                                        "Delete User",
-                                                                        id="admin-delete-confirm",
-                                                                        color="danger",
-                                                                    ),
-                                                                ]
-                                                            ),
-                                                        ],
-                                                        id="admin-delete-modal",
-                                                        is_open=False,
-                                                        centered=True,
-                                                    ),
-                                                ]
-                                            ),
-                                        ],
-                                        className="ae-section-card mb-3",
-                                    ),
-                                    dbc.Card(
-                                        [
-                                            dbc.CardBody(
-                                                [
-                                                    dbc.Row(
-                                                        [
-                                                            dbc.Col(
-                                                                html.H5(
-                                                                    "User Management",
-                                                                    className="mb-0",
-                                                                ),
-                                                                width="auto",
-                                                            ),
-                                                            dbc.Col(
-                                                                html.Span(
-                                                                    id="user-management-total-count",
-                                                                    children="Total: 0",
-                                                                    className="text-muted fw-bold",
-                                                                ),
-                                                                width=True,
-                                                                className="text-end",
-                                                            ),
-                                                        ],
-                                                        className="ae-action-bar align-items-center mb-3",
-                                                    ),
-                                                    _make_ag_grid(
-                                                        table_id="user-management-table",
-                                                        column_defs=USER_MANAGEMENT_COLUMNS,
-                                                        row_model="clientSide",
-                                                        height="500px",
-                                                    ),
-                                                ]
-                                            )
-                                        ],
-                                        className="ae-section-card",
-                                    ),
-                                ],
-                                className="pt-3",
-                            ),
-                        ],
+                        children=[_users_tab(user_status)] if user.is_admin else [],
                     ),
                 ],
                 id="admin-tabs",
-                active_tab="tab-site-uploads",
+                active_tab=(
+                    "tab-users" if user.is_admin and user_status else "tab-site-uploads"
+                ),
                 className="ae-content-tabs",
             ),
             dcc.Interval(id="admin-refresh-interval", interval=30000, n_intervals=0),

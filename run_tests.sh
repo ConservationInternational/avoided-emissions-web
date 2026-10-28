@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./run_tests.sh                                  # run all unit tests
-#   ./run_tests.sh tests/unit/test_auth.py          # run a single file
+#   ./run_tests.sh tests/unit/test_oidc_auth.py     # run a single file
 #   ./run_tests.sh -m integration                   # run integration tests (need DB)
 #   ./run_tests.sh -v --tb=long                     # pass extra pytest flags
 #

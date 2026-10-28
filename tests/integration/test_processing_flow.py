@@ -19,19 +19,10 @@ class TestProcessingFlowIntegration:
 
     def _insert_stub_task(self, db, task_id, user_id=None):
         """Insert a minimal AnalysisTask row so foreign keys are satisfied."""
-        from models import AnalysisTask, User
+        from models import AnalysisTask
 
         if user_id is None:
-            user = User(
-                email=f"stub-{task_id}@test.example",
-                password_hash="placeholder",
-                name="Stub User",
-                role="user",
-                is_approved=True,
-            )
-            db.add(user)
-            db.flush()
-            user_id = str(user.id)
+            user_id = str(uuid.uuid4())
 
         task = AnalysisTask(
             id=task_id,

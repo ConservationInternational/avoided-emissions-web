@@ -296,7 +296,8 @@ unless overridden at the environment level.
 | `POSTGRES_PASSWORD` | Database password |
 | `POSTGRES_DB` | Database name |
 | `EE_SERVICE_ACCOUNT_JSON` | Google Earth Engine service account key (JSON string). Used by the webapp to trigger GEE covariate exports. The R analysis container does **not** need GCS credentials — it reads COGs from the public GCS bucket via GDAL `/vsicurl/`. |
-| `TRENDSEARTH_CLIENT_ID` | OAuth2 service-client ID for the trends.earth API. Used for background polling of execution status. |
+| `OIDC_CLIENT_SECRET` | Secret of the Trends.Earth OIDC client used for user sign-in. **Set per environment**: the staging environment uses the `avoided-emissions-web-staging` client and production the `avoided-emissions-web` client. |
+| `TRENDSEARTH_CLIENT_ID` | OAuth2 service-client ID for the trends.earth API. Used for background polling of execution status, result downloads and admin cancellation of other users' tasks (user task submission uses the signed-in user's token). |
 | `TRENDSEARTH_CLIENT_SECRET` | OAuth2 service-client secret for the trends.earth API. |
 | `ROLLBAR_ACCESS_TOKEN` | *(optional)* Rollbar server-side access token for error tracking. |
 
@@ -322,6 +323,11 @@ to the trends.earth API) uses its own OAuth2 credentials:
 | `GOOGLE_PROJECT_ID` | *(none — required for GEE exports)* | Google Cloud project ID registered for Earth Engine. Passed to `ee.Initialize(project=...)` |
 | `GEE_ENDPOINT` | *(default EE endpoint)* | Optional Earth Engine API endpoint URL (e.g. `https://earthengine-highvolume.googleapis.com`) |
 | `TRENDSEARTH_API_URL` | `https://api.trends.earth/api/v1` | trends.earth API v1 endpoint |
+| `APP_URL` | *(none — required)* | Public URL of the environment. `APP_URL/auth/callback` (redirect) and `APP_URL/` (post-logout redirect) must be registered on the environment's OIDC client |
+| `OIDC_ISSUER` | `https://api.trends.earth` | Trends.Earth OIDC issuer |
+| `OIDC_CLIENT_ID` | staging: `avoided-emissions-web-staging`; production: `avoided-emissions-web` | OIDC client ID |
+| `OIDC_ACCESS_AUDIENCE` | staging: `avoided-emissions-staging`; production: `avoided-emissions` | Expected access-token audience |
+| `OIDC_APP_KEY` | staging: `avoided_emissions_staging`; production: `avoided_emissions` | Trends.Earth app key for access grants and roles |
 | `TRENDSEARTH_SCRIPT_ID` | *(none — required)* | UUID of the avoided-emissions R analysis script registered on the trends.earth API |
 | `BATCH_JOB_QUEUE` | *(empty — uses API default)* | Optional AWS Batch job queue override. Passed to the API in `params["batch"]` when creating an execution |
 | `BATCH_JOB_DEFINITION` | *(empty — uses API default)* | Optional AWS Batch job definition override. Passed to the API in `params["batch"]` when creating an execution |

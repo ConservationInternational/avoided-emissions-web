@@ -42,8 +42,8 @@ def poll_batch_tasks() -> dict:
         # ---- Poll API-routed tasks ----
         # Background polling uses the system-level service credentials
         # (TRENDSEARTH_CLIENT_ID / TRENDSEARTH_CLIENT_SECRET) because
-        # Celery workers have no per-user context.  User credentials are
-        # only used at submission time.
+        # Celery workers have no per-user context.  Users' own
+        # Trends.Earth tokens are only used at submission time.
         api_tasks = [t for t in active if (t.extract_job_id or "").startswith("api:")]
         if api_tasks:
             from config import Config
@@ -165,7 +165,6 @@ def poll_batch_tasks() -> dict:
         adopted = 0
         try:
             from config import Config
-            from models import User
             from trendsearth_client import TrendsEarthClient
 
             if not Config.ENABLE_TASK_ADOPTION:
@@ -175,86 +174,76 @@ def poll_batch_tasks() -> dict:
             else:
                 script_id = Config.TRENDSEARTH_SCRIPT_ID
 
-                # Pre-check: skip discovery entirely when no users exist.
-                # adopt_api_execution needs a user to assign ownership to.
-                has_users = db.query(User.id).first() is not None
-                if not has_users:
-                    logger.info(
-                        "Skipping API execution discovery: no users in the "
-                        "database yet. Create a user to enable adoption of "
-                        "API executions."
+                # Re-use the client created during polling if available
+                if client is None:
+                    client = TrendsEarthClient(
+                        api_url=Config.TRENDSEARTH_API_URL,
+                        client_id=Config.TRENDSEARTH_CLIENT_ID,
+                        client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
                     )
-                else:
-                    # Re-use the client created during polling if available
-                    if client is None:
-                        client = TrendsEarthClient(
-                            api_url=Config.TRENDSEARTH_API_URL,
-                            client_id=Config.TRENDSEARTH_CLIENT_ID,
-                            client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
-                        )
 
-                    resp = client.list_executions(script_id=script_id) or {}
-                    api_executions = resp.get("data", [])
-                    if not isinstance(api_executions, list):
-                        api_executions = []
+                resp = client.list_executions(script_id=script_id) or {}
+                api_executions = resp.get("data", [])
+                if not isinstance(api_executions, list):
+                    api_executions = []
 
-                    # Build set of API exec IDs we already track locally
-                    known_exec_ids = set()
-                    all_tasks = (
-                        db.query(AnalysisTask.extract_job_id)
-                        .filter(AnalysisTask.extract_job_id.isnot(None))
-                        .all()
-                    )
-                    for (job_id,) in all_tasks:
-                        if job_id.startswith("api:"):
-                            known_exec_ids.add(job_id[4:])
+                # Build set of API exec IDs we already track locally
+                known_exec_ids = set()
+                all_tasks = (
+                    db.query(AnalysisTask.extract_job_id)
+                    .filter(AnalysisTask.extract_job_id.isnot(None))
+                    .all()
+                )
+                for (job_id,) in all_tasks:
+                    if job_id.startswith("api:"):
+                        known_exec_ids.add(job_id[4:])
 
-                    for exec_data in api_executions:
-                        eid = exec_data.get("id", "")
-                        if eid and eid not in known_exec_ids:
-                            try:
-                                from services import (
-                                    ResultImportError,
-                                    adopt_api_execution,
-                                    import_execution_results,
-                                )
+                for exec_data in api_executions:
+                    eid = exec_data.get("id", "")
+                    if eid and eid not in known_exec_ids:
+                        try:
+                            from services import (
+                                ResultImportError,
+                                adopt_api_execution,
+                                import_execution_results,
+                            )
 
-                                task_obj = adopt_api_execution(exec_data, db)
-                                if task_obj:
-                                    # If finished, also import results
-                                    api_status = exec_data.get("status", "").upper()
-                                    if api_status == "FINISHED":
-                                        try:
-                                            import_execution_results(
-                                                str(task_obj.id),
-                                                client.get_execution_results(eid),
-                                                db=db,
-                                            )
-                                        except ResultImportError as import_exc:
-                                            task_obj.status = "failed"
-                                            task_obj.error_message = (
-                                                "Results could not be imported: "
-                                                f"{import_exc}"
-                                            )
-                                # Commit each adoption individually so that
-                                # rows added by import_execution_results are
-                                # flushed and committed before the next
-                                # iteration's queries trigger an autoflush.
-                                # Batching all adoptions in a single commit
-                                # leaves rows as "pending" in the session,
-                                # which causes Query-invoked autoflush to
-                                # attempt duplicate INSERTs when the next
-                                # adoption fires a SELECT.
-                                db.commit()
-                                adopted += 1
-                            except Exception as adopt_exc:  # noqa: BLE001
-                                db.rollback()
-                                logger.warning(
-                                    "Failed to adopt API execution %s: %s",
-                                    eid,
-                                    adopt_exc,
-                                )
-                                report_exception(extra_data={"exec_id": eid})
+                            task_obj = adopt_api_execution(exec_data, db)
+                            if task_obj:
+                                # If finished, also import results
+                                api_status = exec_data.get("status", "").upper()
+                                if api_status == "FINISHED":
+                                    try:
+                                        import_execution_results(
+                                            str(task_obj.id),
+                                            client.get_execution_results(eid),
+                                            db=db,
+                                        )
+                                    except ResultImportError as import_exc:
+                                        task_obj.status = "failed"
+                                        task_obj.error_message = (
+                                            "Results could not be imported: "
+                                            f"{import_exc}"
+                                        )
+                            # Commit each adoption individually so that
+                            # rows added by import_execution_results are
+                            # flushed and committed before the next
+                            # iteration's queries trigger an autoflush.
+                            # Batching all adoptions in a single commit
+                            # leaves rows as "pending" in the session,
+                            # which causes Query-invoked autoflush to
+                            # attempt duplicate INSERTs when the next
+                            # adoption fires a SELECT.
+                            db.commit()
+                            adopted += 1
+                        except Exception as adopt_exc:  # noqa: BLE001
+                            db.rollback()
+                            logger.warning(
+                                "Failed to adopt API execution %s: %s",
+                                eid,
+                                adopt_exc,
+                            )
+                            report_exception(extra_data={"exec_id": eid})
 
                 if adopted:
                     logger.info("Discovery: adopted %d new API execution(s)", adopted)

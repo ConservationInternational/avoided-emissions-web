@@ -35,7 +35,7 @@ def clean_db(db_session):
     db_session.rollback()  # clear any aborted transaction from a failed test
     db_session.execute(
         text(
-            "TRUNCATE users, task_results, task_results_total, analysis_tasks RESTART IDENTITY CASCADE"
+            "TRUNCATE task_results, task_results_total, analysis_tasks RESTART IDENTITY CASCADE"
         )
     )
     db_session.commit()

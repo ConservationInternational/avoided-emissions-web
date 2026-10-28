@@ -35,7 +35,6 @@ jobs:
       - name: Run unit tests
         env:
           SECRET_KEY: ci-unit-test-secret-key-at-least-32-chars
-          ENCRYPTION_KEY: ci-unit-test-encryption-key-32ch!!
           ROLLBAR_ACCESS_TOKEN: ""
           ENVIRONMENT: test
         run: python -m pytest tests/unit/ -v -m unit
@@ -82,7 +81,6 @@ jobs:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: "5432"
           SECRET_KEY: ci-integration-test-secret-key-at-least-32-chars
-          ENCRYPTION_KEY: ci-integration-test-encryption-key-32c!
           CELERY_BROKER_URL: redis://localhost:6379/0
           CELERY_RESULT_BACKEND: redis://localhost:6379/0
           ROLLBAR_ACCESS_TOKEN: ""

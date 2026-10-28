@@ -6,19 +6,10 @@ import random
 import uuid as _uuid
 
 import dash_bootstrap_components as dbc
-import flask
 import flask_login
 import pandas as pd
 import plotly.graph_objects as go
-from auth import (
-    authenticate,
-    create_refresh_token,
-    get_current_user,
-    register_user,
-    request_password_reset,
-    reset_password_with_token,
-    revoke_refresh_token,
-)
+from auth import get_current_user
 from config import report_exception
 from dash import ALL, Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
@@ -29,16 +20,15 @@ from layouts import (
 )
 from services import (
     ANALYSIS_DEFAULTS,
-    approve_user,
+    AppUsersError,
     archive_user_site_set,
     cancel_task,
     cancel_user_site_upload,
-    change_user_role,
     create_share_link,
     create_user_site_upload,
     delete_covariate_preset,
     delete_matching_settings_preset,
-    delete_user,
+    delete_user_data,
     delete_user_site_set,
     delete_user_site_upload,
     discard_staged_site_upload,
@@ -53,19 +43,18 @@ from services import (
     get_task_detail,
     get_task_list,
     get_task_site_results,
-    get_user_list,
     get_user_site_set_detail,
     get_user_site_set_preview_rows,
-    grant_te_script_access,
+    list_app_users,
     list_share_links,
     list_user_site_sets,
     list_user_site_uploads,
     queue_analysis_task,
     rename_user_site_set,
     revoke_share_link,
-    revoke_te_script_access,
     save_covariate_preset,
     save_matching_settings_preset,
+    set_app_user_access,
     start_gee_export,
     update_task_info,
 )
@@ -108,33 +97,9 @@ def register_callbacks(app, limiter=None):
     limiter : flask_limiter.Limiter, optional
         Flask-Limiter instance.  Currently unused directly (Dash funnels
         all callbacks through a single POST endpoint) but reserved for
-        future use.  Auth-related callbacks are rate-limited via a
-        lightweight Redis counter (see ``_is_rate_limited``).
+        future use.  Sign-in itself happens on Flask routes (see
+        ``auth_routes.py``), which are rate-limited there.
     """
-
-    # -- Per-IP rate limiting for auth callbacks -----------------------------
-    # Flask-Limiter cannot distinguish individual Dash callbacks because
-    # they all share the /_dash-update-component route.  We use a simple
-    # Redis INCR + EXPIRE pattern instead.
-
-    def _is_rate_limited(action: str, max_attempts: int = 10, window: int = 300):
-        """Return True if the current IP has exceeded *max_attempts* for
-        *action* within *window* seconds.  Silently returns False when
-        Redis is unavailable."""
-        try:
-            import redis as _redis
-            from config import Config as _Cfg
-            from flask import request as _req
-
-            ip = _req.remote_addr or "unknown"
-            key = f"rl:{action}:{ip}"
-            r = _redis.from_url(_Cfg.CELERY_BROKER_URL, decode_responses=True)
-            count = r.incr(key)
-            if count == 1:
-                r.expire(key, window)
-            return count > max_attempts
-        except Exception:  # noqa: BLE001
-            return False
 
     # -- Navbar toggle (responsive collapse) ----------------------------------
 
@@ -151,9 +116,9 @@ def register_callbacks(app, limiter=None):
 
     # -- Session activity check ----------------------------------------------
     # Fires every 5 minutes via dcc.Interval.  The request itself triggers
-    # the before_request refresh-token validation in app.py.  If the user
-    # has been inactive for >4 hours the before_request hook invalidates
-    # the session and this callback redirects to /login.
+    # the before_request OIDC token refresh in app.py.  If Trends.Earth
+    # rejects the refresh (session ended or app access revoked) the hook
+    # signs the user out and this callback redirects to /login.
 
     @app.callback(
         Output("session-check-output", "children"),
@@ -164,183 +129,6 @@ def register_callbacks(app, limiter=None):
         if not flask_login.current_user.is_authenticated:
             return dcc.Location(pathname="/login", id="redirect-session-expired")
         raise PreventUpdate
-
-    # -- Login ---------------------------------------------------------------
-
-    @app.callback(
-        Output("login-error", "children"),
-        Input("login-button", "n_clicks"),
-        State("login-email", "value"),
-        State("login-password", "value"),
-        prevent_initial_call=True,
-    )
-    def handle_login(n_clicks, email, password):
-        if _is_rate_limited("login", max_attempts=10, window=300):
-            return "Too many login attempts. Please try again in a few minutes."
-
-        if not email or not password:
-            return "Please enter email and password."
-
-        result = authenticate(email, password)
-        if result == "pending_approval":
-            return "Your account is pending admin approval."
-        if result:
-            flask_login.login_user(result, remember=True)
-            # Create a refresh token — the after_request hook in app.py
-            # reads this from the Flask session and sets the cookie.
-            token = create_refresh_token(result.id)
-            if token:
-                flask.session["_pending_refresh_token"] = token
-            return dcc.Location(pathname="/", id="redirect-login")
-        return "Invalid email or password."
-
-    # -- Registration --------------------------------------------------------
-
-    @app.callback(
-        Output("register-message", "children"),
-        Input("register-button", "n_clicks"),
-        State("register-name", "value"),
-        State("register-email", "value"),
-        prevent_initial_call=True,
-    )
-    def handle_register(n_clicks, name, email):
-        if _is_rate_limited("register", max_attempts=5, window=600):
-            return dbc.Alert(
-                "Too many registration attempts. Please try again later.",
-                color="danger",
-            )
-
-        if not name or not email:
-            return dbc.Alert(
-                "Please fill in all fields.",
-                color="warning",
-                duration=5000,
-            )
-
-        success, message = register_user(email, name)
-        color = "success" if success else "danger"
-        return dbc.Alert(message, color=color)
-
-    # -- Forgot password -----------------------------------------------------
-
-    @app.callback(
-        Output("forgot-message", "children"),
-        Input("forgot-button", "n_clicks"),
-        State("forgot-email", "value"),
-        prevent_initial_call=True,
-    )
-    def handle_forgot_password(n_clicks, email):
-        if _is_rate_limited("forgot", max_attempts=5, window=600):
-            return dbc.Alert(
-                "Too many reset requests. Please try again later.",
-                color="danger",
-            )
-
-        if not email:
-            return dbc.Alert(
-                "Please enter your email address.",
-                color="warning",
-                duration=5000,
-            )
-        request_password_reset(email)
-        return dbc.Alert(
-            "If an account with that email exists, a password reset "
-            "link has been sent. Please check your inbox.",
-            color="success",
-        )
-
-    # -- Reset password ------------------------------------------------------
-
-    @app.callback(
-        Output("reset-message", "children"),
-        Input("reset-button", "n_clicks"),
-        State("reset-token-store", "data"),
-        State("reset-password", "value"),
-        State("reset-password-confirm", "value"),
-        prevent_initial_call=True,
-    )
-    def handle_reset_password(n_clicks, token, password, password_confirm):
-        if not token:
-            return dbc.Alert(
-                "Invalid or missing reset token. Please request a new "
-                "password reset link.",
-                color="danger",
-            )
-        if not password:
-            return dbc.Alert(
-                "Please enter a new password.",
-                color="warning",
-                duration=5000,
-            )
-
-        from auth import validate_password
-
-        pw_errors = validate_password(password)
-        if pw_errors:
-            return dbc.Alert(
-                html.Ul([html.Li(e) for e in pw_errors]),
-                color="warning",
-            )
-
-        if password != password_confirm:
-            return dbc.Alert(
-                "Passwords do not match.",
-                color="danger",
-                duration=5000,
-            )
-        success, message = reset_password_with_token(token, password)
-        color = "success" if success else "danger"
-        result = [dbc.Alert(message, color=color)]
-        if success:
-            result.append(
-                html.P(
-                    dcc.Link(
-                        "Go to login",
-                        href="/login",
-                        className="fw-bold",
-                    ),
-                    className="text-center mt-2",
-                )
-            )
-        return html.Div(result)
-
-    # -- Real-time password requirements hints -------------------------------
-
-    @app.callback(
-        [
-            Output("req-length", "className"),
-            Output("req-uppercase", "className"),
-            Output("req-lowercase", "className"),
-            Output("req-number", "className"),
-            Output("req-special", "className"),
-            Output("req-match", "className"),
-        ],
-        [
-            Input("reset-password", "value"),
-            Input("reset-password-confirm", "value"),
-        ],
-    )
-    def validate_password_requirements(password, confirm):
-        import re
-
-        pw = password or ""
-        conf = confirm or ""
-
-        def _cls(ok: bool) -> str:
-            if not pw:
-                return "text-muted"
-            return "text-success" if ok else "text-danger"
-
-        return (
-            _cls(len(pw) >= 12),
-            _cls(bool(re.search(r"[A-Z]", pw))),
-            _cls(bool(re.search(r"[a-z]", pw))),
-            _cls(bool(re.search(r"\d", pw))),
-            _cls(bool(re.search(r"[^A-Za-z0-9]", pw))),
-            _cls(bool(pw and pw == conf)),
-        )
-
-    # -- Reusable site sets --------------------------------------------------
 
     @app.callback(
         [Output("site-set-selector", "options"), Output("site-set-selector", "value")],
@@ -1618,6 +1406,9 @@ def register_callbacks(app, limiter=None):
                 task_name=name,
                 description=description or "",
                 user_id=user.id,
+                session_id=user.session_id,
+                submitter_email=user.email,
+                submitter_name=user.name,
                 site_set_id=site_set_id,
                 covariates=covariates,
                 exact_match_vars=exact_match_vars,
@@ -1732,7 +1523,9 @@ def register_callbacks(app, limiter=None):
                 "error_message": task.error_message or "",
             }
             if show_all_users:
-                row["submitted_by_name"] = task.user.name if task.user else "Unknown"
+                row["submitted_by_name"] = (
+                    task.submitter_name or task.submitter_email or "Unknown"
+                )
             rows.append(row)
 
         return rows, columns, f"Total: {len(rows)}"
@@ -1982,7 +1775,7 @@ def register_callbacks(app, limiter=None):
             return False, html.Div()
 
         # Opening — fetch existing links
-        links = list_share_links(task_id, str(user.id))
+        links = list_share_links(task_id, str(user.id), is_admin=user.is_admin)
         return True, _render_share_links_list(links, task_id)
 
     @app.callback(
@@ -2007,7 +1800,10 @@ def register_callbacks(app, limiter=None):
 
         try:
             result = create_share_link(
-                task_id, str(user.id), expiry_days=int(expiry_days)
+                task_id,
+                str(user.id),
+                expiry_days=int(expiry_days),
+                is_admin=user.is_admin,
             )
             from flask import request as flask_request
 
@@ -2053,7 +1849,7 @@ def register_callbacks(app, limiter=None):
             )
 
             # Refresh the list
-            links = list_share_links(task_id, str(user.id))
+            links = list_share_links(task_id, str(user.id), is_admin=user.is_admin)
             return link_display, _render_share_links_list(links, task_id)
         except Exception:
             logger.exception("Failed to create share link")
@@ -2082,9 +1878,11 @@ def register_callbacks(app, limiter=None):
         import json as _json
 
         link_id = _json.loads(trigger["prop_id"].rsplit(".", 1)[0])["index"]
-        revoke_share_link(link_id, str(user.id), task_id=task_id)
+        revoke_share_link(
+            link_id, str(user.id), task_id=task_id, is_admin=user.is_admin
+        )
 
-        links = list_share_links(task_id, str(user.id))
+        links = list_share_links(task_id, str(user.id), is_admin=user.is_admin)
         return _render_share_links_list(links, task_id)
 
     # -- Edit task name/description -------------------------------------------
@@ -2525,40 +2323,71 @@ def register_callbacks(app, limiter=None):
                 duration=6000,
             )
 
-    # -- Admin: User management (AG Grid) ------------------------------------
+    # -- Admin: user access (Trends.Earth app-users API) --------------------
+
+    def _admin_access_token():
+        """Return (user, access_token) for an admin, or raise AppUsersError."""
+        from session_store import (
+            SessionExpired,
+            SessionUnavailable,
+            get_access_token,
+        )
+
+        user = get_current_user()
+        if not user or not user.is_admin:
+            raise AppUsersError("Admin access required.", status=403)
+        try:
+            return user, get_access_token(user.session_id)
+        except SessionExpired as exc:
+            raise AppUsersError(
+                "Your sign-in has ended. Reload the page to sign in again.",
+                status=401,
+            ) from exc
+        except SessionUnavailable as exc:
+            raise AppUsersError(
+                "Could not refresh your sign-in. Please try again shortly."
+            ) from exc
 
     @app.callback(
         [
             Output("user-management-table", "rowData"),
             Output("user-management-total-count", "children"),
+            Output("admin-user-action-result", "children", allow_duplicate=True),
         ],
         Input("admin-refresh-interval", "n_intervals"),
+        Input("admin-user-status-filter", "value"),
+        Input("admin-tabs", "active_tab"),
+        prevent_initial_call="initial_duplicate",
     )
-    def refresh_user_management(n):
+    def refresh_user_management(n, status, active_tab):
+        if active_tab != "tab-users":
+            raise PreventUpdate
         user = get_current_user()
         if not user or not user.is_admin:
             raise PreventUpdate
-
-        users = get_user_list()
-        if not users:
-            return [], "Total: 0"
-
-        rows = []
-        for u in users:
-            rows.append(
-                {
-                    "id": str(u.id),
-                    "name": u.name,
-                    "email": u.email,
-                    "role": u.role,
-                    "is_approved": u.is_approved,
-                    "created_at": _fmt_dt(u.created_at),
-                    "last_login": _fmt_dt(u.last_login),
-                    "is_active": u.is_active,
-                }
+        try:
+            _, token = _admin_access_token()
+            users = list_app_users(
+                token, status=None if status in (None, "", "all") else status
             )
+        except AppUsersError as exc:
+            return no_update, no_update, dbc.Alert(str(exc), color="danger")
 
-        return rows, f"Total: {len(rows)}"
+        rows = [
+            {
+                "id": u.get("sub"),
+                "name": u.get("name") or "",
+                "email": u.get("email") or "",
+                "app_access": u.get("app_access"),
+                "app_role": u.get("app_role") or "",
+                "institution": u.get("institution") or "",
+                "email_verified": bool(u.get("email_verified")),
+                "active": bool(u.get("active", True)),
+            }
+            for u in users
+            if u.get("sub")
+        ]
+        return rows, f"Total: {len(rows)}", no_update
 
     # -- Admin: populate user select dropdown --------------------------------
 
@@ -2571,338 +2400,39 @@ def register_callbacks(app, limiter=None):
             return []
         return [
             {
-                "label": f"{r['name']} ({r['email']})"
-                + (" [pending]" if not r.get("is_approved") else ""),
+                "label": f"{r['name'] or r['email']} ({r['email']})"
+                + (f" [{r['app_access']}]" if r.get("app_access") != "active" else ""),
                 "value": r["id"],
             }
             for r in row_data
         ]
 
-    # -- Settings: link trends.earth account ---------------------------------
-
     @app.callback(
-        [Output("te-link-message", "children"), Output("te-link-done-store", "data")],
-        Input("te-link-btn", "n_clicks"),
-        State("te-link-email", "value"),
-        State("te-link-password", "value"),
+        Output("admin-user-select", "value"),
+        Input("user-management-table", "cellClicked"),
         prevent_initial_call=True,
     )
-    def handle_te_link(n_clicks, email, password):
-        """Log in to trends.earth, register an OAuth2 client, store creds."""
-        if not email or not password:
-            return (
-                dbc.Alert(
-                    "Please enter both email and password.",
-                    color="warning",
-                    duration=5000,
-                ),
-                no_update,
-            )
-
-        user = get_current_user()
-        if not user:
-            return (
-                dbc.Alert("Please log in first.", color="danger", duration=5000),
-                no_update,
-            )
-
-        from config import Config
-        from credential_store import save_credential
-        from trendsearth_client import TrendsEarthClient
-
-        try:
-            # 1. Authenticate with email/password to get a JWT
-            client = TrendsEarthClient(
-                api_url=Config.TRENDSEARTH_API_URL,
-                email=email,
-                password=password,
-            )
-            # Force login to verify credentials
-            client._login()
-
-            # 2. Fetch the API-side user profile to capture te_user_id
-            te_user_id = None
-            try:
-                profile = client.get_user_profile()
-                te_user_id = (profile.get("data") or {}).get("id")
-            except Exception:  # noqa: BLE001
-                logger.warning("Could not fetch trends.earth user profile")
-
-            # 3. Register an OAuth2 service client
-            result = client.create_oauth2_client(
-                name=f"avoided-emissions-web ({user.email})",
-            )
-            data = result.get("data", {})
-            client_id = data.get("client_id", "")
-            client_secret = data.get("client_secret", "")
-            api_client_db_id = data.get("id", "")
-
-            if not client_id or not client_secret:
-                return (
-                    dbc.Alert(
-                        "The API did not return client credentials. Please try again.",
-                        color="danger",
-                    ),
-                    no_update,
-                )
-
-            # 4. Store encrypted credentials locally
-            save_credential(
-                user_id=user.id,
-                te_email=email,
-                client_id=client_id,
-                client_secret=client_secret,
-                client_name=f"avoided-emissions-web ({user.email})",
-                api_client_db_id=api_client_db_id,
-                te_user_id=te_user_id,
-            )
-
-            # 5. Grant the user access to the AE script on the TE API
-            try:
-                grant_te_script_access(user.id)
-            except Exception:
-                logger.warning(
-                    "Linked TE account but failed to grant script "
-                    "access for user %s (will retry on next login)",
-                    user.id,
-                    exc_info=True,
-                )
-
-            return (
-                dbc.Alert(
-                    "Successfully linked to trends.earth! "
-                    "Your client credentials have been securely stored.",
-                    color="success",
-                ),
-                True,
-            )
-
-        except Exception as e:
-            logger.exception("Failed to link trends.earth account")
-            report_exception(action="te_link", user_id=str(user.id))
-            msg = str(e)
-            if "401" in msg or "Unauthorized" in msg:
-                msg = "Invalid email or password."
-            elif "Max" in msg or "limit" in msg.lower():
-                msg = (
-                    "Maximum number of OAuth2 clients reached on your "
-                    "trends.earth account. Please revoke an existing client "
-                    "at trends.earth first."
-                )
-            else:
-                msg = (
-                    "Failed to link account. Please try again later "
-                    "or contact support if the problem persists."
-                )
-            return (
-                dbc.Alert(msg, color="danger"),
-                no_update,
-            )
-
-    # -- Settings: test connection -------------------------------------------
-
-    @app.callback(
-        Output("te-credential-status", "children"),
-        Input("te-test-connection-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def handle_te_test_connection(n_clicks):
-        """Test the stored OAuth2 credentials by requesting a token."""
-        user = get_current_user()
-        if not user:
+    def select_user_from_grid(cell):
+        row = (cell or {}).get("rowData") or {}
+        if not row.get("id"):
             raise PreventUpdate
+        return row["id"]
 
-        from config import Config
-        from credential_store import get_decrypted_secret
-        from trendsearth_client import TrendsEarthClient
-
-        creds = get_decrypted_secret(user.id)
-        if not creds:
+    def _set_access(user_id, status, role, current_n, success_message):
+        if not user_id:
             return dbc.Alert(
-                "No stored credentials found.",
-                color="warning",
-                duration=5000,
-            )
-
-        client_id, client_secret = creds
+                "Please select a user.", color="warning", duration=4000
+            ), no_update
         try:
-            client = TrendsEarthClient(api_url=Config.TRENDSEARTH_API_URL)
-            token_data = client.oauth2_token(client_id, client_secret)
-            if token_data.get("access_token"):
-                return dbc.Alert(
-                    "Connection successful! Access token obtained.",
-                    color="success",
-                    duration=5000,
-                )
-            return dbc.Alert(
-                "Unexpected response from API.",
-                color="warning",
-                duration=5000,
-            )
-        except Exception as e:
-            logger.exception("trends.earth connection test failed")
-            report_exception(action="te_test_connection", user_id=str(user.id))
-            msg = str(e)
-            if "401" in msg or "Unauthorized" in msg:
-                user_message = (
-                    "Connection failed: stored credentials are invalid or expired."
-                )
-            else:
-                user_message = (
-                    "Connection test failed. Please try again later "
-                    "or relink your account."
-                )
-            return dbc.Alert(
-                user_message,
-                color="danger",
-                duration=8000,
-            )
-
-    # -- Settings: unlink account --------------------------------------------
-
-    @app.callback(
-        Output("te-credential-status", "children", allow_duplicate=True),
-        Input("te-unlink-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def handle_te_unlink(n_clicks):
-        """Revoke the OAuth2 client on the API and delete local credentials."""
-        user = get_current_user()
-        if not user:
-            raise PreventUpdate
-
-        from config import Config
-        from credential_store import (
-            delete_credential,
-            get_credential,
-            get_decrypted_secret,
-        )
-        from trendsearth_client import TrendsEarthClient
-
-        cred = get_credential(user.id)
-        if not cred:
-            return dbc.Alert("No linked account.", color="info", duration=4000)
-
-        # Revoke script access (best-effort, before deleting credential)
-        try:
-            revoke_te_script_access(user.id)
-        except Exception:
-            logger.warning(
-                "Failed to revoke TE script access during unlink "
-                "(continuing with local cleanup)",
-                exc_info=True,
-            )
-
-        # Try to revoke the OAuth2 client on the API side (best-effort)
-        if cred.api_client_db_id:
-            try:
-                creds = get_decrypted_secret(user.id)
-                if creds:
-                    client_id, client_secret = creds
-                    client = TrendsEarthClient.from_oauth2_credentials(
-                        api_url=Config.TRENDSEARTH_API_URL,
-                        client_id=client_id,
-                        client_secret=client_secret,
-                    )
-                    client.revoke_oauth2_client(cred.api_client_db_id)
-            except Exception:
-                logger.warning(
-                    "Failed to revoke OAuth2 client on API (continuing "
-                    "with local cleanup)",
-                    exc_info=True,
-                )
-
-        delete_credential(user.id)
-        return dbc.Alert(
-            "Account unlinked. Refresh the page to update the display.",
-            color="success",
-        )
-
-    # -- Settings: change password -------------------------------------------
-
-    @app.callback(
-        Output("change-pw-message", "children"),
-        Input("change-pw-btn", "n_clicks"),
-        [
-            State("change-pw-current", "value"),
-            State("change-pw-new", "value"),
-            State("change-pw-confirm", "value"),
-        ],
-        prevent_initial_call=True,
-    )
-    def handle_change_password(n_clicks, current_pw, new_pw, confirm_pw):
-        if _is_rate_limited("change_pw", max_attempts=5, window=300):
-            return dbc.Alert(
-                "Too many attempts. Please try again later.",
-                color="danger",
-            )
-
-        user = get_current_user()
-        if not user:
-            raise PreventUpdate
-
-        if not current_pw:
-            return dbc.Alert(
-                "Please enter your current password.",
-                color="warning",
-                duration=5000,
-            )
-        if not new_pw:
-            return dbc.Alert(
-                "Please enter a new password.",
-                color="warning",
-                duration=5000,
-            )
-        if new_pw != confirm_pw:
-            return dbc.Alert(
-                "New passwords do not match.",
-                color="danger",
-                duration=5000,
-            )
-
-        from auth import change_password
-
-        success, message = change_password(user.id, current_pw, new_pw)
-        color = "success" if success else "danger"
-        return dbc.Alert(message, color=color, duration=8000 if success else None)
-
-    # -- Settings: change password real-time hints ---------------------------
-
-    @app.callback(
-        [
-            Output("cp-req-length", "className"),
-            Output("cp-req-uppercase", "className"),
-            Output("cp-req-lowercase", "className"),
-            Output("cp-req-number", "className"),
-            Output("cp-req-special", "className"),
-            Output("cp-req-match", "className"),
-        ],
-        [
-            Input("change-pw-new", "value"),
-            Input("change-pw-confirm", "value"),
-        ],
-    )
-    def validate_change_pw_requirements(password, confirm):
-        import re
-
-        pw = password or ""
-        conf = confirm or ""
-
-        def _cls(ok: bool) -> str:
-            if not pw:
-                return "text-muted"
-            return "text-success" if ok else "text-danger"
-
+            _, token = _admin_access_token()
+            set_app_user_access(token, user_id, status, role=role)
+        except AppUsersError as exc:
+            return dbc.Alert(str(exc), color="danger", duration=6000), no_update
+        # Bump n_intervals to force a refresh of the user table
         return (
-            _cls(len(pw) >= 12),
-            _cls(bool(re.search(r"[A-Z]", pw))),
-            _cls(bool(re.search(r"[a-z]", pw))),
-            _cls(bool(re.search(r"\d", pw))),
-            _cls(bool(re.search(r"[^A-Za-z0-9]", pw))),
-            _cls(bool(pw and pw == conf)),
+            dbc.Alert(success_message, color="success", duration=4000),
+            (current_n or 0) + 1,
         )
-
-    # -- Admin: approve user -------------------------------------------------
 
     @app.callback(
         [
@@ -2911,25 +2441,14 @@ def register_callbacks(app, limiter=None):
         ],
         Input("admin-approve-btn", "n_clicks"),
         State("admin-user-select", "value"),
+        State("admin-role-select", "value"),
         State("admin-refresh-interval", "n_intervals"),
         prevent_initial_call=True,
     )
-    def handle_approve_user(n_clicks, user_id, current_n):
-        if not user_id:
-            return dbc.Alert(
-                "Please select a user.", color="warning", duration=4000
-            ), no_update
-        user = get_current_user()
-        if not user or not user.is_admin:
-            return dbc.Alert(
-                "Admin access required.", color="danger", duration=4000
-            ), no_update
-        success, message = approve_user(user_id)
-        color = "success" if success else "danger"
-        # Bump n_intervals to force a refresh of the user table
-        return dbc.Alert(message, color=color, duration=4000), (current_n or 0) + 1
-
-    # -- Admin: change user role ---------------------------------------------
+    def handle_approve_user(n_clicks, user_id, role, current_n):
+        return _set_access(
+            user_id, "active", role or "member", current_n, "Access approved."
+        )
 
     @app.callback(
         [
@@ -2942,21 +2461,29 @@ def register_callbacks(app, limiter=None):
         State("admin-refresh-interval", "n_intervals"),
         prevent_initial_call=True,
     )
-    def handle_change_role(n_clicks, user_id, new_role, current_n):
-        if not user_id:
-            return dbc.Alert(
-                "Please select a user.", color="warning", duration=4000
-            ), no_update
-        user = get_current_user()
-        if not user or not user.is_admin:
-            return dbc.Alert(
-                "Admin access required.", color="danger", duration=4000
-            ), no_update
-        success, message = change_user_role(user_id, new_role, user.id)
-        color = "success" if success else "danger"
-        return dbc.Alert(message, color=color, duration=4000), (current_n or 0) + 1
+    def handle_change_role(n_clicks, user_id, role, current_n):
+        return _set_access(user_id, "active", role, current_n, "Role updated.")
 
-    # -- Admin: delete user (modal) ------------------------------------------
+    @app.callback(
+        [
+            Output("admin-user-action-result", "children", allow_duplicate=True),
+            Output("admin-refresh-interval", "n_intervals", allow_duplicate=True),
+        ],
+        Input("admin-revoke-btn", "n_clicks"),
+        State("admin-user-select", "value"),
+        State("admin-refresh-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def handle_revoke_user(n_clicks, user_id, current_n):
+        return _set_access(
+            user_id,
+            "revoked",
+            None,
+            current_n,
+            "Access revoked. Their sign-in ends within a few minutes.",
+        )
+
+    # -- Admin: delete a user's app data (modal) -----------------------------
 
     @app.callback(
         Output("admin-delete-modal", "is_open"),
@@ -2976,37 +2503,31 @@ def register_callbacks(app, limiter=None):
         return trigger == "admin-delete-btn"
 
     @app.callback(
-        [
-            Output("admin-user-action-result", "children", allow_duplicate=True),
-            Output("admin-refresh-interval", "n_intervals", allow_duplicate=True),
-        ],
+        Output("admin-user-action-result", "children", allow_duplicate=True),
         Input("admin-delete-confirm", "n_clicks"),
         State("admin-user-select", "value"),
-        State("admin-refresh-interval", "n_intervals"),
         prevent_initial_call=True,
     )
-    def handle_admin_delete_user(n_clicks, user_id, current_n):
+    def handle_admin_delete_user_data(n_clicks, user_id):
         if not user_id:
-            return dbc.Alert(
-                "Please select a user.", color="warning", duration=4000
-            ), no_update
+            return dbc.Alert("Please select a user.", color="warning", duration=4000)
         user = get_current_user()
         if not user or not user.is_admin:
+            return dbc.Alert("Admin access required.", color="danger", duration=4000)
+        try:
+            counts = delete_user_data(user_id)
+        except Exception:
+            logger.exception("Failed to delete app data for user %s", user_id)
             return dbc.Alert(
-                "Admin access required.", color="danger", duration=4000
-            ), no_update
-        # Prevent admins from deleting themselves
-        if str(user.id) == str(user_id):
-            return dbc.Alert(
-                "You cannot delete your own admin account.",
-                color="warning",
-                duration=4000,
-            ), no_update
-        success, message = delete_user(user_id)
-        color = "success" if success else "danger"
-        return dbc.Alert(message, color=color, duration=4000), (current_n or 0) + 1
+                "Deleting the user's data failed.", color="danger", duration=6000
+            )
+        return dbc.Alert(
+            f"Deleted {counts['tasks']} task(s) and related data.",
+            color="success",
+            duration=6000,
+        )
 
-    # -- Self account deletion (modal) ---------------------------------------
+    # -- Self data deletion (modal) ------------------------------------------
 
     @app.callback(
         Output("self-delete-modal", "is_open"),
@@ -3031,17 +2552,22 @@ def register_callbacks(app, limiter=None):
         prevent_initial_call=True,
     )
     def handle_self_delete(n_clicks):
+        from auth import end_session
+
         user = get_current_user()
         if not user:
             raise PreventUpdate
-        success, message = delete_user(user.id)
-        if success:
-            cookie_token = flask.request.cookies.get("ae_refresh_token")
-            revoke_refresh_token(cookie_token)
-            flask_login.logout_user()
-            flask.session["_clear_refresh_cookie"] = True
-            return dcc.Location(pathname="/login", id="redirect-after-delete")
-        return dbc.Alert(message, color="danger", duration=4000)
+        try:
+            delete_user_data(user.id)
+        except Exception:
+            logger.exception("Failed to delete app data for user %s", user.id)
+            return dbc.Alert(
+                "Deleting your data failed. Please try again.",
+                color="danger",
+                duration=6000,
+            )
+        end_session()
+        return dcc.Location(href="/login", refresh=True, id="redirect-after-delete")
 
     # -- AG Grid cell click (task link navigation) ---------------------------
 

@@ -19,24 +19,15 @@ class TestResultsFlowIntegration:
 
     def _seed_task_with_results(self, db, payload):
         """Insert a task and import results; return the task_id."""
-        from models import AnalysisTask, User
+        from models import AnalysisTask
         from services.analysis_task import import_execution_results
 
         task_id = str(uuid.uuid4())
-        user = User(
-            email=f"results-{task_id}@test.example",
-            password_hash="placeholder",
-            name="Results User",
-            role="user",
-            is_approved=True,
-        )
-        db.add(user)
-        db.flush()
         task = AnalysisTask(
             id=task_id,
             name="Results Test",
             description="",
-            submitted_by=str(user.id),
+            submitted_by=str(uuid.uuid4()),
             status="succeeded",
             n_sites=2,
             config={},

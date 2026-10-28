@@ -10,18 +10,18 @@ Usage
 
     from trendsearth_client import TrendsEarthClient
 
-    # Using OAuth2 client credentials (preferred for long-lived services)
-    client = TrendsEarthClient(
+    # Service client (background status polling and task adoption)
+    client = TrendsEarthClient.from_oauth2_credentials(
         api_url="https://api.trends.earth/api/v1",
         client_id="your-client-id",
         client_secret="your-client-secret",
     )
 
-    # Using email/password (for interactive flows, e.g. linking accounts)
+    # Acting as a signed-in user (submitting and cancelling analyses) with
+    # the user's Trends.Earth OIDC access token
     client = TrendsEarthClient(
         api_url="https://api.trends.earth/api/v1",
-        email="user@example.com",
-        password="secret",
+        access_token=session_store.get_access_token(session_id),
     )
 
     execution = client.create_execution(script_id, params)
@@ -55,6 +55,37 @@ _token_cache: dict[tuple[str, str], tuple[str, float]] = {}
 _token_cache_lock = threading.Lock()
 
 
+class TrendsEarthAPIError(requests.HTTPError):
+    """A trends.earth API error with a user-presentable message."""
+
+
+def _error_message(resp):
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        if body.get("error") == "insufficient_scope":
+            return (
+                "Your sign-in does not permit running analyses. Sign out and "
+                "sign in again."
+            )
+        for key in ("detail", "message", "error_description", "error"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return value
+    if resp.status_code == 401:
+        return "Your Trends.Earth session has expired. Sign in again."
+    if resp.status_code == 403:
+        return "Trends.Earth refused the request (permission denied)."
+    return f"trends.earth API error {resp.status_code} {resp.reason}"
+
+
+def _raise_for_status(resp):
+    if not resp.ok:
+        raise TrendsEarthAPIError(_error_message(resp), response=resp)
+
+
 class TrendsEarthClient:
     """Lightweight client for the trends.earth API.
 
@@ -68,17 +99,14 @@ class TrendsEarthClient:
         api_url=None,
         client_id=None,
         client_secret=None,
-        email=None,
-        password=None,
+        access_token=None,
     ):
         self.api_url = (api_url or os.environ.get("TRENDSEARTH_API_URL", "")).rstrip(
             "/"
         )
         self._client_id = client_id or ""
         self._client_secret = client_secret or ""
-        self._email = email or ""
-        self._password = password or ""
-        self._token = None
+        self._token = access_token or None
 
         # Persistent session — keeps TCP connections alive across
         # requests to the same host and negotiates compressed responses
@@ -138,7 +166,7 @@ class TrendsEarthClient:
         return {"Authorization": f"Bearer {self._token}"}
 
     def _authenticate(self):
-        """Authenticate using OAuth2 client credentials grant."""
+        """Authenticate the service client (OAuth2 client credentials)."""
         if not self._client_id or not self._client_secret:
             raise ValueError(
                 "Cannot authenticate: client_id and client_secret are "
@@ -149,112 +177,9 @@ class TrendsEarthClient:
         token_data = self.oauth2_token(self._client_id, self._client_secret)
         self._token = token_data["access_token"]
 
-    def _login(self):
-        """Authenticate with email/password and store the JWT.
-
-        The auth endpoint lives at ``{base}/auth`` (outside ``/api/v1``).
-        """
-        base_url = self.api_url.rstrip("/")
-        if base_url.endswith("/api/v1"):
-            auth_url = base_url[: -len("/api/v1")] + "/auth"
-        else:
-            auth_url = base_url + "/auth"
-
-        resp = self._session.post(
-            auth_url,
-            json={"email": self._email, "password": self._password},
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        token = data.get("access_token")
-        if not token:
-            raise ValueError(
-                "Login succeeded but the response did not contain an access_token."
-            )
-        self._token = token
-
     # ------------------------------------------------------------------
-    # User profile
+    # Service-client authentication
     # ------------------------------------------------------------------
-
-    def get_user_profile(self):
-        """Fetch the authenticated user's profile (``/user/me``).
-
-        Returns
-        -------
-        dict
-            ``{"data": {"id": "...", "email": "...", ...}}``
-        """
-        resp = self._session.get(
-            f"{self.api_url}/user/me",
-            headers=self._headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    # ------------------------------------------------------------------
-    # OAuth2 client management (Client Credentials grant)
-    # ------------------------------------------------------------------
-
-    def create_oauth2_client(
-        self, name="avoided-emissions-web", scopes="", expires_in_days=None
-    ):
-        """Register a new OAuth2 service client on the API.
-
-        Requires JWT authentication (email/password login).  The response
-        includes the one-time ``client_secret`` that must be stored
-        securely — it cannot be retrieved again.
-
-        Parameters
-        ----------
-        name : str
-            Human-readable label for the client.
-        scopes : str
-            Space-delimited scope list (empty = full user access).
-        expires_in_days : int | None
-            Optional lifetime in days.  ``None`` means no expiry.
-
-        Returns
-        -------
-        dict
-            ``{"data": {..., "client_id": "...", "client_secret": "..."}}``
-        """
-        body = {"name": name}
-        if scopes:
-            body["scopes"] = scopes
-        if expires_in_days is not None:
-            body["expires_in_days"] = expires_in_days
-
-        resp = self._compressed_post(
-            f"{self.api_url}/oauth/clients",
-            json_body=body,
-            headers=self._headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def list_oauth2_clients(self):
-        """List the caller's active OAuth2 service clients."""
-        resp = self._session.get(
-            f"{self.api_url}/oauth/clients",
-            headers=self._headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def revoke_oauth2_client(self, client_db_id):
-        """Revoke an OAuth2 service client by its database UUID."""
-        resp = self._session.delete(
-            f"{self.api_url}/oauth/clients/{client_db_id}",
-            headers=self._headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
 
     def oauth2_token(self, client_id, client_secret):
         """Exchange OAuth2 client credentials for a short-lived JWT.
@@ -378,7 +303,7 @@ class TrendsEarthClient:
             except Exception:  # noqa: BLE001
                 body = resp.text[:500]
             logger.error("[TE-API] Error response from %s: %s", url, body)
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
     def cancel_execution(self, execution_id):
@@ -396,7 +321,7 @@ class TrendsEarthClient:
                 resp.status_code,
                 resp.reason,
             )
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
     def get_execution(self, execution_id):
@@ -529,53 +454,3 @@ class TrendsEarthClient:
     # ------------------------------------------------------------------
     # Script access control
     # ------------------------------------------------------------------
-
-    def add_user_to_script(self, script_id, user_id):
-        """Grant *user_id* access to *script_id* on the TE API.
-
-        Requires ADMIN or SUPERADMIN privileges on the API side.
-
-        Parameters
-        ----------
-        script_id : str
-            UUID or slug of the script.
-        user_id : str
-            UUID of the trends.earth user to grant access.
-
-        Returns
-        -------
-        dict
-            Updated access summary from the API.
-        """
-        resp = self._session.post(
-            f"{self.api_url}/script/{script_id}/access/users/{user_id}",
-            headers=self._headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def remove_user_from_script(self, script_id, user_id):
-        """Revoke *user_id* access to *script_id* on the TE API.
-
-        Requires ADMIN or SUPERADMIN privileges on the API side.
-
-        Parameters
-        ----------
-        script_id : str
-            UUID or slug of the script.
-        user_id : str
-            UUID of the trends.earth user to revoke access.
-
-        Returns
-        -------
-        dict
-            Updated access summary from the API.
-        """
-        resp = self._session.delete(
-            f"{self.api_url}/script/{script_id}/access/users/{user_id}",
-            headers=self._headers(),
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()

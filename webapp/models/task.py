@@ -27,9 +27,12 @@ class AnalysisTask(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
     description = Column(Text)
-    submitted_by = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    submitted_by = Column(UUID(as_uuid=True), nullable=False, index=True)
+    # Trends.Earth display name/email captured at submission time.
+    submitter_email = Column(String(255))
+    submitter_name = Column(String(255))
+    # Server-side session whose Trends.Earth token submits the analysis.
+    submit_session_id = Column(String(128))
     site_set_id = Column(
         UUID(as_uuid=True), ForeignKey("user_site_sets.id"), index=True
     )
@@ -63,7 +66,6 @@ class AnalysisTask(Base):
     error_message = Column(Text)
     extra_metadata = Column("metadata", JSON, default=dict)
 
-    user = relationship("User", back_populates="tasks")
     site_set = relationship("UserSiteSet", back_populates="tasks")
     sites = relationship(
         "TaskSite", back_populates="task", cascade="all, delete-orphan"

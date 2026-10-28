@@ -63,7 +63,7 @@ class Covariate(Base):
         nullable=False,
         default="pending_export",
     )
-    started_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    started_by = Column(UUID(as_uuid=True), index=True)
     started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     completed_at = Column(DateTime(timezone=True))
     error_message = Column(Text)

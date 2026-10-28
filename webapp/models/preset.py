@@ -3,9 +3,8 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text
+from sqlalchemy import Column, DateTime, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY, JSON, UUID
-from sqlalchemy.orm import relationship
 
 from .base import Base
 
@@ -16,16 +15,12 @@ class CovariatePreset(Base):
     __tablename__ = "covariate_presets"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     covariates = Column(ARRAY(Text), nullable=False)
     exact_match_vars = Column(ARRAY(Text), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-
-    user = relationship("User", back_populates="covariate_presets")
 
 
 class MatchingSettingsPreset(Base):
@@ -34,12 +29,8 @@ class MatchingSettingsPreset(Base):
     __tablename__ = "matching_settings_presets"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     settings = Column(JSON, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-
-    user = relationship("User", back_populates="matching_settings_presets")

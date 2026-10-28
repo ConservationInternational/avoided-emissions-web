@@ -191,9 +191,12 @@ jobs:
         BATCH_JOB_QUEUE: ${{ vars.BATCH_JOB_QUEUE }}
         BATCH_JOB_DEFINITION: ${{ vars.BATCH_JOB_DEFINITION }}
         ROLLBAR_ACCESS_TOKEN: ${{ secrets.ROLLBAR_ACCESS_TOKEN }}
-        SPARKPOST_API_KEY: ${{ secrets.SPARKPOST_API_KEY }}
-        SPARKPOST_FROM_EMAIL: ${{ vars.SPARKPOST_FROM_EMAIL || 'noreply@avoided-emissions.org' }}
         APP_URL: ${{ vars.APP_URL }}
+        OIDC_ISSUER: ${{ vars.OIDC_ISSUER || 'https://api.trends.earth' }}
+        OIDC_CLIENT_ID: ${{ vars.OIDC_CLIENT_ID || 'avoided-emissions-web-staging' }}
+        OIDC_CLIENT_SECRET: ${{ secrets.OIDC_CLIENT_SECRET }}
+        OIDC_ACCESS_AUDIENCE: ${{ vars.OIDC_ACCESS_AUDIENCE || 'avoided-emissions-staging' }}
+        OIDC_APP_KEY: ${{ vars.OIDC_APP_KEY || 'avoided_emissions_staging' }}
       run: |
         ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         {
@@ -211,6 +214,14 @@ jobs:
           echo ""
           echo "# App"
           echo "SECRET_KEY=$SECRET_KEY"
+          echo "APP_URL=$APP_URL"
+          echo ""
+          echo "# Sign-in (Trends.Earth OIDC)"
+          echo "OIDC_ISSUER=$OIDC_ISSUER"
+          echo "OIDC_CLIENT_ID=$OIDC_CLIENT_ID"
+          echo "OIDC_CLIENT_SECRET=$OIDC_CLIENT_SECRET"
+          echo "OIDC_ACCESS_AUDIENCE=$OIDC_ACCESS_AUDIENCE"
+          echo "OIDC_APP_KEY=$OIDC_APP_KEY"
           echo ""
           echo "# Database"
           echo "POSTGRES_USER=$POSTGRES_USER"
@@ -250,10 +261,6 @@ jobs:
           echo "ROLLBAR_ACCESS_TOKEN=$ROLLBAR_ACCESS_TOKEN"
           echo "ROLLBAR_ENVIRONMENT=staging"
           echo ""
-          echo "# Email (SparkPost)"
-          echo "SPARKPOST_API_KEY=$SPARKPOST_API_KEY"
-          echo "SPARKPOST_FROM_EMAIL=$SPARKPOST_FROM_EMAIL"
-          echo "APP_URL=$APP_URL"
         } > staging.env
 
     - name: Update appspec.yml for staging

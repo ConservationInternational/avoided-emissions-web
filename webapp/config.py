@@ -117,7 +117,6 @@ def _get_git_revision() -> str:
 
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-production")
-    ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
     DATABASE_URL = _build_database_url()
     ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
     AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -147,7 +146,30 @@ class Config:
         "CELERY_RESULT_BACKEND", "redis://redis:6379/0"
     )
 
-    # trends.earth API integration
+    # Sign-in via Trends.Earth OIDC.  Staging and local development use the
+    # ``avoided-emissions-web-staging`` client, ``avoided-emissions-staging``
+    # audience, and ``avoided_emissions_staging`` app key.
+    OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "https://api.trends.earth").rstrip("/")
+    OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "avoided-emissions-web")
+    OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
+    OIDC_ACCESS_AUDIENCE = os.environ.get("OIDC_ACCESS_AUDIENCE", "avoided-emissions")
+    OIDC_APP_KEY = os.environ.get("OIDC_APP_KEY", "avoided_emissions")
+    OIDC_SCOPES = os.environ.get(
+        "OIDC_SCOPES",
+        "openid email profile app:read app-users:read app-access:write "
+        "script:read execution:read execution:write",
+    )
+    # Lifetime of the server-side session record (matches the TE refresh
+    # token lifetime, which is the hard upper bound on a session anyway).
+    OIDC_SESSION_MAX_AGE = int(os.environ.get("OIDC_SESSION_MAX_AGE", "2592000"))
+    SESSION_REDIS_URL = os.environ.get(
+        "SESSION_REDIS_URL",
+        os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0"),
+    )
+
+    # trends.earth API integration.  The TRENDSEARTH_CLIENT_* service client
+    # is used only for background status polling and task adoption; analyses
+    # are submitted with the signed-in user's own access token.
     TRENDSEARTH_API_URL = os.environ.get(
         "TRENDSEARTH_API_URL", "https://api.trends.earth/api/v1"
     )
@@ -172,13 +194,9 @@ class Config:
     BATCH_MEMORY_MIB = int(os.environ.get("BATCH_MEMORY_MIB", "131072"))  # 128 GB
     BATCH_VCPUS = int(os.environ.get("BATCH_VCPUS", "4"))
 
-    # SparkPost email configuration
-    SPARKPOST_API_KEY = os.environ.get("SPARKPOST_API_KEY", "")
-    SPARKPOST_FROM_EMAIL = os.environ.get(
-        "SPARKPOST_FROM_EMAIL", "noreply@avoided-emissions.org"
-    )
-    # Public URL used to build password-reset links in emails
-    APP_URL = os.environ.get("APP_URL", "http://localhost:8050")
+    # Public URL of the app; the OIDC redirect URI is derived from it.
+    APP_URL = os.environ.get("APP_URL", "http://localhost:8050").rstrip("/")
+    OIDC_REDIRECT_URI = f"{APP_URL}/auth/callback"
 
 
 def report_exception(**extra):

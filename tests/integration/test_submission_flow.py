@@ -7,6 +7,8 @@ Run locally (from the repo root):
     python -m pytest tests/integration/test_submission_flow.py -v -m integration
 """
 
+import uuid
+
 import pytest
 
 pytestmark = pytest.mark.integration
@@ -17,32 +19,22 @@ class TestSubmissionFlowIntegration:
 
     def test_task_record_persisted_in_db(self, clean_db, mocker):
         """queue_analysis_task must write a row to the analysis_tasks table."""
-        from models import AnalysisTask, User
+        from models import AnalysisTask
         from services.analysis_task import queue_analysis_task
 
         mocker.patch(
             "services.analysis_task.get_ready_covariate_names",
             return_value=["elev", "precip"],
         )
-        mocker.patch(
-            "credential_store.get_decrypted_secret", return_value=("cid", "csecret")
-        )
+        mocker.patch("session_store.get", return_value={"sub": "user"})
         mocker.patch("tasks.submit_analysis_task_worker")
 
-        user = User(
-            email="submit-test@test.example",
-            password_hash="placeholder",
-            name="Submit Test User",
-            role="user",
-            is_approved=True,
-        )
-        clean_db.add(user)
-        clean_db.commit()
-        user_id = str(user.id)
+        user_id = str(uuid.uuid4())
         task_id = queue_analysis_task(
             task_name="Integration Test Task",
             description="Automated integration test",
             user_id=user_id,
+            session_id="integration-session",
             site_set_id=None,
             covariates=["elev"],
             exact_match_vars=["admin0"],
@@ -55,31 +47,21 @@ class TestSubmissionFlowIntegration:
 
     def test_task_config_round_trips_through_db(self, clean_db, mocker):
         """Config dict written to JSONB must be readable back as a Python dict."""
-        from models import AnalysisTask, User
+        from models import AnalysisTask
         from services.analysis_task import queue_analysis_task
 
         mocker.patch(
             "services.analysis_task.get_ready_covariate_names",
             return_value=["elev"],
         )
-        mocker.patch(
-            "credential_store.get_decrypted_secret", return_value=("cid", "csecret")
-        )
+        mocker.patch("session_store.get", return_value={"sub": "user"})
         mocker.patch("tasks.submit_analysis_task_worker")
 
-        user = User(
-            email="config-test@test.example",
-            password_hash="placeholder",
-            name="Config Test User",
-            role="user",
-            is_approved=True,
-        )
-        clean_db.add(user)
-        clean_db.commit()
         task_id = queue_analysis_task(
             task_name="Config Test",
             description="",
-            user_id=str(user.id),
+            user_id=str(uuid.uuid4()),
+            session_id="integration-session",
             site_set_id=None,
             covariates=["elev"],
             exact_match_vars=["admin0"],

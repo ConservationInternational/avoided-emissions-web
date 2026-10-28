@@ -14,7 +14,7 @@ from services.analysis_task import ANALYSIS_DEFAULTS, queue_analysis_task
 logger = logging.getLogger(__name__)
 
 
-def create_share_link(task_id, user_id, expiry_days=7):
+def create_share_link(task_id, user_id, expiry_days=7, is_admin=False):
     """Create a shareable link for a task.
 
     Parameters
@@ -22,9 +22,11 @@ def create_share_link(task_id, user_id, expiry_days=7):
     task_id : str
         UUID of the ``AnalysisTask``.
     user_id : str
-        UUID of the user creating the link.
+        Trends.Earth subject of the user creating the link.
     expiry_days : int
         Number of days until the link expires (default 7, max 90).
+    is_admin : bool
+        Whether the user is an admin of this app (may share any task).
 
     Returns
     -------
@@ -37,19 +39,11 @@ def create_share_link(task_id, user_id, expiry_days=7):
 
     db = get_db()
     try:
-        from models import User
-
         task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
         if not task:
             raise ValueError("Task not found.")
 
-        user = (
-            db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
-        )
-        if not user:
-            raise PermissionError("User is not authorized to manage share links.")
-
-        if user.role != "admin" and str(task.submitted_by) != str(user_id):
+        if not user_id or (not is_admin and str(task.submitted_by) != str(user_id)):
             raise PermissionError("User is not authorized to manage share links.")
 
         link = TaskShareLink(
@@ -71,7 +65,7 @@ def create_share_link(task_id, user_id, expiry_days=7):
         db.close()
 
 
-def list_share_links(task_id, user_id=None):
+def list_share_links(task_id, user_id=None, is_admin=False):
     """Return active share links for a task.
 
     Returns
@@ -84,20 +78,10 @@ def list_share_links(task_id, user_id=None):
     db = get_db()
     try:
         if user_id is not None:
-            from models import User
-
             task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
             if not task:
                 return []
-
-            user = (
-                db.query(User)
-                .filter(User.id == user_id, User.is_active.is_(True))
-                .first()
-            )
-            if not user:
-                return []
-            if user.role != "admin" and str(task.submitted_by) != str(user_id):
+            if not is_admin and str(task.submitted_by) != str(user_id):
                 return []
 
         links = (
@@ -122,7 +106,7 @@ def list_share_links(task_id, user_id=None):
         db.close()
 
 
-def revoke_share_link(link_id, user_id, task_id=None):
+def revoke_share_link(link_id, user_id, task_id=None, is_admin=False):
     """Revoke a share link by setting ``is_active`` to False.
 
     Validates that the link belongs to the expected *task_id* (if
@@ -134,23 +118,15 @@ def revoke_share_link(link_id, user_id, task_id=None):
 
     db = get_db()
     try:
-        from models import User
-
         link = db.query(TaskShareLink).filter(TaskShareLink.id == link_id).first()
-        if not link:
-            return False
-
-        user = (
-            db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
-        )
-        if not user:
+        if not link or not user_id:
             return False
 
         task = db.query(AnalysisTask).filter(AnalysisTask.id == link.task_id).first()
         if not task:
             return False
 
-        if user.role != "admin" and str(task.submitted_by) != str(user_id):
+        if not is_admin and str(task.submitted_by) != str(user_id):
             return False
 
         # Cross-validate: link must belong to the task the caller has
@@ -207,7 +183,7 @@ def validate_share_token(token, record_access=True):
 # ---------------------------------------------------------------------------
 
 
-def get_recompute_config(task_id, user_id):
+def get_recompute_config(task_id, user_id, is_admin=False):
     """Return the configuration of a task for pre-filling the submit form.
 
     Loads the original task's settings and returns them as a plain dict
@@ -219,7 +195,9 @@ def get_recompute_config(task_id, user_id):
     task_id : str
         UUID of the ``AnalysisTask`` to recompute.
     user_id : str
-        UUID of the user requesting the recompute.
+        Trends.Earth subject of the user requesting the recompute.
+    is_admin : bool
+        Whether the user is an admin of this app (may recompute any task).
 
     Returns
     -------
@@ -244,12 +222,7 @@ def get_recompute_config(task_id, user_id):
         if not task:
             raise ValueError("Task not found.")
 
-        from models import User
-
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            raise ValueError("User not found.")
-        if not user.is_admin and str(task.submitted_by) != str(user_id):
+        if not is_admin and str(task.submitted_by) != str(user_id):
             raise ValueError("You can only recompute your own tasks.")
 
         config = task.config or {}
@@ -281,7 +254,7 @@ def get_recompute_config(task_id, user_id):
         db.close()
 
 
-def resubmit_analysis_task(task_id, user_id):
+def resubmit_analysis_task(task_id, user):
     """Resubmit a previously submitted task with a new random seed.
 
     Looks up the original task's configuration, generates a fresh random
@@ -294,8 +267,9 @@ def resubmit_analysis_task(task_id, user_id):
     ----------
     task_id : str
         UUID of the original ``AnalysisTask`` to recompute.
-    user_id : str
-        UUID of the user requesting the recompute.
+    user : auth.SessionUser
+        The signed-in user requesting the recompute; the new task is
+        submitted with their Trends.Earth session.
 
     Returns
     -------
@@ -317,12 +291,8 @@ def resubmit_analysis_task(task_id, user_id):
             raise ValueError("Task not found.")
 
         # Ownership check (admins bypass)
-        from models import User
-
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            raise ValueError("User not found.")
-        if not user.is_admin and str(task.submitted_by) != str(user_id):
+        user_id = str(user.id)
+        if not user.is_admin and str(task.submitted_by) != user_id:
             raise ValueError("You can only recompute your own tasks.")
 
         # Verify that site data can be recovered — either via the local
@@ -349,6 +319,9 @@ def resubmit_analysis_task(task_id, user_id):
             task_name=new_task_name,
             description=task.description or "",
             user_id=user_id,
+            session_id=user.session_id,
+            submitter_email=user.email,
+            submitter_name=user.name,
             site_set_id=str(task.site_set_id) if task.site_set_id else None,
             covariates=list(task.covariates or []),
             exact_match_vars=config.get("exact_match_vars", []),

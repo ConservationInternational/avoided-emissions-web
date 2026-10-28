@@ -8,7 +8,7 @@ tables following the same patterns as the trends.earth-api-ui.
 import dash_ag_grid as dag
 import dash_bootstrap_components as dbc
 from config import Config
-from dash import html
+from dash import dcc, html
 
 # Default covariates for the matching formula
 DEFAULT_COVARIATES = [
@@ -476,43 +476,40 @@ USER_MANAGEMENT_COLUMNS = [
         "tooltipField": "email",
     },
     {
+        "headerName": "Access",
+        "field": "app_access",
+        "flex": 0.8,
+        "minWidth": 100,
+        "cellRenderer": "AccessBadge",
+        "filter": "agTextColumnFilter",
+        "sort": "asc",
+    },
+    {
         "headerName": "Role",
-        "field": "role",
+        "field": "app_role",
         "flex": 0.8,
         "minWidth": 90,
         "filter": "agTextColumnFilter",
     },
     {
-        "headerName": "Approved",
-        "field": "is_approved",
+        "headerName": "Institution",
+        "field": "institution",
+        "flex": 1.5,
+        "minWidth": 150,
+        "cellStyle": {**TRUNCATED_CELL},
+        "tooltipField": "institution",
+    },
+    {
+        "headerName": "Email verified",
+        "field": "email_verified",
         "flex": 0.7,
         "minWidth": 90,
-        "cellRenderer": "ApprovalBadge",
-        "filter": "agTextColumnFilter",
     },
     {
-        "headerName": "Created",
-        "field": "created_at",
-        "flex": 1.5,
-        "minWidth": 160,
-        "sort": "desc",
-        "sortIndex": 0,
-        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
-        "cellRenderer": "LocalDateTime",
-    },
-    {
-        "headerName": "Last Login",
-        "field": "last_login",
-        "flex": 1.5,
-        "minWidth": 160,
-        "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
-        "cellRenderer": "LocalDateTime",
-    },
-    {
-        "headerName": "Active",
-        "field": "is_active",
-        "flex": 0.6,
-        "minWidth": 80,
+        "headerName": "TE account active",
+        "field": "active",
+        "flex": 0.7,
+        "minWidth": 90,
     },
 ]
 
@@ -954,6 +951,27 @@ def _make_ag_grid(
 # -- Navigation bar ----------------------------------------------------------
 
 
+def logout_form(label, button_class="nav-link btn btn-link"):
+    """A button that signs out via a CSRF-protected POST to /auth/logout."""
+    try:
+        from flask_wtf.csrf import generate_csrf
+
+        token = generate_csrf()
+    except (RuntimeError, KeyError):
+        # Outside a request (e.g. layout tests); the server rejects the
+        # submission and shows the sign-out page instead.
+        token = ""
+    return html.Form(
+        [
+            dcc.Input(type="hidden", name="csrf_token", value=token),
+            html.Button(label, type="submit", className=button_class),
+        ],
+        method="POST",
+        action="/auth/logout",
+        className="d-inline m-0",
+    )
+
+
 def navbar(user=None, active_page=None):
     """Top navigation bar.
 
@@ -1008,12 +1026,11 @@ def navbar(user=None, active_page=None):
     if user:
         right_items = [
             dbc.NavItem(dbc.NavLink(user.name, disabled=True, className="text-light")),
-            dbc.NavItem(dbc.NavLink("Logout", href="/logout")),
+            dbc.NavItem(logout_form("Logout")),
         ]
     else:
         right_items = [
             dbc.NavItem(dbc.NavLink("Login", href="/login")),
-            dbc.NavItem(dbc.NavLink("Register", href="/register")),
         ]
 
     return dbc.Navbar(

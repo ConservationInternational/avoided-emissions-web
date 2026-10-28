@@ -74,13 +74,14 @@ webapp/
   app.py              Entry point — creates Dash app, Flask server, URL routing
   api_routes.py       Flask API blueprint (/api/*, /health)
   config.py           Config class reading from env vars
-  auth.py             Flask-Login + bcrypt authentication
+  auth.py             Flask-Login user/session helpers (Trends.Earth identities)
+  auth_routes.py      /auth/login, /auth/callback, /auth/logout (OIDC flow)
+  oidc.py             Trends.Earth OIDC client (PKCE, token verification)
+  session_store.py    Redis-backed sessions holding Trends.Earth tokens
   celery_app.py       Celery factory with beat schedule and task routing
   cog_merge.py        Merge GEE tiles into single COGs via GDAL
   layer_config.py     Visualization styles for covariate COG map overlays
-  email_service.py    SparkPost transactional email (password reset)
-  credential_store.py Fernet-encrypted credential storage
-  trendsearth_client.py OAuth2 client for trends.earth API
+  trendsearth_client.py Client for the trends.earth API (user or service token)
   callbacks/          Dash interactive callback functions
   layouts/            Page layouts and AG Grid column definitions
   models/             SQLAlchemy model definitions (one module per domain)
@@ -98,7 +99,8 @@ Schema is created automatically on first startup via `alembic upgrade head`.
 
 Model definitions live in `webapp/models/` (one file per domain):
 
-- **Auth & users**: `User`, `TrendsEarthCredential`, `PasswordResetToken`, `RefreshToken`
+- **Users**: none — users are Trends.Earth accounts, identified by their OIDC
+  subject (`sub`); see [Sign-in and user access](#sign-in-and-user-access)
 - **Tasking & results**: `AnalysisTask`, `TaskSite`, `TaskResult`, `TaskResultTotal`
 - **Site uploads**: `UserSiteSet`, `UserSiteFeature`, `UserSiteUpload`
 - **Covariates**: `Covariate`, `GeeExportMetadata`, `ReferenceLayerExport`, `CovariatePreset`, `MatchingSettingsPreset`
@@ -134,14 +136,17 @@ See the example file for the full set of variables and their defaults.
 |---|---|---|
 | `TRENDSEARTH_SCRIPT_ID` | **Yes** (for task submission) | UUID of the avoided-emissions R analysis script registered on the trends.earth API. Obtain this by publishing the script with `trends publish` (see the trends.earth CLI docs) or from the API UI script list. Without this, task submission will fail. |
 | `TRENDSEARTH_API_URL` | No | trends.earth API v1 endpoint. Defaults to `https://api.trends.earth/api/v1`. |
-| `TRENDSEARTH_CLIENT_ID` | **Yes** (for polling) | OAuth2 client ID for background status polling of executions. |
-| `TRENDSEARTH_CLIENT_SECRET` | **Yes** (for polling) | OAuth2 client secret for background status polling. |
+| `TRENDSEARTH_CLIENT_ID` | **Yes** (for polling) | Service-client ID used for background status polling of executions, result downloads and admin cancellation of other users' tasks. Create it with `webapp/scripts/create_service_client.py` using a Trends.Earth admin account. Task *submission* uses the signed-in user's own token. |
+| `TRENDSEARTH_CLIENT_SECRET` | **Yes** (for polling) | Service-client secret for the above. |
 | `S3_BUCKET` | **Yes** | S3 bucket for site uploads and analysis results. |
 | `GCS_BUCKET` | **Yes** (for GEE exports) | GCS bucket where GEE covariate COGs are stored. |
 | `GOOGLE_PROJECT_ID` | **Yes** (for GEE exports) | Google Cloud project registered for Earth Engine access. |
-| `SPARKPOST_API_KEY` | **Yes** (for password reset emails) | SparkPost API key for transactional email (password resets). Without this, password reset emails are logged to the console instead of sent. |
-| `APP_URL` | **Yes** (for password reset emails) | Public URL of the web app (e.g. `https://app.avoided-emissions.org`). Used to build password-reset links in emails. Defaults to `http://localhost:8050`. |
-| `SPARKPOST_FROM_EMAIL` | No | Sender address for outgoing emails. Defaults to `noreply@avoided-emissions.org`. Must be a verified sending domain in SparkPost. |
+| `APP_URL` | **Yes** | Public URL of the web app (e.g. `https://app.avoided-emissions.org`). The OIDC redirect URI is `APP_URL/auth/callback` and the post-logout redirect URI is `APP_URL/`; both must be registered on the Trends.Earth OIDC client. Defaults to `http://localhost:8050`. |
+| `OIDC_CLIENT_SECRET` | **Yes** | Secret of this app's confidential OIDC client on Trends.Earth. The app refuses to start without it unless `DEBUG` is set. |
+| `OIDC_CLIENT_ID` | No | OIDC client ID. Defaults to `avoided-emissions-web` (production); staging uses `avoided-emissions-web-staging`. |
+| `OIDC_ACCESS_AUDIENCE` | No | Audience of the access tokens issued to this app. Defaults to `avoided-emissions` (staging: `avoided-emissions-staging`). |
+| `OIDC_APP_KEY` | No | Trends.Earth app key that access grants and roles are recorded under. Defaults to `avoided_emissions` (staging: `avoided_emissions_staging`). |
+| `OIDC_ISSUER` | No | Trends.Earth OIDC issuer. Defaults to `https://api.trends.earth`. |
 
 ## Quick Start
 
@@ -161,30 +166,32 @@ docker compose -f deploy/docker-compose.develop.yml up --build
 |-----------|------------------|---------------|
 | Postgres  | `ae_user`        | `ae_password` |
 
-### Creating the Admin User
+### Sign-in and user access
 
-No default admin user is seeded in the database. After starting the
-development environment for the first time, create one by running:
+Users sign in with their **Trends.Earth account** (OpenID Connect); there are
+no separate Avoided Emissions passwords or registrations — analyses are submitted to
+Trends.Earth with the signed-in user's own token.
 
-```bash
-docker compose -f deploy/docker-compose.develop.yml exec webapp python -c "
-from auth import hash_password
-from models import User, get_db
-db = get_db()
-db.add(User(
-    email='admin@avoided-emissions.org',
-    password_hash=hash_password('CHANGE_ME'),
-    name='Administrator',
-    role='admin',
-    is_approved=True,
-))
-db.commit()
-db.close()
-"
-```
+- The first time someone signs in, Trends.Earth records a **pending** access
+  request for this app and emails the app admins who can approve users (and
+  any recipients configured for the app in the Trends.Earth API UI).
+- App admins approve, revoke or change roles (`member` / `admin`) on the
+  **Admin → Users** tab, or in the Trends.Earth API UI (**App Access** tab).
+  Trends.Earth superadmins are always admins.
+- Sessions are stored server-side in Redis; refresh tokens never reach the
+  browser.
 
-Replace `admin@avoided-emissions.org` and `CHANGE_ME` with your preferred
-email and a strong password.
+### Granting the first admin
+
+No admin is seeded. In the Trends.Earth API UI, a Trends.Earth admin or
+superadmin opens **App Access**, selects the Avoided Emissions app
+(`avoided_emissions`, or `avoided_emissions_staging` for staging and local
+development) and grants the first users the `admin` role. From then on, app
+admins manage users from **Admin → Users** in this app.
+
+For local development, register `http://localhost:8050/auth/callback` (and
+`http://localhost:8050/` as a post-logout redirect URI) on the staging OIDC
+client and put its secret in `OIDC_CLIENT_SECRET`.
 
 > **Note:** Change the Postgres credentials in your `.env` file before
 > deploying to any non-local environment.
