@@ -87,5 +87,3 @@ docker run --rm --entrypoint python \
     ae-ranalysis /pipeline/tests/test_extraction.py
 ```
 
-The extraction requirements keep NumPy below 2 for the system GDAL ABI and
-PyArrow below 26, which requires NumPy 2.

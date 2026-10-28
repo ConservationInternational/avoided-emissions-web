@@ -1,9 +1,11 @@
 """Extraction regressions; run with the analysis image's Python dependencies."""
 
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +28,39 @@ spec.loader.exec_module(extract)
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_gdal_settings_apply_to_rasterio_and_worker_threads(self):
+        from rasterio.env import get_gdal_config
+
+        with patch.dict(os.environ), extract._configure_gdal():
+            self.assertEqual(get_gdal_config("GDAL_CACHEMAX"), 1024**3)
+            self.assertEqual(get_gdal_config("GDAL_HTTP_MAX_RETRY"), 5)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                self.assertEqual(
+                    pool.submit(get_gdal_config, "GDAL_HTTP_MAX_RETRY").result(),
+                    5,
+                )
+
+    def test_transient_raster_errors_retry_without_osgeo(self):
+        with (
+            patch.object(
+                extract,
+                "_open_single_cog",
+                side_effect=[
+                    rasterio.errors.RasterioIOError("HTTP response_code=503"),
+                    rasterio.errors.RasterioIOError("not a supported file format"),
+                ],
+            ) as open_cog,
+            patch.object(extract.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(
+                rasterio.errors.RasterioIOError, "not a supported file format"
+            ):
+                extract._load_layer_fresh(
+                    "test.tif", "test", (0, 0, 1, 1), (), np.array([0]), np.array([0])
+                )
+            self.assertEqual(open_cog.call_count, 2)
+            sleep.assert_called_once()
+
     def test_nonzero_nodata_is_missing_without_losing_valid_zeros(self):
         with tempfile.TemporaryDirectory() as output:
             path = Path(output) / "biomass.tif"

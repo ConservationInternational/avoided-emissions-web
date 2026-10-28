@@ -3,16 +3,14 @@ rollbar
 te_schemas @ git+https://github.com/ConservationInternational/trends.earth-schemas.git
 
 # Geospatial extraction (step 1 - Python)
-# GDAL Python bindings are installed in the Dockerfile to match the system libgdal.
-# numpy must stay <2 for ABI compatibility with the system python3-gdal package.
-numpy<2
+# Rasterio supplies NumPy-2-compatible GDAL bindings; do not use system osgeo.
+numpy>=2,<3
 pandas
 geopandas
 xarray
 rioxarray
-rasterio
+rasterio>=1.4.0
 dask
-# PyArrow 26 requires NumPy 2, incompatible with the system GDAL bindings.
-pyarrow<26
+pyarrow
 pyproj
 shapely

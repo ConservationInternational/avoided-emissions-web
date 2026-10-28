@@ -43,10 +43,10 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import rasterio
 import rioxarray
 import xarray as xr
 from logging_utils import configure_third_party_logging
-from osgeo import gdal
 from rasterio.features import rasterize
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
@@ -77,17 +77,16 @@ _GDAL_OPTS = {
     "VSI_CACHE": "TRUE",
     "VSI_CACHE_SIZE": "50000000",  # 50 MB per file
     "AWS_NO_SIGN_REQUEST": "NO",
-    "GDAL_CACHEMAX": "1024",  # 1 GB block cache
+    "GDAL_CACHEMAX": 1024**3,  # Rasterio expects bytes, not MB.
     "GDAL_NUM_THREADS": "ALL_CPUS",
 }
 
 
-def _configure_gdal() -> None:
-    """Set GDAL config options for fast COG access over S3."""
+def _configure_gdal() -> rasterio.Env:
+    """Configure Rasterio's GDAL and propagate options to worker threads."""
     for key, val in _GDAL_OPTS.items():
-        gdal.SetConfigOption(key, val)
-        os.environ.setdefault(key, val)
-    gdal.UseExceptions()
+        os.environ.setdefault(key, str(val))
+    return rasterio.Env(**_GDAL_OPTS)
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +286,6 @@ def _load_layer_fresh(
                 exc,
                 sleep_for,
             )
-            gdal.ErrorReset()
             time.sleep(sleep_for)
             delay = min(delay * 2, 20.0)
     raise RuntimeError(f"Exhausted retries while reading layer '{layer_name}'.")
@@ -1086,9 +1084,7 @@ def compute_sites_exclusion_buffer(
 
 def main(argv: list[str] | None = None) -> None:
     rollbar_init()
-    _configure_gdal()
-
-    with with_rollbar("01_extract_covariates"):
+    with _configure_gdal(), with_rollbar("01_extract_covariates"):
         config = parse_config(argv)
         log.info("Step 1: Extracting covariates")
         log.info("  Config: %s", json.dumps(config, default=str))
