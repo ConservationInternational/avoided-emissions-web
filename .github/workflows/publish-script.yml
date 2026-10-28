@@ -61,7 +61,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Install trends.earth CLI
         run: pip install git+https://github.com/ConservationInternational/trends.earth-CLI.git
