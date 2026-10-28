@@ -1,1 +1,21 @@
-{"name": "avoided-emissions", "description": "Avoided deforestation and emissions analysis using propensity score matching. Runs a three-step R pipeline (extract covariates, match treatment/control pixels, summarize results) and returns per-site avoided emissions estimates.", "environment": "trends.earth-environment", "environment_version": "2.2.4", "compute_type": "batch", "batch_image": "avoided-emissions-ranalysis:production-latest", "id": "bd669222-67d3-41f5-828f-0cf462de7175"}
+{
+  "name": "avoided-emissions",
+  "description": "Avoided deforestation and emissions analysis using propensity score matching. Runs a three-step R pipeline (extract covariates, match treatment/control pixels, summarize results) and returns per-site avoided emissions estimates.",
+  "environment": "trends.earth-environment",
+  "environment_version": "2.2.4",
+  "compute_type": "batch",
+  "batch_image": "avoided-emissions-ranalysis:production-latest",
+  "batch_execution_config": {
+    "allowed_commands": [
+      ["extract"],
+      ["match"],
+      ["match_chunk_{index}"],
+      ["summarize"]
+    ],
+    "allowed_job_queues": [
+      "ae-spot-gp3",
+      "ae-ondemand-gp3"
+    ]
+  },
+  "id": "bd669222-67d3-41f5-828f-0cf462de7175"
+}

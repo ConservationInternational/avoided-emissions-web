@@ -30,6 +30,33 @@ is described in [docs/matching.md](../../docs/matching.md) and the outputs in
   Pixel data is loaded once per element.
 - **Step 3 (summarize)** runs as a single job after matching completes.
 
+### API execution policy
+
+[configuration.json](../configuration.json) publishes the Batch execution policy
+required by the hardened trends.earth API. It approves only the existing
+`extract`, `match`, `match_chunk_{index}`, and `summarize` command arrays, and the
+two queues offered by the webapp (`ae-spot-gp3` and `ae-ondemand-gp3`).
+`{index}` matches digits only, allowing large matching arrays to retain their
+existing chunk commands without permitting arbitrary shell commands.
+
+Single-job analyses continue to use the image's default command. Resource,
+timeout, retry, and array-size parameters are unchanged. The Batch runner uses
+S3 and its job IAM role; it does not depend on workload API passwords or the new
+execution callback credentials.
+
+Republish this configuration to **each target API** before enabling hardened
+execution validation there. Apply the API's Batch policy database migration
+first. Existing published script records do not automatically receive policy
+changes from this repository. The publishing workflow selects the matching
+`staging-latest` or `production-latest` Batch image.
+
+Custom `BATCH_JOB_DEFINITION` values must match the published script's
+`batch_job_definition` or be explicitly approved in
+`batch_execution_config.allowed_job_definitions` by the API administrator.
+Likewise, custom queues must be in the published script policy. Do not approve
+arbitrary image, command, queue, or definition overrides just for compatibility.
+See the [deployment guide](../../deploy/README.md#job-definitions).
+
 ## Matching (`02_perform_matching.R`)
 
 For each site fragment:
@@ -86,4 +113,3 @@ docker run --rm --entrypoint python \
     -v "$PWD/r-analysis:/pipeline:ro" \
     ae-ranalysis /pipeline/tests/test_extraction.py
 ```
-

@@ -115,6 +115,24 @@ jobs:
           "
           echo "::notice::Access token obtained successfully"
 
+      - name: Select the published Batch image
+        env:
+          API_ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("r-analysis/configuration.json")
+          config = json.loads(path.read_text())
+          environment = os.environ["API_ENVIRONMENT"]
+          if environment not in {"staging", "production"}:
+              raise ValueError(f"Unsupported API environment: {environment}")
+          config["batch_image"] = f"avoided-emissions-ranalysis:{environment}-latest"
+          path.write_text(json.dumps(config, indent=2) + "\n")
+          PY
+
       - name: Publish script
         run: |
           cd r-analysis
