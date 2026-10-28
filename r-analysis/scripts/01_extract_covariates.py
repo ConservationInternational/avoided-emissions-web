@@ -261,6 +261,7 @@ def _load_layer_fresh(
             _, da = _open_single_cog(uri, layer_name)
             da = da.rio.clip_box(*clip_bounds)
             _check_grid(layer_name, da, grid)
+            nodata = da.rio.nodata
             arr = da.values
             del da  # free DataArray before full-grid array
             if arr.ndim == 3:
@@ -269,6 +270,8 @@ def _load_layer_fresh(
             del arr  # free full-grid array; only candidate values survive
             if vals.dtype == np.float64:
                 vals = vals.astype(np.float32)
+            if nodata is not None and nodata != 0:
+                vals = np.where(vals == nodata, np.nan, vals).astype(np.float32)
             return vals
         except GridMismatchError:
             raise
@@ -455,7 +458,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     all_layers = list(
         dict.fromkeys(
             config["covariates"]
-            + ["total_biomass_2025"]
+            + ["total_biomass_2000", "fc_2000"]
             + config["exact_match_vars"]
             + [f"fc_{y}" for y in config["fc_years"]]
         )
@@ -557,6 +560,26 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     )
     in_extent = extent_mask_2d.ravel().astype(bool)
     del extent_mask_2d  # free full-grid raster
+
+    # Exclude candidate controls whose pixel centre lies within
+    # min_control_distance_km of any site (done once here rather than in every
+    # match worker).  Treatment pixels are added back below.
+    exclusion_buffer = config.get("sites_exclusion_buffer")
+    if exclusion_buffer:
+        near_sites = rasterize(
+            [(exclusion_buffer, 1)],
+            out_shape=(height, width),
+            transform=transform,
+            fill=0,
+            dtype="uint8",
+            all_touched=False,
+        ).ravel()
+        log.info(
+            "Excluding %d candidate pixels within the site exclusion buffer",
+            int(np.count_nonzero(in_extent & (near_sites > 0))),
+        )
+        in_extent &= near_sites == 0
+        del near_sites
     candidate_mask = in_extent | treatment_mask
     del in_extent, treatment_mask  # free boolean arrays
 
@@ -763,6 +786,12 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             del block
         if writer is not None:
             writer.close()
+        else:
+            pq.write_table(
+                pa.table({c: rows[c][:0] for c in columns}),
+                path,
+                compression="zstd",
+            )
         return written
 
     # Treatment membership mask (numpy bool, ~N bytes).
@@ -787,7 +816,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     _control_pixels_dir = os.path.join(output_dir, "control_pixels")
     os.makedirs(_control_pixels_dir, exist_ok=True)
 
-    if _partition_var:
+    if _partition_var and _control_count > 0:
         # One hive directory + one file per distinct partition value.  For each
         # value we build a boolean mask over the (cheap, single-column) int32
         # partition array, collect that partition's control row indices, and
@@ -831,7 +860,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         )
         del _idx
         log.info(
-            "Written control_pixels/part-0.parquet (%d rows, no partition var)",
+            "Written control_pixels/part-0.parquet (%d rows, unpartitioned)",
             _control_count,
         )
 
@@ -886,7 +915,7 @@ def build_matching_formula(covariates: list[str]) -> dict:
     return {
         "lhs": "treatment",
         "rhs": list(covariates),
-        "formula_str": "treatment ~ " + " + ".join(terms),
+        "formula_str": "treatment ~ " + (" + ".join(terms) or "1"),
     }
 
 
@@ -1006,11 +1035,7 @@ def compute_sites_exclusion_buffer(
     sites_gdf: gpd.GeoDataFrame,
     distance_km: float,
 ) -> dict | None:
-    """Buffer the simplified union of all site geometries by *distance_km*.
-
-    Pre-simplifies each geometry before unioning to dramatically reduce
-    vertex count and computation time for large site sets.
-    """
+    """Buffer sites in local distance-preserving projections, then union."""
     if distance_km <= 0:
         log.info("min_control_distance_km <= 0 — skipping exclusion buffer")
         return None
@@ -1018,30 +1043,35 @@ def compute_sites_exclusion_buffer(
     distance_m = distance_km * 1000
     valid_geoms = [
         make_valid(g) if not g.is_valid else g
-        for g in sites_gdf.geometry
+        for g in sites_gdf.explode(index_parts=False).geometry
         if g is not None and not g.is_empty
     ]
     if not valid_geoms:
-        log.warning("No valid site geometries — skipping exclusion buffer")
-        return None
+        raise ValueError(
+            "Cannot compute exclusion buffer without valid site geometries"
+        )
 
-    # Simplify before union to reduce vertex count (major performance win for
-    # large globally-distributed site sets).
-    simplified = [g.simplify(0.001, preserve_topology=True) for g in valid_geoms]
-    sites_union = unary_union(simplified)
-    if not sites_union.is_valid:
-        sites_union = make_valid(sites_union)
+    # Equal-area projections do not preserve distances: at 60 degrees a
+    # nominal 10 km CEA buffer extends roughly 20 km north/south.
+    local_groups: dict[tuple[float, float], list] = {}
+    for geom in valid_geoms:
+        centre = geom.centroid
+        key = (math.floor(centre.x / 5) * 5 + 2.5, math.floor(centre.y / 5) * 5 + 2.5)
+        local_groups.setdefault(key, []).append(geom)
 
-    sites_series = gpd.GeoSeries([sites_union], crs="EPSG:4326")
-    buffered = (
-        sites_series.to_crs("+proj=cea +datum=WGS84 +units=m")
-        .buffer(distance_m)
-        .to_crs("EPSG:4326")
-    )
-    result = buffered.iloc[0]
+    # Share projection setup for nearby sites instead of doing it per feature.
+    buffered = []
+    for (lon, lat), geoms in local_groups.items():
+        local_crs = f"+proj=aeqd +lat_0={lat} +lon_0={lon} +datum=WGS84 +units=m"
+        projected = gpd.GeoSeries(geoms, crs="EPSG:4326").to_crs(local_crs)
+        buffered.extend(
+            projected.simplify(min(100.0, distance_m / 100), preserve_topology=True)
+            .buffer(distance_m)
+            .to_crs("EPSG:4326")
+        )
+    result = make_valid(unary_union(buffered))
     if result is None or result.is_empty:
-        log.warning("Exclusion buffer is empty after reprojection — returning None")
-        return None
+        raise ValueError("Exclusion buffer is empty after reprojection")
 
     log.info(
         "sites_exclusion_buffer computed (%.1f km buffer, type=%s)",

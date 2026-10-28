@@ -12,6 +12,7 @@ xarray
 rioxarray
 rasterio
 dask
-pyarrow
+# PyArrow 26 requires NumPy 2, incompatible with the system GDAL bindings.
+pyarrow<26
 pyproj
 shapely

@@ -89,16 +89,54 @@ preserve total head-count semantics.
 
 | Variable | Source | Description | Units | Type |
 |---|---|---|---|---|
+| `agb_2000` | External (unmasked GFW AGB-2000) | Aboveground live woody biomass without future loss masking | Mg / ha | 2000 |
+| `total_biomass_2000` | Derived — Mokany et al. root:shoot ratio applied to AGB | Unmasked biomass reference for historical emissions | Mg / ha | 2000 |
 | `agb_2025` | External (Hansen GFC loss-masked) | Aboveground live woody biomass, loss-masked to 2025 | Mg / ha | 2025 |
 | `total_biomass_2025` | Derived — Mokany et al. root:shoot ratio applied to AGB | Total biomass (above + belowground), loss-masked to 2025 | Mg / ha | 2025 |
 | `soil_oc` | SoilGrids ISRIC (ocs_0–30 cm mean) | Soil organic carbon stock, 0–30 cm depth | t / ha | Static |
 | `irr_carbon_2024` | CI external asset (irrC v1a, 30 m, 2024) | Irrecoverable carbon (above + below ground + soil) | Mg C / ha | 2024 |
 
-`total_biomass_2025` is the biomass layer used in the emissions calculation,
-interpreted as whole-cell biomass density at baseline forest cover (see
+`total_biomass_2000` is the biomass layer used in the emissions calculation,
+interpreted as whole-cell biomass density in 2000 (see
 [analysis-outputs.md](analysis-outputs.md#biomass-to-co2e-conversion)). It is
-always extracted during Step 1, and pixels where it is missing are not
-eligible for matching.
+always extracted during Step 1 together with `fc_2000`, and pixels where
+either is missing are not eligible for matching. The 2025 layer is retained
+for other uses, but cannot reconstruct biomass already lost since 2000.
+See [year-2000-biomass-correction.md](year-2000-biomass-correction.md) for
+the correction and calculation details.
+
+#### Generating the historical biomass inputs
+
+The upstream preparation script lives in
+`CI_Impacts/KPI_Code/total-biomass-prep/total_biomass.py`. Its existing
+2025 mode remains the default. For the historical reference, run each stage
+with `--year 2000` (in its configured preparation environment):
+
+```bash
+# Run process-tile for every source tile, then merge, then calc-biomass.
+python total_biomass.py process-tile --year 2000 --tile-index <index>
+python total_biomass.py merge --year 2000
+python total_biomass.py calc-biomass --year 2000
+```
+
+The year-2000 mode never downloads or applies a Hansen future-loss mask.
+It writes separate `agb_2000.tif` and `total_biomass_2000.tif` COGs in both
+`cog_1km/` and `cog_250m/`, using separate intermediate tile prefixes. It
+does not overwrite the 2025 products.
+
+Before deploying the analysis change:
+
+1. Generate and verify all four new COGs, including complete tile coverage,
+   alignment to the analysis grid, source units (whole-cell Mg/ha), valid
+   zeros versus NoData, and retention of biomass in subsequently deforested
+   areas. The 2000 total-biomass output uses `-9999` for missing values;
+   valid zero biomass is not marked missing.
+2. Register/sync the external covariates in the webapp, and rebuild the
+   analysis image. There is deliberately no fallback to 2025 biomass if
+   the 2000 input is unavailable.
+3. Recompute existing analyses; previous loss-masked emissions cannot be
+   corrected by a global multiplier.
+4. Analyze actual COG distributions before adding layer-specific map styles.
 
 ### Land Use
 

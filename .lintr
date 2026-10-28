@@ -10,5 +10,7 @@ linters: linters_with_defaults(
     # File-path comments in script headers are flagged as code — disable.
     commented_code_linter = NULL,
     # UPPER_CASE constants (e.g. MAX_TREATMENT) are intentional.
-    object_name_linter = NULL
+    object_name_linter = NULL,
+    # The analysis scripts consistently use the tidyverse pipe.
+    pipe_consistency_linter = NULL
   )

@@ -267,8 +267,6 @@ def run(params, log=None):
         config["sites_exclusion_buffer"] = params["sites_exclusion_buffer"]
     if params.get("min_control_distance_km") is not None:
         config["min_control_distance_km"] = float(params["min_control_distance_km"])
-    if params.get("match_batch_size") is not None:
-        config["match_batch_size"] = int(params["match_batch_size"])
     if params.get("separation_fallback_mahalanobis") is not None:
         config["separation_fallback_mahalanobis"] = bool(
             params["separation_fallback_mahalanobis"]
@@ -647,6 +645,7 @@ def _collect_results(output_dir, task_id, log):
         "n_sites": summary["n_sites"],
         "n_failed_sites": summary["n_failed_sites"],
         "n_replicates": n_replicates,
+        "biomass_reference_year": summary["biomass_reference_year"],
         "bounds_label": summary["bounds_label"],
         "r_analysis_git_sha": summary.get("r_analysis_git_sha"),
         "total_emissions_avoided_mgco2e": summary[

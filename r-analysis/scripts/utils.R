@@ -3,7 +3,6 @@
 # Loaded by each analysis step via source(). Provides configuration parsing,
 # exact-match group filtering, and Rollbar error tracking.
 
-library(sf)
 library(tidyverse)
 library(jsonlite)
 library(httr)

@@ -13,7 +13,7 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
-from services.analysis_task import queue_analysis_task
+from services.analysis_task import _pack_match_units, queue_analysis_task
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -113,6 +113,16 @@ class TestQueueAnalysisTaskSuccess:
 
 @pytest.mark.unit
 class TestQueueAnalysisTaskValidation:
+    @pytest.mark.parametrize("batch_size", [0, -1, 1.5])
+    def test_rejects_invalid_match_batch_size(self, mocker, batch_size):
+        _setup_happy_path(mocker)
+        with pytest.raises(ValueError, match="match_batch_size"):
+            queue_analysis_task(
+                user_id=str(uuid.uuid4()),
+                match_batch_size=batch_size,
+                **_BASE_KWARGS,
+            )
+
     def test_raises_if_empty_exact_match_vars(self, mocker):
         _setup_happy_path(mocker)
         with pytest.raises(ValueError, match="exact match variable"):
@@ -227,3 +237,33 @@ class TestQueueAnalysisTaskValidation:
             )
         mock_db.add.assert_not_called()
         mock_db.commit.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("batch_size", [1, 3, 25])
+def test_pack_match_units_bounds_large_groups_without_losing_fragments(batch_size):
+    groups = {
+        2: [("B", i) for i in range(4)],
+        1: [("A", i) for i in range(60)],
+    }
+    units = _pack_match_units(groups, batch_size)
+    assert list(units) == list(range(1, len(units) + 1))
+    assert all(1 <= len(members) <= batch_size for members in units.values())
+    assert [member for members in units.values() for member in members] == (
+        groups[1] + groups[2]
+    )
+
+
+@pytest.mark.unit
+def test_exclusion_buffer_uses_site_geometries_not_their_bounding_box(mocker):
+    from services.reference_layers import compute_sites_exclusion_buffer
+
+    db = MagicMock()
+    db.execute.return_value.fetchone.return_value = (None,)
+    mocker.patch("services.reference_layers.get_db", return_value=db)
+    compute_sites_exclusion_buffer(None, 10, site_set_id="test")
+    query = str(db.execute.call_args.args[0])
+    assert "ST_Collect(geom)" in query
+    assert "ST_Extent" not in query
+    assert db.execute.call_args.args[1]["dist_m"] == 10_000
+    db.close.assert_called_once()

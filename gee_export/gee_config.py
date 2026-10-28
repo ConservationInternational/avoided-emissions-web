@@ -222,6 +222,18 @@ COVARIATES = {
         "resample": "mean",
     },
     # Biomass
+    "agb_2000": {
+        "external": True,
+        "description": "Aboveground live woody biomass 2000 (Mg/ha, no post-2000 loss masking)",
+        "category": "biomass",
+        "resample": "mean",
+    },
+    "total_biomass_2000": {
+        "external": True,
+        "description": "Total biomass 2000 — above + belowground (Mg/ha, unmasked historical emissions reference)",
+        "category": "biomass",
+        "resample": "mean",
+    },
     "agb_2025": {
         "external": True,
         "description": "Aboveground live woody biomass 2025 (Mg/ha, Hansen GFC loss-masked)",

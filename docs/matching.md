@@ -72,14 +72,14 @@ for Step 1 details):
 | Step | Script | What it does |
 |---|---|---|
 | 1 — extract | Python | Samples covariate values for treatment and control candidate pixels from COG files; computes matching extent and control exclusion buffer |
-| 2 — match | R | Within each exact-match stratum of each site, fits a propensity model and matches sampled treatment pixels to controls; runs as an AWS Batch array job (each element handles a batch of exact-match groups for one replicate) |
+| 2 — match | R | Within each exact-match stratum of each site, fits a propensity model and matches sampled treatment pixels to controls; each AWS Batch array element handles one bounded unit of site fragments for one replicate |
 | 3 — summarize | R | Computes annual forest loss and emissions for matched pixels, aggregates within each replicate, and reports means and replicate ranges per site-year, per site, and for all sites |
 
 ### Eligible pixels
 
 A pixel is eligible for matching when it has forest cover in the site's
 baseline year (`start_year − 6`, or the first forest-cover year if earlier),
-complete covariate and outcome data (`total_biomass_2025` and every
+complete covariate and outcome data (`total_biomass_2000`, `fc_2000`, and every
 forest-cover year), and a value for every exact-match variable. Treatment and
 control pixels use the same rules. Pixels without forest at baseline cannot
 lose forest, so including them would bias the comparison.
@@ -200,7 +200,12 @@ If site polygons overlap, each overlapping pixel is assigned to only one site
 **Parameter**: `separation_fallback_mahalanobis`  
 **Default**: `false` (must be explicitly enabled)
 
-The distance used within each exact-match stratum is chosen as follows:
+Terms that are constant within the sampled stratum are removed first,
+including one-level factors. If no term varies, every pairing is equally
+good on the selected covariates; matching uses equal distances, no caliper,
+and no fitted propensity scores.
+
+Otherwise, the distance used within each exact-match stratum is chosen as follows:
 
 1. **Fewer than `min_glm_treatment_pixels`** treatment pixels — Mahalanobis
    distance on all covariates. A logistic regression cannot be fitted
@@ -237,7 +242,12 @@ intervals for the avoided emissions, because they do not capture spatial
 dependence or model uncertainty. Fewer than 50 replicates gives imprecise
 bounds; the web app shows a warning.
 
-A site fragment is included only if every replicate produced a match file.
+An exact-match stratum of a site fragment is included only if it has matches
+in every replicate. This keeps the represented population constant across
+replicates: a stratum missing from some replicates must not count as zero
+there. Excluded strata produce an `inconsistent_strata` warning; a fragment
+with no consistently matched stratum is reported as failed. Pixel downloads
+and balance diagnostics use the same included strata as the estimates.
 
 Runtime scales approximately linearly with `n_replicates`.
 
@@ -254,8 +264,15 @@ from the control pool. This prevents matching treatment pixels against
 nearby unprotected pixels that may be influenced by spillover effects from
 the intervention (e.g. wildlife dispersal, edge effects).
 
-The buffer is computed within the extract step from the simplified union of
-all site polygons, using a 0.001° pre-simplification tolerance for performance.
+The buffer is computed once in extraction and rasterized using pixel centres,
+not recomputed in every match worker. Treatment pixels are retained.
+Nearby geometries share local azimuthal-equidistant projections (5-degree
+tiles), rather than a global equal-area projection that distorts distances
+with latitude. Boundaries are simplified by at most the smaller of 100 m
+or 1% of the requested distance before buffering. Buffer distances are
+approximate for very large polygons that span far beyond their local tile.
+The PostGIS submission fallback buffers actual site geometries, not the
+bounding box enclosing them.
 
 ---
 
@@ -298,16 +315,28 @@ distance is used instead.
 
 ### Sampling Weights and Coverage
 
-Totals are scaled to all **eligible** treatment pixels. In each exact-match
-stratum, matched treatment pixels (and their controls) are weighted by
+Totals are scaled to **eligible treatment pixels in consistently matched
+strata**. In each included exact-match stratum, matched treatment pixels
+(and their controls) are weighted by
 `n_eligible / n_matched`. This assumes treatment pixels dropped by the
 caliper resemble matched ones. Pixels that are not eligible (no forest at
-baseline, missing data, or no shared stratum) are not represented.
+baseline, missing data, or no shared stratum) are not represented. Nor are
+pixels in strata that could not be matched in every replicate.
 
 Per-site results report `n_treatment_pixels` (all site pixels),
-`n_eligible_pixels`, `n_sample_pixels` (matched), `coverage_fraction`
-(eligible / site pixels), and `match_rate` (matched / sampled). The web app
+`n_eligible_pixels`, `n_represented_pixels` (eligible pixels in included
+strata), `n_sample_pixels` (matched), `coverage_fraction`
+(represented / all site pixels), and `match_rate` (matched / sampled). The web app
 warns when either fraction is below 80%.
+
+### Batch work allocation
+
+The submission setting `match_batch_size` (default 25) limits the number of
+site fragments in one match unit. Fragments are packed in exact-match-region
+order to share control-data reads, but a large region is split across units
+instead of assigning an unbounded number of sites to one worker. Each array
+element processes one unit and one replicate. Arrays larger than 10,000
+elements are split into chunks without changing per-site statistical models.
 
 ---
 

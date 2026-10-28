@@ -84,6 +84,7 @@ class TestImportExecutionResultsRows:
         _, task_obj = _import(sample_task_id, sample_results_payload)
         meta = task_obj.extra_metadata
         assert meta["n_replicates"] == 3
+        assert meta["biomass_reference_year"] == 2000
         assert meta["n_failed_sites"] == 1
         assert meta["failed_sites"][0]["site_id"] == "site-bad"
         assert meta["bounds_label"] == "Range across matching replicates"

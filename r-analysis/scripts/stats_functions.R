@@ -87,6 +87,19 @@ drop_formula_vars <- function(f, vars) {
 }
 
 
+drop_constant_terms <- function(f, d) {
+    # Remove terms whose variables do not vary within `d` (e.g. a covariate
+    # that is constant within an exact-match stratum).  They carry no
+    # information and a one-level factor breaks glm() and Mahalanobis
+    # distances.  Returns `treatment ~ 1` when no term varies.
+    labels <- attr(terms(f), "term.labels")
+    varies <- vapply(labels, function(l) {
+        all(vapply(all.vars(str2lang(l)), function(v) n_distinct(d[[v]]) > 1, logical(1)))
+    }, logical(1))
+    reformulate(if (any(varies)) labels[varies] else "1", response = "treatment")
+}
+
+
 check_separation <- function(d, f) {
     # Detect univariate (quasi-)complete separation before fitting a GLM:
     #   - factor terms: levels present in only one group
@@ -154,19 +167,30 @@ fit_propensity <- function(f, d) {
 pixel_outcomes <- function(m, start_year, fc_year_min, fc_year_max) {
     # Annual forest loss (ha) and emissions (MgCO2e) for each matched pixel.
     #
-    # total_biomass_2025 is whole-cell biomass density (Mg per ha of cell) at
-    # the baseline forest cover, so a pixel's biomass in year t is
-    #   biomass_t = density * area_ha * fc_t / fc_baseline
+    # total_biomass_2000 is whole-cell biomass density (Mg per ha of cell) in
+    # 2000, so a pixel's biomass in year t is
+    #   biomass_t = density_2000 * area_ha * fc_t / fc_2000
     # and annual emissions are the biomass lost, converted to CO2e.
     years <- seq(baseline_year(start_year, fc_year_min), fc_year_max)
+    required <- c("total_biomass_2000", "fc_2000", "area_ha", paste0("fc_", years))
+    missing <- setdiff(required, names(m))
+    if (length(missing) > 0) stop("Missing outcome columns: ", paste(missing, collapse = ", "))
     fc <- unname(as.matrix(m[, paste0("fc_", years), drop = FALSE]))
-    if (anyNA(fc) || anyNA(m$total_biomass_2025) || anyNA(m$area_ha)) {
+    if (anyNA(fc) || anyNA(m$total_biomass_2000) || anyNA(m$fc_2000) || anyNA(m$area_ha)) {
         stop("Missing forest cover, biomass, or area for matched pixels")
     }
+    if (any(!is.finite(fc)) || any(!is.finite(m$total_biomass_2000)) ||
+        any(!is.finite(m$fc_2000)) || any(!is.finite(m$area_ha)) ||
+        any(m$total_biomass_2000 < 0) || any(m$area_ha <= 0) ||
+        any(fc < 0 | fc > 100) || any(m$fc_2000 < 0 | m$fc_2000 > 100)) {
+        stop("Invalid forest cover, biomass, or area for matched pixels")
+    }
     cover_loss <- fc[, -ncol(fc), drop = FALSE] - fc[, -1, drop = FALSE]
-    baseline <- fc[, 1]
+    if (any(cover_loss < -1e-5) || any(fc[, 1] > m$fc_2000 + 1e-5)) {
+        stop("Forest cover must not increase in the loss-only Hansen series")
+    }
     biomass_per_pct <- ifelse(
-        baseline > 0, m$total_biomass_2025 * m$area_ha / baseline, 0
+        m$fc_2000 > 0, m$total_biomass_2000 * m$area_ha / m$fc_2000, 0
     )
     list(
         years = years[-1],
@@ -177,15 +201,24 @@ pixel_outcomes <- function(m, start_year, fc_year_min, fc_year_max) {
 
 
 aggregate_outcomes <- function(m, outcomes) {
-    # Sum weighted pixel outcomes to one row per year.  "sample_" columns use
-    # matching weights only; "extrapolated_" columns also apply the stratum
-    # weight that scales matched pixels to all eligible site pixels.
+    # Sum weighted pixel outcomes to one row per exact-match stratum (`group`)
+    # and year.  "sample_" columns use matching weights only; "extrapolated_"
+    # columns also apply the stratum weight that scales matched pixels to all
+    # eligible pixels in the stratum.
+    groups <- sort(unique(m$group))
+    idx <- match(m$group, groups)
     w_sample <- m$match_weight
     w_extrap <- m$match_weight * m$sampling_weight
     t <- m$treatment
-    wsum <- function(x, w, rows) colSums(x[rows, , drop = FALSE] * w[rows])
+    wsum <- function(x, w, rows) {
+        out <- matrix(0, length(groups), ncol(x))
+        sums <- rowsum(x[rows, , drop = FALSE] * w[rows], idx[rows])
+        out[as.integer(rownames(sums)), ] <- sums
+        as.vector(out)  # groups vary fastest, matching the columns below
+    }
     tibble(
-        year = outcomes$years,
+        group = rep(groups, times = length(outcomes$years)),
+        year = rep(outcomes$years, each = length(groups)),
         sample_treatment_defor_ha = wsum(outcomes$loss_ha, w_sample, t),
         sample_control_defor_ha = wsum(outcomes$loss_ha, w_sample, !t),
         sample_treatment_emissions_mgco2e = wsum(outcomes$emissions, w_sample, t),
@@ -223,7 +256,8 @@ summarise_replicates <- function(df, by, metrics) {
     # because quantiles of sums are not sums of quantiles.
     n_rep <- n_distinct(df$replicate)
     per_group <- count(df, across(all_of(by)))
-    if (any(per_group$n != n_rep)) {
+    per_replicate <- count(df, across(all_of(c(by, "replicate"))))
+    if (any(per_group$n != n_rep) || any(per_replicate$n != 1L)) {
         stop("summarise_replicates: each group needs one row per replicate")
     }
     fns <- list(mean = mean)

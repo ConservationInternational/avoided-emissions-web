@@ -5,8 +5,8 @@ matched_pixels <- function(control_fc = c(100, 90, 80), weight = 1, n_controls =
     n <- 1 + n_controls
     tibble(
         cell = seq_len(n), treatment = c(TRUE, rep(FALSE, n_controls)),
-        area_ha = 100, total_biomass_2025 = 100,
-        match_group = "s_1", sampling_weight = weight,
+        area_ha = 100, total_biomass_2000 = 100, fc_2000 = 100,
+        group = "s", match_group = "s_1", sampling_weight = weight,
         fc_2014 = c(100, rep(control_fc[1], n_controls)),
         fc_2015 = c(100, rep(control_fc[2], n_controls)),
         fc_2016 = c(100, rep(control_fc[3], n_controls))
@@ -32,8 +32,35 @@ test_that("zero baseline forest emits nothing", {
 
 test_that("missing outcome inputs fail instead of becoming zero (F7)", {
     m <- matched_pixels()
-    m$total_biomass_2025[2] <- NA
+    m$total_biomass_2000[2] <- NA
     expect_error(pixel_outcomes(m, 2020, 2014, 2016), "Missing")
+})
+
+test_that("emissions use year-2000 stock, not remaining stock at the site baseline", {
+    m <- matched_pixels(control_fc = c(50, 0, 0))
+    out <- pixel_outcomes(m, 2020, 2014, 2016)
+    expect_equal(out$emissions[2, 1], 100 * 100 * 0.5 * 0.5 * 44 / 12)
+    m$fc_2014[2] <- 100
+    out <- pixel_outcomes(m, 2020, 2014, 2016)
+    expect_equal(out$emissions[2, 1], 100 * 100 * 0.5 * 44 / 12)
+})
+
+test_that("invalid outcome inputs cannot produce emissions estimates", {
+    m <- matched_pixels()
+    m$total_biomass_2000[2] <- -9999
+    expect_error(pixel_outcomes(m, 2020, 2014, 2016), "Invalid")
+    m$total_biomass_2000[2] <- 100
+    m$fc_2000[2] <- NA
+    expect_error(pixel_outcomes(m, 2020, 2014, 2016), "Missing")
+    m$fc_2000[2] <- 100
+    m$fc_2015[2] <- 101
+    expect_error(pixel_outcomes(m, 2020, 2014, 2016), "Invalid")
+    m$fc_2015[2] <- 100
+    m$fc_2014[2] <- 90
+    expect_error(pixel_outcomes(m, 2020, 2014, 2016), "must not increase")
+    m$total_biomass_2025 <- 0
+    m$total_biomass_2000 <- NULL
+    expect_error(pixel_outcomes(m, 2020, 2014, 2016), "Missing outcome columns: total_biomass_2000")
 })
 
 test_that("control weight equals treated weight in every matched set (F2)", {
@@ -69,6 +96,16 @@ test_that("stratum weights scale sample totals (F9)", {
     expect_equal(agg$extrapolated_control_defor_ha, 4 * agg$sample_control_defor_ha)
 })
 
+test_that("outcomes are aggregated per stratum and year", {
+    a <- matched_pixels(weight = 2)
+    b <- mutate(matched_pixels(control_fc = c(100, 100, 50)), group = "r", match_group = "r_1")
+    m <- bind_rows(a, b)
+    agg <- aggregate_outcomes(m, pixel_outcomes(m, 2020, 2014, 2016))
+    expect_equal(agg$group, c("r", "s", "r", "s"))
+    expect_equal(agg$year, c(2015, 2015, 2016, 2016))
+    expect_equal(agg$extrapolated_control_defor_ha, c(0, 20, 50, 20))
+})
+
 test_that("replicate bounds are computed after summing (F3, F8)", {
     df <- tibble(
         replicate = c(1, 2, 1, 2), site_id = c("A", "A", "B", "B"),
@@ -90,6 +127,8 @@ test_that("a single replicate has no bounds", {
 
 test_that("summarise_replicates rejects incomplete replicates", {
     df <- tibble(replicate = c(1, 2, 1), site_id = c("A", "A", "B"), value = 1)
+    expect_error(summarise_replicates(df, "site_id", "value"), "one row per replicate")
+    df <- tibble(replicate = c(1, 1, 1, 2), site_id = c("A", "A", "B", "B"), value = 1)
     expect_error(summarise_replicates(df, "site_id", "value"), "one row per replicate")
 })
 
@@ -121,6 +160,12 @@ test_that("drop_formula_vars removes terms using separated variables", {
     f <- treatment ~ x + factor(eco) + z
     expect_equal(deparse(drop_formula_vars(f, "eco")), "treatment ~ x + z")
     expect_equal(drop_formula_vars(treatment ~ x, "x"), treatment ~ x)
+})
+
+test_that("terms that do not vary within a stratum are dropped", {
+    d <- tibble(treatment = c(TRUE, FALSE, FALSE), x = 1:3, eco = 5, k = 2)
+    expect_equal(deparse(drop_constant_terms(treatment ~ x + factor(eco) + k, d)), "treatment ~ x")
+    expect_equal(deparse(drop_constant_terms(treatment ~ factor(eco) + k, d)), "treatment ~ 1")
 })
 
 test_that("SMD is invariant to weight scale (F14)", {

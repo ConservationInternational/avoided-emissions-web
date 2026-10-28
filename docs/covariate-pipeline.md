@@ -67,7 +67,8 @@ Derived layers are computed inside GEE before export:
 | `pop_growth` | Annualised log-growth rate from WorldPop 2000 and 2020 counts |
 | `friction_surface` | Road-proximity composite from OpenStreetMap friction surface data |
 | `fc_YYYY` | Annual forest cover fraction derived from Hansen GFC cumulative loss layers; `fc_t = (treecover2000 > 0) ∧ (loss_year > t)` |
-| `total_biomass_2025` | AGB from external asset × (1 + root:shoot ratio from Mokany et al. 2006), masked by Hansen loss to 2025 |
+| `total_biomass_2000` | Unmasked AGB-2000 plus belowground biomass from the Mokany et al. formula; historical emissions reference |
+| `total_biomass_2025` | Corresponding remaining-stock layer, masked by Hansen loss to 2025; not used for historical emissions |
 
 ### Output destination
 
@@ -192,8 +193,8 @@ s3://{intermediate_s3_uri}/
   prep_summary.json             # matching extent and exclusion buffer
 ```
 
-The control distance exclusion and `defor_pre_intervention` are applied in
-Step 2 (see [matching.md](matching.md)).
+Control distance exclusion is rasterized once in Step 1.
+`defor_pre_intervention` is added in Step 2 (see [matching.md](matching.md)).
 
 ### Covariate value extraction details
 
@@ -226,6 +227,8 @@ s3://{S3_BUCKET}/{S3_PREFIX}/
     pop_2015.tif
     pop_2020.tif
     pop_growth.tif
+    agb_2000.tif
+    total_biomass_2000.tif
     agb_2025.tif
     total_biomass_2025.tif
     soil_oc.tif

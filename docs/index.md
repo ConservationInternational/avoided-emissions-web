@@ -13,6 +13,7 @@ variables, and a system overview see the top-level [README](../README.md).
 | [covariate-pipeline.md](covariate-pipeline.md) | COG processing pipeline — GEE export → tile merge → reference layer rasterization → pixel extraction |
 | [matching.md](matching.md) | Propensity score matching — methodology, every parameter explained, fallback behaviour |
 | [analysis-outputs.md](analysis-outputs.md) | Analysis output reference — S3 bucket layout, all output files with column schemas |
+| [year-2000-biomass-correction.md](year-2000-biomass-correction.md) | Why emissions use unmasked year-2000 biomass, and how biomass enters the calculations |
 | [statistical-pipeline-review.md](statistical-pipeline-review.md) | Statistical correctness review, prioritized remediation, maintainability, and performance plan |
 
 ## System Overview

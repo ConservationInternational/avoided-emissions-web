@@ -7,8 +7,9 @@
 # scope -- site-year, site total, and portfolio -- because quantiles of sums
 # are not sums of quantiles.
 #
-# A site fragment is included only when it has a match file for every
-# replicate; otherwise it is reported as failed.
+# An exact-match stratum of a site fragment is included only when it was
+# matched in every replicate; fragments with no such stratum are reported as
+# failed.
 #
 # Output (in {output_dir}):
 #   results_by_site_year.csv, results_by_site_total.csv, results_summary.json,
@@ -75,13 +76,105 @@ matched_files <- tibble(
     path = match_paths,
     id_numeric = as.integer(sub("^m_([0-9]+)_rep.*$", "\\1", basename(match_paths))),
     replicate = as.integer(sub("^.*_rep([0-9]+)\\.rds$", "\\1", basename(match_paths)))
-)
-included_ids <- matched_files %>%
+) %>%
     group_by(id_numeric) %>%
     filter(n_distinct(replicate) == N_REPLICATES) %>%
-    pull(id_numeric) %>%
-    unique()
-matched_files <- filter(matched_files, id_numeric %in% included_ids)
+    ungroup()
+
+
+# -- Read each match file once -----------------------------------------------
+
+stratum_rows <- list()
+strata <- list()
+count_rows <- list()
+cov_rows <- list()
+diagnostics <- list()
+detail_path <- out_path("results_pixel_year_emissions.csv")
+if (file.exists(detail_path)) file.remove(detail_path)
+
+for (i in seq_len(nrow(matched_files))) {
+    file_info <- matched_files[i, ]
+    frag <- filter(fragments, id_numeric == file_info$id_numeric)
+    m <- readRDS(file_info$path)
+    outcomes <- pixel_outcomes(m, frag$start_year, FC_YEAR_MIN, FC_YEAR_MAX)
+    ids <- tibble(id_numeric = file_info$id_numeric, site_id = frag$site_id,
+                  replicate = file_info$replicate)
+    stratum_rows[[i]] <- bind_cols(ids, aggregate_outcomes(m, outcomes))
+    # Eligible pixels per matched stratum (sampling_weight = n_eligible / n_matched).
+    strata[[i]] <- bind_cols(ids, m %>%
+        filter(treatment) %>%
+        group_by(group) %>%
+        summarise(n_matched = n(), n_eligible = sampling_weight[1] * n(), .groups = "drop"))
+    count_rows[[i]] <- bind_cols(ids, tibble(
+        n_eligible = m$n_eligible[1], n_sampled = m$n_sampled[1],
+        n_control_pool = m$n_control_pool[1], n_control_sampled = m$n_control_sampled[1]
+    ))
+    if (file_info$replicate == 1L) {
+        n_years <- length(outcomes$years)
+        write_csv(
+            tibble(
+                cell = rep(m$cell, times = n_years),
+                id_numeric = file_info$id_numeric,
+                site_id = frag$site_id,
+                group = rep(m$group, times = n_years),
+                year = rep(outcomes$years, each = nrow(m)),
+                treatment = rep(m$treatment, times = n_years),
+                match_group = rep(m$match_group, times = n_years),
+                match_weight = rep(m$match_weight, times = n_years),
+                sampling_weight = rep(m$sampling_weight, times = n_years),
+                forest_loss_ha = as.vector(outcomes$loss_ha),
+                emissions_mgco2e = as.vector(outcomes$emissions)
+            ),
+            detail_path, append = file.exists(detail_path)
+        )
+        cov_rows[[length(cov_rows) + 1]] <- m %>%
+            select(cell, group, treatment, match_group, match_weight, pscore,
+                   any_of(COVARIATES)) %>%
+            mutate(id_numeric = file_info$id_numeric, site_id = frag$site_id, .before = 1)
+        diagnostics <- c(diagnostics, attr(m, "group_diagnostics"))
+    }
+}
+if (!file.exists(detail_path)) {
+    write_csv(tibble(cell = integer(), site_id = character(), year = integer()), detail_path)
+}
+
+# A stratum is included only if it was matched in every replicate, so that all
+# replicates estimate the same population.  Otherwise a stratum missing from
+# some replicates would count as zero there, biasing the mean and the range.
+strata <- bind_rows(
+    tibble(id_numeric = integer(), site_id = character(), replicate = integer(),
+           group = character(), n_matched = integer(), n_eligible = numeric()),
+    strata
+)
+complete_strata <- strata %>%
+    count(id_numeric, group) %>%
+    filter(n == N_REPLICATES) %>%
+    select(id_numeric, group)
+n_inconsistent_strata <- nrow(distinct(strata, id_numeric, group)) - nrow(complete_strata)
+strata <- semi_join(strata, complete_strata, by = c("id_numeric", "group"))
+included_ids <- unique(complete_strata$id_numeric)
+
+if (n_inconsistent_strata > 0) {
+    filtered_detail <- tempfile("pixel_year_", tmpdir = config$output_dir, fileext = ".csv")
+    read_csv_chunked(
+        detail_path,
+        SideEffectChunkCallback$new(function(chunk, pos) {
+            write_csv(
+                semi_join(chunk, complete_strata, by = c("id_numeric", "group")),
+                filtered_detail, append = file.exists(filtered_detail)
+            )
+        }),
+        chunk_size = 100000L, progress = FALSE,
+        col_types = cols(
+            .default = col_double(), site_id = col_character(), group = col_character(),
+            match_group = col_character(), treatment = col_logical()
+        )
+    )
+    if (!file.rename(filtered_detail, detail_path)) stop("Could not replace filtered pixel-year output")
+}
+
+
+# -- Work reconciliation -----------------------------------------------------
 
 # Failure markers for outputs that were later produced (e.g. a retried spot
 # job) are ignored.  Worker-level markers (failed_array_*.json) are kept.
@@ -104,6 +197,9 @@ mapped_keys <- if (is.null(GROUP_MAPPING)) {
 failure_reason <- function(id, site_id, sub_site_index) {
     mk <- Filter(function(x) identical(as.integer(x$id_numeric), as.integer(id)), fragment_markers)
     if (length(mk) > 0) return(mk[[1]]$error)
+    if (id %in% matched_files$id_numeric) {
+        return("No exact-match stratum was matched in every replicate")
+    }
     if (!is.null(mapped_keys) && !paste(site_id, sub_site_index, sep = "\r") %in% mapped_keys) {
         return("Site has no exact-match region assignment and was not matched")
     }
@@ -112,7 +208,9 @@ failure_reason <- function(id, site_id, sub_site_index) {
     }
     "No match output for one or more replicates"
 }
-failed_fragments <- filter(fragments, !id_numeric %in% included_ids)
+# Fragments without any pixel (e.g. slivers smaller than a pixel) have nothing
+# to estimate and are not failures.
+failed_fragments <- filter(fragments, !id_numeric %in% included_ids, n_site_pixels > 0)
 failed_fragments$error <- vapply(seq_len(nrow(failed_fragments)), function(i) {
     failure_reason(failed_fragments$id_numeric[i], failed_fragments$site_id[i],
                    failed_fragments$sub_site_index[i])
@@ -123,57 +221,8 @@ write_csv(
 )
 n_failed_sites <- n_distinct(failed_fragments$site_id)
 message("  ", length(included_ids), " fragment(s) included; ", nrow(failed_fragments),
-        " fragment(s) in ", n_failed_sites, " site(s) failed")
-
-
-# -- Read each match file once -----------------------------------------------
-
-rep_rows <- list()
-count_rows <- list()
-cov_rows <- list()
-diagnostics <- list()
-detail_path <- out_path("results_pixel_year_emissions.csv")
-if (file.exists(detail_path)) file.remove(detail_path)
-
-for (i in seq_len(nrow(matched_files))) {
-    file_info <- matched_files[i, ]
-    frag <- filter(fragments, id_numeric == file_info$id_numeric)
-    m <- readRDS(file_info$path)
-    outcomes <- pixel_outcomes(m, frag$start_year, FC_YEAR_MIN, FC_YEAR_MAX)
-    rep_rows[[i]] <- aggregate_outcomes(m, outcomes) %>%
-        mutate(site_id = frag$site_id, replicate = file_info$replicate)
-    count_rows[[i]] <- tibble(
-        site_id = frag$site_id, replicate = file_info$replicate,
-        n_eligible = m$n_eligible[1], n_sampled = m$n_sampled[1],
-        n_matched = sum(m$treatment), n_control_pool = m$n_control_pool[1],
-        n_control_sampled = m$n_control_sampled[1]
-    )
-    if (file_info$replicate == 1L) {
-        n_years <- length(outcomes$years)
-        write_csv(
-            tibble(
-                cell = rep(m$cell, times = n_years),
-                site_id = frag$site_id,
-                year = rep(outcomes$years, each = nrow(m)),
-                treatment = rep(m$treatment, times = n_years),
-                match_group = rep(m$match_group, times = n_years),
-                match_weight = rep(m$match_weight, times = n_years),
-                sampling_weight = rep(m$sampling_weight, times = n_years),
-                forest_loss_ha = as.vector(outcomes$loss_ha),
-                emissions_mgco2e = as.vector(outcomes$emissions)
-            ),
-            detail_path, append = file.exists(detail_path)
-        )
-        cov_rows[[length(cov_rows) + 1]] <- m %>%
-            select(cell, treatment, match_group, match_weight, pscore,
-                   any_of(COVARIATES)) %>%
-            mutate(site_id = frag$site_id, .before = 1)
-        diagnostics <- c(diagnostics, attr(m, "group_diagnostics"))
-    }
-}
-if (!file.exists(detail_path)) {
-    write_csv(tibble(cell = integer(), site_id = character(), year = integer()), detail_path)
-}
+        " fragment(s) in ", n_failed_sites, " site(s) failed; ", n_inconsistent_strata,
+        " stratum/strata excluded for not matching in every replicate")
 
 
 # -- Estimates ---------------------------------------------------------------
@@ -187,26 +236,37 @@ metric_cols <- c(
     "extrapolated_forest_loss_avoided_ha", "extrapolated_emissions_avoided_mgco2e"
 )
 
-# Fragments are summed to sites within each replicate.
+# Strata and fragments are summed to sites within each replicate.
 empty_metrics <- as_tibble(setNames(rep(list(numeric()), 8), metric_cols[1:8]))
 site_year_rep <- bind_rows(
-    tibble(replicate = integer(), site_id = character(), year = integer()),
-    empty_metrics, rep_rows
+    tibble(id_numeric = integer(), group = character(), replicate = integer(),
+           site_id = character(), year = integer()),
+    empty_metrics, stratum_rows
 ) %>%
+    semi_join(complete_strata, by = c("id_numeric", "group")) %>%
     group_by(replicate, site_id, year) %>%
     summarise(across(any_of(metric_cols), sum), .groups = "drop") %>%
     add_avoided()
 
 site_counts <- bind_rows(
-    tibble(site_id = character(), replicate = integer(), n_eligible = numeric(),
-           n_sampled = numeric(), n_matched = numeric(), n_control_pool = numeric(),
+    tibble(id_numeric = integer(), site_id = character(), replicate = integer(),
+           n_eligible = numeric(), n_sampled = numeric(), n_control_pool = numeric(),
            n_control_sampled = numeric()),
     count_rows
 ) %>%
+    filter(id_numeric %in% included_ids) %>%
+    left_join(
+        strata %>%
+            group_by(id_numeric, replicate) %>%
+            summarise(n_matched = sum(n_matched), n_represented = sum(n_eligible),
+                      .groups = "drop"),
+        by = c("id_numeric", "replicate")
+    ) %>%
     group_by(site_id) %>%
     summarise(
         n_sample_pixels = as.integer(round(sum(n_matched) / N_REPLICATES)),
         n_eligible_pixels = sum(n_eligible) / N_REPLICATES,
+        n_represented_pixels = sum(n_represented) / N_REPLICATES,
         sampled_fraction = sum(n_sampled) / sum(n_eligible),
         match_rate = sum(n_matched) / sum(n_sampled),
         n_control_pool = sum(n_control_pool) / N_REPLICATES,
@@ -214,7 +274,8 @@ site_counts <- bind_rows(
         .groups = "drop"
     ) %>%
     left_join(select(sites, site_id, n_site_pixels), by = "site_id") %>%
-    mutate(coverage_fraction = n_eligible_pixels / n_site_pixels)
+    # Share of the site's pixels that the estimates represent.
+    mutate(coverage_fraction = n_represented_pixels / n_site_pixels)
 
 results_by_year <- (if (nrow(site_year_rep) > 0) {
     summarise_replicates(site_year_rep, c("site_id", "year"), metric_cols)
@@ -298,10 +359,13 @@ if (nrow(site_total_rep) > 0) {
 # -- Match quality -----------------------------------------------------------
 
 cov_data <- bind_rows(
-    tibble(site_id = character(), cell = numeric(), treatment = logical(),
-           match_group = character(), match_weight = numeric(), pscore = numeric()),
+    tibble(id_numeric = integer(), site_id = character(), cell = numeric(),
+           group = character(), treatment = logical(), match_group = character(),
+           match_weight = numeric(), pscore = numeric()),
     cov_rows
-)
+) %>%
+    semi_join(complete_strata, by = c("id_numeric", "group")) %>%
+    select(-id_numeric, -group)
 covariates <- intersect(COVARIATES, names(cov_data))
 write_csv(select(cov_data, -pscore), out_path("results_pixel_covariates.csv"))
 write_csv(
@@ -447,11 +511,22 @@ if (nrow(low_coverage) > 0) {
         code = "low_coverage",
         message = paste0(
             nrow(low_coverage), " site(s) have less than ", LOW_COVERAGE * 100,
-            "% of their pixels eligible for matching (forested with complete data) or ",
-            "less than ", LOW_COVERAGE * 100, "% of sampled pixels matched. Totals cover ",
-            "eligible pixels only and assume unmatched pixels resemble matched ones."
+            "% of their pixels represented by the estimates (forested, complete data, ",
+            "in an exact-match stratum with matches) or less than ", LOW_COVERAGE * 100,
+            "% of sampled pixels matched. Totals cover represented pixels only and ",
+            "assume unmatched pixels in matched strata resemble matched ones."
         ),
         affected_sites = site_names(low_coverage$site_id)
+    )
+}
+
+if (n_inconsistent_strata > 0) {
+    warnings[[length(warnings) + 1]] <- list(
+        code = "inconsistent_strata",
+        message = paste0(
+            n_inconsistent_strata, " exact-match stratum/strata were matched in only some ",
+            "replicates and were excluded from the estimates, so their pixels are not represented."
+        )
     )
 }
 
@@ -470,6 +545,7 @@ summary_data <- list(
     n_failed_sites = n_failed_sites,
     random_seed = RANDOM_SEED,
     n_replicates = N_REPLICATES,
+    biomass_reference_year = 2000L,
     bounds_label = BOUNDS_LABEL,
     r_analysis_git_sha = Sys.getenv("CODE_VERSION", unset = NA_character_),
     extrapolated_total_emissions_avoided_mgco2e = total_value("extrapolated_emissions_avoided_mgco2e"),

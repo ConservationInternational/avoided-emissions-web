@@ -5,10 +5,11 @@
 # outside all sites using a per-stratum logistic propensity model, or
 # Mahalanobis distance when the stratum is too small or separated.
 #
-# On AWS Batch each array element processes one batch of match units (the
-# exact-match groups in config$exact_match_group_mapping, or sites when no
-# mapping is given) for one replicate:
-#   batch_index     = floor(array_index / N_REPLICATES)
+# On AWS Batch each array element processes one match unit (an entry of
+# config$exact_match_group_mapping, which the webapp packs to at most
+# match_batch_size site fragments, or one site when no mapping is given) for
+# one replicate:
+#   unit_index      = floor(array_index / N_REPLICATES)
 #   replicate_index = (array_index %% N_REPLICATES) + 1
 #
 # Output, per site fragment {id} and replicate {k}:
@@ -49,16 +50,10 @@ MAX_CONTROLS <- config$max_controls_per_treatment
 RANDOM_SEED <- if (is.null(config$random_seed)) NULL else as.integer(config$random_seed)
 N_REPLICATES <- if (is.null(config$n_replicates)) 1L else as.integer(config$n_replicates)
 SEPARATION_FALLBACK <- isTRUE(config$separation_fallback_mahalanobis)
-MIN_CONTROL_DISTANCE_KM <- if (is.null(config$min_control_distance_km)) {
-    10
-} else {
-    as.numeric(config$min_control_distance_km)
-}
 EXACT_MATCH_VARS <- config$exact_match_vars
 MATCHING_METHOD <- if (is.null(config$matching_method)) "optimal" else config$matching_method
-MATCH_BATCH_SIZE <- if (is.null(config$match_batch_size)) 1L else as.integer(config$match_batch_size)
 FC_YEARS <- as.integer(config$fc_years)
-FC_COLS <- paste0("fc_", FC_YEARS)
+FC_COLS <- unique(c("fc_2000", paste0("fc_", FC_YEARS)))
 GROUP_MAPPING <- fromJSON(config$config_path, simplifyVector = FALSE)$exact_match_group_mapping
 
 if (length(EXACT_MATCH_VARS) == 0) {
@@ -74,20 +69,6 @@ sites <- read_parquet(
     col_select = c("site_id", "site_name", "id_numeric", "sub_site_index", "start_year")
 ) %>% as_tibble()
 
-grid_meta <- fromJSON(file.path(config$output_dir, "grid_metadata.json"))
-
-cell_to_lonlat <- function(cells, gm) {
-    # Pixel-centre lon/lat from the affine transform [a, b, c, d, e, f]:
-    #   x = c + col * a,  y = f + row * e
-    tf <- gm$transform
-    rows <- cells %/% gm$width
-    cols <- cells %% gm$width
-    data.frame(
-        lon = tf[3] + (cols + 0.5) * tf[1],
-        lat = tf[6] + (rows + 0.5) * tf[5]
-    )
-}
-
 treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
 treatment_table <- read_parquet(file.path(config$output_dir, "treatment_pixels.parquet")) %>%
     as_tibble()
@@ -99,27 +80,6 @@ control_pixels_uri <- if (!is.null(config$control_pixels_s3_uri)) {
     file.path(config$output_dir, "control_pixels")
 }
 control_dataset <- open_dataset(control_pixels_uri)
-
-# Buffer around all sites; controls inside it are excluded.
-all_sites_buffer <- NULL
-if (MIN_CONTROL_DISTANCE_KM > 0) {
-    buffer_geojson <- config$sites_exclusion_buffer
-    if (is.null(buffer_geojson)) {
-        buffer_geojson <- fromJSON(
-            file.path(config$output_dir, "prep_summary.json")
-        )$sites_exclusion_buffer
-    }
-    if (is.null(buffer_geojson)) {
-        stop("sites_exclusion_buffer is required when min_control_distance_km > 0")
-    }
-    s2_state <- sf_use_s2()
-    sf_use_s2(FALSE)
-    all_sites_buffer <- st_make_valid(st_set_crs(
-        st_as_sfc(as.character(toJSON(buffer_geojson, auto_unbox = TRUE)), GeoJSON = TRUE),
-        4326
-    ))
-    sf_use_s2(s2_state)
-}
 
 formula_json <- fromJSON(file.path(config$output_dir, "formula.json"))
 f <- as.formula(formula_json$formula_str)
@@ -145,22 +105,16 @@ select_work <- function() {
         return(list(sites = mapped, replicates = all_reps))
     }
     ai <- as.integer(array_index)
-    batch_idx <- ai %/% N_REPLICATES
+    unit <- ai %/% N_REPLICATES + 1L
     replicate <- ai %% N_REPLICATES + 1L
-    units <- if (is.null(GROUP_MAPPING)) {
-        as.character(sort(sites$id_numeric))
-    } else {
-        names(GROUP_MAPPING)
-    }
-    in_batch <- (seq_along(units) - 1L) %/% MATCH_BATCH_SIZE == batch_idx
-    message("Array index ", ai, ": batch ", batch_idx + 1L, ", replicate ",
-            replicate, ", ", sum(in_batch), " unit(s)")
+    message("Array index ", ai, ": unit ", unit, ", replicate ", replicate)
     if (is.null(GROUP_MAPPING)) {
-        selected <- filter(sites, id_numeric %in% as.integer(units[in_batch]))
-    } else {
-        members <- unlist(GROUP_MAPPING[in_batch], recursive = FALSE)
-        keys <- vapply(members, function(m) paste(m[[1]], m[[2]], sep = "\r"), character(1))
+        selected <- filter(sites, id_numeric == sort(sites$id_numeric)[unit])
+    } else if (unit <= length(GROUP_MAPPING)) {
+        keys <- vapply(GROUP_MAPPING[[unit]], function(m) paste(m[[1]], m[[2]], sep = "\r"), character(1))
         selected <- filter(sites, paste(site_id, sub_site_index, sep = "\r") %in% keys)
+    } else {
+        selected <- sites[0, ]
     }
     list(sites = selected, replicates = replicate)
 }
@@ -169,13 +123,13 @@ select_work <- function() {
 # -- Data loading ------------------------------------------------------------
 
 load_worker_pixels <- function(site_rows) {
-    # Treatment pixels for every site in this batch plus the candidate
-    # controls for their exact-match strata, loaded once per worker.  Pixels
-    # missing an exact-match value are dropped and the distance exclusion is
-    # applied to controls here because it does not depend on the site.
+    # Treatment pixels for every site in this unit plus the candidate controls
+    # for their exact-match strata, loaded once per worker.  Pixels missing an
+    # exact-match value are dropped.  Controls near any site were already
+    # excluded by the extract step.
     needed <- unique(c(
         "cell", "area_ha", EXACT_MATCH_VARS, setdiff(all.vars(f), "treatment"),
-        "total_biomass_2025", FC_COLS
+        "total_biomass_2000", FC_COLS
     ))
     tk <- treatment_key %>%
         filter(id_numeric %in% site_rows$id_numeric) %>%
@@ -202,23 +156,7 @@ load_worker_pixels <- function(site_rows) {
     pixels <- bind_rows(t_rows, c_rows) %>%
         mutate(treatment = !is.na(id_numeric)) %>%
         filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.x)))
-
-    if (!is.null(all_sites_buffer)) {
-        ctrl <- which(!pixels$treatment)
-        points <- st_as_sf(
-            cell_to_lonlat(pixels$cell[ctrl], grid_meta),
-            coords = c("lon", "lat"), crs = 4326
-        )
-        # The buffer is validated under planar (GEOS) rules, so test with S2
-        # off; at 1 km resolution the difference is sub-pixel.
-        s2_state <- sf_use_s2()
-        sf_use_s2(FALSE)
-        too_close <- lengths(st_intersects(points, all_sites_buffer)) > 0
-        sf_use_s2(s2_state)
-        if (any(too_close)) pixels <- pixels[-ctrl[too_close], ]
-        message("  Excluded ", sum(too_close), " control pixels within ",
-                MIN_CONTROL_DISTANCE_KM, " km of any site")
-    }
+    pixels$group <- interaction(pixels[EXACT_MATCH_VARS], drop = TRUE)
     pixels
 }
 
@@ -226,14 +164,15 @@ load_worker_pixels <- function(site_rows) {
 # -- Matching ----------------------------------------------------------------
 
 run_matcher <- function(gd, method, mf, lp) {
-    # Match one stratum.  `lp` is the propensity linear predictor (NULL for
-    # Mahalanobis).  Both backends apply the same caliper: CALIPER_WIDTH
-    # standard deviations of the linear predictor, propensity matching only.
+    # Match one stratum on the distance `lp` (a propensity linear predictor),
+    # or on Mahalanobis distance when `lp` is NULL.  Both backends apply the
+    # same caliper: CALIPER_WIDTH standard deviations of the linear predictor,
+    # for propensity matching only.
     caliper <- if (method == "glm" && CALIPER_WIDTH > 0) CALIPER_WIDTH * sd(lp) else NULL
     if (MATCHING_METHOD == "nearest") {
         mi <- matchit(
             mf, data = gd, method = "nearest",
-            distance = if (method == "glm") lp else "mahalanobis",
+            distance = if (is.null(lp)) "mahalanobis" else lp,
             ratio = MAX_CONTROLS, replace = FALSE,
             caliper = caliper, std.caliper = FALSE
         )
@@ -243,11 +182,11 @@ run_matcher <- function(gd, method, mf, lp) {
         md <- md[, setdiff(names(md), c("distance", "weights", "subclass"))]
         return(set_match_weights(md))
     }
-    dists <- if (method == "glm") {
+    dists <- if (is.null(lp)) {
+        match_on(mf, data = gd)
+    } else {
         # Passing the caliper here builds a sparse distance matrix.
         match_on(setNames(lp, rownames(gd)), z = gd$treatment, caliper = caliper)
-    } else {
-        match_on(mf, data = gd)
     }
     m <- if (MAX_CONTROLS > 0) {
         pairmatch(dists, controls = MAX_CONTROLS, data = gd, remove.unmatchables = TRUE)
@@ -266,16 +205,21 @@ run_matcher <- function(gd, method, mf, lp) {
 match_stratum <- function(gd, f) {
     # Choose the distance for one exact-match stratum and match it.
     rownames(gd) <- NULL
+    mf <- drop_constant_terms(f, gd)
     method <- "glm"
-    mf <- f
     lp <- NULL
     details <- NULL
-    if (sum(gd$treatment) < MIN_GLM) {
+    if (length(attr(terms(mf), "term.labels")) == 0) {
+        # No covariate varies: pixels are alike on observables, so every
+        # pairing is equally good.
+        method <- "constant"
+        lp <- rep(0, nrow(gd))
+    } else if (sum(gd$treatment) < MIN_GLM) {
         method <- "mahalanobis"
     } else {
-        sep <- check_separation(gd, f)
+        sep <- check_separation(gd, mf)
         if (!sep$separated) {
-            fit <- fit_propensity(f, gd)
+            fit <- fit_propensity(mf, gd)
             if (fit$separated) {
                 sep <- list(
                     separated = TRUE, sep_vars = character(0),
@@ -291,10 +235,10 @@ match_stratum <- function(gd, f) {
                 return(list(result = NULL, diag = list(method = "none", separation_details = details)))
             }
             method <- "mahalanobis"
-            mf <- drop_formula_vars(f, sep$sep_vars)
+            mf <- drop_formula_vars(mf, sep$sep_vars)
         }
     }
-    gd$pscore <- if (is.null(lp)) NA_real_ else plogis(lp)
+    gd$pscore <- if (method == "glm") plogis(lp) else NA_real_
     error <- NULL
     result <- tryCatch(
         suppressWarnings(run_matcher(gd, method, mf, lp)),
@@ -389,7 +333,9 @@ process_site <- function(site, pixels, replicates) {
             ", id ", this_id, "), replicate(s) ", paste(todo, collapse = ","))
 
     n_site_pixels <- sum(treatment_key$id_numeric == this_id)
-    vals <- filter(pixels, !treatment | id_numeric == this_id)
+    # This site's treatment pixels and the controls in its strata only.
+    is_site <- pixels$treatment & pixels$id_numeric %in% this_id
+    vals <- pixels[is_site | (!pixels$treatment & pixels$group %in% pixels$group[is_site]), ]
 
     this_f <- f
     defor <- defor_pre_intervention(vals, site$start_year, FC_YEARS)
@@ -400,7 +346,7 @@ process_site <- function(site, pixels, replicates) {
 
     # Eligible pixels: complete covariates and outcome inputs, and forest at
     # the site's baseline year (pixels without forest cannot lose any).
-    required <- unique(c(setdiff(all.vars(this_f), "treatment"), "total_biomass_2025", FC_COLS))
+    required <- unique(c(setdiff(all.vars(this_f), "treatment"), "total_biomass_2000", FC_COLS))
     complete <- complete.cases(vals[required])
     write_na_exclusion(site, vals, complete, required)
     baseline <- paste0("fc_", baseline_year(site$start_year, min(FC_YEARS)))
@@ -418,7 +364,7 @@ process_site <- function(site, pixels, replicates) {
         mutate(group = as.character(group))
     keep_cols <- unique(c(
         "cell", "treatment", "group", "match_group", "match_weight", "pscore",
-        "area_ha", "total_biomass_2025", FC_COLS, setdiff(all.vars(this_f), "treatment")
+        "area_ha", "total_biomass_2000", FC_COLS, setdiff(all.vars(this_f), "treatment")
     ))
 
     for (k in todo) {

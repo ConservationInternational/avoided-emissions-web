@@ -95,7 +95,7 @@ These files are produced by `01_extract_covariates.py` and consumed by
 |---|---|---|
 | `sites_processed.parquet` | Parquet | One row per site fragment (sites split across exact-match regions have several), with `site_id`, `sub_site_index`, `id_numeric`, `start_year`, `end_year`, `area_ha` |
 | `treatment_cell_key.parquet` | Parquet | Raster cell index → `id_numeric` for every treatment pixel |
-| `treatment_pixels.parquet` | Parquet | Covariate, `area_ha` (cell area), `total_biomass_2025`, and `fc_YYYY` values for treatment pixels |
+| `treatment_pixels.parquet` | Parquet | Covariate, `area_ha` (cell area), `total_biomass_2000`, `fc_2000`, and outcome-window `fc_YYYY` values for treatment pixels |
 | `control_pixels/` | Parquet dataset | The same columns for candidate control pixels, partitioned by the first exact-match variable. A missing partition value is stored as `-1` |
 | `formula.json` | JSON | Propensity score formula (e.g. `"treatment ~ precip + temp + ..."`) |
 | `site_id_key.csv` | CSV | Integer `id_numeric` ↔ string `site_id` mapping |
@@ -129,7 +129,8 @@ and replicate) and consumed by `03_summarize_results.R`.
 | `sampling_weight` | numeric | `n_eligible / n_matched` for the pixel's stratum |
 | `pscore` | numeric | Fitted propensity score (`NA` for Mahalanobis matching) |
 | `area_ha` | numeric | Cell area (ha) |
-| `total_biomass_2025` | numeric | Whole-cell biomass density (Mg/ha) |
+| `total_biomass_2000` | numeric | Unmasked year-2000 whole-cell biomass density (Mg/ha) |
+| `fc_2000` | numeric | Forest cover in the biomass reference year, always extracted |
 | `fc_YYYY` | numeric | Forest cover (percent, 0–100) per year |
 | covariates | numeric | Matching covariates, including `defor_pre_intervention` when used |
 | `n_site_pixels`, `n_eligible`, `n_sampled`, `n_matched` | integer | Treatment pixel counts for the fragment |
@@ -144,8 +145,9 @@ or matching error.
 ## Final Result Files (Step 3)
 
 All files are produced by `03_summarize_results.R` and written to
-`{results_s3_uri}`. A site fragment is included only when it has a match file
-for every replicate; site results sum their included fragments.
+`{results_s3_uri}`. An exact-match stratum of a site fragment is included
+only when it was matched in every replicate; site results sum their included
+strata and fragments. Pixel-level downloads use the same inclusion rule.
 
 Columns prefixed `extrapolated_` are scaled to all eligible treatment pixels
 (see [matching.md](matching.md#sampling-weights-and-coverage)); columns
@@ -195,7 +197,8 @@ pre-intervention years
 | `n_eligible_pixels` | integer | Treatment pixels eligible for matching |
 | `n_sample_pixels` | integer | Matched treatment pixels (mean across replicates) |
 | `sampled_fraction` | numeric | Sampled / eligible treatment pixels |
-| `coverage_fraction` | numeric | Eligible / all treatment pixels |
+| `n_represented_pixels` | numeric | Eligible treatment pixels in strata matched in every replicate |
+| `coverage_fraction` | numeric | Represented / all treatment pixels |
 | `match_rate` | numeric | Matched / sampled treatment pixels |
 | `n_control_pool`, `n_control_sampled` | numeric | Control pixel counts |
 
@@ -208,6 +211,7 @@ pre-intervention years
 | Column | Type | Description |
 |---|---|---|
 | `cell`, `site_id`, `year`, `treatment` | | Pixel, site, year, and group |
+| `id_numeric`, `group` | integer, string | Site fragment and exact-match stratum |
 | `match_group`, `match_weight`, `sampling_weight` | | Matching and stratum weights |
 | `forest_loss_ha` | numeric | Forest lost during the year (ha) |
 | `emissions_mgco2e` | numeric | Emissions from that loss (MgCO₂e) |
@@ -360,18 +364,20 @@ every replicate as failed, using the marker's error when available.
 
 ## Biomass-to-CO₂e Conversion
 
-`total_biomass_2025` is whole-cell biomass density (Mg per hectare of cell)
-at the baseline forest cover. For each matched pixel with cell area $A$
-(ha), baseline forest cover $\text{fc}_0$ (percent, in the site's baseline
-year), and forest cover $\text{fc}_t$:
+`total_biomass_2000` is unmasked year-2000 whole-cell biomass density
+(Mg per hectare of cell). For each matched pixel with cell area $A$ (ha),
+year-2000 forest cover $\text{fc}_{2000}$ (percent), and forest cover
+$\text{fc}_t$:
 
-$$\text{biomass}_t = \text{total\_biomass\_2025} \times A \times \frac{\text{fc}_t}{\text{fc}_0}$$
+$$\text{biomass}_t = \text{total\_biomass\_2000} \times A \times \frac{\text{fc}_t}{\text{fc}_{2000}}$$
 
 $$\text{emissions}_t = (\text{biomass}_{t-1} - \text{biomass}_t) \times 0.5 \times \frac{44}{12}$$
 
 - **0.5** is the carbon fraction of dry biomass.
 - **44/12** converts carbon to CO₂.
 - Annual forest loss is $(\text{fc}_{t-1} - \text{fc}_t) / 100 \times A$.
+- The summary records `biomass_reference_year = 2000`, including in API
+  results and task metadata.
 
 Avoided emissions are the weighted control emissions minus the treatment
 emissions. Extrapolated values multiply each matched pixel by its stratum's

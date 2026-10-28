@@ -26,6 +26,8 @@ DEFAULT_COVARIATES = [
 # total_biomass_2025 is loss-masked to 2025, so it can reflect deforestation
 # after a site's start; it is available but not a default covariate.
 ALL_COVARIATES = DEFAULT_COVARIATES + [
+    "agb_2000",
+    "total_biomass_2000",
     "total_biomass_2025",
     "sdg_baseline",
     "sdg_status_2019",

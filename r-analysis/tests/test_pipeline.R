@@ -39,16 +39,16 @@ make_fixture <- function(data_dir, method, n_replicates) {
     n_t <- 30
     treatment <- strata[rep(1:4, each = n_t), ] %>%
         mutate(cell = seq_len(n()), area_ha = 100, x1 = rnorm(n(), 0.3),
-               total_biomass_2025 = 100) %>%
+               total_biomass_2000 = 100, fc_2000 = 100) %>%
         bind_cols(forest_cover(4 * n_t, 1))
     # One non-forest treatment pixel in site B: not eligible for matching.
     treatment[treatment$id_numeric == 3, ][1, paste0("fc_", FC_YEARS)] <- 0
     n_c <- 400
     controls <- strata[rep(1:2, each = n_c), ] %>%
         mutate(cell = 10000L + seq_len(n()), area_ha = 100, x1 = rnorm(n()),
-               total_biomass_2025 = 100) %>%
+               total_biomass_2000 = 100, fc_2000 = 100) %>%
         bind_cols(forest_cover(2 * n_c, 3))
-    controls$total_biomass_2025[1] <- NA
+    controls$total_biomass_2000[1] <- NA
 
     write_parquet(sites, file.path(out, "sites_processed.parquet"))
     write_parquet(select(treatment, cell, id_numeric), file.path(out, "treatment_cell_key.parquet"))
@@ -62,7 +62,7 @@ make_fixture <- function(data_dir, method, n_replicates) {
         max_treatment_pixels = 20, control_multiplier = 5, min_glm_treatment_pixels = 5,
         caliper_width = 1, max_controls_per_treatment = 2, min_control_distance_km = 0,
         exact_match_vars = c("admin1", "ecoregion"), matching_method = method,
-        n_replicates = n_replicates, random_seed = 7, match_batch_size = 1,
+        n_replicates = n_replicates, random_seed = 7,
         exact_match_group_mapping = list(
             "1" = list(list("A", 0), list("B", 0)), "2" = list(list("A", 1)),
             "3" = list(list("C", 0))
@@ -85,6 +85,76 @@ run_script <- function(script, config_path, array_index = NULL) {
     log
 }
 
+test_that("summary uses the same complete strata for estimates and pixel downloads", {
+    data_dir <- tempfile("ae_summary_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
+    out <- file.path(data_dir, "output")
+    for (k in 1:2) {
+        m <- tibble(
+            cell = 1:4, treatment = c(TRUE, FALSE, TRUE, FALSE),
+            group = c("stable", "stable", "unstable", "unstable"),
+            match_group = c("stable_1", "stable_1", "unstable_1", "unstable_1"),
+            match_weight = 1, sampling_weight = 10,
+            area_ha = 100, total_biomass_2000 = 100, fc_2000 = 100, x1 = 0, pscore = 0.5,
+            n_eligible = 20, n_sampled = 2, n_control_pool = 100, n_control_sampled = 10
+        ) %>% bind_cols(forest_cover(4, 1))
+        if (k == 2) m <- filter(m, group == "stable")
+        saveRDS(m, file.path(out, "matches", paste0("m_1_rep", k, ".rds")))
+    }
+    run_script("03_summarize_results.R", config_path)
+    totals <- read.csv(file.path(out, "results_by_site_total.csv"))
+    detail <- read.csv(file.path(out, "results_pixel_year_emissions.csv"))
+    covariates <- read.csv(file.path(out, "results_pixel_covariates.csv"))
+    summary <- fromJSON(file.path(out, "results_summary.json"))
+    expect_equal(totals$n_sample_pixels, 1)
+    expect_equal(totals$coverage_fraction, 10 / 60)
+    expect_equal(sort(unique(detail$cell)), sort(unique(covariates$cell)))
+    expect_equal(unique(detail$cell), 1:2)
+    expect_true(any(summary$methodology_warnings$code == "inconsistent_strata"))
+    # Pixel-level weighted totals agree with the reported annual sample.
+    by_year <- read.csv(file.path(out, "results_by_site_year.csv"))
+    detail_totals <- detail %>%
+        filter(treatment) %>%
+        group_by(year) %>%
+        summarise(loss = sum(forest_loss_ha * match_weight), .groups = "drop")
+    expect_equal(detail_totals$loss, by_year$sample_treatment_defor_ha)
+})
+
+test_that("summary reports no estimates when all fragments fail", {
+    data_dir <- tempfile("ae_empty_")
+    config_path <- make_fixture(data_dir, "optimal", n_replicates = 1)
+    run_script("03_summarize_results.R", config_path)
+    out <- file.path(data_dir, "output")
+    summary <- fromJSON(file.path(out, "results_summary.json"))
+    expect_equal(summary$n_sites, 0)
+    expect_equal(summary$n_failed_sites, 3)
+    expect_equal(nrow(read.csv(file.path(out, "results_by_site_total.csv"))), 0)
+    expect_equal(nrow(read.csv(file.path(out, "results_pixel_year_emissions.csv"))), 0)
+})
+
+for (method in c("optimal", "nearest")) {
+    test_that(paste(method, "supports constant factor covariates and a single replicate"), {
+        data_dir <- tempfile("ae_constant_")
+        config_path <- make_fixture(data_dir, method, n_replicates = 1)
+        out <- file.path(data_dir, "output")
+        write_json(list(formula_str = "treatment ~ factor(admin1)"),
+                   file.path(out, "formula.json"), auto_unbox = TRUE)
+        if (method == "optimal") {
+            config <- fromJSON(config_path, simplifyVector = FALSE)
+            config$max_controls_per_treatment <- 0
+            write_json(config, config_path, auto_unbox = TRUE)
+        }
+        run_script("02_perform_matching.R", config_path)
+        run_script("03_summarize_results.R", config_path)
+        totals <- read.csv(file.path(out, "results_by_site_total.csv"))
+        expect_equal(sort(totals$site_id), c("A", "B"))
+        expect_false(any(grepl("_ci_", names(totals))))
+        m <- readRDS(file.path(out, "matches", "m_1_rep1.rds"))
+        expect_true(all(is.na(m$pscore)))
+        expect_equal(attr(m, "group_diagnostics")[[1]]$method, "constant")
+    })
+}
+
 for (method in c("optimal", "nearest")) {
     test_that(paste("pipeline produces consistent results with", method, "matching"), {
         data_dir <- tempfile("ae_")
@@ -101,7 +171,7 @@ for (method in c("optimal", "nearest")) {
                 group_by(match_group) %>%
                 summarise(t = sum(match_weight[treatment]), c = sum(match_weight[!treatment]))
             expect_equal(sets$t, sets$c)
-            expect_false(any(is.na(m$total_biomass_2025)))
+            expect_false(any(is.na(m$total_biomass_2000)))
             expect_true(all(m[[paste0("fc_", 2008)]] > 0))
         }
 
@@ -114,6 +184,7 @@ for (method in c("optimal", "nearest")) {
         expect_equal(failed$site_id, "C")
         expect_match(failed$error, "No overlapping")
         expect_equal(summary$n_failed_sites, 1)
+        expect_equal(summary$biomass_reference_year, 2000)
         expect_false("sub_site_index" %in% names(by_year))
         expect_true(all(totals$sampled_fraction <= 1))
         expect_true(all(totals$extrapolated_emissions_avoided_mgco2e > 0))

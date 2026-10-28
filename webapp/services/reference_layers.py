@@ -350,7 +350,7 @@ def compute_sites_exclusion_buffer(gdf, distance_km, site_set_id=None):
                 text(
                     "SELECT ST_AsGeoJSON("
                     "  ST_Buffer("
-                    "    (SELECT ST_SetSRID(ST_Extent(geom)::geometry, 4326) FROM user_site_features"
+                    "    (SELECT ST_UnaryUnion(ST_Collect(geom)) FROM user_site_features"
                     "     WHERE site_set_id = :site_set_id)::geography,"
                     "    :dist_m"
                     "  )::geometry"

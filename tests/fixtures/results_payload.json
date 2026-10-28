@@ -2,6 +2,7 @@
     "summary": {
         "n_sites": 2,
         "n_replicates": 3,
+        "biomass_reference_year": 2000,
         "failed_sites": [
             {
                 "id_numeric": 3,
