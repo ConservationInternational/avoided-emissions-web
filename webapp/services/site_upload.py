@@ -28,12 +28,17 @@ from sqlalchemy import text
 
 from services.s3 import get_s3_client
 from services.site_set import get_user_site_set_detail
+from services.site_upload_validation import (
+    normalize_site_date,
+    normalize_site_text,
+    validate_wgs84_polygon,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_ARCHIVE_FILE_COUNT = 2_000
-MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
-MAX_ARCHIVE_MEMBER_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+MAX_ARCHIVE_MEMBER_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 200.0
 
 SITE_UPLOAD_STAGE_DIR = Path(tempfile.gettempdir()) / "ae_site_upload_stage"
@@ -44,12 +49,21 @@ SITE_UPLOAD_INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024
 SITE_UPLOAD_PROGRESS_BATCH_SIZE = 250
 SITE_UPLOAD_PROGRESS_CHECK_ROW_INTERVAL = 25
 SITE_UPLOAD_PROGRESS_INTERVAL_SECONDS = 10
+# Recovery must outlive the worker's 7,500-second hard time limit.
+SITE_UPLOAD_WORKER_LEASE_SECONDS = 8400
+SITE_UPLOAD_DISPATCH_INTERVAL_SECONDS = 600
+SITE_UPLOAD_MAX_DISPATCH_ATTEMPTS = 6
+SITE_UPLOAD_PENDING_EXPIRY_SECONDS = 24 * 60 * 60
 
 # start_date is the only truly required field for analysis
 # site_id and site_name can be auto-assigned if missing
 REQUIRED_SITE_FIELDS = ("start_date",)
 OPTIONAL_SITE_FIELDS = ("site_id", "site_name", "end_date")
 ALL_SITE_FIELDS = ("site_id", "site_name", "start_date", "end_date")
+
+
+class _SiteUploadCancelled(Exception):
+    """Raised when a user cancels an active import."""
 
 
 def _site_upload_stage_paths(upload_token):
@@ -115,14 +129,16 @@ def _validate_staged_upload_access(upload_token, user_id):
 
     created_at = _parse_staged_upload_created_at(meta)
     age_seconds = (datetime.now(UTC) - created_at).total_seconds()
-    if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS:
+    if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS and not _site_upload_stage_in_use(
+        upload_token
+    ):
         discard_staged_site_upload(upload_token, user_id)
         raise ValueError("Staged upload expired. Please upload the file again.")
 
     return meta
 
 
-def _materialize_staged_upload_path(upload_token, user_id):
+def _materialize_staged_upload_path(upload_token, user_id, progress_callback=None):
     """Materialize staged upload to a local path and return (path, filename, size)."""
     meta = _validate_staged_upload_access(upload_token, user_id)
     filename = meta.get("filename") or "sites"
@@ -134,7 +150,12 @@ def _materialize_staged_upload_path(upload_token, user_id):
             local_path = tmp.name
         try:
             with open(local_path, "wb") as out:
-                get_s3_client().download_fileobj(Config.S3_BUCKET, data_key, out)
+                get_s3_client().download_fileobj(
+                    Config.S3_BUCKET,
+                    data_key,
+                    out,
+                    Callback=progress_callback,
+                )
         except Exception:
             os.unlink(local_path)
             raise
@@ -149,6 +170,10 @@ def _materialize_staged_upload_path(upload_token, user_id):
 
 def _parse_sites_geometry_file_from_path(file_path, filename):
     """Parse sites geometry using a local file path (low-memory path)."""
+    from fiona.errors import FionaError
+    from pyproj.exceptions import ProjError
+    from shapely.errors import GEOSException
+
     errors = []
     gdf = None
 
@@ -157,14 +182,24 @@ def _parse_sites_geometry_file_from_path(file_path, filename):
         if ext in (".geojson", ".json", ".gpkg"):
             gdf = gpd.read_file(file_path)
         elif ext in (".zip", ".tar.gz", ".tgz"):
-            with open(file_path, "rb") as f:
-                gdf = _read_sites_from_archive(f.read(), filename)
+            archive_dir = tempfile.mkdtemp(prefix="ae_site_archive_parse_")
+            source_path = _extract_site_archive_dataset(
+                file_path, filename, archive_dir
+            )
+            gdf = (
+                _read_shapefile(source_path)
+                if source_path.endswith(".shp")
+                else gpd.read_file(source_path)
+            )
         else:
             errors.append(f"Unsupported file format: {ext}")
             return None, errors
-    except Exception as e:  # noqa: BLE001
+    except (FionaError, OSError, ValueError, RuntimeError) as e:
         errors.append(f"Failed to read file: {e!s}")
         return None, errors
+    finally:
+        if "archive_dir" in locals():
+            shutil.rmtree(archive_dir, ignore_errors=True)
 
     # Reuse existing validation/repair pipeline by operating on the parsed gdf.
     if gdf is not None and not gdf.empty:
@@ -187,10 +222,29 @@ def _parse_sites_geometry_file_from_path(file_path, filename):
                     "All geometries must be Polygon or MultiPolygon.\n"
                     + "\n".join(details[:10])
                 )
-        if gdf.crs and gdf.crs.to_epsg() != 4326:
-            gdf = gdf.to_crs(epsg=4326)
+        if not gdf.crs:
+            if _get_file_extension(filename) in {".geojson", ".json"}:
+                # RFC 7946 GeoJSON coordinates are WGS84 longitude/latitude.
+                gdf = gdf.set_crs(epsg=4326)
+            else:
+                errors.append("The uploaded dataset has no known CRS.")
+        else:
+            try:
+                if gdf.crs.to_epsg() != 4326:
+                    gdf = gdf.to_crs(epsg=4326)
+            except (ValueError, ProjError) as exc:
+                errors.append(f"Failed to transform geometry to EPSG:4326: {exc}")
 
         gdf = _repair_geometries(gdf)
+        geometry_errors = []
+        for index, geometry in gdf.geometry.items():
+            try:
+                validate_wgs84_polygon(geometry, row_number=index + 1)
+            except (TypeError, ValueError, GEOSException) as exc:
+                geometry_errors.append(str(exc))
+                if len(geometry_errors) >= 10:
+                    break
+        errors.extend(geometry_errors)
 
     return gdf, errors
 
@@ -200,27 +254,85 @@ def _cleanup_expired_staged_uploads():
         # Expired shared staged uploads are deleted lazily when retrieved.
         return
 
-    SITE_UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
-    cutoff = datetime.now(UTC) - timedelta(seconds=SITE_UPLOAD_STAGE_TTL_SECONDS)
+    audit_local_site_upload_stages(apply=True)
 
-    for meta_path in SITE_UPLOAD_STAGE_DIR.glob("*.json"):
-        token = meta_path.stem
-        data_path = SITE_UPLOAD_STAGE_DIR / f"{token}.bin"
-        try:
-            with open(meta_path, encoding="utf-8") as f:
-                meta = json.load(f)
-            created_at = datetime.fromisoformat(meta.get("created_at", ""))
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=UTC)
-        except Exception:  # noqa: BLE001
-            created_at = datetime.fromtimestamp(meta_path.stat().st_mtime, tz=UTC)
 
-        if created_at < cutoff:
+def _lock_site_upload_stage(db, token, *, wait=True):
+    """Serialize local-stage deletion with durable job creation."""
+    statement = (
+        "SELECT pg_advisory_xact_lock(hashtextextended(:token, 0))"
+        if wait
+        else "SELECT pg_try_advisory_xact_lock(hashtextextended(:token, 0))"
+    )
+    result = db.execute(
+        text(statement),
+        {"token": f"site-upload-stage:{token}"},
+    )
+    return True if wait else result.scalar_one()
+
+
+def _site_upload_stage_in_use(token, db=None):
+    owns_session = db is None
+    db = db or get_db()
+    try:
+        return (
+            db.query(UserSiteUpload.id)
+            .filter(
+                UserSiteUpload.status.in_(("pending", "running")),
+                UserSiteUpload.extra_metadata["upload_token"].as_string() == str(token),
+            )
+            .first()
+            is not None
+        )
+    finally:
+        if owns_session:
+            db.close()
+
+
+def audit_local_site_upload_stages(*, apply=False, now=None):
+    """Audit expired local files, retaining all pending/running job inputs.
+
+    Failure to check the database fails closed. No cloud API is called.
+    """
+    cutoff = (now or datetime.now(UTC)) - timedelta(
+        seconds=SITE_UPLOAD_STAGE_TTL_SECONDS
+    )
+    result = {"expired_local_tokens": [], "protected_local_tokens": []}
+    if not SITE_UPLOAD_STAGE_DIR.exists():
+        return result
+    db = get_db()
+    try:
+        for meta_path in SITE_UPLOAD_STAGE_DIR.glob("*.json"):
+            token = meta_path.stem
+            data_path, _ = _site_upload_stage_paths(token)
+            if not _lock_site_upload_stage(db, token, wait=False):
+                result["protected_local_tokens"].append(token)
+                db.rollback()
+                continue
             try:
-                meta_path.unlink(missing_ok=True)
-                data_path.unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed cleaning expired staged upload: %s", token)
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    created_at = _parse_staged_upload_created_at(meta)
+                except (OSError, KeyError, TypeError, ValueError, AttributeError):
+                    created_at = datetime.fromtimestamp(meta_path.stat().st_mtime, UTC)
+                if created_at >= cutoff:
+                    continue
+                if _site_upload_stage_in_use(token, db):
+                    result["protected_local_tokens"].append(token)
+                    continue
+                result["expired_local_tokens"].append(token)
+                if apply:
+                    meta_path.unlink(missing_ok=True)
+                    data_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Failed auditing local upload stage %s", token, exc_info=True
+                )
+            finally:
+                db.rollback()
+    finally:
+        db.close()
+    return result
 
 
 def stage_site_upload(file_content, filename, user_id):
@@ -409,93 +521,95 @@ def stream_stage_site_upload(file_stream, filename, user_id):
 def get_site_upload_mapping_preview_from_staged(token, user_id):
     """Return a column-mapping preview by reading the staged file directly.
 
-    For GPKG/GeoJSON, reads only the first 10 rows so memory usage is O(1)
-    rather than O(file size).  Feature count is obtained cheaply via fiona.
-    For archive formats the full archive is still read (archives are small on
-    disk due to compression) but the behaviour matches the existing fallback.
+    Direct files and archives are read from paths. Only a small feature sample
+    is materialized; archive feature counts remain unknown because obtaining
+    them may require scanning every member.
     """
-    import fiona  # local import — only needed here
+    from fiona.errors import FionaError
+    from shapely.geometry import shape
 
     try:
-        meta = _load_staged_upload_meta(token)
-    except ValueError as exc:
+        local_path, filename, _size = _materialize_staged_upload_path(token, user_id)
+    except (OSError, ValueError) as exc:
         return None, [str(exc)]
 
-    if str(meta.get("user_id")) != str(user_id):
-        return None, ["You do not have access to this staged upload."]
-
-    created_at = _parse_staged_upload_created_at(meta)
-    age_seconds = (datetime.now(UTC) - created_at).total_seconds()
-    if age_seconds > SITE_UPLOAD_STAGE_TTL_SECONDS:
-        discard_staged_site_upload(token, user_id)
-        return None, ["Staged upload expired. Please upload the file again."]
-
-    filename = meta.get("filename") or "sites"
     ext = _get_file_extension(filename)
-
-    gdf_sample = None
-    n_features = 0
-
-    preview_path = None
+    preview_path = local_path
+    extracted_dir = None
+    owned_preview_path = False
     try:
-        if ext in (".gpkg", ".geojson", ".json"):
-            # GDAL/pyogrio expects GeoPackage files to have a conformant
-            # extension. Staged files are stored as .bin, so read through a
-            # temporary path with the original suffix.
-            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-                preview_path = tmp.name
-
-            if _use_shared_site_upload_stage():
-                data_key, _ = _site_upload_stage_s3_keys(token)
-                with open(preview_path, "wb") as out:
-                    get_s3_client().download_fileobj(Config.S3_BUCKET, data_key, out)
-            else:
-                data_path, _ = _site_upload_stage_paths(token)
-                if not data_path.exists():
-                    return None, [
-                        "Staged upload not found. Please upload the file again."
-                    ]
-                shutil.copyfile(data_path, preview_path)
-
-            # Read a tiny sample — just enough to get column names + one value.
-            gdf_sample = gpd.read_file(preview_path, rows=10)
-            with fiona.open(preview_path) as src:
-                n_features = len(src)
-        elif ext in (".zip", ".tar.gz", ".tgz"):
-            # Archives are compressed; read them fully (still small in RAM).
-            if _use_shared_site_upload_stage():
-                data_key, _ = _site_upload_stage_s3_keys(token)
-                archive_bytes = (
-                    get_s3_client()
-                    .get_object(Bucket=Config.S3_BUCKET, Key=data_key)["Body"]
-                    .read()
-                )
-            else:
-                data_path, _ = _site_upload_stage_paths(token)
-                if not data_path.exists():
-                    return None, [
-                        "Staged upload not found. Please upload the file again."
-                    ]
-                with open(data_path, "rb") as f:
-                    archive_bytes = f.read()
-            gdf_sample = _read_sites_from_archive(archive_bytes, filename)
-            if gdf_sample is not None:
-                n_features = len(gdf_sample)
-        else:
+        if ext not in {".gpkg", ".geojson", ".json", ".zip", ".tar.gz", ".tgz"}:
             return None, [f"Unsupported file format: {ext}"]
-    except Exception as exc:  # noqa: BLE001
+
+        if ext in {".zip", ".tar.gz", ".tgz"}:
+            extracted_dir = tempfile.mkdtemp(prefix="ae_site_upload_preview_")
+            preview_path = _extract_site_archive_dataset(
+                local_path, filename, extracted_dir
+            )
+        elif not local_path.lower().endswith(ext):
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as temp_file:
+                preview_path = temp_file.name
+                owned_preview_path = True
+            shutil.copyfile(local_path, preview_path)
+
+        with _open_site_feature_source(preview_path) as src:
+            source_crs = src.crs_wkt or src.crs
+            if not source_crs and ext not in {".geojson", ".json"}:
+                return None, ["The uploaded dataset has no known CRS."]
+            if source_crs:
+                try:
+                    from pyproj import CRS
+
+                    CRS.from_user_input(source_crs)
+                except (ValueError, TypeError) as exc:
+                    return None, [f"Invalid source CRS: {exc}"]
+            sample_features = []
+            for feature in src:
+                if feature is None:
+                    continue
+                properties = dict(feature.get("properties") or {})
+                geometry = feature.get("geometry")
+                properties["geometry"] = (
+                    shape(geometry) if geometry is not None else None
+                )
+                sample_features.append(properties)
+                if len(sample_features) >= 10:
+                    break
+
+            if not sample_features:
+                return None, ["No features were found in the uploaded file."]
+            gdf_sample = gpd.GeoDataFrame(sample_features, geometry="geometry")
+            if source_crs:
+                gdf_sample = gdf_sample.set_crs(source_crs)
+            else:
+                gdf_sample = gdf_sample.set_crs("EPSG:4326")
+            n_features = None
+            if ext not in {".zip", ".tar.gz", ".tgz", ".geojson", ".json"}:
+                try:
+                    n_features = len(src)
+                except (TypeError, ValueError):
+                    n_features = None
+    except (FionaError, OSError, ValueError, RuntimeError, TypeError) as exc:
         return None, [f"Failed to read file: {exc}"]
     finally:
-        if preview_path:
+        if owned_preview_path:
             try:
                 os.unlink(preview_path)
             except OSError:
                 logger.debug(
                     "Failed to remove temporary preview file: %s", preview_path
                 )
-
-    if gdf_sample is None or gdf_sample.empty:
-        return None, ["No features were found in the uploaded file."]
+        if (
+            local_path
+            and _use_shared_site_upload_stage()
+            and os.path.exists(local_path)
+        ):
+            try:
+                os.unlink(local_path)
+            except OSError:
+                logger.debug("Failed to remove temporary staged file: %s", local_path)
+        if extracted_dir:
+            shutil.rmtree(extracted_dir, ignore_errors=True)
 
     non_geom_cols = [c for c in gdf_sample.columns if c != "geometry"]
     column_info = []
@@ -540,12 +654,23 @@ def _is_within_directory(directory, target):
     )
 
 
-def _safe_extract_zip(archive_path, target_dir):
+def _copy_archive_member(source, destination, cancel_check=None):
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    with open(destination, "wb") as target:
+        while chunk := source.read(1024 * 1024):
+            if cancel_check:
+                cancel_check()
+            target.write(chunk)
+
+
+def _safe_extract_zip(archive_path, target_dir, cancel_check=None):
     with zipfile.ZipFile(archive_path, "r") as archive:
         file_count = 0
         total_uncompressed_bytes = 0
 
         for info in archive.infolist():
+            if cancel_check:
+                cancel_check()
             member = info.filename
             if not member:
                 continue
@@ -577,19 +702,31 @@ def _safe_extract_zip(archive_path, target_dir):
             if file_count > MAX_ARCHIVE_FILE_COUNT:
                 raise ValueError("Archive contains too many files.")
 
-        archive.extractall(target_dir)
+        for info in archive.infolist():
+            if cancel_check:
+                cancel_check()
+            member_path = os.path.join(target_dir, info.filename)
+            if info.is_dir():
+                os.makedirs(member_path, exist_ok=True)
+            else:
+                with archive.open(info, "r") as source:
+                    _copy_archive_member(source, member_path, cancel_check)
 
 
-def _safe_extract_tar(archive_path, target_dir):
+def _safe_extract_tar(archive_path, target_dir, cancel_check=None):
     with tarfile.open(archive_path, "r:gz") as archive:
         file_count = 0
         total_uncompressed_bytes = 0
 
         for member in archive.getmembers():
+            if cancel_check:
+                cancel_check()
             destination = os.path.join(target_dir, member.name)
             if not _is_within_directory(target_dir, destination):
                 raise ValueError("Archive contains invalid paths.")
 
+            if member.issym() or member.islnk():
+                raise ValueError("Archive links are not supported.")
             if not member.isfile():
                 continue
 
@@ -605,7 +742,22 @@ def _safe_extract_tar(archive_path, target_dir):
             if file_count > MAX_ARCHIVE_FILE_COUNT:
                 raise ValueError("Archive contains too many files.")
 
-        archive.extractall(target_dir, filter="data")
+        for member in archive.getmembers():
+            if cancel_check:
+                cancel_check()
+            if member.isdir():
+                os.makedirs(os.path.join(target_dir, member.name), exist_ok=True)
+                continue
+            if not member.isfile():
+                continue
+            source = archive.extractfile(member)
+            if source is not None:
+                with source:
+                    _copy_archive_member(
+                        source,
+                        os.path.join(target_dir, member.name),
+                        cancel_check,
+                    )
 
 
 def _find_supported_dataset_paths(directory):
@@ -653,12 +805,14 @@ def _select_site_dataset_path(directory):
     return geojsons[0]
 
 
-def _extract_site_archive_dataset(archive_path, filename, target_dir):
+def _extract_site_archive_dataset(
+    archive_path, filename, target_dir, cancel_check=None
+):
     ext = _get_file_extension(filename)
     if ext == ".zip":
-        _safe_extract_zip(archive_path, target_dir)
+        _safe_extract_zip(archive_path, target_dir, cancel_check)
     else:
-        _safe_extract_tar(archive_path, target_dir)
+        _safe_extract_tar(archive_path, target_dir, cancel_check)
     return _select_site_dataset_path(target_dir)
 
 
@@ -828,6 +982,10 @@ def _repair_geometry_single(geom):
 
 def _parse_sites_geometry_file(file_content, filename):
     """Parse uploaded site files and validate geometry/CRS constraints."""
+    from fiona.errors import FionaError
+    from pyproj.exceptions import ProjError
+    from shapely.errors import GEOSException
+
     errors = []
     gdf = None
 
@@ -846,34 +1004,24 @@ def _parse_sites_geometry_file(file_content, filename):
         else:
             errors.append(f"Unsupported file format: {ext}")
             return None, errors
-    except Exception as e:  # noqa: BLE001
+    except (FionaError, OSError, ValueError, RuntimeError) as e:
         errors.append(f"Failed to read file: {e!s}")
         return None, errors
 
-    # Validate geometries
+    # Validate CRS and normalize all valid inputs to WGS84. GeoJSON follows
+    # RFC 7946 when the driver omits CRS metadata.
     if gdf is not None and not gdf.empty:
-        null_geom = gdf.geometry.is_empty | gdf.geometry.isna()
-        if null_geom.any():
-            feature_nums = [i + 1 for i in gdf[null_geom].index[:10]]
-            errors.append(f"Features with missing/empty geometry: {feature_nums}")
-        valid_mask = ~null_geom
-        if valid_mask.any():
-            bad_type = ~gdf.loc[valid_mask].geometry.geom_type.isin(
-                ["Polygon", "MultiPolygon"]
-            )
-            if bad_type.any():
-                bad_rows = gdf.loc[valid_mask][bad_type]
-                details = [
-                    f"Feature {idx + 1}: geometry type={row.geometry.geom_type}"
-                    for idx, row in bad_rows.iterrows()
-                ]
-                errors.append(
-                    "All geometries must be Polygon or MultiPolygon.\n"
-                    + "\n".join(details[:10])
-                )
-        # Ensure EPSG:4326
-        if gdf.crs and gdf.crs.to_epsg() != 4326:
-            gdf = gdf.to_crs(epsg=4326)
+        if not gdf.crs:
+            if _get_file_extension(filename) in {".geojson", ".json"}:
+                gdf = gdf.set_crs(epsg=4326)
+            else:
+                errors.append("The uploaded dataset has no known CRS.")
+        else:
+            try:
+                if gdf.crs.to_epsg() != 4326:
+                    gdf = gdf.to_crs(epsg=4326)
+            except (ValueError, ProjError) as exc:
+                errors.append(f"Failed to transform geometry to EPSG:4326: {exc}")
 
         # Repair geometries so they are valid under S2 (used by the R sf
         # package).  Two common issues:
@@ -882,6 +1030,15 @@ def _parse_sites_geometry_file(file_content, filename):
         # ST_MakeValid in PostGIS fixes (2) but not (1), so we clean both
         # in Shapely before the data reaches PostGIS.
         gdf = _repair_geometries(gdf)
+        geometry_errors = []
+        for position, geometry in enumerate(gdf.geometry, start=1):
+            try:
+                validate_wgs84_polygon(geometry, row_number=position)
+            except (TypeError, ValueError, GEOSException) as exc:
+                geometry_errors.append(str(exc))
+                if len(geometry_errors) >= 10:
+                    break
+        errors.extend(geometry_errors)
 
     return gdf, errors
 
@@ -946,8 +1103,17 @@ def suggest_site_column_mapping(columns):
 
 def _normalize_site_mapping(column_mapping):
     mapping = {field: None for field in ALL_SITE_FIELDS}
-    if not isinstance(column_mapping, dict):
+    if column_mapping is None:
         return mapping
+    if not isinstance(column_mapping, dict):
+        raise TypeError("Column mapping must be an object.")
+
+    unknown_fields = set(column_mapping) - set(ALL_SITE_FIELDS)
+    if unknown_fields:
+        raise ValueError(
+            "Unknown site mapping field(s): "
+            + ", ".join(sorted(str(field) for field in unknown_fields))
+        )
 
     for field in ALL_SITE_FIELDS:
         value = column_mapping.get(field)
@@ -964,12 +1130,16 @@ def apply_site_column_mapping(gdf, column_mapping):
 
     Returns a tuple of (mapped_gdf, errors, warnings).
     """
-    mapped = gdf.copy()
+    source = gdf.copy(deep=True)
+    mapped = gdf.copy(deep=True)
     errors = []
     warnings = []
 
-    available_cols = {c for c in mapped.columns if c != "geometry"}
-    mapping = _normalize_site_mapping(column_mapping)
+    available_cols = {c for c in source.columns if c != "geometry"}
+    try:
+        mapping = _normalize_site_mapping(column_mapping)
+    except (TypeError, ValueError) as exc:
+        return None, [str(exc)], warnings
 
     selected_sources = [mapping[field] for field in ALL_SITE_FIELDS if mapping[field]]
     duplicate_sources = sorted(
@@ -995,50 +1165,71 @@ def apply_site_column_mapping(gdf, column_mapping):
     if errors:
         return None, errors, warnings
 
-    # Copy source values to canonical field names.
+    # Read every field from the same immutable snapshot so swapped mappings
+    # cannot overwrite a source field before the next field is copied.
     for field in ALL_SITE_FIELDS:
         src = mapping.get(field)
         if src:
-            mapped[field] = mapped[src]
-        elif field == "end_date":
+            mapped[field] = source[src].copy()
+        else:
             mapped[field] = pd.Series([None] * len(mapped), index=mapped.index)
 
-    mapped["site_id"] = mapped["site_id"].astype("string").str.strip()
-    mapped["site_name"] = mapped["site_name"].astype("string").str.strip()
-
-    # Note: Blank site_id and site_name values will be auto-assigned during import
-    # (site_id → "MissingID{n}", site_name → "Site_{n}"), so no validation error needed
-
-    start_raw = mapped["start_date"].astype("string").str.strip()
-    start_blank = start_raw.isna() | start_raw.eq("")
-    start_parsed = pd.to_datetime(mapped["start_date"], errors="coerce")
-    start_invalid = (~start_blank) & start_parsed.isna()
-    if start_blank.any() or start_invalid.any():
-        bad_idx = mapped[start_blank | start_invalid].index[:10]
-        feature_nums = [i + 1 for i in bad_idx]
-        errors.append(
-            "Mapped 'start_date' has missing or unparseable values. "
-            f"Affected features (first 10): {feature_nums}"
-        )
-    mapped["start_date"] = start_parsed.dt.date
-
-    if mapping.get("end_date"):
-        end_raw = mapped["end_date"].astype("string").str.strip()
-        end_blank = end_raw.isna() | end_raw.eq("")
-        end_parsed = pd.to_datetime(mapped["end_date"], errors="coerce")
-        end_invalid = (~end_blank) & end_parsed.isna()
-        if end_invalid.any():
-            n_invalid = int(end_invalid.sum())
-            warnings.append(
-                "Some 'end_date' values could not be parsed and will be saved as empty. "
-                f"Affected rows: {n_invalid}"
+    row_errors = []
+    start_dates = []
+    end_dates = []
+    site_ids = []
+    site_names = []
+    for position, (index, row) in enumerate(source.iterrows(), start=1):
+        error = None
+        try:
+            start_date = normalize_site_date(
+                row[mapping["start_date"]],
+                field="start_date",
+                row_number=position,
+                required=True,
             )
-        mapped["end_date"] = end_parsed.dt.date
-    else:
-        mapped["end_date"] = pd.Series([None] * len(mapped), index=mapped.index)
+            end_date = normalize_site_date(
+                row[mapping["end_date"]] if mapping["end_date"] else None,
+                field="end_date",
+                row_number=position,
+                required=False,
+            )
+            if end_date is not None and end_date < start_date:
+                raise ValueError(f"row {position}: end_date precedes start_date")
+            site_id = normalize_site_text(
+                row[mapping["site_id"]] if mapping["site_id"] else None,
+                field="site_id",
+                row_number=position,
+            )
+            site_name = normalize_site_text(
+                row[mapping["site_name"]] if mapping["site_name"] else None,
+                field="site_name",
+                row_number=position,
+            )
+        except (TypeError, ValueError) as exc:
+            error = str(exc)
+            start_date = end_date = None
+            site_id = site_name = None
+        start_dates.append(start_date)
+        end_dates.append(end_date)
+        site_ids.append(site_id)
+        site_names.append(site_name)
+        row_errors.append(error)
 
-    if errors:
-        return None, errors, warnings
+    mapped["site_id"] = pd.Series(site_ids, index=mapped.index, dtype="string")
+    mapped["site_name"] = pd.Series(site_names, index=mapped.index, dtype="string")
+    mapped["start_date"] = pd.Series(start_dates, index=mapped.index, dtype=object)
+    mapped["end_date"] = pd.Series(end_dates, index=mapped.index, dtype=object)
+    mapped["_site_upload_row_error"] = pd.Series(
+        row_errors, index=mapped.index, dtype="string"
+    )
+    invalid_rows = [(i + 1, error) for i, error in enumerate(row_errors) if error]
+    if invalid_rows:
+        detail = "; ".join(f"row {row}: {error}" for row, error in invalid_rows[:10])
+        warnings.append(
+            f"{len(invalid_rows)} feature(s) contain invalid mapped attributes and "
+            f"will be skipped during import. {detail}"
+        )
 
     return mapped, errors, warnings
 
@@ -1056,10 +1247,16 @@ def validate_site_upload_mapping(file_content, filename, column_mapping):
         "n_features": len(mapped_gdf),
         "n_missing_end_date": int(mapped_gdf["end_date"].isna().sum()),
         "n_unique_site_id": int(mapped_gdf["site_id"].nunique(dropna=True)),
+        "n_missing_site_id": int(mapped_gdf["site_id"].isna().sum()),
+        "n_missing_site_name": int(mapped_gdf["site_name"].isna().sum()),
+        "n_invalid_features": int(mapped_gdf["_site_upload_row_error"].notna().sum()),
     }
-    if summary["n_unique_site_id"] < summary["n_features"]:
+    if summary["n_unique_site_id"] < (
+        summary["n_features"] - summary["n_missing_site_id"]
+    ):
         warnings.append(
-            "Mapped 'site_id' contains duplicates. Duplicates are allowed but may cause confusion in reporting."
+            "Mapped 'site_id' contains duplicate display labels. These remain separate "
+            "features with distinct internal UUID identities."
         )
 
     return {
@@ -1108,14 +1305,20 @@ def _site_upload_summary_row(row):
         "celery_task_id": row.celery_task_id,
         "site_set_id": str(row.site_set_id) if row.site_set_id else None,
         "site_set_name": row.site_set_name,
-        "n_features": int(row.n_features or 0),
+        "n_features": int(row.n_features) if row.n_features is not None else None,
         "n_sites_imported": int(row.n_sites_imported or 0),
+        "phase": row.phase,
+        "rows_scanned": int(row.rows_scanned or 0),
+        "rows_accepted": int(row.rows_accepted or 0),
+        "rows_skipped": int(row.rows_skipped or 0),
+        "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
         "status": row.status,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         "error_message": row.error_message,
         "ingest_stats": meta.get("ingest_stats"),
+        "diagnostics": meta.get("diagnostics"),
         "skip_errors_available": bool(meta.get("skip_errors_s3_key")),
     }
 
@@ -1145,40 +1348,95 @@ def create_user_site_upload(
     """
     db = get_db()
     normalized_mapping = _normalize_site_mapping(column_mapping)
+    task_id = str(uuid.uuid4())
     try:
+        _lock_site_upload_stage(db, upload_token)
+        if not _use_shared_site_upload_stage():
+            data_path, meta_path = _site_upload_stage_paths(upload_token)
+            if not data_path.exists() or not meta_path.exists():
+                raise ValueError(
+                    "Staged upload not found. Please upload the file again."
+                )
         upload = UserSiteUpload(
             user_id=user_id,
             original_filename=filename or "sites",
-            n_features=int(n_features or 0),
+            n_features=int(n_features) if n_features is not None else None,
             status="pending",
+            celery_task_id=task_id,
             extra_metadata={
                 "upload_token": upload_token,
                 "column_mapping": normalized_mapping,
+                "dispatch_at": datetime.now(UTC).isoformat(),
+                "dispatch_attempts": 1,
             },
         )
         db.add(upload)
         db.flush()
+        upload_id = str(upload.id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
-        async_result = webapp_tasks.import_user_site_upload_task.apply_async(
+    try:
+        webapp_tasks.import_user_site_upload_task.apply_async(
+            task_id=task_id,
             kwargs={
-                "upload_id": str(upload.id),
+                "upload_id": upload_id,
                 "user_id": str(user_id),
                 "upload_token": str(upload_token),
                 "column_mapping": normalized_mapping,
-            }
+            },
         )
-        upload.celery_task_id = async_result.id
-        db.commit()
-        return _site_upload_summary_row(upload)
+    except Exception as exc:
+        logger.exception("Failed to dispatch site upload %s", upload_id)
+        record_site_upload_dispatch(upload_id, task_id, error=str(exc))
+    else:
+        record_site_upload_dispatch(upload_id, task_id)
+    db = get_db()
+    try:
+        upload = db.query(UserSiteUpload).filter(UserSiteUpload.id == upload_id).first()
+        if upload:
+            return _site_upload_summary_row(upload)
     except Exception:
         db.rollback()
-        try:
-            discard_staged_site_upload(upload_token, user_id)
-        except Exception:
-            logger.warning(
-                "Failed to discard staged upload after async dispatch error",
-                exc_info=True,
+        raise
+    finally:
+        db.close()
+    raise ValueError("Upload job disappeared after it was queued.")
+
+
+def record_site_upload_dispatch(upload_id, task_id, *, error=None):
+    """Record a broker outcome without changing lifecycle or newer reservations."""
+    db = get_db()
+    try:
+        upload = (
+            db.query(UserSiteUpload)
+            .filter(
+                UserSiteUpload.id == upload_id,
+                UserSiteUpload.celery_task_id == task_id,
+                UserSiteUpload.status.in_(("pending", "running")),
             )
+            .with_for_update(key_share=True)
+            .first()
+        )
+        if upload:
+            metadata = dict(upload.extra_metadata or {})
+            if error is None:
+                metadata["dispatch_confirmed_at"] = datetime.now(UTC).isoformat()
+                metadata.pop("dispatch_error", None)
+                upload.error_message = None
+            else:
+                metadata["dispatch_error"] = error[:2000]
+                upload.error_message = (
+                    f"Task dispatch failed; recovery will retry: {error}"[:2000]
+                )
+            upload.extra_metadata = metadata
+            db.commit()
+    except Exception:
+        db.rollback()
         raise
     finally:
         db.close()
@@ -1224,6 +1482,7 @@ def delete_user_site_upload(upload_id, user_id):
         upload = (
             db.query(UserSiteUpload)
             .filter(UserSiteUpload.id == upload_id, UserSiteUpload.user_id == user_id)
+            .with_for_update(key_share=True)
             .first()
         )
         if not upload:
@@ -1254,15 +1513,17 @@ def delete_user_site_upload(upload_id, user_id):
 def cancel_user_site_upload(upload_id, user_id):
     """Cancel a user-owned background site import job.
 
-    Only uploads in ``pending`` or ``running`` state can be cancelled.
-    The associated Celery task is revoked and the upload row is marked
-    ``cancelled``.
+    Cancellation is durable and cooperative. The task is revoked without
+    terminating its worker process; the importer checks the status between
+    phases and before atomic publication.
     """
+    task_id = None
     db = get_db()
     try:
         upload = (
             db.query(UserSiteUpload)
             .filter(UserSiteUpload.id == upload_id, UserSiteUpload.user_id == user_id)
+            .with_for_update(key_share=True)
             .first()
         )
         if not upload:
@@ -1274,27 +1535,130 @@ def cancel_user_site_upload(upload_id, user_id):
         if upload.status not in {"pending", "running"}:
             return False, f"Upload cannot be cancelled from status '{upload.status}'."
 
-        if upload.celery_task_id:
-            try:
-                webapp_tasks.import_user_site_upload_task.AsyncResult(
-                    upload.celery_task_id
-                ).revoke(terminate=True, signal="SIGTERM")
-            except Exception:
-                logger.exception(
-                    "Failed to revoke upload Celery task %s", upload.celery_task_id
-                )
-                return False, "Failed to cancel upload task."
-
+        task_id = upload.celery_task_id
         upload.status = "cancelled"
+        upload.phase = "cancelled"
         upload.completed_at = datetime.now(UTC)
         upload.error_message = "Cancelled by admin."
         db.commit()
-        return True, "Upload cancelled."
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
+
+    if task_id:
+        try:
+            webapp_tasks.import_user_site_upload_task.AsyncResult(task_id).revoke(
+                terminate=False
+            )
+        except Exception:
+            logger.warning(
+                "Failed to revoke queued upload task %s", task_id, exc_info=True
+            )
+    return True, "Upload cancelled."
+
+
+def claim_user_site_upload(
+    upload_id,
+    user_id,
+    *,
+    lease_seconds=SITE_UPLOAD_WORKER_LEASE_SECONDS,
+    max_attempts=3,
+):
+    """Atomically claim a pending upload or one with an expired worker lease."""
+    db = get_db()
+    try:
+        claimed = db.execute(
+            text(
+                """
+                UPDATE user_site_uploads
+                SET status = 'running',
+                    phase = 'loading',
+                    started_at = COALESCE(started_at, now()),
+                    heartbeat_at = now(),
+                    attempt_count = attempt_count + 1
+                WHERE id = :upload_id
+                  AND user_id = :user_id
+                  AND attempt_count < :max_attempts
+                  AND (
+                    status = 'pending'
+                    OR (
+                      status = 'running'
+                      AND (
+                        COALESCE(heartbeat_at, started_at, created_at)
+                            < now() - (:lease_seconds * interval '1 second')
+                      )
+                    )
+                  )
+                RETURNING id
+                """
+            ),
+            {
+                "upload_id": str(upload_id),
+                "user_id": str(user_id),
+                "max_attempts": max_attempts,
+                "lease_seconds": lease_seconds,
+            },
+        ).scalar_one_or_none()
+        if claimed:
+            db.commit()
+            return {"claimed": True, "status": "running"}
+
+        upload = (
+            db.query(UserSiteUpload)
+            .filter(
+                UserSiteUpload.id == upload_id,
+                UserSiteUpload.user_id == user_id,
+            )
+            .with_for_update(key_share=True)
+            .first()
+        )
+        if not upload:
+            return {"claimed": False, "status": "missing"}
+
+        if (
+            upload.status == "running"
+            and upload.attempt_count >= max_attempts
+            and (upload.heartbeat_at or upload.started_at or upload.created_at)
+            < datetime.now(UTC) - timedelta(seconds=lease_seconds)
+        ):
+            upload.status = "failed"
+            upload.phase = "failed"
+            upload.completed_at = datetime.now(UTC)
+            upload.error_message = (
+                "Upload worker stopped and exhausted its retry limit."
+            )
+            db.commit()
+            return {"claimed": False, "status": "failed"}
+        return {
+            "claimed": False,
+            "status": upload.status,
+            "site_set_id": str(upload.site_set_id) if upload.site_set_id else None,
+            "site_set_name": upload.site_set_name,
+            "n_sites": int(upload.n_sites_imported or 0),
+        }
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _assert_site_upload_running(upload_id):
+    """Raise when a durable upload job was cancelled or disappeared."""
+    if upload_id is None:
+        return
+    db = get_db()
+    try:
+        status = db.execute(
+            text("SELECT status FROM user_site_uploads WHERE id = :upload_id"),
+            {"upload_id": str(upload_id)},
+        ).scalar_one_or_none()
+    finally:
+        db.close()
+    if status != "running":
+        raise _SiteUploadCancelled(f"Upload {upload_id} is no longer active.")
 
 
 def update_user_site_upload_status(
@@ -1308,6 +1672,13 @@ def update_user_site_upload_status(
     n_sites_imported=None,
     error_message=None,
     ingest_stats=None,
+    phase=None,
+    rows_scanned=None,
+    rows_accepted=None,
+    rows_skipped=None,
+    heartbeat_at=None,
+    diagnostics=None,
+    skip_errors_s3_key=None,
 ):
     """Update a background site import job row.
 
@@ -1329,22 +1700,41 @@ def update_user_site_upload_status(
         Failure details, truncated before storage.
     ingest_stats : dict | None
         Optional skipped-feature statistics copied from the site set metadata.
+    phase : str | None
+        Current import phase.
+    rows_scanned, rows_accepted, rows_skipped : int | None
+        Import progress counters.
+    heartbeat_at : datetime | None
+        Latest worker heartbeat for lease recovery.
+    diagnostics : dict | None
+        Bounded examples and failure context, stored as JSON metadata.
 
     Returns
     -------
     bool
-        ``True`` when the row was updated, else ``False`` when it was not found.
+        ``True`` when updated; ``False`` when missing or terminal-state guarded.
     """
     db = get_db()
     try:
-        upload = db.query(UserSiteUpload).filter(UserSiteUpload.id == upload_id).first()
+        # NO KEY UPDATE coexists with the import transaction's source-upload FK.
+        upload = (
+            db.query(UserSiteUpload)
+            .filter(UserSiteUpload.id == upload_id)
+            .with_for_update(key_share=True)
+            .first()
+        )
         if not upload:
             return False
 
-        if upload.status == "cancelled" and status != "cancelled":
+        terminal_statuses = {"completed", "failed", "cancelled"}
+        if upload.status in terminal_statuses and status != upload.status:
+            return False
+        if status == "running" and upload.status not in {"pending", "running"}:
             return False
 
         upload.status = status
+        if phase is not None:
+            upload.phase = phase
         if started_at is not None:
             upload.started_at = started_at
         if completed_at is not None:
@@ -1355,11 +1745,28 @@ def update_user_site_upload_status(
             upload.site_set_name = site_set_name
         if n_sites_imported is not None:
             upload.n_sites_imported = int(n_sites_imported)
+        if rows_scanned is not None:
+            upload.rows_scanned = int(rows_scanned)
+        if rows_accepted is not None:
+            upload.rows_accepted = int(rows_accepted)
+        if rows_skipped is not None:
+            upload.rows_skipped = int(rows_skipped)
+        if heartbeat_at is not None:
+            upload.heartbeat_at = heartbeat_at
         if error_message is not None:
             upload.error_message = error_message[:2000] if error_message else None
-        if ingest_stats is not None:
+        if (
+            ingest_stats is not None
+            or diagnostics is not None
+            or skip_errors_s3_key is not None
+        ):
             metadata = dict(upload.extra_metadata or {})
-            metadata["ingest_stats"] = ingest_stats
+            if ingest_stats is not None:
+                metadata["ingest_stats"] = ingest_stats
+            if diagnostics is not None:
+                metadata["diagnostics"] = diagnostics
+            if skip_errors_s3_key is not None:
+                metadata["skip_errors_s3_key"] = skip_errors_s3_key
             upload.extra_metadata = metadata
 
         db.commit()
@@ -1505,21 +1912,74 @@ def save_user_site_set_from_staged(
         None  # file handle; kept in outer scope so finally can close on exception
     )
     try:
+        _assert_site_upload_running(upload_id)
+        bytes_since_download_check = 0
+
+        def _download_progress(bytes_transferred):
+            nonlocal bytes_since_download_check
+            bytes_since_download_check += bytes_transferred
+            if bytes_since_download_check >= 8 * 1024 * 1024:
+                _assert_site_upload_running(upload_id)
+                if upload_id is not None:
+                    update_user_site_upload_status(
+                        upload_id,
+                        status="running",
+                        phase="downloading",
+                        heartbeat_at=datetime.now(UTC),
+                    )
+                bytes_since_download_check = 0
+
+        if upload_id is not None:
+            update_user_site_upload_status(
+                upload_id,
+                status="running",
+                phase="downloading",
+                heartbeat_at=datetime.now(UTC),
+            )
         local_path, filename, file_size_bytes = _materialize_staged_upload_path(
-            upload_token, user_id
+            upload_token, user_id, progress_callback=_download_progress
         )
+        _assert_site_upload_running(upload_id)
         mapping_to_apply = _normalize_site_mapping(column_mapping)
         source_path = local_path
         source_name = filename
         ext = _get_file_extension(filename)
 
         if ext in {".zip", ".tar.gz", ".tgz"}:
+            if upload_id is not None:
+                update_user_site_upload_status(
+                    upload_id,
+                    status="running",
+                    phase="extracting",
+                    heartbeat_at=datetime.now(UTC),
+                )
+
+            last_archive_check = monotonic()
+
+            def _check_archive_cancellation():
+                nonlocal last_archive_check
+                if monotonic() - last_archive_check < 5:
+                    return
+                _assert_site_upload_running(upload_id)
+                if upload_id is not None:
+                    update_user_site_upload_status(
+                        upload_id,
+                        status="running",
+                        phase="extracting",
+                        heartbeat_at=datetime.now(UTC),
+                    )
+                last_archive_check = monotonic()
+
             extracted_archive_dir = tempfile.mkdtemp(prefix="ae_site_upload_extract_")
             source_path = _extract_site_archive_dataset(
-                local_path, filename, extracted_archive_dir
+                local_path,
+                filename,
+                extracted_archive_dir,
+                cancel_check=_check_archive_cancellation,
             )
             source_name = os.path.basename(source_path)
             ext = _get_file_extension(source_name)
+        _assert_site_upload_running(upload_id)
 
         # Stream supported datasets directly so Celery only holds a small insert
         # batch in memory at a time, even when the upload arrived as an archive.
@@ -1527,6 +1987,15 @@ def save_user_site_set_from_staged(
 
         db = get_db()
         try:
+            if upload_id is not None:
+                existing_site_set = (
+                    db.query(UserSiteSet)
+                    .filter(UserSiteSet.source_upload_id == upload_id)
+                    .first()
+                )
+                if existing_site_set:
+                    db.rollback()
+                    return get_user_site_set_detail(existing_site_set.id, user_id)
             site_set = UserSiteSet(
                 user_id=user_id,
                 name=_derive_site_set_name(filename),
@@ -1535,6 +2004,7 @@ def save_user_site_set_from_staged(
                 file_format=_get_file_extension(filename).lstrip("."),
                 n_sites=0,
                 bounds=None,
+                source_upload_id=upload_id,
                 extra_metadata={"column_mapping": mapping_to_apply}
                 if any(mapping_to_apply.values())
                 else None,
@@ -1570,16 +2040,14 @@ def save_user_site_set_from_staged(
             )
 
             n_sites = 0
+            rows_scanned = 0
+            rows_skipped = 0
             bounds_minx = None
             bounds_miny = None
             bounds_maxx = None
             bounds_maxy = None
-            skipped_missing_required = 0
-            skipped_bad_start_date = 0
-            skipped_bad_geometry = 0
-            # Track up to 5 examples for the error message when n_sites == 0.
+            skipped_by_reason = {}
             _skip_error_examples = []
-            # Open a temp CSV file for incremental skip-error writing (no in-memory list).
             _skip_csv_writer = None
             if upload_id is not None and Config.S3_BUCKET:
                 try:
@@ -1605,51 +2073,80 @@ def save_user_site_set_from_staged(
 
             batch_rows = []
             batch_row_bytes = 0
-            last_progress_sites = 0
+            last_progress_rows = 0
             last_progress_at = monotonic()
 
             def _report_upload_progress(force=False):
-                nonlocal last_progress_sites, last_progress_at
-                if upload_id is None or n_sites <= 0:
+                nonlocal last_progress_rows, last_progress_at
+                if upload_id is None:
                     return
                 now = monotonic()
                 if not force and (
-                    n_sites - last_progress_sites < SITE_UPLOAD_PROGRESS_BATCH_SIZE
+                    rows_scanned - last_progress_rows < SITE_UPLOAD_PROGRESS_BATCH_SIZE
                     and now - last_progress_at < SITE_UPLOAD_PROGRESS_INTERVAL_SECONDS
                 ):
                     return
-                skipped_total = (
-                    skipped_missing_required
-                    + skipped_bad_start_date
-                    + skipped_bad_geometry
-                )
-                ingest_stats = (
-                    {
-                        "skipped_total": int(skipped_total),
-                        "skipped_missing_required": int(skipped_missing_required),
-                        "skipped_bad_start_date": int(skipped_bad_start_date),
-                        "skipped_bad_geometry": int(skipped_bad_geometry),
-                    }
-                    if skipped_total > 0
-                    else None
-                )
+                ingest_stats = {
+                    "rows_scanned": int(rows_scanned),
+                    "rows_accepted": int(n_sites),
+                    "rows_skipped": int(rows_skipped),
+                    "skipped_by_reason": dict(skipped_by_reason),
+                }
                 update_user_site_upload_status(
                     upload_id,
                     status="running",
+                    phase="importing",
                     n_sites_imported=n_sites,
+                    rows_scanned=rows_scanned,
+                    rows_accepted=n_sites,
+                    rows_skipped=rows_skipped,
+                    heartbeat_at=datetime.now(UTC),
                     ingest_stats=ingest_stats,
                 )
-                last_progress_sites = n_sites
+                _assert_site_upload_running(upload_id)
+                last_progress_rows = rows_scanned
                 last_progress_at = now
 
             def _maybe_report_upload_progress():
-                if n_sites % SITE_UPLOAD_PROGRESS_CHECK_ROW_INTERVAL == 0:
+                if rows_scanned % SITE_UPLOAD_PROGRESS_CHECK_ROW_INTERVAL == 0:
                     _report_upload_progress()
+
+            def _record_skip(
+                feature_index, reason, *, category, site_id="", site_name="", value=""
+            ):
+                nonlocal rows_skipped
+                rows_skipped += 1
+                skipped_by_reason[category] = skipped_by_reason.get(category, 0) + 1
+                if len(_skip_error_examples) < 10:
+                    _skip_error_examples.append(f"row {feature_index}: {reason}")
+                if _skip_csv_writer is not None:
+
+                    def _as_text(value):
+                        if value is None:
+                            return ""
+                        try:
+                            missing = pd.isna(value)
+                            if not hasattr(missing, "__len__") and bool(missing):
+                                return ""
+                        except (TypeError, ValueError):
+                            pass
+                        return str(value)
+
+                    _skip_csv_writer.writerow(
+                        {
+                            "row_number": feature_index,
+                            "site_id": _as_text(site_id)[:100],
+                            "site_name": _as_text(site_name)[:255],
+                            "reason": reason,
+                            "value": _as_text(value)[:500],
+                        }
+                    )
 
             def _flush_batch_rows():
                 nonlocal batch_row_bytes
                 if not batch_rows:
                     return
+                _assert_site_upload_running(upload_id)
                 db.execute(insert_sql, batch_rows)
                 batch_rows.clear()
                 batch_row_bytes = 0
@@ -1657,6 +2154,8 @@ def save_user_site_set_from_staged(
 
             if use_streaming_ingest:
                 from pyproj import Transformer
+                from pyproj.exceptions import ProjError
+                from shapely.errors import GEOSException
                 from shapely.geometry import shape
                 from shapely.ops import transform as shapely_transform
 
@@ -1691,180 +2190,156 @@ def save_user_site_set_from_staged(
                                 f"Selected source column for '{field}' was not found: {src_col}"
                             )
 
-                    end_src = mapping_to_apply.get("end_date")
-                    if end_src and end_src not in source_columns:
-                        raise ValueError(
-                            f"Selected source column for 'end_date' was not found: {end_src}"
-                        )
+                    for field in ALL_SITE_FIELDS:
+                        src_col = mapping_to_apply.get(field)
+                        if src_col and src_col not in source_columns:
+                            raise ValueError(
+                                f"Selected source column for '{field}' was not found: "
+                                f"{src_col}"
+                            )
 
-                    to_wgs84 = None
+                    source_crs = src.crs_wkt or src.crs
+                    if not source_crs:
+                        if ext in {".geojson", ".json"}:
+                            source_crs = "EPSG:4326"
+                        else:
+                            raise ValueError("The uploaded dataset has no known CRS.")
                     try:
-                        if src.crs and src.crs.to_epsg() != 4326:
-                            to_wgs84 = Transformer.from_crs(
-                                src.crs, "EPSG:4326", always_xy=True
-                            ).transform
-                    except Exception:  # noqa: BLE001
-                        # If CRS is unavailable/unparseable, trust source geometry.
-                        to_wgs84 = None
+                        to_wgs84 = Transformer.from_crs(
+                            source_crs, "EPSG:4326", always_xy=True
+                        ).transform
+                    except Exception as exc:
+                        raise ValueError(f"Invalid source CRS: {exc}") from exc
 
-                    # Counters for auto-assigned IDs
-                    missing_site_id_count = 0
+                    reserved_site_ids = set()
+                    if mapping_to_apply.get("site_id"):
+                        last_identifier_check = monotonic()
+                        for feature_index, feature in enumerate(src, start=1):
+                            value = (feature.get("properties") or {}).get(
+                                mapping_to_apply["site_id"]
+                            )
+                            if value is not None and str(value).strip():
+                                reserved_site_ids.add(str(value).strip())
+                            if (
+                                feature_index % 1000 == 0
+                                or monotonic() - last_identifier_check >= 5
+                            ):
+                                _assert_site_upload_running(upload_id)
+                                if upload_id is not None:
+                                    update_user_site_upload_status(
+                                        upload_id,
+                                        status="running",
+                                        phase="reserving_ids",
+                                        heartbeat_at=datetime.now(UTC),
+                                    )
+                                last_identifier_check = monotonic()
+                    generated_site_ids = set()
+                    generated_id_counter = 0
                     missing_site_name_count = 0
 
+                if upload_id is not None:
+                    update_user_site_upload_status(
+                        upload_id,
+                        status="running",
+                        phase="validating",
+                        heartbeat_at=datetime.now(UTC),
+                    )
+
+                with _open_site_feature_source(source_path) as src:
                     for feature_index, feature in enumerate(src, start=1):
-                        props = feature.get("properties") or {}
-                        raw_site_id = props.get(mapping_to_apply["site_id"])
-                        raw_site_name = props.get(mapping_to_apply["site_name"])
-                        raw_start = props.get(mapping_to_apply["start_date"])
-                        raw_end = (
-                            props.get(mapping_to_apply["end_date"])
-                            if mapping_to_apply.get("end_date")
-                            else None
-                        )
+                        rows_scanned = feature_index
+                        props = dict(feature.get("properties") or {})
+                        raw_site_id = props.get(mapping_to_apply.get("site_id"))
+                        raw_site_name = props.get(mapping_to_apply.get("site_name"))
 
-                        site_id = (
-                            str(raw_site_id).strip() if raw_site_id is not None else ""
-                        )
-                        site_name = (
-                            str(raw_site_name).strip()
-                            if raw_site_name is not None
-                            else ""
-                        )
+                        try:
+                            site_id = normalize_site_text(
+                                raw_site_id,
+                                field="site_id",
+                                row_number=feature_index,
+                            )
+                            site_name = normalize_site_text(
+                                raw_site_name,
+                                field="site_name",
+                                row_number=feature_index,
+                            )
+                            start_date = normalize_site_date(
+                                props.get(mapping_to_apply["start_date"]),
+                                field="start_date",
+                                row_number=feature_index,
+                                required=True,
+                            )
+                            end_date = normalize_site_date(
+                                props.get(mapping_to_apply["end_date"])
+                                if mapping_to_apply.get("end_date")
+                                else None,
+                                field="end_date",
+                                row_number=feature_index,
+                                required=False,
+                            )
+                            if end_date is not None and end_date < start_date:
+                                raise ValueError(
+                                    f"row {feature_index}: end_date precedes start_date"
+                                )
+                        except (TypeError, ValueError) as exc:
+                            message = str(exc)
+                            if "start_date is required" in message:
+                                category = "missing_required"
+                            elif "start_date" in message or "end_date" in message:
+                                category = "bad_date"
+                            else:
+                                category = "bad_text"
+                            _record_skip(
+                                feature_index,
+                                message,
+                                category=category,
+                                site_id=raw_site_id,
+                                site_name=raw_site_name,
+                            )
+                            _maybe_report_upload_progress()
+                            continue
 
-                        # Auto-assign missing site_id
-                        if not site_id:
-                            missing_site_id_count += 1
-                            site_id = f"MissingID{missing_site_id_count}"
-
-                        # Auto-assign missing site_name
-                        if not site_name:
+                        if site_id is None:
+                            while True:
+                                generated_id_counter += 1
+                                candidate = f"MissingID{generated_id_counter}"
+                                if (
+                                    candidate not in reserved_site_ids
+                                    and candidate not in generated_site_ids
+                                ):
+                                    site_id = candidate
+                                    generated_site_ids.add(candidate)
+                                    break
+                        if site_name is None:
                             missing_site_name_count += 1
                             site_name = f"Missing_Site_Name_{missing_site_name_count}"
 
-                        # Only check for missing start_date (required for analysis)
-                        if raw_start is None:
-                            skipped_missing_required += 1
-                            if len(_skip_error_examples) < 5:
-                                _skip_error_examples.append(
-                                    f"row {feature_index}: Missing start date"
-                                )
-                            if _skip_csv_writer is not None:
-                                _skip_csv_writer.writerow(
-                                    {
-                                        "row_number": feature_index,
-                                        "site_id": str(raw_site_id).strip()
-                                        if raw_site_id is not None
-                                        else "",
-                                        "site_name": str(raw_site_name).strip()
-                                        if raw_site_name is not None
-                                        else "",
-                                        "reason": "Missing start date",
-                                        "value": "",
-                                    }
-                                )
-                            continue
-
-                        start_dt = pd.to_datetime(raw_start, errors="coerce")
-                        if pd.isna(start_dt):
-                            skipped_bad_start_date += 1
-                            if len(_skip_error_examples) < 5:
-                                _skip_error_examples.append(
-                                    f"row {feature_index}: Unparseable start date ({raw_start!r})"
-                                )
-                            if _skip_csv_writer is not None:
-                                _skip_csv_writer.writerow(
-                                    {
-                                        "row_number": feature_index,
-                                        "site_id": str(raw_site_id).strip()
-                                        if raw_site_id is not None
-                                        else "",
-                                        "site_name": str(raw_site_name).strip()
-                                        if raw_site_name is not None
-                                        else "",
-                                        "reason": "Unparseable start date",
-                                        "value": str(raw_start),
-                                    }
-                                )
-                            continue
-
-                        start_date = start_dt.date()
-
-                        if raw_end is None or str(raw_end).strip() == "":
-                            end_date = None
-                        else:
-                            end_dt = pd.to_datetime(raw_end, errors="coerce")
-                            end_date = None if pd.isna(end_dt) else end_dt.date()
-
                         geom_json = feature.get("geometry")
                         if not geom_json:
-                            skipped_bad_geometry += 1
-                            if len(_skip_error_examples) < 5:
-                                _skip_error_examples.append(
-                                    f"row {feature_index}: Missing geometry"
-                                )
-                            if _skip_csv_writer is not None:
-                                _skip_csv_writer.writerow(
-                                    {
-                                        "row_number": feature_index,
-                                        "site_id": str(raw_site_id).strip()
-                                        if raw_site_id is not None
-                                        else "",
-                                        "site_name": str(raw_site_name).strip()
-                                        if raw_site_name is not None
-                                        else "",
-                                        "reason": "Missing geometry",
-                                        "value": "",
-                                    }
-                                )
+                            _record_skip(
+                                feature_index,
+                                "Missing geometry",
+                                category="bad_geometry",
+                                site_id=site_id,
+                                site_name=site_name,
+                            )
+                            _maybe_report_upload_progress()
                             continue
 
-                        geom = shape(geom_json)
-                        if to_wgs84 is not None:
+                        try:
+                            geom = shape(geom_json)
                             geom = shapely_transform(to_wgs84, geom)
-                        geom = _repair_geometry_single(geom)
-
-                        if geom.is_empty:
-                            skipped_bad_geometry += 1
-                            if len(_skip_error_examples) < 5:
-                                _skip_error_examples.append(
-                                    f"row {feature_index}: Empty geometry after repair"
-                                )
-                            if _skip_csv_writer is not None:
-                                _skip_csv_writer.writerow(
-                                    {
-                                        "row_number": feature_index,
-                                        "site_id": str(raw_site_id).strip()
-                                        if raw_site_id is not None
-                                        else "",
-                                        "site_name": str(raw_site_name).strip()
-                                        if raw_site_name is not None
-                                        else "",
-                                        "reason": "Empty geometry after repair",
-                                        "value": "",
-                                    }
-                                )
-                            continue
-
-                        if geom.geom_type not in ("Polygon", "MultiPolygon"):
-                            skipped_bad_geometry += 1
-                            if len(_skip_error_examples) < 5:
-                                _skip_error_examples.append(
-                                    f"row {feature_index}: Unsupported geometry type ({geom.geom_type!r})"
-                                )
-                            if _skip_csv_writer is not None:
-                                _skip_csv_writer.writerow(
-                                    {
-                                        "row_number": feature_index,
-                                        "site_id": str(raw_site_id).strip()
-                                        if raw_site_id is not None
-                                        else "",
-                                        "site_name": str(raw_site_name).strip()
-                                        if raw_site_name is not None
-                                        else "",
-                                        "reason": "Unsupported geometry type",
-                                        "value": geom.geom_type,
-                                    }
-                                )
+                            geom = _repair_geometry_single(geom)
+                            validate_wgs84_polygon(geom, row_number=feature_index)
+                        except (ValueError, TypeError, ProjError, GEOSException) as exc:
+                            _record_skip(
+                                feature_index,
+                                f"Invalid polygon geometry: {exc}",
+                                category="bad_geometry",
+                                site_id=site_id,
+                                site_name=site_name,
+                            )
+                            _maybe_report_upload_progress()
                             continue
 
                         minx, miny, maxx, maxy = geom.bounds
@@ -1901,66 +2376,9 @@ def save_user_site_set_from_staged(
                         ):
                             _flush_batch_rows()
             else:
-                gdf, errors = _parse_sites_geometry_file_from_path(local_path, filename)
-                if errors:
-                    raise ValueError("\n".join(errors))
-                if gdf is None or gdf.empty:
-                    raise ValueError("No features were found in the uploaded file.")
-
-                if any(mapping_to_apply.values()):
-                    gdf, mapping_errors, _mapping_warnings = apply_site_column_mapping(
-                        gdf, mapping_to_apply
-                    )
-                    if mapping_errors:
-                        raise ValueError("\n".join(mapping_errors))
-                else:
-                    missing = set(REQUIRED_SITE_FIELDS) - set(gdf.columns)
-                    if missing:
-                        raise ValueError(
-                            "Missing required columns: " + ", ".join(sorted(missing))
-                        )
-
-                if not gdf.crs:
-                    gdf = gdf.set_crs(epsg=4326)
-                elif gdf.crs.to_epsg() != 4326:
-                    gdf = gdf.to_crs(epsg=4326)
-
-                if len(gdf) > 0:
-                    minx, miny, maxx, maxy = gdf.total_bounds
-                    bounds_minx, bounds_miny, bounds_maxx, bounds_maxy = (
-                        minx,
-                        miny,
-                        maxx,
-                        maxy,
-                    )
-
-                for _, row in gdf.iterrows():
-                    start_date = pd.to_datetime(row["start_date"]).date()
-                    end_date = (
-                        pd.to_datetime(row["end_date"]).date()
-                        if pd.notna(row.get("end_date")) and str(row.get("end_date"))
-                        else None
-                    )
-
-                    batch_row = {
-                        "site_set_id": str(site_set.id),
-                        "site_id": str(row["site_id"]),
-                        "site_name": str(row.get("site_name", "")),
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "geom_geojson": json.dumps(row.geometry.__geo_interface__),
-                    }
-                    batch_rows.append(batch_row)
-                    n_sites += 1
-                    _maybe_report_upload_progress()
-                    batch_row_bytes += len(
-                        json.dumps(batch_row, default=str).encode("utf-8")
-                    )
-                    if (
-                        len(batch_rows) >= SITE_UPLOAD_INSERT_BATCH_SIZE
-                        or batch_row_bytes >= SITE_UPLOAD_INSERT_BATCH_MAX_BYTES
-                    ):
-                        _flush_batch_rows()
+                raise ValueError(
+                    f"Unsupported site upload dataset format for streaming: {ext}"
+                )
 
             _flush_batch_rows()
             _report_upload_progress(force=True)
@@ -1970,58 +2388,67 @@ def save_user_site_set_from_staged(
                 _skip_csv_file.close()
                 _skip_csv_file = None
 
-            if n_sites == 0:
-                skipped_total = (
-                    skipped_missing_required
-                    + skipped_bad_start_date
-                    + skipped_bad_geometry
+            skipped_total = rows_skipped
+            ingest_stats = {
+                "rows_scanned": int(rows_scanned),
+                "rows_accepted": int(n_sites),
+                "rows_skipped": int(rows_skipped),
+                "skipped_by_reason": dict(skipped_by_reason),
+            }
+            diagnostics = {
+                "examples": _skip_error_examples,
+                "input_rows": int(rows_scanned),
+                "valid_rows": int(n_sites),
+            }
+            skip_errors_s3_key = None
+            if (
+                skipped_total > 0
+                and _skip_csv_path is not None
+                and upload_id is not None
+            ):
+                skip_errors_s3_key = _upload_skip_errors_csv(upload_id, _skip_csv_path)
+
+            if upload_id is not None:
+                update_user_site_upload_status(
+                    upload_id,
+                    status="running",
+                    phase="finalizing" if n_sites else "validating",
+                    n_sites_imported=n_sites,
+                    rows_scanned=rows_scanned,
+                    rows_accepted=n_sites,
+                    rows_skipped=rows_skipped,
+                    heartbeat_at=datetime.now(UTC),
+                    ingest_stats=ingest_stats,
+                    diagnostics=diagnostics,
+                    skip_errors_s3_key=skip_errors_s3_key,
                 )
+                _assert_site_upload_running(upload_id)
+
+            if n_sites == 0:
                 if skipped_total > 0:
                     details = (
                         "No valid features were found after applying the selected mapping. "
-                        f"Skipped checks: missing start_date={skipped_missing_required}, "
-                        f"bad start_date={skipped_bad_start_date}, "
-                        f"bad geometry={skipped_bad_geometry}."
+                        f"Scanned {rows_scanned}; skipped {rows_skipped}: "
+                        f"{skipped_by_reason}."
                     )
                     if _skip_error_examples:
                         details += f" First examples: {'; '.join(_skip_error_examples)}"
                     raise ValueError(details)
                 raise ValueError("No features were found in the uploaded file.")
 
-            skipped_total = (
-                skipped_missing_required + skipped_bad_start_date + skipped_bad_geometry
-            )
             if skipped_total > 0:
                 logger.warning(
-                    "Site upload saved with skipped features: site_set_id=%s skipped_total=%s "
-                    "missing_required=%s bad_start_date=%s bad_geometry=%s",
+                    "Site upload saved with skipped features: site_set_id=%s "
+                    "scanned=%s accepted=%s skipped=%s reasons=%s",
                     site_set.id,
+                    rows_scanned,
+                    n_sites,
                     skipped_total,
-                    skipped_missing_required,
-                    skipped_bad_start_date,
-                    skipped_bad_geometry,
+                    skipped_by_reason,
                 )
                 metadata = dict(site_set.extra_metadata or {})
-                metadata["ingest_stats"] = {
-                    "skipped_total": int(skipped_total),
-                    "skipped_missing_required": int(skipped_missing_required),
-                    "skipped_bad_start_date": int(skipped_bad_start_date),
-                    "skipped_bad_geometry": int(skipped_bad_geometry),
-                }
-                if skipped_total > 0 and _skip_csv_path is not None:
-                    s3_key = _upload_skip_errors_csv(upload_id, _skip_csv_path)
-                    if s3_key and upload_id is not None:
-                        # Write the key to the upload row so _site_upload_summary_row
-                        # can surface the download button in the admin grid.
-                        upload_row = (
-                            db.query(UserSiteUpload)
-                            .filter(UserSiteUpload.id == upload_id)
-                            .first()
-                        )
-                        if upload_row is not None:
-                            upload_meta = dict(upload_row.extra_metadata or {})
-                            upload_meta["skip_errors_s3_key"] = s3_key
-                            upload_row.extra_metadata = upload_meta
+                metadata["ingest_stats"] = ingest_stats
+                metadata["diagnostics"] = diagnostics
                 site_set.extra_metadata = metadata
 
             site_set.n_sites = n_sites
@@ -2043,6 +2470,35 @@ def save_user_site_set_from_staged(
                 ),
                 {"site_set_id": str(site_set.id)},
             )
+
+            if upload_id is not None:
+                upload_row = (
+                    db.query(UserSiteUpload)
+                    .filter(UserSiteUpload.id == upload_id)
+                    .with_for_update(key_share=True)
+                    .first()
+                )
+                if upload_row is None or upload_row.status != "running":
+                    raise _SiteUploadCancelled(
+                        f"Upload {upload_id} was cancelled before publication."
+                    )
+                upload_row.status = "completed"
+                upload_row.phase = "completed"
+                upload_row.completed_at = datetime.now(UTC)
+                upload_row.heartbeat_at = upload_row.completed_at
+                upload_row.site_set_id = site_set.id
+                upload_row.site_set_name = site_set.name
+                upload_row.n_sites_imported = n_sites
+                upload_row.rows_scanned = rows_scanned
+                upload_row.rows_accepted = n_sites
+                upload_row.rows_skipped = rows_skipped
+                upload_row.error_message = None
+                upload_metadata = dict(upload_row.extra_metadata or {})
+                upload_metadata["ingest_stats"] = ingest_stats
+                upload_metadata["diagnostics"] = diagnostics
+                if skip_errors_s3_key:
+                    upload_metadata["skip_errors_s3_key"] = skip_errors_s3_key
+                upload_row.extra_metadata = upload_metadata
 
             db.commit()
             return get_user_site_set_detail(site_set.id, user_id)

@@ -50,11 +50,12 @@ COVARIATES <- c(setdiff(all.vars(f), "treatment"), "defor_pre_intervention")
 
 fragments <- read_parquet(
     out_path("sites_processed.parquet"),
-    col_select = c("site_id", "site_name", "id_numeric", "sub_site_index",
-                   "start_year", "end_year", "area_ha")
+    col_select = any_of(c("site_id", "display_site_id", "site_name", "id_numeric", "sub_site_index",
+                         "start_year", "end_year", "area_ha"))
 ) %>%
     as_tibble() %>%
     mutate(site_id = as.character(site_id))
+if (!"display_site_id" %in% names(fragments)) fragments$display_site_id <- fragments$site_id
 site_pixels <- read_parquet(out_path("treatment_cell_key.parquet")) %>%
     count(id_numeric, name = "n_site_pixels")
 fragments <- fragments %>%
@@ -63,10 +64,12 @@ fragments <- fragments %>%
 sites <- fragments %>%
     group_by(site_id) %>%
     summarise(
+        display_site_id = first(display_site_id),
         site_name = first(site_name), start_year = first(start_year),
         end_year = first(end_year), area_ha = sum(area_ha),
         n_site_pixels = sum(n_site_pixels), .groups = "drop"
     )
+write_csv(select(sites, site_id, display_site_id, site_name), out_path("site_identity.csv"))
 
 
 # -- Work reconciliation -----------------------------------------------------

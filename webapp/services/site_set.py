@@ -3,6 +3,8 @@
 import io
 import json
 import logging
+import tempfile
+from itertools import islice
 
 import geopandas as gpd
 import pandas as pd
@@ -12,7 +14,7 @@ from models import (
     UserSiteSet,
     get_db,
 )
-from shapely import from_wkb, wkb
+from shapely import wkb
 from sqlalchemy import text
 
 from services.s3 import S3_COST_TAGGING, get_s3_client
@@ -71,7 +73,8 @@ def get_user_site_set_geojson(site_set_id):
             text(
                 """
                 SELECT
-                    f.site_id,
+                    f.id::text AS site_id,
+                    f.site_id AS display_site_id,
                     f.site_name,
                     to_char(f.start_date, 'YYYY-MM-DD') AS start_date,
                     CASE
@@ -97,6 +100,7 @@ def get_user_site_set_geojson(site_set_id):
                 "geometry": json.loads(r.geom_json),
                 "properties": {
                     "site_id": r.site_id,
+                    "display_site_id": r.display_site_id,
                     "site_name": r.site_name,
                     "start_date": r.start_date,
                     "end_date": r.end_date,
@@ -127,7 +131,8 @@ def get_user_site_set_centroids_geojson(site_set_id):
             text(
                 """
                 SELECT
-                    f.site_id,
+                    f.id::text AS site_id,
+                    f.site_id AS display_site_id,
                     f.area_ha,
                     ST_AsGeoJSON(ST_Centroid(f.geom)) AS centroid_json
                 FROM user_site_features f
@@ -143,6 +148,7 @@ def get_user_site_set_centroids_geojson(site_set_id):
                 "geometry": json.loads(r.centroid_json),
                 "properties": {
                     "site_id": r.site_id,
+                    "display_site_id": r.display_site_id,
                     "area_ha": r.area_ha,
                     "_is_centroid": True,
                 },
@@ -404,8 +410,12 @@ def get_user_site_set_preview_rows(
     risk.
     """
     # Columns allowed in WHERE / ORDER BY expressions.
-    _ALLOWED = frozenset({"site_id", "site_name", "start_date", "end_date"})
+    _ALLOWED = frozenset(
+        {"feature_id", "site_id", "site_name", "start_date", "end_date"}
+    )
 
+    if start_row < 0 or end_row <= start_row or end_row - start_row > 1000:
+        raise ValueError("Invalid preview row range (maximum 1000 rows).")
     params = {
         "site_set_id": str(site_set_id),
         "limit": max(1, end_row - start_row),
@@ -425,7 +435,7 @@ def get_user_site_set_preview_rows(
             if not val:
                 continue
             p = f"flt_{col}"
-            col_expr = f"CAST({col} AS text)"
+            col_expr = f"CAST({'id' if col == 'feature_id' else col} AS text)"
             if op == "contains":
                 params[p] = f"%{val}%"
                 where_frags.append(f"{col_expr} ILIKE :{p}")
@@ -442,14 +452,14 @@ def get_user_site_set_preview_rows(
                 params[p] = f"%{val}"
                 where_frags.append(f"{col_expr} ILIKE :{p}")
 
-        elif ftype == "date":
+        elif ftype == "date" and col in {"start_date", "end_date"}:
             date_from = spec.get("dateFrom") or spec.get("filter") or ""
             date_to = spec.get("dateTo") or ""
             if op == "inRange" and date_from and date_to:
                 params[f"flt_{col}_f"] = date_from
                 params[f"flt_{col}_t"] = date_to
                 where_frags.append(
-                    f"{col} BETWEEN :flt_{col}_f::date AND :flt_{col}_t::date"
+                    f"{col} BETWEEN CAST(:flt_{col}_f AS date) AND CAST(:flt_{col}_t AS date)"
                 )
             elif date_from:
                 sql_op = {
@@ -461,7 +471,7 @@ def get_user_site_set_preview_rows(
                     "notEqual": "<>",
                 }.get(op, "=")
                 params[f"flt_{col}"] = date_from
-                where_frags.append(f"{col} {sql_op} :flt_{col}::date")
+                where_frags.append(f"{col} {sql_op} CAST(:flt_{col} AS date)")
 
     # ── Build ORDER BY from sortModel ────────────────────────────────────────
     order_parts = []
@@ -469,10 +479,8 @@ def get_user_site_set_preview_rows(
         col = item.get("colId", "")
         direction = "DESC" if str(item.get("sort", "asc")).lower() == "desc" else "ASC"
         if col in _ALLOWED:
-            order_parts.append(f"{col} {direction}")
-    order_sql = (
-        "ORDER BY " + ", ".join(order_parts) if order_parts else "ORDER BY site_id"
-    )
+            order_parts.append(f"{'id' if col == 'feature_id' else col} {direction}")
+    order_sql = "ORDER BY " + ", ".join((order_parts or ["site_id"]) + ["id"])
 
     # ── Assemble and execute ─────────────────────────────────────────────────
     where_sql = ""
@@ -481,7 +489,7 @@ def get_user_site_set_preview_rows(
 
     sql = text(
         f"""
-        SELECT site_id, site_name, start_date, end_date
+        SELECT id::text AS feature_id, site_id, site_name, start_date, end_date
         FROM user_site_features
         WHERE site_set_id = :site_set_id
         {where_sql}
@@ -495,6 +503,7 @@ def get_user_site_set_preview_rows(
         rows = db.execute(sql, params).fetchall()
         return [
             {
+                "feature_id": r.feature_id,
                 "site_id": r.site_id,
                 "site_name": r.site_name,
                 "start_date": r.start_date.isoformat() if r.start_date else "",
@@ -524,31 +533,20 @@ def _get_site_set_min_start_year(site_set_id, db):
 
 
 def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
-    """Stream site geometries from PostGIS to an in-memory GeoParquet buffer.
+    """Write bounded GeoParquet row groups to a caller-owned temporary file."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
 
-    Uses server-side cursor iteration (``stream_results=True``) so that
-    the DB only sends rows in chunks.  All rows are collected as lightweight
-    Python row objects (WKB bytes, not Shapely objects) before the final
-    GeoDataFrame is built and written with ``to_parquet()`` in one shot.
-    This avoids geopandas-version incompatibilities with the ``to_arrow()``
-    batch-writer approach while keeping DB-side memory at O(batch_size).
-
-    Returns
-    -------
-    buf : io.BytesIO
-        Seeked-to-0 in-memory GeoParquet file.  Callers that need a
-        GeoDataFrame afterwards can do ``gpd.read_parquet(buf)`` then
-        ``buf.seek(0)`` again for the S3 upload.
-    row_count : int
-        Total number of site features written.
-    """
-    buf = io.BytesIO()
+    if batch_size < 1:
+        raise ValueError("Parquet batch size must be positive.")
+    buf = tempfile.TemporaryFile(suffix=".parquet")  # noqa: SIM115 -- caller owns it
 
     result = db.execute(
         text(
             """
             SELECT
-                f.site_id,
+                f.id::text AS site_id,
+                f.site_id AS display_site_id,
                 f.site_name,
                 to_char(f.start_date, 'YYYY-MM-DD') AS start_date,
                 CASE
@@ -559,47 +557,69 @@ def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
                 ST_AsBinary(f.geom) AS geom_wkb
             FROM user_site_features f
             WHERE f.site_set_id = :site_set_id
-            ORDER BY f.site_id
+            ORDER BY f.id
             """
         ).execution_options(stream_results=True, max_row_buffer=batch_size),
         {"site_set_id": str(site_set_id)},
     )
 
-    rows = [r for r in result if r.geom_wkb is not None]
-
-    if not rows:
-        raise ValueError(
-            f"Site set {site_set_id} has no valid geometries — cannot stream to Parquet."
-        )
-
-    total_rows = len(rows)
-    # Vectorized WKB decode: C-level batch decode is ~5-10x faster than
-    # per-row wkb.loads().  Build the GeoDataFrame column-by-column from
-    # individual lists to avoid an intermediate list-of-dicts, which would
-    # hold rows + records + GDF simultaneously (~3x peak RAM).
-    wkb_bytes = [bytes(r.geom_wkb) for r in rows]
-    geoms = from_wkb(wkb_bytes)
-    del wkb_bytes
-    gdf = gpd.GeoDataFrame(
-        {
-            "site_id": [r.site_id for r in rows],
-            "site_name": [r.site_name for r in rows],
-            "start_date": [r.start_date for r in rows],
-            "end_date": [r.end_date for r in rows],
-            "area_ha": [r.area_ha for r in rows],
-            "geometry": geoms,
+    schema = pa.schema(
+        [
+            ("site_id", pa.string()),
+            ("display_site_id", pa.string()),
+            ("site_name", pa.string()),
+            ("start_date", pa.string()),
+            ("end_date", pa.string()),
+            ("area_ha", pa.float64()),
+            ("geometry", pa.binary()),
+        ],
+        metadata={
+            b"geo": json.dumps(
+                {
+                    "version": "1.0.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["MultiPolygon", "Polygon"],
+                            "crs": gpd.GeoSeries([], crs=4326).crs.to_json_dict(),
+                        }
+                    },
+                }
+            ).encode()
         },
-        crs="EPSG:4326",
-        geometry="geometry",
     )
-    del rows, geoms
-    gdf["start_date"] = pd.to_datetime(gdf["start_date"])
-    gdf["end_date"] = pd.to_datetime(gdf["end_date"])
-    gdf.to_parquet(buf)
-    del gdf
-
-    buf.seek(0)
-    return buf, total_rows
+    total_rows = 0
+    try:
+        with pq.ParquetWriter(buf, schema) as writer:
+            iterator = iter(result)
+            while rows := list(islice(iterator, batch_size)):
+                records = []
+                for row in rows:
+                    if row.geom_wkb is None:
+                        raise ValueError(f"Missing geometry for feature {row.site_id}.")
+                    records.append(
+                        {
+                            "site_id": row.site_id,
+                            "display_site_id": row.display_site_id,
+                            "site_name": row.site_name,
+                            "start_date": row.start_date,
+                            "end_date": row.end_date,
+                            "area_ha": row.area_ha,
+                            "geometry": bytes(row.geom_wkb),
+                        }
+                    )
+                writer.write_table(pa.Table.from_pylist(records, schema=schema))
+                total_rows += len(records)
+        if not total_rows:
+            raise ValueError(f"Site set {site_set_id} has no valid geometries.")
+        buf.seek(0)
+        return buf, total_rows
+    except Exception:
+        buf.close()
+        raise
+    finally:
+        result.close()
 
 
 def get_user_site_set_gdf(site_set_id, user_id=None):
@@ -619,7 +639,8 @@ def get_user_site_set_gdf(site_set_id, user_id=None):
             text(
                 """
                 SELECT
-                    f.site_id,
+                    f.id::text AS site_id,
+                    f.site_id AS display_site_id,
                     f.site_name,
                     to_char(f.start_date, 'YYYY-MM-DD') AS start_date,
                     CASE
@@ -639,6 +660,7 @@ def get_user_site_set_gdf(site_set_id, user_id=None):
         records = [
             {
                 "site_id": row.site_id,
+                "display_site_id": row.display_site_id,
                 "site_name": row.site_name,
                 "start_date": row.start_date,
                 "end_date": row.end_date,

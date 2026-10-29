@@ -14,6 +14,67 @@ from layouts.common import (
     navbar,
 )
 
+SITE_CATALOG_COLUMNS = [
+    {
+        **column,
+        "headerName": (
+            "Sites"
+            if column["field"] == "n_sites_imported"
+            else "Uploaded"
+            if column["field"] == "created_at"
+            else column["headerName"]
+        ),
+    }
+    for column in COMBINED_SITE_UPLOAD_COLUMNS
+    if column["field"]
+    in (
+        "site_set_name",
+        "filename",
+        "n_sites_imported",
+        "is_archived",
+        "created_at",
+        "id",
+    )
+]
+IMPORT_HISTORY_COLUMNS = [
+    *COMBINED_SITE_UPLOAD_COLUMNS[:3],
+    {"headerName": "Phase", "field": "phase", "minWidth": 140},
+    {
+        "headerName": "Scanned",
+        "field": "rows_scanned",
+        "type": "numericColumn",
+        "minWidth": 110,
+    },
+    {
+        "headerName": "Accepted",
+        "field": "rows_accepted",
+        "type": "numericColumn",
+        "minWidth": 110,
+    },
+    {
+        "headerName": "Skipped",
+        "field": "rows_skipped",
+        "type": "numericColumn",
+        "minWidth": 100,
+    },
+    *[
+        {
+            **column,
+            **(
+                {
+                    "wrapText": True,
+                    "autoHeight": True,
+                    "cellStyle": {"whiteSpace": "normal"},
+                }
+                if column["field"] == "error_message"
+                else {}
+            ),
+        }
+        for column in COMBINED_SITE_UPLOAD_COLUMNS[3:]
+        if column["field"] not in {"is_archived", "ingest_stats"}
+    ],
+]
+
 
 def _build_category_options():
     """Build dropdown options with variable names per category from config."""
@@ -99,11 +160,20 @@ def _site_upload_card(footer_text):
                                     ", or ",
                                     html.Strong("GeoPackage"),
                                     (
-                                        " dataset with site polygons. Geometries must be valid "
-                                        "Polygons or MultiPolygons in EPSG:4326 (WGS 84)."
+                                        " dataset with site polygons. Polygons and MultiPolygons "
+                                        "are validated and repaired. GeoJSON uses WGS 84; other "
+                                        "datasets must declare their CRS and are transformed "
+                                        "to EPSG:4326."
                                     ),
                                 ],
                                 className="mb-2 small",
+                            ),
+                            html.P(
+                                "Upload request limit: 800 MiB including form data. "
+                                "Archive limits: 2,000 files, 512 MiB per file, "
+                                "1 GiB expanded total and 200:1 compression.",
+                                id="site-upload-limits",
+                                className="mb-2 small text-muted",
                             ),
                             dbc.Button(
                                 "Click to Upload",
@@ -111,6 +181,13 @@ def _site_upload_card(footer_text):
                                 color="secondary",
                                 outline=True,
                                 className="w-100 mb-1",
+                            ),
+                            html.Button(
+                                "Cancel transfer",
+                                id="upload-sites-stream-cancel-btn",
+                                type="button",
+                                className="btn btn-outline-secondary btn-sm mb-2",
+                                style={"display": "none"},
                             ),
                         ],
                         id="site-upload-controls",
@@ -122,15 +199,22 @@ def _site_upload_card(footer_text):
                         value="",
                         style={"display": "none"},
                     ),
-                    html.Div(id="upload-status"),
+                    html.Div(
+                        id="upload-status",
+                        role="status",
+                        **{"aria-live": "polite", "aria-atomic": "true"},
+                    ),
                     dbc.Collapse(
                         dbc.Card(
                             dbc.CardBody(
                                 [
                                     html.H6("Map Uploaded Columns", className="mb-2"),
                                     html.P(
-                                        "Confirm which columns should be used for each required field. "
-                                        "start_date must be parseable as dates; end_date is optional.",
+                                        "Only start_date is required (for example 2000-01-01). "
+                                        "Site ID and name are optional display labels and are generated "
+                                        "when omitted; duplicate display IDs are allowed. "
+                                        "Numeric years/serial dates must be converted to explicit dates. "
+                                        "The choices below include sampled source values.",
                                         className="small text-muted mb-3",
                                     ),
                                     dbc.Row(
@@ -138,7 +222,9 @@ def _site_upload_card(footer_text):
                                             dbc.Col(
                                                 [
                                                     dbc.Label(
-                                                        "site_id", className="mb-1"
+                                                        "site_id (optional display ID)",
+                                                        className="mb-1",
+                                                        html_for="mapping-site-id",
                                                     ),
                                                     dbc.Select(
                                                         id="mapping-site-id",
@@ -153,7 +239,9 @@ def _site_upload_card(footer_text):
                                             dbc.Col(
                                                 [
                                                     dbc.Label(
-                                                        "site_name", className="mb-1"
+                                                        "site_name (optional)",
+                                                        className="mb-1",
+                                                        html_for="mapping-site-name",
                                                     ),
                                                     dbc.Select(
                                                         id="mapping-site-name",
@@ -168,7 +256,9 @@ def _site_upload_card(footer_text):
                                             dbc.Col(
                                                 [
                                                     dbc.Label(
-                                                        "start_date", className="mb-1"
+                                                        "start_date (required)",
+                                                        className="mb-1",
+                                                        html_for="mapping-start-date",
                                                     ),
                                                     dbc.Select(
                                                         id="mapping-start-date",
@@ -185,6 +275,7 @@ def _site_upload_card(footer_text):
                                                     dbc.Label(
                                                         "end_date (optional)",
                                                         className="mb-1",
+                                                        html_for="mapping-end-date",
                                                     ),
                                                     dbc.Select(
                                                         id="mapping-end-date",
@@ -202,6 +293,8 @@ def _site_upload_card(footer_text):
                                     html.Div(
                                         id="site-upload-mapping-status",
                                         className="mt-2",
+                                        role="status",
+                                        **{"aria-live": "polite"},
                                     ),
                                     dbc.Row(
                                         [
@@ -469,7 +562,7 @@ def admin_layout(user, user_status=None):
                                                         [
                                                             dbc.Col(
                                                                 html.H5(
-                                                                    "Site Imports",
+                                                                    "Site Set Catalog",
                                                                     className="mb-0",
                                                                 ),
                                                                 width="auto",
@@ -494,14 +587,48 @@ def admin_layout(user, user_status=None):
                                                     ),
                                                     _make_ag_grid(
                                                         table_id="admin-combined-site-table",
-                                                        column_defs=COMBINED_SITE_UPLOAD_COLUMNS,
+                                                        column_defs=SITE_CATALOG_COLUMNS,
                                                         row_model="clientSide",
                                                         height="420px",
                                                         style_conditions=USER_SITE_UPLOAD_ROW_STYLES,
+                                                        grid_options_extra={
+                                                            "pagination": True,
+                                                            "paginationPageSize": 25,
+                                                            "paginationPageSizeSelector": [
+                                                                25,
+                                                                50,
+                                                                100,
+                                                            ],
+                                                            "getRowId": {
+                                                                "function": "params.data.id"
+                                                            },
+                                                        },
                                                     ),
                                                     html.Div(
                                                         id="admin-combined-site-action-status",
                                                         className="mt-2",
+                                                    ),
+                                                    html.Hr(),
+                                                    html.H5("Recent Import History"),
+                                                    html.P(
+                                                        "The latest 50 imports are shown here. "
+                                                        "All reusable site sets remain in the catalog above, "
+                                                        "including legacy uploads.",
+                                                        className="small text-muted",
+                                                    ),
+                                                    _make_ag_grid(
+                                                        "admin-site-import-history",
+                                                        IMPORT_HISTORY_COLUMNS,
+                                                        height="320px",
+                                                        grid_options_extra={
+                                                            "pagination": True,
+                                                            "paginationPageSize": 10,
+                                                            "paginationPageSizeSelector": [
+                                                                10,
+                                                                25,
+                                                                50,
+                                                            ],
+                                                        },
                                                     ),
                                                 ]
                                             )

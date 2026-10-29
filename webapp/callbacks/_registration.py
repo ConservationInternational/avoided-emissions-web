@@ -87,6 +87,41 @@ from gee_export import gee_config
 logger = logging.getLogger(__name__)
 
 
+def _site_catalog_rows(site_sets, include_archived=False):
+    """Build the reusable catalog without depending on retained import history."""
+    return [
+        {
+            **site_set,
+            "site_set_id": site_set["id"],
+            "site_set_name": site_set["name"],
+            "n_sites_imported": site_set["n_sites"],
+            "created_at": site_set.get("uploaded_at"),
+            "status": "archived" if site_set.get("is_archived") else "ready",
+        }
+        for site_set in site_sets
+        if include_archived or not site_set.get("is_archived")
+    ]
+
+
+def _site_import_history_rows(uploads, site_sets):
+    current = {site_set["id"]: site_set for site_set in site_sets}
+    rows = []
+    for upload in uploads:
+        row = dict(upload)
+        site_set = current.get(row.get("site_set_id"))
+        if site_set:
+            row.update(
+                site_set_name=site_set["name"],
+                is_archived=site_set.get("is_archived", False),
+            )
+        else:
+            # A deleted set must not offer actions against stale import metadata.
+            row["site_set_id"] = None
+            row["is_archived"] = False
+        rows.append(row)
+    return rows
+
+
 def register_callbacks(app, limiter=None):
     """Register all Dash callbacks on the app instance.
 
@@ -684,9 +719,19 @@ def register_callbacks(app, limiter=None):
             columns = preview.get("column_info", [])
             suggested = preview.get("suggested_mapping", {})
             options = [
-                {"label": f"{c['name']} ({c['dtype']})", "value": c["name"]}
+                {
+                    "label": (
+                        f"{c['name']} ({c['dtype']})"
+                        f" — sample: {str(c.get('sample', ''))[:100]}"
+                    ),
+                    "value": c["name"],
+                }
                 for c in columns
             ]
+            optional_options = [
+                {"label": "(none — generated automatically)", "value": ""}
+            ]
+            optional_options += options
             end_options = [{"label": "(none)", "value": ""}] + options
 
             pending_data = {
@@ -695,12 +740,18 @@ def register_callbacks(app, limiter=None):
                 "n_features": preview.get("n_features", 0),
                 "available_columns": [c.get("name") for c in columns],
             }
+            count = preview.get("n_features")
+            count_message = (
+                f"Preview ready ({count:,} features). "
+                if isinstance(count, int)
+                else "Sample preview ready; feature count will be determined during import. "
+            )
 
             return (
                 dbc.Alert(
                     (
-                        f"Parsed {preview.get('n_features', 0)} features. "
-                        "Confirm column mapping to start the background import."
+                        count_message
+                        + "Confirm column mapping to start the background import."
                     ),
                     color="info",
                 ),
@@ -708,10 +759,10 @@ def register_callbacks(app, limiter=None):
                 True,
                 False,
                 pending_data,
-                options,
-                suggested.get("site_id"),
-                options,
-                suggested.get("site_name"),
+                optional_options,
+                suggested.get("site_id") or "",
+                optional_options,
+                suggested.get("site_name") or "",
                 options,
                 suggested.get("start_date"),
                 end_options,
@@ -773,14 +824,14 @@ def register_callbacks(app, limiter=None):
                             color="danger",
                         ),
                         no_update,
-                        False,
                         True,
-                        "",
+                        no_update,
+                        *([no_update] * 9),
                     )
 
                 mapping = {
-                    "site_id": mapped_site_id,
-                    "site_name": mapped_site_name,
+                    "site_id": mapped_site_id or None,
+                    "site_name": mapped_site_name or None,
                     "start_date": mapped_start_date,
                     "end_date": mapped_end_date or None,
                 }
@@ -791,14 +842,28 @@ def register_callbacks(app, limiter=None):
                     n_features=pending_upload.get("n_features", 0),
                     column_mapping=mapping,
                 )
-                return (
-                    dbc.Alert(
-                        (
-                            f"Queued background import for '{upload['filename']}'. "
-                            "Track progress in the Site Imports table below."
-                        ),
+                status = upload.get("status")
+                error = upload.get("error_message")
+                if status in {"failed", "cancelled"}:
+                    feedback = dbc.Alert(
+                        f"Import {status}. {error or 'See Recent Import History for details.'}",
+                        color="danger" if status == "failed" else "warning",
+                    )
+                elif status == "pending" and error:
+                    feedback = dbc.Alert(
+                        f"Import request saved. Dispatch is delayed: {error} "
+                        "Automatic recovery will retry. Track progress in "
+                        "Recent Import History below.",
+                        color="warning",
+                    )
+                else:
+                    feedback = dbc.Alert(
+                        f"Queued background import for '{upload['filename']}'. "
+                        "Track progress in Recent Import History below.",
                         color="success",
-                    ),
+                    )
+                return (
+                    feedback,
                     str(_uuid.uuid4()),
                     False,
                     True,
@@ -853,6 +918,7 @@ def register_callbacks(app, limiter=None):
         [
             Output("admin-combined-site-table", "rowData"),
             Output("admin-combined-site-count", "children"),
+            Output("admin-site-import-history", "rowData"),
         ],
         [
             Input("admin-refresh-interval", "n_intervals"),
@@ -868,33 +934,19 @@ def register_callbacks(app, limiter=None):
         site_sets = list_user_site_sets(user.id, include_archived=True)
         uploads = list_user_site_uploads(user.id)
 
-        site_set_lookup = {ss["id"]: ss for ss in site_sets}
-
-        rows = []
-        for upload in uploads:
-            row = dict(upload)
-            site_set_id = row.get("site_set_id")
-            if site_set_id:
-                ss = site_set_lookup.get(site_set_id, {})
-                row["is_archived"] = ss.get("is_archived", False)
-            else:
-                row["is_archived"] = False
-            rows.append(row)
-
-        if not bool(show_archived):
-            rows = [r for r in rows if not r.get("is_archived")]
-
+        rows = _site_catalog_rows(site_sets, bool(show_archived))
+        history = _site_import_history_rows(uploads, site_sets)
         archived_count = sum(1 for r in rows if r.get("is_archived"))
-        running_count = sum(1 for r in rows if r.get("status") == "running")
-        queued_count = sum(1 for r in rows if r.get("status") == "pending")
-        cancelled_count = sum(1 for r in rows if r.get("status") == "cancelled")
+        running_count = sum(1 for r in uploads if r.get("status") == "running")
+        queued_count = sum(1 for r in uploads if r.get("status") == "pending")
 
         return (
             rows,
             (
-                f"Total: {len(rows)} | Archived: {archived_count} | Pending: {queued_count}"
-                f" | Running: {running_count} | Cancelled: {cancelled_count}"
+                f"Site sets: {len(rows)} | Archived: {archived_count}"
+                f" | Imports pending: {queued_count} | Running: {running_count}"
             ),
+            history,
         )
 
     @app.callback(
@@ -903,9 +955,14 @@ def register_callbacks(app, limiter=None):
             Output("site-set-refresh-store", "data", allow_duplicate=True),
         ],
         Input("admin-combined-site-table", "cellRendererData"),
+        Input("admin-site-import-history", "cellRendererData"),
         prevent_initial_call=True,
     )
-    def handle_admin_combined_site_row_actions(renderer_data):
+    def handle_admin_combined_site_row_actions(catalog_data, history_data):
+        triggered = callback_context.triggered_id
+        renderer_data = (
+            history_data if triggered == "admin-site-import-history" else catalog_data
+        )
         if not renderer_data:
             raise PreventUpdate
 
@@ -975,8 +1032,6 @@ def register_callbacks(app, limiter=None):
             return None
 
         required = {
-            "site_id": mapped_site_id,
-            "site_name": mapped_site_name,
             "start_date": mapped_start_date,
         }
         missing = [key for key, value in required.items() if not value]
@@ -987,9 +1042,16 @@ def register_callbacks(app, limiter=None):
                 className="mb-0 py-2",
             )
 
-        chosen = [mapped_site_id, mapped_site_name, mapped_start_date]
-        if mapped_end_date:
-            chosen.append(mapped_end_date)
+        chosen = [
+            column
+            for column in (
+                mapped_site_id,
+                mapped_site_name,
+                mapped_start_date,
+                mapped_end_date,
+            )
+            if column
+        ]
         duplicates = sorted({c for c in chosen if chosen.count(c) > 1})
         if duplicates:
             return dbc.Alert(
@@ -1009,7 +1071,7 @@ def register_callbacks(app, limiter=None):
 
         return dbc.Alert(
             (
-                f"Mapping looks good for {pending_upload.get('n_features', 0)} features. "
+                "Mapping looks good. "
                 "Full validation runs in the background import when you click Confirm Mapping and Start Import."
             ),
             color="success",
@@ -1061,6 +1123,11 @@ def register_callbacks(app, limiter=None):
 
             preview_cols = [
                 {
+                    "field": "feature_id",
+                    "hide": True,
+                    "filter": "agTextColumnFilter",
+                },
+                {
                     "headerName": "Site ID",
                     "field": "site_id",
                     "flex": 1,
@@ -1103,9 +1170,7 @@ def register_callbacks(app, limiter=None):
                         "mode": "singleRow",
                         "enableClickSelection": True,
                     },
-                    # site_id is the stable row key used by getRowsResponse
-                    # and focusTableRow in the JS.
-                    "getRowId": {"function": "params.data.site_id"},
+                    "getRowId": {"function": "params.data.feature_id"},
                 },
             )
 
@@ -1133,7 +1198,6 @@ def register_callbacks(app, limiter=None):
             }
 
             tile_url = f"/api/sites-tiles/{site_set_id}/{{z}}/{{x}}/{{y}}"
-            centroids_url = f"/api/site-centroids/{site_set_id}"
             return (
                 store_data,
                 preview_table,
@@ -1144,7 +1208,6 @@ def register_callbacks(app, limiter=None):
                     enable_cog_layers=True,
                     resolution_m=resolution_m,
                     tile_url=tile_url,
-                    centroids_url=centroids_url,
                     bounds=detail.get("bounds"),
                 ),
                 metadata,
@@ -1187,6 +1250,9 @@ def register_callbacks(app, limiter=None):
         if not user:
             raise PreventUpdate
 
+        if not get_user_site_set_detail(site_set_id, user.id):
+            return {"rowData": [], "rowCount": 0}
+
         start = request.get("startRow", 0)
         end = request.get("endRow", 100)
         filter_model = request.get("filterModel") or {}
@@ -1198,9 +1264,9 @@ def register_callbacks(app, limiter=None):
             filter_model=filter_model,
             sort_model=sort_model,
         )
-        # Use known total when unfiltered for accurate scrollbar; pass -1 when
-        # filters are active so AG Grid determines the end from the data.
         row_count = sites_data.get("n_sites", -1) if not filter_model else -1
+        if row_count == -1 and len(rows) < end - start:
+            row_count = start + len(rows)
         return {"rowData": rows, "rowCount": row_count}
 
     @app.callback(
@@ -1696,14 +1762,20 @@ def register_callbacks(app, limiter=None):
 
     @app.callback(
         Output("download-results", "data"),
-        [Input("download-by-year", "n_clicks"), Input("download-totals", "n_clicks")],
+        [
+            Input("download-by-year", "n_clicks"),
+            Input("download-totals", "n_clicks"),
+            Input("download-site-identity", "n_clicks"),
+        ],
         [
             State("task-id-store", "data"),
             State("share-token-store", "data"),
         ],
         prevent_initial_call=True,
     )
-    def handle_download(by_year_clicks, total_clicks, task_id, share_token):
+    def handle_download(
+        by_year_clicks, total_clicks, identity_clicks, task_id, share_token
+    ):
         ctx = callback_context
         if not ctx.triggered:
             raise PreventUpdate
@@ -1712,12 +1784,15 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
 
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trigger_id == "download-by-year":
-            csv = download_results_csv(task_id, "by_site_year")
-            filename = "results_by_site_year.csv"
-        else:
-            csv = download_results_csv(task_id, "by_site_total")
-            filename = "results_by_site_total.csv"
+        downloads = {
+            "download-by-year": ("by_site_year", "results_by_site_year.csv"),
+            "download-totals": ("by_site_total", "results_by_site_total.csv"),
+            "download-site-identity": ("site_identity", "site_identity.csv"),
+        }
+        if trigger_id not in downloads:
+            raise PreventUpdate
+        result_type, filename = downloads[trigger_id]
+        csv = download_results_csv(task_id, result_type)
 
         if csv:
             return {"content": csv, "filename": filename}

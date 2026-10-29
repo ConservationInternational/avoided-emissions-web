@@ -9,6 +9,8 @@ dependency on ``app.py``.
 import json
 import logging
 import re
+import uuid
+from urllib.parse import urlparse
 
 import boto3
 import flask_login
@@ -395,11 +397,8 @@ def create_api_blueprint(limiter):
     # Serve Mapbox Vector Tiles for site geometries.  The rendering layer in
     # OpenLayers fetches these directly; no Dash callback round-trip is needed
     # for zoom/pan.  At zoom < 7 the endpoint returns centroid Points for all
-    # sites in the tile; at zoom >= 7 it returns simplified Polygons.
-
-    def _mvt_simplify_tol(z):
-        """Geometry simplification tolerance in degrees, halving each zoom level."""
-        return max(0.0001, 0.00001 * (2 ** (18 - z)))
+    # sites in the tile; at zoom >= 7 MVT clips and quantizes polygons itself.
+    # Simplifying entire source polygons first can stall on million-vertex sites.
 
     _MVT_SQL_SITE_SET = sa_text(
         """
@@ -411,7 +410,8 @@ def create_api_blueprint(limiter):
         SELECT ST_AsMVT(q, 'sites', 4096, 'geom') AS mvt
         FROM (
             SELECT
-                f.site_id,
+                f.id::text AS site_id,
+                f.site_id AS display_site_id,
                 f.site_name,
                 f.area_ha,
                 CASE WHEN :z < 7
@@ -419,9 +419,7 @@ def create_api_blueprint(limiter):
                              ST_Transform(ST_Centroid(f.geom), 3857),
                              t.env3857, 4096, 256, true)
                     ELSE ST_AsMVTGeom(
-                             ST_Transform(
-                                 ST_SimplifyPreserveTopology(f.geom, :simplify_tol),
-                                 3857),
+                             ST_Transform(f.geom, 3857),
                              t.env3857, 4096, 256, true)
                 END AS geom
             FROM user_site_features f, tile t
@@ -442,7 +440,8 @@ def create_api_blueprint(limiter):
         SELECT ST_AsMVT(q, 'sites', 4096, 'geom') AS mvt
         FROM (
             SELECT
-                f.site_id,
+                f.id::text AS site_id,
+                f.site_id AS display_site_id,
                 f.site_name,
                 f.area_ha,
                 tr.extrapolated_emissions_avoided_mgco2e AS emissions_avoided_mgco2e,
@@ -452,15 +451,13 @@ def create_api_blueprint(limiter):
                              ST_Transform(ST_Centroid(f.geom), 3857),
                              t.env3857, 4096, 256, true)
                     ELSE ST_AsMVTGeom(
-                             ST_Transform(
-                                 ST_SimplifyPreserveTopology(f.geom, :simplify_tol),
-                                 3857),
+                             ST_Transform(f.geom, 3857),
                              t.env3857, 4096, 256, true)
                 END AS geom
             FROM user_site_features f
             JOIN tile t ON true
             LEFT JOIN task_results_total tr
-                   ON tr.site_id = f.site_id AND tr.task_id = :task_id
+                   ON tr.site_id = f.id::text AND tr.task_id = :task_id
             WHERE f.site_set_id = :site_set_id
               AND f.geom && t.env4326
         ) q
@@ -474,13 +471,138 @@ def create_api_blueprint(limiter):
         resp.headers["Cache-Control"] = "private, max-age=300"
         return resp
 
+    @api_bp.route("/api/site-feature/<site_set_id>/<feature_id>")
+    @api_bp.route(
+        "/api/task-site-feature/<task_id>/<feature_id>", defaults={"site_set_id": None}
+    )
+    @flask_login.login_required
+    @limiter.limit("120 per minute")
+    def site_feature(feature_id, site_set_id=None, task_id=None):
+        """Fetch one owned feature's details and exact extent, not every centroid."""
+        try:
+            uuid.UUID(feature_id)
+            uuid.UUID(site_set_id or task_id)
+        except (ValueError, TypeError, AttributeError):
+            return jsonify({"error": "Invalid feature or collection ID"}), 400
+        db = get_db()
+        try:
+            if task_id:
+                task = (
+                    db.query(AnalysisTask)
+                    .filter(
+                        AnalysisTask.id == task_id,
+                        AnalysisTask.submitted_by == flask_login.current_user.id,
+                    )
+                    .first()
+                )
+                if not task:
+                    return jsonify({"error": "Task not found"}), 404
+                site_set_id = task.site_set_id
+            else:
+                site_set = (
+                    db.query(UserSiteSet)
+                    .filter(
+                        UserSiteSet.id == site_set_id,
+                        UserSiteSet.user_id == flask_login.current_user.id,
+                    )
+                    .first()
+                )
+                if not site_set:
+                    return jsonify({"error": "Site set not found"}), 404
+            row = (
+                db.execute(
+                    sa_text("""
+                    SELECT id::text AS feature_id, site_id AS display_site_id,
+                           site_name, area_ha, start_date, end_date,
+                           ST_XMin(Box2D(geom)) AS west,
+                           ST_YMin(Box2D(geom)) AS south,
+                           ST_XMax(Box2D(geom)) AS east,
+                           ST_YMax(Box2D(geom)) AS north
+                    FROM user_site_features
+                    WHERE id = :feature_id AND site_set_id = :site_set_id
+                """),
+                    {"feature_id": feature_id, "site_set_id": str(site_set_id)},
+                )
+                .mappings()
+                .first()
+            )
+            if not row:
+                return jsonify({"error": "Feature not found"}), 404
+            result = dict(row)
+            result["site_id"] = result["feature_id"]
+            result["bounds"] = {
+                key: result.pop(key) for key in ("west", "south", "east", "north")
+            }
+            for key in ("start_date", "end_date"):
+                result[key] = str(result[key]) if result[key] else None
+            return jsonify(result)
+        finally:
+            db.close()
+
+    @api_bp.route("/api/tasks/<task_id>/preparation/<artifact>")
+    @flask_login.login_required
+    def task_preparation_download(task_id, artifact):
+        """Download the persisted preparation report or split analysis units."""
+        if artifact not in ("report", "sites"):
+            return jsonify({"error": "Artifact not found"}), 404
+        try:
+            uuid.UUID(task_id)
+        except (ValueError, AttributeError):
+            return jsonify({"error": "Invalid task ID"}), 400
+        db = get_db()
+        try:
+            task = (
+                db.query(AnalysisTask)
+                .filter(
+                    AnalysisTask.id == task_id,
+                    AnalysisTask.submitted_by == flask_login.current_user.id,
+                )
+                .first()
+            )
+            if not task:
+                return jsonify({"error": "Task not found"}), 404
+            preparation = (task.extra_metadata or {}).get("preparation")
+            if artifact == "report":
+                if not preparation:
+                    return jsonify(
+                        {"error": "Preparation report not available yet"}
+                    ), 404
+                response = jsonify(preparation)
+                response.headers["Content-Disposition"] = (
+                    f'attachment; filename="preparation-{task_id}.json"'
+                )
+                return response
+            uri = urlparse((task.config or {}).get("sites_parquet_s3_uri") or "")
+            if uri.scheme != "s3" or not uri.netloc or not uri.path.strip("/"):
+                return jsonify({"error": "Prepared GeoParquet not available yet"}), 404
+            try:
+                url = boto3.client(
+                    "s3", region_name=Config.AWS_REGION
+                ).generate_presigned_url(
+                    "get_object",
+                    Params={
+                        "Bucket": uri.netloc,
+                        "Key": uri.path.lstrip("/"),
+                        "ResponseContentDisposition": (
+                            f'attachment; filename="analysis-units-{task_id}.parquet"'
+                        ),
+                    },
+                    ExpiresIn=900,
+                )
+            except Exception:
+                logger.exception("Could not sign prepared sites download")
+                return jsonify({"error": "Download temporarily unavailable"}), 503
+            return redirect(url)
+        finally:
+            db.close()
+
     @api_bp.route("/api/sites-tiles/<site_set_id>/<int:z>/<int:x>/<int:y>")
     @flask_login.login_required
     @limiter.limit("300 per minute")
     def sites_tiles(site_set_id, z, x, y):
         """Serve MVT tiles for a user-owned site set.
 
-        Returns centroid Points at zoom < 7; simplified Polygons at zoom >= 7.
+        Returns centroid Points at zoom < 7; clipped tile-grid Polygons above.
         The tile is empty (zero-length body) when no sites intersect the tile.
         """
         db = get_db()
@@ -503,7 +625,6 @@ def create_api_blueprint(limiter):
                     "x": x,
                     "y": y,
                     "site_set_id": str(site_set_id),
-                    "simplify_tol": _mvt_simplify_tol(z),
                 },
             ).fetchone()
         finally:
@@ -547,7 +668,6 @@ def create_api_blueprint(limiter):
                     "y": y,
                     "site_set_id": str(task.site_set_id),
                     "task_id": str(task_id),
-                    "simplify_tol": _mvt_simplify_tol(z),
                 },
             ).fetchone()
         finally:

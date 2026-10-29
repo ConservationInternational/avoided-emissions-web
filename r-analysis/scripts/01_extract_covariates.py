@@ -175,9 +175,23 @@ def load_sites(sites_path: str) -> gpd.GeoDataFrame:
     sites["start_year"] = sites["start_date"].dt.year.astype("Int64")
     sites["end_year"] = sites["end_date"].dt.year.fillna(2099).astype(int)
 
-    # Area in hectares (equal-area projection)
-    sites_cea = sites.to_crs("+proj=cea")
-    sites["area_ha"] = sites_cea.geometry.area / 10_000
+    # Keep this precision budget aligned with services.polygon_partition.
+    area_parts = []
+    for start in range(0, len(sites), 128):
+        dense = sites.geometry.iloc[start : start + 128].segmentize(0.005)
+        area_parts.append(dense.to_crs("ESRI:54009").area.to_numpy() / 10000)
+    computed_area = np.concatenate(area_parts)
+    if "area_ha" in sites.columns:
+        supplied_area = pd.to_numeric(sites["area_ha"], errors="coerce")
+        if supplied_area.isna().any() or not np.allclose(
+            supplied_area, computed_area, rtol=1e-8, atol=1e-6
+        ):
+            raise ValueError("Prepared site areas disagree with polygon geometry.")
+    sites["area_ha"] = computed_area
+    if "sub_site_index" not in sites.columns:
+        sites["sub_site_index"] = 0
+    if sites.duplicated(["site_id", "sub_site_index"]).any():
+        raise ValueError("Duplicate immutable site/fragment identities.")
 
     # Numeric IDs (1-based)
     sites["id_numeric"] = range(1, len(sites) + 1)
@@ -420,6 +434,60 @@ def _rasterize_sites(
     )
 
 
+def _treatment_memberships(sites, transform, width, height, ys, xres, yres):
+    """Build sparse cell membership without overwriting overlapping sites."""
+    from rasterio.windows import Window, from_bounds
+    from rasterio.windows import transform as window_transform
+
+    frames = []
+    for row in sites.itertuples():
+        window = from_bounds(*row.geometry.bounds, transform=transform)
+        left = max(0, int(np.floor(window.col_off)))
+        top = max(0, int(np.floor(window.row_off)))
+        right = min(width, int(np.ceil(window.col_off + window.width)))
+        bottom = min(height, int(np.ceil(window.row_off + window.height)))
+        if left >= right or top >= bottom:
+            continue
+        for start in range(top, bottom, 512):
+            stop = min(start + 512, bottom)
+            # Horizontal tiles also bound allocations for very wide polygons.
+            for col in range(left, right, 512):
+                end = min(col + 512, right)
+                tile = Window(col, start, end - col, stop - start)
+                mask = rasterize(
+                    [(row.geometry, 1)],
+                    out_shape=(stop - start, end - col),
+                    transform=window_transform(tile, transform),
+                    fill=0,
+                    dtype="uint8",
+                )
+                rr, cc = np.nonzero(mask)
+                if len(rr):
+                    global_rows = rr + start
+                    frames.append(
+                        pd.DataFrame(
+                            {
+                                "cell": global_rows * width + cc + col,
+                                "id_numeric": row.id_numeric,
+                                "site_id": row.site_id,
+                                "area_ha": calc_pixel_area_ha(
+                                    ys[global_rows], yres, xres
+                                ),
+                            }
+                        )
+                    )
+    if not frames:
+        return pd.DataFrame(
+            {
+                "cell": pd.Series(dtype="int64"),
+                "id_numeric": pd.Series(dtype="int64"),
+                "site_id": pd.Series(dtype="str"),
+                "area_ha": pd.Series(dtype="float64"),
+            }
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
 # ---------------------------------------------------------------------------
 # Core extraction logic (GDAL + xarray)
 # ---------------------------------------------------------------------------
@@ -511,37 +579,14 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             f"resolution COGs."
         )
 
-    # --- 4. rasterize sites ---
-    site_mask = _rasterize_sites(sites, transform, width, height)
-
-    # --- 5. build treatment cell key ---
-    log.info("Building treatment cell key...")
-    site_ids_flat = site_mask.ravel()
-    treatment_mask = site_ids_flat > 0
-    treatment_indices = np.nonzero(treatment_mask)[0]
-
-    # Map flat index → row (for latitude-dependent area calculation)
-    rows_t = treatment_indices // width
-
-    # Pixel areas
-    y_coords_treatment = ys[rows_t]
-    pixel_areas = calc_pixel_area_ha(y_coords_treatment, yres, xres)
-
-    treatment_key = pd.DataFrame(
-        {
-            "cell": treatment_indices,
-            "id_numeric": site_ids_flat[treatment_indices],
-            "area_ha": pixel_areas,
-        }
+    log.info("Building sparse treatment cell membership...")
+    treatment_key = _treatment_memberships(
+        sites, transform, width, height, ys, xres, yres
     )
-
-    # Attach site_id
-    id_to_site = dict(zip(sites["id_numeric"], sites["site_id"]))
-    treatment_key["site_id"] = treatment_key["id_numeric"].map(id_to_site)
+    treatment_indices = np.unique(treatment_key["cell"].to_numpy(dtype=np.int64))
+    treatment_mask = np.zeros(height * width, dtype=bool)
+    treatment_mask[treatment_indices] = True
     log.info("Treatment cells: %d", len(treatment_key))
-
-    # Free the full-grid site mask — values are captured in treatment_key
-    del site_mask, site_ids_flat
 
     # --- 6. determine candidate control pixels ---
     # Rasterize the matching extent polygon to identify the area

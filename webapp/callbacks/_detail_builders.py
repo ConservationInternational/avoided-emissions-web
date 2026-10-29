@@ -1,6 +1,8 @@
 """Helper functions for building the task detail page content."""
 
+import json
 import logging
+from collections import Counter
 
 import dash_bootstrap_components as dbc
 import pandas as pd
@@ -29,9 +31,77 @@ from callbacks._match_quality import (
 logger = logging.getLogger(__name__)
 
 
+def _display_site_id(site):
+    value = getattr(site, "display_site_id", None)
+    return value if value is not None else site.site_id
+
+
+def _display_site_columns(columns):
+    return [
+        {**column, "field": "display_site_id"}
+        if column.get("field") == "site_id"
+        else column
+        for column in columns
+    ]
+
+
+def _build_preparation_summary(task):
+    """Render the stored preparation audit without recomputing any geometry."""
+    preparation = (task.extra_metadata or {}).get("preparation")
+    if not isinstance(preparation, dict) or not preparation:
+        body = html.P(
+            "Preparation report is not available yet, or this task predates preparation reporting.",
+            className="text-muted mb-0",
+        )
+    else:
+        fields = [
+            html.Div(
+                [
+                    html.Dt(key.replace("_", " ").capitalize(), className="col-sm-5"),
+                    html.Dd(
+                        json.dumps(value, ensure_ascii=False, sort_keys=True)
+                        if isinstance(value, (dict, list))
+                        else str(value),
+                        className="col-sm-7 text-break",
+                    ),
+                ],
+                className="row",
+            )
+            for key, value in preparation.items()
+        ]
+        links = [
+            html.A(
+                "Download preparation report (JSON)",
+                href=f"/api/tasks/{task.id}/preparation/report",
+                className="btn btn-sm btn-outline-secondary me-2",
+            )
+        ]
+        if (task.config or {}).get("sites_parquet_s3_uri"):
+            links.append(
+                html.A(
+                    "Download split analysis units (GeoParquet)",
+                    href=f"/api/tasks/{task.id}/preparation/sites",
+                    className="btn btn-sm btn-outline-secondary",
+                )
+            )
+        body = [
+            html.P(
+                "Input and retained counts refer to original sites; fragments are the "
+                "analysis units used for exact matching. Maps show original site boundaries. "
+                "Areas are hectares; the report records reference versions and exclusions.",
+                className="small text-muted",
+            ),
+            html.Dl(fields),
+            html.Div(links),
+        ]
+    return dbc.Card(
+        [dbc.CardHeader("Site Preparation"), dbc.CardBody(body)], className="mb-3"
+    )
+
+
 def _build_overview(task, sites, totals, quality_warnings=None):
     """Build the overview cards for a task detail page."""
-    cards = []
+    cards = [_build_preparation_summary(task)]
 
     # Task info card
     config = task.config or {}
@@ -430,7 +500,9 @@ def _build_overview(task, sites, totals, quality_warnings=None):
             totals_lookup = {}  # sid ΓåÆ {n_matched, area_ha, ...}
             if totals:
                 for t in totals:
-                    name_lookup[str(t.site_id)] = t.site_name or str(t.site_id)
+                    name_lookup[str(t.site_id)] = t.site_name or str(
+                        _display_site_id(t)
+                    )
                     totals_lookup[str(t.site_id)] = {
                         "n_matched": t.n_sample_pixels,
                         "n_eligible": t.n_eligible_pixels,
@@ -616,11 +688,18 @@ def _build_overview(task, sites, totals, quality_warnings=None):
 
     # --- Failed sites alert --------------------------------------------------
     meta = task.extra_metadata or {}
+    display_ids = {
+        str(site.site_id): str(_display_site_id(site))
+        for site in [*(sites or []), *(totals or [])]
+    }
     failed_sites = _normalize_metadata_list(meta.get("failed_sites", []))
     if failed_sites:
         failed_items = []
         for fs in failed_sites:
-            site_id = fs.get("site_id") or fs.get("id_numeric", "?")
+            canonical_id = fs.get("site_id") or fs.get("id_numeric", "?")
+            site_id = fs.get("display_site_id") or display_ids.get(
+                str(canonical_id), canonical_id
+            )
             site_name = fs.get("site_name", "")
             if site_name and site_name != site_id:
                 label = f"{site_name} ({site_id})"
@@ -678,6 +757,9 @@ def _build_overview(task, sites, totals, quality_warnings=None):
             if site_id is None or site_id == "":
                 site_id = ss.get("id_numeric", "?")
             site_name = ss.get("site_name") or site_name_map.get(str(site_id), "")
+            site_id = ss.get("display_site_id") or display_ids.get(
+                str(site_id), site_id
+            )
             if site_name and str(site_name) != str(site_id):
                 label = f"{site_name} ({site_id})"
             else:
@@ -753,6 +835,7 @@ def _build_results_content(
         site_rows = [
             {
                 "site_id": s.site_id,
+                "display_site_id": _display_site_id(s),
                 "site_name": s.site_name or "-",
                 "start_date": str(s.start_date)[:10] if s.start_date else "-",
                 "end_date": str(s.end_date)[:10] if s.end_date else "Ongoing",
@@ -762,7 +845,12 @@ def _build_results_content(
         ]
 
         site_cols = [
-            {"headerName": "Site ID", "field": "site_id", "flex": 1, "minWidth": 120},
+            {
+                "headerName": "Site ID",
+                "field": "display_site_id",
+                "flex": 1,
+                "minWidth": 120,
+            },
             {"headerName": "Name", "field": "site_name", "flex": 1.5, "minWidth": 150},
             {"headerName": "Start", "field": "start_date", "flex": 1, "minWidth": 110},
             {"headerName": "End", "field": "end_date", "flex": 1, "minWidth": 110},
@@ -801,6 +889,7 @@ def _build_results_content(
     totals_rows = [
         {
             "site_id": t.site_id,
+            "display_site_id": _display_site_id(t),
             "site_name": t.site_name or "-",
             "emissions_avoided_mgco2e": t.extrapolated_emissions_avoided_mgco2e or 0,
             "forest_loss_avoided_ha": t.extrapolated_forest_loss_avoided_ha or 0,
@@ -816,7 +905,7 @@ def _build_results_content(
             html.H5("Totals by Site"),
             _make_ag_grid(
                 "results-totals-table",
-                RESULTS_TOTAL_COLUMNS,
+                _display_site_columns(RESULTS_TOTAL_COLUMNS),
                 row_data=totals_rows,
                 height="350px",
                 grid_options_extra={
@@ -903,6 +992,7 @@ def _build_results_content(
         yearly_rows = [
             {
                 "site_id": r.site_id,
+                "display_site_id": _display_site_id(r),
                 "year": r.year,
                 "treatment_defor_ha": r.extrapolated_treatment_defor_ha or 0,
                 "control_defor_ha": r.extrapolated_control_defor_ha or 0,
@@ -918,7 +1008,7 @@ def _build_results_content(
                 html.H5("Results by Year", className="mt-4"),
                 _make_ag_grid(
                     "results-yearly-table",
-                    RESULTS_YEARLY_COLUMNS,
+                    _display_site_columns(RESULTS_YEARLY_COLUMNS),
                     row_data=yearly_rows,
                     height="400px",
                 ),
@@ -940,6 +1030,16 @@ def _build_results_content(
                         id="download-totals",
                         color="secondary",
                         size="sm",
+                    ),
+                    dbc.Button(
+                        "Site ID / label mapping",
+                        id="download-site-identity",
+                        color="secondary",
+                        size="sm",
+                        title=(
+                            "CSV mapping canonical site IDs to the original "
+                            "site labels and names"
+                        ),
                     ),
                 ],
                 className="mt-3",
@@ -966,6 +1066,9 @@ _FILE_DESCRIPTIONS = {
     "results_sampling_by_site.csv": "Subsampling fraction per site",
     "results_summary.json": "Global summary of avoided emissions and site counts",
     "site_id_key.csv": "Mapping between numeric and string site IDs",
+    "site_identity.csv": (
+        "Mapping between canonical site IDs, original site labels and names"
+    ),
     "sites_processed.parquet": "Processed site geometries and metadata",
     "treatment_cell_key.parquet": "Raster cells belonging to each treatment site",
     "treatment_pixels.parquet": "Covariate values for pixels inside treatment sites",
@@ -1129,6 +1232,15 @@ def _build_plots(
     # of quantiles.
     agg_df = pd.DataFrame(agg_yearly).sort_values("year")
     n_sites_display = len(totals or [])
+    display_labels = {
+        str(site.site_id): str(_display_site_id(site))
+        for site in [*(sites or []), *(totals or [])]
+    }
+    label_counts = Counter(display_labels.values())
+    display_labels = {
+        site_id: f"{label} [{site_id[:8]}]" if label_counts[label] > 1 else label
+        for site_id, label in display_labels.items()
+    }
     # Per-site rows (small tasks only) for stacked bars and the site drill-down.
     df = None
     if not is_large and results:
@@ -1370,6 +1482,8 @@ def _build_plots(
                 labels={metric: label, "year": "Year", "site_id": "Site"},
             )
             fig.update_layout(barmode="stack")
+            for trace in fig.data:
+                trace.name = display_labels.get(str(trace.name), trace.name)
         else:
             fig = px.bar(
                 agg_df,
@@ -1408,7 +1522,7 @@ def _build_plots(
             [
                 {
                     "site_id": t.site_id,
-                    "site_name": t.site_name or t.site_id,
+                    "site_name": t.site_name or _display_site_id(t),
                     "emissions_avoided_mgco2e": t.extrapolated_emissions_avoided_mgco2e
                     or 0,
                     "forest_loss_avoided_ha": t.extrapolated_forest_loss_avoided_ha
@@ -1420,13 +1534,21 @@ def _build_plots(
 
         fig_site_totals = px.bar(
             df_totals,
-            x="site_name",
+            x="site_id",
             y="emissions_avoided_mgco2e",
             title="Total Avoided Emissions by Site",
             labels={
                 "emissions_avoided_mgco2e": "Emissions Avoided (MgCO₂e)",
-                "site_name": "Site",
+                "site_id": "Site",
             },
+        )
+        fig_site_totals.update_xaxes(
+            tickmode="array",
+            tickvals=df_totals["site_id"].tolist(),
+            ticktext=[
+                display_labels.get(str(site_id), str(site_id))
+                for site_id in df_totals["site_id"]
+            ],
         )
         plots.append(dcc.Graph(figure=fig_site_totals))
 
@@ -1436,8 +1558,10 @@ def _build_plots(
         # For large tasks we read IDs/names from `totals` (always loaded).
         # For small tasks we read from the per-site rows.
         totals_name_map = {}
+        display_id_map = {}
         if totals:
             for t in totals:
+                display_id_map[str(t.site_id)] = str(_display_site_id(t))
                 if t.site_name:
                     totals_name_map[str(t.site_id)] = t.site_name
 
@@ -1446,7 +1570,7 @@ def _build_plots(
             site_ids = sorted(str(t.site_id) for t in totals) if totals else []
             site_info_map = {
                 str(t.site_id): {
-                    "site_name": t.site_name or str(t.site_id),
+                    "site_name": t.site_name or str(_display_site_id(t)),
                     "start_date": None,
                     "end_date": None,
                 }
@@ -1465,6 +1589,7 @@ def _build_plots(
             if sites:
                 for s in sites:
                     sid = str(s.site_id)
+                    display_id_map[sid] = str(_display_site_id(s))
                     name = s.site_name if s.site_name and s.site_name != sid else None
                     site_info_map[sid] = {
                         "site_name": name or totals_name_map.get(sid) or sid,
@@ -1482,16 +1607,21 @@ def _build_plots(
 
         # Annotate dropdown labels for subsampled sites
         site_options = []
+        display_id_counts = Counter(display_id_map.values())
         for sid in site_ids:
             sname = (
                 site_info_map.get(str(sid), {}).get("site_name")
                 or totals_name_map.get(str(sid))
                 or str(sid)
             )
-            if sname and str(sname) != str(sid):
-                label = f"{sname} ({sid})"
+            display_id = display_id_map.get(str(sid), str(sid))
+            if sname and str(sname) != display_id:
+                label = f"{sname} ({display_id})"
             else:
-                label = str(sid)
+                label = display_id
+            # Duplicate labels remain separate selectable canonical features.
+            if display_id_counts[display_id] > 1:
+                label += f" [{str(sid)[:8]}]"
             if sid in subsampled_map:
                 pct = subsampled_map[sid].get("sampled_percent", 100)
                 label += f" (subsampled {pct:.0f}%)"

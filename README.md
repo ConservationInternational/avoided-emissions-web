@@ -115,17 +115,35 @@ Model definitions live in `webapp/models/` (one file per domain):
 
 ## Site Input Format
 
-Sites must be provided as GeoJSON or GeoPackage files with the following
-required attributes:
+Sites can be GeoJSON or GeoPackage files, or a ZIP/TAR archive containing
+exactly one supported dataset (including Shapefile). Map source columns after
+upload; only the intervention start date is required.
+HTTP requests are limited to 800 MiB including form data. Archives allow up to
+2,000 files, 512 MiB per member, 1 GiB expanded total and 200:1 compression.
 
 | Field          | Type    | Description                              |
 |----------------|---------|------------------------------------------|
-| `site_id`      | string  | Unique site identifier                   |
-| `site_name`    | string  | Human-readable site name                 |
-| `start_date`   | date    | Intervention start date (YYYY-MM-DD)     |
+| `site_id`      | string  | Optional display identifier; duplicates allowed |
+| `site_name`    | string  | Optional human-readable name             |
+| `start_date`   | date    | Required intervention start (YYYY-MM-DD) |
 | `end_date`     | date    | Intervention end date (optional)         |
 
-Geometries must be valid polygons or multipolygons in EPSG:4326.
+Geometries must be polygons or multipolygons. GeoJSON follows RFC 7946
+(EPSG:4326); other datasets must declare their CRS and are transformed to
+EPSG:4326. Invalid, nonfinite, or out-of-range coordinates are rejected after repair.
+Use explicit dates, not numeric years or spreadsheet serial dates.
+Omitted IDs and names are generated. Each imported feature receives an immutable
+UUID used as the canonical analysis `site_id`; the original label is retained as
+`display_site_id`, so duplicate user-supplied labels never combine distinct sites.
+
+The site catalog lists all reusable site sets independently of recent import
+history. Map previews show original polygons and load selected-site extents on
+demand. After submission, **Site Preparation** in task details reports retained
+and excluded sites, fragment counts, reference versions, and area reconciliation,
+with downloads of the preparation JSON and split GeoParquet analysis units.
+Splitting preserves all positive area and reference strata; overlapping reference
+coverage fails explicitly. Results also provide a **Site ID / label mapping**
+CSV. See [the preparation and audit guide](docs/webapp.md#conservative-analysis-preparation).
 
 ## Key Environment Variables
 

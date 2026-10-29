@@ -28,6 +28,51 @@ spec.loader.exec_module(extract)
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_prepared_high_latitude_area_is_preserved_and_validated(self):
+        source = box(0, 70, 12, 72)
+        sites = gpd.GeoDataFrame(
+            {
+                "site_id": ["immutable-a"],
+                "display_site_id": ["original label"],
+                "site_name": ["A prepared site"],
+                "start_date": ["2000-01-01"],
+                "area_ha": [9682188.444773627],
+            },
+            geometry=[source],
+            crs=4326,
+        )
+        with tempfile.TemporaryDirectory() as output:
+            path = str(Path(output) / "prepared.parquet")
+            sites.to_parquet(path)
+            loaded = extract.load_sites(path)
+            self.assertAlmostEqual(
+                loaded.area_ha.iloc[0], sites.area_ha.iloc[0], places=6
+            )
+            self.assertTrue(loaded.geometry.iloc[0].equals(source))
+            self.assertEqual(loaded.display_site_id.iloc[0], "original label")
+            sites["area_ha"] = 1.0
+            sites.to_parquet(path)
+            with self.assertRaisesRegex(ValueError, "areas disagree"):
+                extract.load_sites(path)
+
+    def test_overlapping_features_keep_independent_pixel_membership(self):
+        sites = gpd.GeoDataFrame(
+            {
+                "site_id": ["immutable-a", "immutable-b"],
+                "display_site_id": ["duplicate", "duplicate"],
+                "id_numeric": [1, 2],
+            },
+            geometry=[box(0, 0, 2, 2), box(1, 0, 3, 2)],
+            crs=4326,
+        )
+        memberships = extract._treatment_memberships(
+            sites, from_origin(0, 2, 1, 1), 3, 2, np.array([1.5, 0.5]), 1, 1
+        )
+        self.assertEqual(len(memberships), 8)
+        self.assertEqual(memberships.groupby("id_numeric").size().tolist(), [4, 4])
+        self.assertEqual(memberships.cell.nunique(), 6)
+        self.assertFalse(memberships.duplicated(["cell", "id_numeric"]).any())
+
     def test_gdal_settings_apply_to_rasterio_and_worker_threads(self):
         from rasterio.env import get_gdal_config
 

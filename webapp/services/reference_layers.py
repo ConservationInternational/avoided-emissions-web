@@ -1,5 +1,6 @@
 """Reference layer S3 export and PostGIS spatial computation helpers."""
 
+import hashlib
 import json
 import logging
 import tempfile
@@ -9,9 +10,9 @@ import geopandas as gpd
 from config import Config
 from models import (
     ReferenceLayerExport,
+    VectorImportMetadata,
     get_db,
 )
-from pyproj import Transformer
 from sqlalchemy import text
 
 from services.s3 import S3_COST_TAGGING, get_s3_client
@@ -28,15 +29,69 @@ _EXTENT_TABLE_MAP: dict[str, str] = {
     "admin2": "geoboundaries_adm2",
     "ecoregion": "ecoregions",
 }
+_REGION_ID_SQL = {
+    "admin0": "shape_group",
+    "admin1": "shape_group || ':' || shape_id",
+    "admin2": "shape_group || ':' || shape_id",
+    "ecoregion": "eco_id::text",
+}
 
 _SAFE_TABLE_RE = __import__("re").compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def _write_reference_parquet(db, layer_name, path, batch_size=500):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = _EXTENT_TABLE_MAP[layer_name]
+    identity = _REGION_ID_SQL[layer_name]
+    schema = pa.schema(
+        [("region_id", pa.string()), ("geometry", pa.binary())],
+        metadata={
+            b"geo": json.dumps(
+                {
+                    "version": "1.0.0",
+                    "primary_column": "geometry",
+                    "columns": {
+                        "geometry": {
+                            "encoding": "WKB",
+                            "geometry_types": ["MultiPolygon", "Polygon"],
+                            "crs": gpd.GeoSeries(crs=4326).crs.to_json_dict(),
+                        }
+                    },
+                }
+            ).encode()
+        },
+    )
+    result = db.execute(
+        text(
+            f"SELECT {identity}, ST_AsBinary(geom) FROM {table} "
+            "WHERE geom IS NOT NULL ORDER BY id"
+        ).execution_options(stream_results=True, yield_per=batch_size)
+    )
+    count = 0
+    try:
+        with pq.ParquetWriter(path, schema) as writer:
+            while rows := result.fetchmany(batch_size):
+                records = []
+                for region_id, geometry in rows:
+                    if region_id is None:
+                        raise ValueError(f"Missing reference identity in {layer_name}.")
+                    records.append(
+                        {"region_id": str(region_id), "geometry": bytes(geometry)}
+                    )
+                writer.write_table(pa.Table.from_pylist(records, schema=schema))
+                count += len(records)
+    finally:
+        result.close()
+    return count
 
 
 def export_reference_layers_to_s3() -> dict[str, str]:
     """Export PostGIS reference layers to S3 as GeoParquet files.
 
     Queries each table in :data:`_EXTENT_TABLE_MAP` from PostGIS, writes
-    the result (with geometries simplified to ~100 m tolerance) to a
+    the authoritative source geometries to a
     temporary GeoParquet file, uploads it to S3, and upserts a
     :class:`~models.ReferenceLayerExport` row so subsequent runs know
     the current S3 URI.
@@ -52,8 +107,6 @@ def export_reference_layers_to_s3() -> dict[str, str]:
     """
     import os as _os
 
-    from shapely.geometry import shape as _shape
-
     exported: dict[str, str] = {}
     s3 = get_s3_client()
     now = datetime.now(UTC)
@@ -63,43 +116,20 @@ def export_reference_layers_to_s3() -> dict[str, str]:
 
         logger.info("[EXPORT-REF] Exporting layer %s (table=%s)", layer_name, table)
 
-        db = get_db()
-        try:
-            # Stream all rows with simplified geometry (one row at a time via
-            # yield_per to keep peak Python memory near O(batch) not O(total)).
-            result = db.execute(
-                text(
-                    f"SELECT "
-                    f"  ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, 0.001)) AS geojson,"
-                    f"  geom IS NOT NULL AS has_geom "
-                    f"FROM {table}"
-                )
-            )
-            geoms = []
-            for row in result:
-                if row[0]:
-                    geoms.append(_shape(json.loads(row[0])))
-        finally:
-            db.close()
-
-        if not geoms:
-            logger.warning("[EXPORT-REF] Table %s is empty — skipping", table)
-            continue
-
-        gdf = gpd.GeoDataFrame(geometry=geoms, crs="EPSG:4326")
-        feature_count = len(gdf)
-        logger.info(
-            "[EXPORT-REF] Layer %s: %d features, writing GeoParquet",
-            layer_name,
-            feature_count,
-        )
-
-        # Write to a temporary file, then upload to S3.
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".parquet")
         try:
             _os.close(tmp_fd)
-            gdf.to_parquet(tmp_path)
-            parquet_key = f"{Config.S3_PREFIX}/reference/{layer_name}.parquet"
+            db = get_db()
+            try:
+                feature_count = _write_reference_parquet(db, layer_name, tmp_path)
+            finally:
+                db.close()
+            if not feature_count:
+                logger.warning("[EXPORT-REF] Table %s is empty; not ready", table)
+                continue
+            with open(tmp_path, "rb") as source:
+                digest = hashlib.file_digest(source, "sha256").hexdigest()
+            parquet_key = f"{Config.S3_PREFIX}/reference/{layer_name}/{digest}.parquet"
             s3.upload_file(
                 tmp_path,
                 Config.S3_BUCKET,
@@ -123,6 +153,7 @@ def export_reference_layers_to_s3() -> dict[str, str]:
             if existing:
                 existing.s3_uri = s3_uri
                 existing.feature_count = feature_count
+                existing.schema_version = 2
                 existing.exported_at = now
             else:
                 db2.add(
@@ -130,6 +161,7 @@ def export_reference_layers_to_s3() -> dict[str, str]:
                         layer_name=layer_name,
                         s3_uri=s3_uri,
                         feature_count=feature_count,
+                        schema_version=2,
                         exported_at=now,
                     )
                 )
@@ -147,7 +179,7 @@ def export_reference_layers_to_s3() -> dict[str, str]:
     return exported
 
 
-def get_reference_layer_uris() -> dict[str, str]:
+def get_reference_layer_uris(required_layers=None) -> dict[str, str]:
     """Return the current S3 URIs for all exported reference layers.
 
     Reads from the ``reference_layer_exports`` table.  Returns an empty
@@ -156,7 +188,27 @@ def get_reference_layer_uris() -> dict[str, str]:
     db = get_db()
     try:
         rows = db.query(ReferenceLayerExport).all()
-        return {r.layer_name: r.s3_uri for r in rows}
+        imports = {
+            row.table_name: row.completed_at
+            for row in db.query(VectorImportMetadata).all()
+        }
+        uris = {}
+        for row in rows:
+            completed = imports.get(_EXTENT_TABLE_MAP.get(row.layer_name))
+            if row.schema_version != 2 or (
+                completed is not None and row.exported_at < completed
+            ):
+                logger.warning("Ignoring stale reference export: %s", row.layer_name)
+                continue
+            uris[row.layer_name] = row.s3_uri
+        if required_layers is not None:
+            required = set(required_layers).intersection(_EXTENT_TABLE_MAP)
+            missing = required.difference(uris)
+            if missing:
+                logger.warning("Reference exports not ready: %s", sorted(missing))
+                return {}
+            uris = {key: value for key, value in uris.items() if key in required}
+        return uris
     finally:
         db.close()
 
@@ -244,9 +296,7 @@ def compute_matching_extent(
 
                 result = db.execute(
                     text(
-                        f"SELECT ST_AsGeoJSON("
-                        f"  ST_SimplifyPreserveTopology(t.geom, 0.001)"
-                        f") "
+                        f"SELECT ST_AsGeoJSON(t.geom) "
                         f"FROM {table} t "
                         f"WHERE ST_Intersects("
                         f"  t.geom, "
@@ -388,8 +438,8 @@ def compute_exact_match_groups_with_splitting(
     exact-match group ID based on the combination of all polygon-type
     exact-match values it falls within.
 
-    Small slivers (<10% of original site area) are merged into the largest
-    sub-polygon of the same site to reduce fragmentation.
+    All positive polygonal coverage is retained, including slivers and
+    unassigned residuals. Overlapping reference coverage is rejected.
 
     Performance
     -----------
@@ -423,13 +473,26 @@ def compute_exact_match_groups_with_splitting(
     import numpy as np
     import pandas as pd
     import shapely
-    from shapely import STRtree
     from shapely.geometry import box as _bbox_box
-    from shapely.geometry import mapping, shape
+    from shapely.geometry import mapping
     from shapely.validation import make_valid
 
+    from services.polygon_partition import (
+        equal_area_ha,
+        partition_by_regions,
+        polygonal,
+    )
+
     # Filter to polygon-type exact-match variables
-    polygon_vars = [v for v in exact_match_vars if v in _EXTENT_TABLE_MAP]
+    polygon_vars = sorted({v for v in exact_match_vars if v in _EXTENT_TABLE_MAP})
+    if gdf.crs is None or gdf.crs.to_epsg() != 4326:
+        raise ValueError("Site splitting requires validated EPSG:4326 geometry.")
+    if gdf.empty:
+        raise ValueError("No sites available for splitting.")
+    if gdf["site_id"].isna().any() or gdf["site_id"].duplicated().any():
+        raise ValueError("Analysis site_id must be a unique immutable feature key.")
+    gdf = gdf.copy()
+    gdf["geometry"] = [polygonal(geom) for geom in gdf.geometry]
     if not polygon_vars:
         # No polygon variables → no splitting
         gdf_out = gdf.copy()
@@ -442,24 +505,26 @@ def compute_exact_match_groups_with_splitting(
 
     t0 = _time.perf_counter()
 
-    # ── Step 1: bulk-load reference regions (one query per polygon var) ──────
-    # Use gdf.total_bounds to compute the bounding rectangle of all sites
-    # directly from coordinate arrays — O(N) in C, far cheaper than
-    # _unary_union(valid_site_geoms).envelope which processes every geometry.
     non_empty_mask = ~(gdf.geometry.isna() | gdf.geometry.is_empty)
     if not non_empty_mask.any():
-        # Edge case: no valid geometries — return the input unchanged.
-        gdf_out = gdf.copy()
-        gdf_out["sub_site_index"] = 0
-        gdf_out["is_sub_site"] = False
-        gdf_out["original_area_ha"] = None
-        group_mapping = {1: [(row["site_id"], 0) for _, row in gdf_out.iterrows()]}
-        return gdf_out, group_mapping
+        raise ValueError("No valid polygon geometries available for splitting.")
 
-    sites_envelope_geojson = json.dumps(mapping(_bbox_box(*gdf.total_bounds)))
+    bounds = gdf.geometry.bounds.to_numpy()
+    buckets = np.floor((bounds[:, :2] + bounds[:, 2:]) / 10).astype(int)
+    envelopes = {}
+    for bucket, site_bounds in zip(buckets, bounds, strict=True):
+        key = tuple(bucket)
+        if key not in envelopes:
+            envelopes[key] = site_bounds.copy()
+        else:
+            envelopes[key][:2] = np.minimum(envelopes[key][:2], site_bounds[:2])
+            envelopes[key][2:] = np.maximum(envelopes[key][2:], site_bounds[2:])
+    sites_envelopes_geojson = json.dumps(
+        [mapping(_bbox_box(*extent)) for extent in envelopes.values()]
+    )
 
-    # var_regions maps var_name → (region_ids, region_geoms ndarray, STRtree)
-    var_regions: dict[str, tuple[list[str], np.ndarray, STRtree | None]] = {}
+    var_regions: dict[str, tuple[list[str], np.ndarray]] = {}
+    reference_digests = {}
     db = get_db()
     try:
         for var_name in polygon_vars:
@@ -474,42 +539,50 @@ def compute_exact_match_groups_with_splitting(
                     f"identifier pattern (lowercase letters, digits, underscores, "
                     f"must start with a letter or underscore)."
                 )
-            id_col = "shape_name" if table.startswith("geoboundaries") else "eco_name"
-
-            # Single bulk query: all regions whose bounding box overlaps the
-            # sites envelope.  Uses the pre-simplified geom_simp column
-            # (added by migration 0028a1b2c3ef, ~500 m tolerance) instead of
-            # computing ST_SimplifyPreserveTopology on the fly.  The GIST index
-            # on geom_simp handles the spatial filter; no per-query
-            # simplification cost.
+            id_col = _REGION_ID_SQL[var_name]
             rows = db.execute(
                 text(
-                    f"SELECT {id_col}, "
-                    f"  ST_AsGeoJSON(geom_simp) "
-                    f"FROM {table} "
-                    f"WHERE ST_Intersects("
-                    f"  geom_simp, ST_SetSRID(ST_GeomFromGeoJSON(:bbox), 4326)"
-                    f")"
+                    f"WITH candidate_ids AS (SELECT DISTINCT r.id "
+                    f"FROM jsonb_array_elements(CAST(:bboxes AS jsonb)) b "
+                    f"JOIN {table} r ON ST_Intersects(r.geom, "
+                    f"ST_SetSRID(ST_GeomFromGeoJSON(b::text), 4326))) "
+                    f"SELECT {id_col}, ST_AsBinary(geom) "
+                    f"FROM {table} r JOIN candidate_ids c ON c.id = r.id "
+                    f"ORDER BY 1"
                 ),
-                {"bbox": sites_envelope_geojson},
+                {"bboxes": sites_envelopes_geojson},
             ).fetchall()
 
+            if not rows:
+                ready = db.execute(
+                    text(f"SELECT EXISTS(SELECT 1 FROM {table})")
+                ).scalar()
+                if not ready:
+                    raise ValueError(
+                        f"Reference layer {var_name} is not ready: import it first."
+                    )
             region_ids: list[str] = []
             region_geom_list: list = []
-            for rid, geojson_str in rows:
-                if not geojson_str or rid is None:
-                    continue
-                g = shape(json.loads(geojson_str))
+            for rid, geom_wkb in rows:
+                if not geom_wkb or rid is None:
+                    raise ValueError(
+                        f"Missing reference identity or geometry in {var_name}."
+                    )
+                g = shapely.from_wkb(bytes(geom_wkb))
                 if not g.is_valid:
                     g = make_valid(g)
-                region_ids.append(rid)
-                region_geom_list.append(g)
+                region_ids.append(str(rid))
+                region_geom_list.append(polygonal(g))
+            if len(set(region_ids)) != len(region_ids):
+                raise ValueError(f"Duplicate reference identities in {var_name}.")
 
             region_geoms_arr = np.asarray(region_geom_list, dtype=object)
-            tree: STRtree | None = (
-                STRtree(region_geom_list) if region_geom_list else None
-            )
-            var_regions[var_name] = (region_ids, region_geoms_arr, tree)
+            digest = hashlib.sha256()
+            for rid, geom in zip(region_ids, region_geom_list, strict=True):
+                digest.update(rid.encode())
+                digest.update(geom.wkb)
+            reference_digests[var_name] = digest.hexdigest()
+            var_regions[var_name] = (region_ids, region_geoms_arr)
 
             logger.info(
                 "[SPLIT] Loaded %d regions for %s from %s in %.2fs",
@@ -521,108 +594,31 @@ def compute_exact_match_groups_with_splitting(
     finally:
         db.close()
 
-    # ── Step 2: vectorized site splitting using bulk STRtree queries ──────────
-    # Rather than a per-site Python loop, process all sites (and sub-pieces)
-    # at once using Shapely 2.0's array-query API and vectorized ufuncs.
-    # This moves geometry work to C-level libgeos with no per-row Python overhead.
-    #
-    # State arrays (one element per current "piece"):
-    #   curr_orig_idxs  – index into the original gdf for each piece
-    #   curr_geoms      – current piece geometry (numpy object array)
-    #   processed_vals  – dict of var_name → numpy object array of region IDs
+    # Bound candidate work to one piece while retaining all prior stratum keys.
     curr_orig_idxs: np.ndarray = np.arange(len(gdf))
-    curr_geoms: np.ndarray = shapely.make_valid(np.asarray(gdf.geometry, dtype=object))
-    # Compute areas from validated geometries so sliver detection uses consistent values.
-    orig_geom_areas = shapely.area(curr_geoms)
+    curr_geoms: np.ndarray = np.asarray(
+        [polygonal(geom) for geom in gdf.geometry], dtype=object
+    )
     processed_vals: dict[str, np.ndarray] = {}
 
     for var_name in polygon_vars:
         _var_t0 = _time.perf_counter()
-        region_ids_list, region_geoms_arr, tree = var_regions[var_name]
+        region_ids_list, region_geoms_arr = var_regions[var_name]
         n_curr = len(curr_geoms)
 
-        if tree is None:
+        if not region_ids_list:
             processed_vals[var_name] = np.full(n_curr, None, dtype=object)
             continue
 
-        # Validate current piece geometries in bulk before querying
-        curr_geoms = shapely.make_valid(curr_geoms)
-
-        # Bulk STRtree query: (piece_indices, region_indices) for every
-        # (piece, region) pair whose bounding boxes overlap.  We deliberately
-        # omit predicate="intersects" here: the PreparedGeometry predicate test
-        # in STRtree is ~175× slower per pair for ecoregion geometries than the
-        # subsequent shapely.intersection ufunc, so it is faster to collect all
-        # bbox candidates and let the valid_mask filter (below) discard non-
-        # intersecting pairs via the same ufunc call.
-        piece_idxs, reg_idxs = tree.query(curr_geoms)
-        logger.info(
-            "[SPLIT] %s: STRtree query on %d pieces → %d candidate pairs in %.2fs",
-            var_name,
-            n_curr,
-            len(piece_idxs),
-            _time.perf_counter() - _var_t0,
+        piece_idxs, new_geoms, new_var_ids = partition_by_regions(
+            curr_geoms, region_ids_list, region_geoms_arr, var_name
         )
-
-        # Compute all intersections in a single C-level ufunc call
-        _isect_t0 = _time.perf_counter()
-        intersections = shapely.intersection(
-            curr_geoms[piece_idxs], region_geoms_arr[reg_idxs]
-        )
-        logger.info(
-            "[SPLIT] %s: shapely.intersection on %d pairs in %.2fs",
-            var_name,
-            len(piece_idxs),
-            _time.perf_counter() - _isect_t0,
-        )
-
-        # Discard empty / zero-area results
-        valid_mask = ~shapely.is_empty(intersections) & (
-            shapely.area(intersections) > 0
-        )
-        piece_idxs = piece_idxs[valid_mask]
-        reg_idxs = reg_idxs[valid_mask]
-        intersections = intersections[valid_mask]
-
-        # Pieces with no matching region → keep with NULL for this variable
-        hit_pieces = np.unique(piece_idxs)
-        no_hit = np.setdiff1d(np.arange(n_curr), hit_pieces)
-        n_hits = len(piece_idxs)
-        n_miss = len(no_hit)
-        logger.info(
-            "[SPLIT] %s: %d valid intersections, %d hit pieces, %d miss (no region)",
-            var_name,
-            n_hits,
-            len(hit_pieces),
-            n_miss,
-        )
-
-        # Build combined arrays: intersecting pieces first, then non-intersecting
-        new_orig_idxs = np.empty(n_hits + n_miss, dtype=curr_orig_idxs.dtype)
-        new_orig_idxs[:n_hits] = curr_orig_idxs[piece_idxs]
-        new_orig_idxs[n_hits:] = curr_orig_idxs[no_hit]
-
-        new_geoms = np.empty(n_hits + n_miss, dtype=object)
-        new_geoms[:n_hits] = intersections
-        new_geoms[n_hits:] = curr_geoms[no_hit]
-
-        # Region IDs for this variable (None where no intersection)
-        new_var_ids = np.empty(n_hits + n_miss, dtype=object)
-        new_var_ids[:n_hits] = np.asarray(region_ids_list, dtype=object)[reg_idxs]
-        new_var_ids[n_hits:] = None
-
-        # Propagate all previously-assigned variables to the expanded rows
-        new_processed: dict[str, np.ndarray] = {}
-        for prev_var, prev_arr in processed_vals.items():
-            new_arr = np.empty(n_hits + n_miss, dtype=object)
-            new_arr[:n_hits] = prev_arr[piece_idxs]
-            new_arr[n_hits:] = prev_arr[no_hit]
-            new_processed[prev_var] = new_arr
-        new_processed[var_name] = new_var_ids
-
-        curr_orig_idxs = new_orig_idxs
+        curr_orig_idxs = curr_orig_idxs[piece_idxs]
         curr_geoms = new_geoms
-        processed_vals = new_processed
+        processed_vals = {
+            name: values[piece_idxs] for name, values in processed_vals.items()
+        }
+        processed_vals[var_name] = new_var_ids
 
         logger.info(
             "[SPLIT] %s: variable done in %.2fs → %d output pieces total",
@@ -631,85 +627,8 @@ def compute_exact_match_groups_with_splitting(
             len(curr_geoms),
         )
 
-    # ── Step 3: sliver merging (<10% of original site area) ──────────────────
-    piece_areas = shapely.area(curr_geoms)
-    piece_orig_areas = orig_geom_areas[curr_orig_idxs]
-    area_fractions = np.where(piece_orig_areas > 0, piece_areas / piece_orig_areas, 1.0)
-    is_sliver = area_fractions < 0.1
-
-    n_slivers = int(is_sliver.sum())
-    logger.info(
-        "[SPLIT] sliver check: %d/%d pieces are slivers (<10%% of original area)",
-        n_slivers,
-        len(curr_geoms),
-    )
-
-    if is_sliver.any():
-        _sliver_t0 = _time.perf_counter()
-        piece_df = pd.DataFrame(
-            {
-                "orig_idx": curr_orig_idxs,
-                "piece_area": piece_areas,
-                "is_sliver": is_sliver,
-            }
-        )
-        rows_to_drop: list[int] = []
-        geom_updates: dict[int, object] = {}
-        _n_sliver_groups = 0
-        for _orig_idx, grp in piece_df.groupby("orig_idx"):
-            if len(grp) <= 1:
-                continue  # site was not split — nothing to merge
-            slivers = grp[grp["is_sliver"]]
-            mains = grp[~grp["is_sliver"]]
-            if slivers.empty:
-                continue
-            _n_sliver_groups += 1
-            if mains.empty:
-                # All pieces are slivers — keep only the largest
-                keep_idx = int(grp["piece_area"].idxmax())
-                rows_to_drop.extend(int(i) for i in grp.index if int(i) != keep_idx)
-                continue
-            # Merge all slivers into the largest main piece
-            largest_idx = int(mains["piece_area"].idxmax())
-            sliver_row_idxs = [int(i) for i in slivers.index]
-            union_input = np.concatenate(
-                [
-                    curr_geoms[sliver_row_idxs],
-                    np.asarray([curr_geoms[largest_idx]], dtype=object),
-                ]
-            )
-            geom_updates[largest_idx] = shapely.union_all(union_input)
-            rows_to_drop.extend(sliver_row_idxs)
-
-        logger.info(
-            "[SPLIT] sliver merge loop: %d groups with slivers, "
-            "%d pieces to drop, %d geom updates in %.2fs",
-            _n_sliver_groups,
-            len(rows_to_drop),
-            len(geom_updates),
-            _time.perf_counter() - _sliver_t0,
-        )
-
-        if geom_updates or rows_to_drop:
-            for row_i, new_geom in geom_updates.items():
-                curr_geoms[row_i] = new_geom
-            if rows_to_drop:
-                keep_mask = np.ones(len(curr_geoms), dtype=bool)
-                keep_mask[rows_to_drop] = False
-                curr_geoms = curr_geoms[keep_mask]
-                curr_orig_idxs = curr_orig_idxs[keep_mask]
-                for v in list(processed_vals.keys()):
-                    processed_vals[v] = processed_vals[v][keep_mask]
-
-    # ── Step 4: build output GeoDataFrame from arrays ─────────────────────────
-    # Retrieve site_id first so sub_site_index_arr can be computed per site_id,
-    # consistent with the _sub_site_counters approach in analysis_task.py and
-    # the (task_id, site_id, sub_site_index) unique constraint in TaskSite.
     site_id_arr = gdf["site_id"].to_numpy()[curr_orig_idxs]
 
-    # sub_site_index: 0-based sequential per site_id string (not per orig_idx).
-    # This matches _sub_site_counters in analysis_task.py so group_mapping tuples
-    # and TaskSite records always agree, even for duplicate site_id values.
     site_id_series = pd.Series(site_id_arr)
     sub_site_index_arr = (
         site_id_series.groupby(site_id_series, sort=False).cumcount().to_numpy()
@@ -735,29 +654,8 @@ def compute_exact_match_groups_with_splitting(
         else np.full(len(curr_geoms), None, dtype=object)
     )
 
-    # Piece areas in ha — reproject to Mollweide equal-area (ESRI:54009) so the
-    # values stored in TaskSite (web UI) and the S3 Parquet (R pipeline) are accurate
-    # and consistent with each other.
-    _ea_tfm = Transformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
-    # shapely.transform passes a single (N, 2) coordinate array; pyproj
-    # Transformer.transform expects separate (xx, yy) arrays — wrap it.
-    _pieces_ea = shapely.transform(
-        curr_geoms,
-        lambda c: np.column_stack(_ea_tfm.transform(c[:, 0], c[:, 1])),
-    )
-    piece_areas_ha = shapely.area(_pieces_ea) / 10_000.0
-    del _pieces_ea
-
-    # Original site area in ha — populated only for pieces of split sites.
-    if "area_ha" in gdf.columns:
-        orig_site_area_ha = gdf["area_ha"].to_numpy(dtype=float)
-    else:
-        _orig_ea = shapely.transform(
-            np.asarray(gdf.geometry, dtype=object),
-            lambda c: np.column_stack(_ea_tfm.transform(c[:, 0], c[:, 1])),
-        )
-        orig_site_area_ha = shapely.area(_orig_ea) / 10_000.0
-        del _orig_ea
+    piece_areas_ha = equal_area_ha(curr_geoms)
+    orig_site_area_ha = equal_area_ha(gdf.geometry)
     original_area_ha_arr = np.where(
         is_sub_site_arr, orig_site_area_ha[curr_orig_idxs], np.nan
     )
@@ -773,10 +671,13 @@ def compute_exact_match_groups_with_splitting(
         "is_sub_site": is_sub_site_arr,
         "original_area_ha": original_area_ha_arr,
     }
+    if "display_site_id" in gdf.columns:
+        out_data["display_site_id"] = gdf["display_site_id"].to_numpy()[curr_orig_idxs]
     for var_name in polygon_vars:
         out_data[var_name] = processed_vals[var_name]
 
     split_gdf = gpd.GeoDataFrame(out_data, crs=gdf.crs, geometry="geometry")
+    split_gdf.attrs["reference_versions"] = reference_digests
 
     # ── Step 5: build group mapping ───────────────────────────────────────────
     group_key_to_id: dict = {}
@@ -785,7 +686,7 @@ def compute_exact_match_groups_with_splitting(
 
     for i in range(len(split_gdf)):
         key_values = tuple(processed_vals[var_name][i] for var_name in polygon_vars)
-        if all(v is None for v in key_values):
+        if any(v is None for v in key_values):
             group_id = 0
         else:
             if key_values not in group_key_to_id:

@@ -39,6 +39,12 @@ class UserSiteSet(Base):
     bounds = Column(JSON)
     extra_metadata = Column("metadata", JSON, default=dict)
     is_archived = Column(Boolean, default=False, nullable=False, server_default="false")
+    source_upload_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("user_site_uploads.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+    )
 
     sites = relationship(
         "UserSiteFeature", back_populates="site_set", cascade="all, delete-orphan"
@@ -105,4 +111,12 @@ class UserSiteUpload(Base):
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
     error_message = Column(Text)
+    phase = Column(
+        String(32), nullable=False, default="queued", server_default="queued"
+    )
+    rows_scanned = Column(Integer, nullable=False, default=0, server_default="0")
+    rows_accepted = Column(Integer, nullable=False, default=0, server_default="0")
+    rows_skipped = Column(Integer, nullable=False, default=0, server_default="0")
+    attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
+    heartbeat_at = Column(DateTime(timezone=True))
     extra_metadata = Column("metadata", JSON, default=dict)

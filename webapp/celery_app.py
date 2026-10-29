@@ -86,6 +86,15 @@ celery_app.conf.update(
 # Celery Beat schedule — periodic background jobs
 # ---------------------------------------------------------------------------
 celery_app.conf.beat_schedule = {
+    "recover-site-uploads": {
+        "task": "tasks.recover_site_uploads",
+        "schedule": 300.0,
+    },
+    "audit-site-upload-stages": {
+        "task": "tasks.audit_site_upload_stages",
+        "schedule": 3600.0,
+        "kwargs": {"apply": True},
+    },
     "poll-gee-export-status": {
         "task": "tasks.poll_gee_exports",
         "schedule": 60.0,  # every 60 seconds

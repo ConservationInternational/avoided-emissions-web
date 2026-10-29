@@ -132,6 +132,38 @@ test_that("summary reports no estimates when all fragments fail", {
     expect_equal(nrow(read.csv(file.path(out, "results_pixel_year_emissions.csv"))), 0)
 })
 
+test_that("overlapping features keep independent treatment memberships and results", {
+    data_dir <- tempfile("ae_overlap_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)
+    out <- file.path(data_dir, "output")
+    sites <- read_parquet(file.path(out, "sites_processed.parquet"))
+    sites$display_site_id <- "duplicate display label"
+    write_parquet(sites, file.path(out, "sites_processed.parquet"))
+    key <- read_parquet(file.path(out, "treatment_cell_key.parquet"))
+    original_cell <- key$cell[which(key$id_numeric == 3)[1]]
+    shared_cell <- key$cell[which(key$id_numeric == 1)[1]]
+    key$cell[key$cell == original_cell] <- shared_cell
+    write_parquet(key, file.path(out, "treatment_cell_key.parquet"))
+    pixels <- read_parquet(file.path(out, "treatment_pixels.parquet"))
+    write_parquet(filter(pixels, cell != original_cell), file.path(out, "treatment_pixels.parquet"))
+    write_json(list(formula_str = "treatment ~ factor(admin1)"),
+               file.path(out, "formula.json"), auto_unbox = TRUE)
+    config <- fromJSON(config_path, simplifyVector = FALSE)
+    config$max_treatment_pixels <- 100
+    write_json(config, config_path, auto_unbox = TRUE)
+    run_script("02_perform_matching.R", config_path)
+    for (id in c(1, 3)) {
+        matched <- readRDS(file.path(out, "matches", paste0("m_", id, "_rep1.rds")))
+        expect_true(shared_cell %in% matched$cell[matched$treatment])
+    }
+    run_script("03_summarize_results.R", config_path)
+    totals <- read.csv(file.path(out, "results_by_site_total.csv"))
+    expect_equal(sort(totals$site_id), c("A", "B"))
+    identity <- read.csv(file.path(out, "site_identity.csv"))
+    expect_equal(sort(identity$site_id), c("A", "B", "C"))
+    expect_true(all(identity$display_site_id == "duplicate display label"))
+})
+
 for (method in c("optimal", "nearest")) {
     test_that(paste(method, "supports constant factor covariates and a single replicate"), {
         data_dir <- tempfile("ae_constant_")

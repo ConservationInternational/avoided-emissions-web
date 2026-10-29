@@ -19,10 +19,11 @@ from models import (
     TaskSite,
     get_db,
 )
-from pyproj import Transformer as _ProjTransformer
 
 from gee_export import gee_config
 from services.covariate import get_ready_covariate_names
+from services.polygon_partition import equal_area_ha as _equal_area_ha
+from services.polygon_partition import polygonal
 from services.reference_layers import (
     compute_exact_match_groups_with_splitting,
     compute_matching_extent,
@@ -79,19 +80,6 @@ ANALYSIS_DEFAULTS = {
     "fc_year_end": FC_YEAR_MAX + 1,  # exclusive upper bound for range()
     "resolution_m": 1000,  # nominal resolution: 1000 m (1 km) or 250 m
 }
-
-
-_EQUAL_AREA = _ProjTransformer.from_crs("EPSG:4326", "ESRI:54009", always_xy=True)
-
-
-def _equal_area_ha(geometries):
-    """Area in hectares, computed in the Mollweide equal-area projection."""
-    # shapely.transform passes a single (N, 2) array; pyproj expects (xx, yy).
-    projected = shapely.transform(
-        np.asarray(geometries, dtype=object),
-        lambda c: np.column_stack(_EQUAL_AREA.transform(c[:, 0], c[:, 1])),
-    )
-    return shapely.area(projected) / 10_000.0
 
 
 def _pack_match_units(group_mapping, batch_size):
@@ -388,27 +376,8 @@ def _complete_analysis_task_submission(task_id, user_id):
 
         _site_set_id = str(task.site_set_id) if task.site_set_id else None
 
-        # ── OOM-safe path for DB-linked site sets ────────────────────────────
-        # When the task is linked to a site_set_id we can derive everything we
-        # need from PostGIS *before* loading any geometry into Python.  This
-        # means the worker never holds the full GDF + the matching-extent query
-        # result + the Parquet buffer simultaneously.
-        #
-        # 1. fc_years  — SELECT MIN(start_date) from user_site_features (scalar)
-        # 2. matching_extent  — PostGIS aggregate via ST_Collect subquery
-        # 3. exclusion_buffer — PostGIS aggregate via ST_Collect subquery
-        # 4. sites Parquet    — streamed in batches; GDF batches are released
-        #                       after each write; peak = O(batch) + O(parquet)
-        # 5. GDF for splitting / TaskSite — read back from in-memory Parquet
-        #                       buffer only when needed; Parquet is ~4–8× smaller
-        #                       than the equivalent GeoDataFrame.
-        #
-        # For adopted tasks loaded from S3 (no site_set_id) we fall through to
-        # the legacy path that fetches the GDF from S3 directly.
-        # ─────────────────────────────────────────────────────────────────────
-
-        parquet_buf = None  # holds the in-memory GeoParquet buffer
-        gdf = None  # populated lazily from parquet_buf when needed
+        parquet_buf = None  # caller-owned temporary GeoParquet file
+        gdf = None
 
         if _site_set_id:
             # Step 1 — forest-cover year range via scalar DB query.
@@ -426,7 +395,7 @@ def _complete_analysis_task_submission(task_id, user_id):
             # matching_extent and sites_exclusion_buffer are now computed
             # by the dedicated Batch ``prep`` step from the exported
             # GeoParquets, keeping all heavy PostGIS work out of this worker.
-            reference_layer_uris = get_reference_layer_uris()
+            reference_layer_uris = get_reference_layer_uris(exact_match_vars)
             matching_extent = None
             sites_exclusion_buffer = None
 
@@ -458,7 +427,7 @@ def _complete_analysis_task_submission(task_id, user_id):
                     _time.perf_counter() - _buf_t0,
                 )
 
-            # Step 3 — stream site set to in-memory Parquet (batch-at-a-time).
+            # Step 3 — stream bounded row groups to a temporary file.
             _stream_t0 = _time.perf_counter()
             _db_stream = get_db()
             try:
@@ -527,16 +496,26 @@ def _complete_analysis_task_submission(task_id, user_id):
             reference_layer_uris = {}
 
         # Step 5 — load GDF only now (from Parquet buffer or existing gdf).
-        # For the DB path the GDF is read from the compact in-memory Parquet;
+        # For the DB path the GDF is read from the temporary GeoParquet;
         # for the S3 fallback path the GDF is already loaded above.
         if parquet_buf is not None and gdf is None:
-            gdf = gpd.read_parquet(parquet_buf)
-            parquet_buf.seek(0)  # rewind so we can upload the same buffer to S3
+            try:
+                gdf = gpd.read_parquet(parquet_buf)
+            finally:
+                parquet_buf.close()
+                parquet_buf = None
 
         if gdf is None or gdf.empty:
             raise ValueError(
                 f"Task {task_id}: could not load site data. Cannot complete submission."
             )
+        if gdf.crs is None or gdf.crs.to_epsg() != 4326:
+            raise ValueError("Analysis inputs must declare EPSG:4326.")
+        if gdf["site_id"].isna().any() or gdf["site_id"].duplicated().any():
+            raise ValueError("Analysis inputs require unique immutable feature keys.")
+        repaired_count = int((~shapely.is_valid(gdf.geometry.to_numpy())).sum())
+        gdf = gdf.copy()
+        gdf["geometry"] = [polygonal(geom) for geom in gdf.geometry]
 
         logger.info(
             "[SUBMIT-WORKER] Task %s: %d sites ready (%.2fs so far)",
@@ -547,9 +526,27 @@ def _complete_analysis_task_submission(task_id, user_id):
 
         # Apply the minimum area to whole sites before they are split, so a
         # large site keeps any small fragments created by region boundaries.
-        gdf = gdf[_equal_area_ha(gdf.geometry) >= min_site_area_ha].reset_index(
-            drop=True
-        )
+        gdf["area_ha"] = _equal_area_ha(gdf.geometry)
+        input_count = len(gdf)
+        input_area = float(gdf["area_ha"].sum())
+        gdf = gdf[gdf["area_ha"] >= min_site_area_ha].reset_index(drop=True)
+        preparation = {
+            "version": "authoritative-conservative-v1",
+            "area_method": "Mollweide; boundaries densified to 0.005 degrees",
+            "input_sites": input_count,
+            "retained_sites": len(gdf),
+            "excluded_sites": input_count - len(gdf),
+            "excluded_by_reason": {"minimum_site_area": input_count - len(gdf)},
+            "geometry_repairs": repaired_count,
+            "input_area_ha": input_area,
+            "retained_area_ha": float(gdf["area_ha"].sum()),
+            "min_site_area_ha": min_site_area_ha,
+        }
+        task.extra_metadata = {
+            **(task.extra_metadata or {}),
+            "preparation": preparation,
+        }
+        db.commit()
         if gdf.empty:
             raise ValueError(f"No sites are at least {min_site_area_ha} ha.")
 
@@ -571,8 +568,17 @@ def _complete_analysis_task_submission(task_id, user_id):
             )
             gdf_for_db = split_gdf
         else:
-            gdf_for_db = gdf
+            gdf_for_db = gdf.assign(
+                sub_site_index=0, is_sub_site=False, original_area_ha=None
+            )
             group_mapping = None
+        if (
+            reference_layer_uris
+            and get_reference_layer_uris(exact_match_vars) != reference_layer_uris
+        ):
+            raise ValueError(
+                "Reference layers changed during preparation. Retry the analysis."
+            )
 
         # Store the same equal-area value in TaskSite (web UI) and the S3
         # Parquet (R analysis pipeline).
@@ -604,6 +610,11 @@ def _complete_analysis_task_submission(task_id, user_id):
         _empty_mask = shapely.is_empty(_geoms_deg) | shapely.is_missing(_geoms_deg)
         del _geoms_deg
         _sid_arr = gdf_for_db["site_id"].astype(str).tolist()
+        _display_arr = (
+            gdf_for_db["display_site_id"].astype(str).tolist()
+            if "display_site_id" in gdf_for_db.columns
+            else _sid_arr
+        )
         _name_col = (
             gdf_for_db["site_name"]
             if "site_name" in gdf_for_db.columns
@@ -612,7 +623,9 @@ def _complete_analysis_task_submission(task_id, user_id):
         _name_arr = _name_col.astype(str).tolist()
         _start_py = pd.to_datetime(gdf_for_db["start_date"]).tolist()
         _end_dt = pd.to_datetime(
-            gdf_for_db["end_date"] if "end_date" in gdf_for_db.columns else pd.NaT,
+            gdf_for_db["end_date"]
+            if "end_date" in gdf_for_db.columns
+            else pd.Series(pd.NaT, index=gdf_for_db.index),
             errors="coerce",
         )
         _end_py = [None if pd.isna(v) else v for v in _end_dt]
@@ -639,6 +652,7 @@ def _complete_analysis_task_submission(task_id, user_id):
             {
                 "task_id": task_id,
                 "site_id": _sid_arr[i],
+                "display_site_id": _display_arr[i],
                 "site_name": _name_arr[i],
                 "start_date": _start_py[i],
                 "end_date": _end_py[i],
@@ -654,6 +668,33 @@ def _complete_analysis_task_submission(task_id, user_id):
             for i in range(len(gdf_for_db))
         ]
         db.execute(TaskSite.__table__.insert(), _site_mappings)
+        assigned_mask = np.ones(len(gdf_for_db), dtype=bool)
+        if group_mapping and 0 in group_mapping:
+            unassigned = set(group_mapping[0])
+            assigned_mask = np.array(
+                [
+                    (sid, int(sub)) not in unassigned
+                    for sid, sub in zip(_sid_arr, _sub_idx_arr, strict=True)
+                ]
+            )
+        task.extra_metadata = {
+            **(task.extra_metadata or {}),
+            "preparation": {
+                **preparation,
+                "fragments": len(gdf_for_db),
+                "fragment_area_ha": float(_areas_ha_arr.sum()),
+                "covered_area_ha": float(_areas_ha_arr[assigned_mask].sum()),
+                "uncovered_area_ha": float(_areas_ha_arr[~assigned_mask].sum()),
+                "reassigned_area_ha": 0.0,
+                "unmatched_fragments": int((~assigned_mask).sum()),
+                "excluded_from_matching_sites": len(
+                    set(np.asarray(_sid_arr)[~assigned_mask])
+                    - set(np.asarray(_sid_arr)[assigned_mask])
+                ),
+                "reference_versions": gdf_for_db.attrs.get("reference_versions", {}),
+                "reference_artifacts": reference_layer_uris,
+            },
+        }
         db.commit()
 
         logger.info(
@@ -662,14 +703,15 @@ def _complete_analysis_task_submission(task_id, user_id):
             len(gdf_for_db),
         )
 
-        # Upload sites to S3.
-        # When parquet_buf is available (DB-linked path) the buffer was produced
-        # by _stream_site_set_to_parquet_buf and is already seeked to 0; upload
-        # it directly to avoid re-encoding the GDF a second time.
         _s3_t0 = _time.perf_counter()
         # Always encode gdf_for_db to Parquet so the R analysis pipeline reads
         # the same equal-area area_ha values that were written to TaskSite.
         sites_parquet_uri = upload_sites_parquet_to_s3(gdf_for_db, task_id)
+        task.config = {
+            **(task.config or {}),
+            "sites_parquet_s3_uri": sites_parquet_uri,
+        }
+        db.commit()
         sites_uri = None
         if not task.site_set_id:
             sites_uri = upload_sites_to_s3(gdf_for_db, task_id)
@@ -923,6 +965,8 @@ def _complete_analysis_task_submission(task_id, user_id):
             db.rollback()
         raise
     finally:
+        if "parquet_buf" in locals() and parquet_buf is not None:
+            parquet_buf.close()
         db.close()
 
 
@@ -1392,6 +1436,12 @@ def import_execution_results(task_id, results_payload, db=None):
         task_obj = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
         if task_obj:
             task_obj.extra_metadata = {**(task_obj.extra_metadata or {}), **metadata}
+        labels = {
+            row.site_id: row.display_site_id
+            for row in db.query(TaskSite).filter(TaskSite.task_id == task_id).all()
+        }
+        for row in year_rows + total_rows:
+            row["display_site_id"] = labels.get(row["site_id"], row["site_id"])
         db.query(TaskResult).filter(TaskResult.task_id == task_id).delete()
         db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).delete()
         if year_rows:
@@ -1561,6 +1611,7 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         "match_quality_summary": "results_match_quality_summary.json",
         "matched_pixels": "results_pixel_locations.csv",
         "summary": "results_summary.json",
+        "site_identity": "site_identity.csv",
     }
     filename = filename_map.get(result_type)
     if not filename:

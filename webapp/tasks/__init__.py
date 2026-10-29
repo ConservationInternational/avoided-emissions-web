@@ -22,7 +22,11 @@ from tasks.reference_layers import (  # noqa: F401
     export_reference_layers_task,
     ingest_sdg_cog_task,
 )
-from tasks.site_upload import import_user_site_upload_task  # noqa: F401
+from tasks.site_upload import (  # noqa: F401
+    audit_site_upload_stages,
+    import_user_site_upload_task,
+    recover_site_uploads,
+)
 from tasks.vector_import import (  # noqa: F401
     import_vector_data_task,
     rasterize_vectors_task,

@@ -198,6 +198,15 @@ def submit_layout(user, recompute_config=None):
                                                     dbc.CardBody(
                                                         dcc.Loading(
                                                             [
+                                                                html.P(
+                                                                    "This preview shows original sites. "
+                                                                    "Preparation runs once after submission; "
+                                                                    "the task detail page provides exclusions, "
+                                                                    "area reconciliation, and split analysis units. "
+                                                                    "Selecting a map feature can filter the table; "
+                                                                    "use Clear selection to show all sites.",
+                                                                    className="small text-muted",
+                                                                ),
                                                                 html.Div(
                                                                     id="site-preview-map",
                                                                     className="mb-3",

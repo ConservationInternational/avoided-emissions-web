@@ -80,30 +80,140 @@ account or their access to the app.
 
 Sites are uploaded as GeoJSON or GeoPackage files. The required attribute
 fields are documented in the main [README](../README.md#site-input-format).
+Archives may contain exactly one supported dataset, including Shapefile.
+The upload panel shows the limits before transfer: 800 MiB per HTTP request
+(including form data); archives allow 2,000 files, 512 MiB per member,
+1 GiB expanded total and at most 200:1 compression.
 
 ### Upload flow
 
-1. The user selects a file in the **Upload Sites** panel.
+1. The user selects a file in the **Upload Sites** panel. Transfer progress and
+   server-side preview are separate phases; **Cancel transfer** stops an active
+   request.
 2. The file is staged to S3 (`{S3_PREFIX}/site-upload-stage/`) under a
    time-limited token (12-hour TTL).
-3. A Celery task (`tasks.process_site_upload`) parses and validates the
-   geometries, converts them to GeoParquet format, and writes a
-   `UserSiteUpload` record to the database.
-4. On success the site set appears in the **My Sites** list and is ready for
-   use in a task submission.
+3. A bounded schema/sample preview supplies mapping choices with example values.
+   The user selects a required start-date column and optional ID, name and
+   end-date columns, then confirms the mapping.
+4. A durable `UserSiteUpload` record is queued for
+   `tasks.import_user_site_upload`. The worker validates and imports features
+   into PostGIS; import progress and diagnostics appear in **Recent Import History**.
+5. On success the reusable set appears in the **Site Set Catalog** and submission
+   selector. The catalog is independent of the latest 50 import jobs, includes
+   legacy sets and supports pagination, renaming, archiving/restoring and deletion.
 
 ### Validation
 
 The upload task checks:
 
-- All features have valid polygon or multipolygon geometries in EPSG:4326.
-- Required fields (`site_id`, `site_name`, `start_date`) are present and
-  correctly typed.
+- Polygon or multipolygon geometries are repaired and validated, including
+  finite coordinate/bounds checks. GeoJSON defaults to RFC 7946 WGS84; other
+  datasets require a declared CRS and are transformed to EPSG:4326.
+- A required `start_date` mapping is supplied. Optional IDs and names are
+  generated when omitted.
 - `start_date` (and optional `end_date`) parse as ISO 8601 dates.
-- `site_id` values are unique within the file.
+- Dates must be explicit dates, not numeric years or serial dates.
+- Duplicate display `site_id` values are accepted. Immutable feature UUIDs are
+  canonical analysis identities; original labels are retained as `display_site_id`.
 
-Validation errors are stored in the `UserSiteUpload.error` column and
-displayed in the UI.
+Validation errors and import diagnostics are displayed with the import history.
+Mapping and upload status changes are announced to assistive technology.
+Import history includes the active phase and scanned/accepted/skipped counts;
+failure diagnostics are readable directly in the table. Claims and publication
+are durable and idempotent. Cancellation is cooperative: it records a terminal
+state, lets the importer roll back unpublished data, and does not kill its worker
+process. Failed inputs remain staged until their expiry rather than being
+silently deleted before diagnosis.
+
+Beat recovers interrupted dispatches every five minutes, at most 100 jobs per
+pass. Failed or unknown sends have a ten-minute cooldown and six dispatch
+reservations; confirmed broker deliveries are not repeatedly sent or failed
+just because the heavy queue is busy. Delayed dispatch is shown as a warning,
+not a successful queue notification. Imports allow three worker claims.
+Pending jobs explicitly expire after 24 hours; stage tokens themselves remain
+valid for 12 hours, so an import must start within that source-retention window.
+Running jobs are only
+recovered after 140 minutes without activity, beyond the 125-minute worker hard
+limit. Recovery rechecks cancellation and terminal state before dispatching.
+Restart workers and Beat when deploying these changes.
+
+Administrators can inventory stale jobs and expired **local** staging without
+accessing cloud storage:
+
+```bash
+PYTHONPATH=webapp:. python webapp/scripts/audit_site_uploads.py
+# Review the inventory before explicitly applying cleanup:
+PYTHONPATH=webapp:. python webapp/scripts/audit_site_uploads.py --apply
+```
+
+Beat also applies local cleanup hourly. Live jobs' source tokens are protected;
+row/advisory locks prevent cleanup from racing current progress or registration.
+Production S3 staging still requires an appropriate bucket lifecycle policy;
+this local-only audit does not enumerate or delete cloud objects.
+
+### Map and table preview
+
+The preview loads vector tiles and immediately fits stored bounds, without
+downloading every site's centroid. Selecting a table row fetches only that
+feature's exact extent. Selecting an unloaded map feature filters the server-backed
+grid by its immutable feature key; **Clear selection** restores all rows.
+Display labels need not be unique. Failed tiles retry and then show a visible
+retry control; expired authentication is distinguished from empty tiles.
+Changing sets or leaving the page cancels stale requests and cleans up listeners.
+Polygon tiles use PostGIS MVT clipping, validity handling and tile-grid
+quantization directly. They do not repeatedly run topology-preserving
+simplification on entire source geometries before clipping; that step stalled
+on the FY26 dataset's million-vertex features. Display generalization never
+changes stored analytical geometries or their GeoParquet exports.
+
+### Conservative analysis preparation
+
+Preparation uses authoritative reference boundaries, not display simplifications.
+All positive polygon coverage survives splitting, including tiny cross-stratum
+pieces and uncovered residuals. Overlapping reference coverage is an error with
+the layer and region identified; it is never resolved by double-counting or
+assigning a sliver to a different stratum. A missing selected reference table
+must be imported before preparation can proceed.
+
+The minimum-area setting applies to whole input features before splitting.
+Fragments lacking any selected polygon-region key remain in the downloadable
+artifact but are excluded from matching. The persisted **Site Preparation**
+report distinguishes minimum-area exclusions, unmatched fragments/sites,
+covered/uncovered hectares, repairs, and reference fingerprints. It is also
+available when every input fails the minimum-area filter. Reference GeoParquets
+have content-addressed paths; stale exports are not used after a newer import.
+Hectares use Mollweide (ESRI:54009) with boundaries densified to at most
+0.005 degrees for measurement, in bounded batches. This avoids area changing
+simply because a split adds vertices along a curved projected edge. The original
+geometry coordinates are not densified or simplified in the analysis artifact.
+Extraction validates the same area convention before reading covariates.
+
+Analysis `site_id` is the immutable feature UUID, not the display label.
+Extraction supports multiple feature memberships in a raster cell, so overlapping
+features remain independent reports. Portfolio totals sum these reports; they
+are not a unique-area union of overlapping source features. The results'
+**Site ID / label mapping** CSV maps canonical IDs to original labels and names.
+
+The read-only audit command can inventory historical jobs and references or
+validate downloaded artifacts. Run from the repository root with the application's
+dependencies and database configuration:
+
+```bash
+PYTHONPATH=webapp:. python webapp/scripts/audit_polygon_preparation.py --database
+PYTHONPATH=webapp:. python webapp/scripts/audit_polygon_preparation.py \
+    --fragments prepared.parquet
+PYTHONPATH=webapp:. python webapp/scripts/audit_polygon_preparation.py \
+    --fragments prepared.parquet --sources canonical-source-snapshot.parquet
+PYTHONPATH=webapp:. python webapp/scripts/audit_polygon_preparation.py \
+    --benchmark-sites 1000
+```
+
+The optional source snapshot must use the same immutable `site_id` values;
+original upload display labels cannot substitute for these keys. Artifact
+validation fails on duplicate keys, overlapping fragments, inconsistent stored
+hectares, or changed source coverage. Database inventory only flags historical
+jobs for review; it cannot prove an old run conserved geometry and never rewrites
+or resubmits historical outputs.
 
 ---
 
@@ -148,6 +258,21 @@ Grouped matching settings with defaults pre-filled. See
 
 If submission fails (e.g. trends.earth API error) the task status is set to
 `failed` and the error message is stored on the `AnalysisTask` record.
+
+### Preparation audit and analysis units
+
+Preparation runs after submission, not on every form edit. The task detail page
+shows the persisted **Site Preparation** summary: input/retained/excluded site
+counts, fragment counts, area reconciliation, reference versions and any recorded
+repair/exclusion diagnostics. Original sites and split analysis units are
+distinguished; the maps continue to show original site boundaries.
+
+Task owners can download the stored JSON report from
+`/api/tasks/<task_id>/preparation/report` and the split GeoParquet from
+`/api/tasks/<task_id>/preparation/sites`. Both endpoints enforce task ownership.
+The GeoParquet link signs the artifact already saved during preparation, including
+when later API submission fails; it does not rerun splitting. Older tasks may
+have no preparation report.
 
 ### Concurrency and queueing
 

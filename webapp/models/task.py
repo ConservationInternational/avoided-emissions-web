@@ -97,6 +97,7 @@ class TaskSite(Base):
         index=True,
     )
     site_id = Column(String(100), nullable=False)
+    display_site_id = Column(String(100))
     site_name = Column(String(255))
     start_date = Column(DateTime)
     end_date = Column(DateTime)
@@ -128,6 +129,7 @@ class TaskResult(Base):
         index=True,
     )
     site_id = Column(String(100), nullable=False)
+    display_site_id = Column(String(100))
     year = Column(Integer, nullable=False)
     extrapolated_forest_loss_avoided_ha = Column(Float)
     extrapolated_emissions_avoided_mgco2e = Column(Float)
@@ -168,6 +170,7 @@ class TaskResultTotal(Base):
         index=True,
     )
     site_id = Column(String(100), nullable=False)
+    display_site_id = Column(String(100))
     site_name = Column(String(255))
     extrapolated_forest_loss_avoided_ha = Column(Float)
     extrapolated_emissions_avoided_mgco2e = Column(Float)

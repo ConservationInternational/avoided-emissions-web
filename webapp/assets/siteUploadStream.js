@@ -1,11 +1,12 @@
 (function () {
+    let activeRequest = null;
+    let bound = false;
+    let fileInput = null;
+
     function emitPayload(payload) {
-        // Resolve the element at emit-time because Dash can replace nodes
-        // during rerenders while a long upload is in flight.
         const payloadInput = document.getElementById("site-upload-stream-payload");
         const payloadJson = JSON.stringify(payload);
 
-        // Preferred path for Dash >= 2.16: update component props directly.
         if (
             window.dash_clientside &&
             typeof window.dash_clientside.set_props === "function"
@@ -16,7 +17,7 @@
                 });
                 return true;
             } catch (_error) {
-                // Fall through to DOM event path below.
+                // Fall through to the DOM event path below.
             }
         }
 
@@ -24,7 +25,6 @@
             return false;
         }
 
-        // Use the native setter so React's internal value tracker sees updates.
         const setter = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype,
             "value",
@@ -38,6 +38,13 @@
         payloadInput.dispatchEvent(new Event("input", { bubbles: true }));
         payloadInput.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
+    }
+
+    function setStatus(message) {
+        const status = document.getElementById("upload-status");
+        if (status) {
+            status.textContent = message;
+        }
     }
 
     function formatBytes(value) {
@@ -55,17 +62,31 @@
         return `${size.toFixed(1)} ${units[unitIndex]}`;
     }
 
-    function uploadFileWithProgress(file, onProgress) {
+    function uploadFileWithProgress(file, button) {
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
+            let lastAnnouncedProgress = -10;
+            activeRequest = xhr;
             xhr.open("POST", "/api/site-upload/stream-preview", true);
             xhr.withCredentials = true;
 
             xhr.upload.onprogress = (event) => {
-                if (!event.lengthComputable || typeof onProgress !== "function") {
+                if (!event.lengthComputable) {
                     return;
                 }
-                onProgress(event.loaded, event.total);
+                const pct = event.total > 0
+                    ? Math.min(100, Math.round((event.loaded / event.total) * 100))
+                    : 0;
+                button.textContent = `Uploading... ${pct}% (${formatBytes(event.loaded)} / ${formatBytes(event.total)})`;
+                if (pct >= lastAnnouncedProgress + 10 || pct === 100) {
+                    setStatus(`Uploading ${file.name}: ${pct}% transferred.`);
+                    lastAnnouncedProgress = pct;
+                }
+            };
+
+            xhr.upload.onload = () => {
+                button.textContent = "Processing preview...";
+                setStatus("Upload complete. Preparing the mapping preview.");
             };
 
             xhr.onload = () => {
@@ -102,96 +123,127 @@
         });
     }
 
-    function bindUploadControls() {
+    async function handleFile(file) {
         const button = document.getElementById("upload-sites-stream-btn");
-        const payloadInput = document.getElementById("site-upload-stream-payload");
-
-        if (!button || !payloadInput || button.dataset.streamBound === "1") {
+        if (!button || !file || activeRequest) {
             return;
         }
 
-        // Create the hidden file input dynamically to avoid Dash html.Input limitations.
-        let fileInput = document.getElementById("upload-sites-stream-input");
-        if (!fileInput) {
-            fileInput = document.createElement("input");
-            fileInput.type = "file";
-            fileInput.id = "upload-sites-stream-input";
-            fileInput.accept = ".geojson,.json,.gpkg,.zip,.tar.gz,.tgz";
-            fileInput.style.display = "none";
-            document.body.appendChild(fileInput);
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = "Uploading...";
+        const cancelButton = document.getElementById("upload-sites-stream-cancel-btn");
+        if (cancelButton) {
+            cancelButton.disabled = false;
+            cancelButton.style.display = "inline-block";
         }
+        setStatus(`Starting upload of ${file.name}.`);
 
-        button.dataset.streamBound = "1";
-        button.addEventListener("click", () => {
-            fileInput.click();
-        });
+        try {
+            const response = await uploadFileWithProgress(file, button);
+            const body = response.body || {
+                ok: false,
+                errors: ["Unexpected server response while uploading file."],
+            };
+            const emitted = emitPayload({
+                ts: Date.now(),
+                status: response.ok && body.ok ? "ok" : "error",
+                filename: file.name,
+                response: body,
+                http_status: response.status,
+            });
+            if (!emitted) {
+                setStatus("Upload finished, but the page needs to be refreshed.");
+            } else if (response.ok && body.ok) {
+                setStatus("Mapping preview ready.");
+            } else {
+                const errors = Array.isArray(body.errors)
+                    ? body.errors.filter(message => typeof message === "string")
+                    : [];
+                setStatus(`Upload preview failed. ${errors.join(" ") || "Please try again."}`);
+            }
+        } catch (error) {
+            const cancelled = error && error.message === "Upload was cancelled.";
+            emitPayload({
+                ts: Date.now(),
+                status: "error",
+                filename: file.name,
+                response: {
+                    ok: false,
+                    errors: [cancelled ? "Upload cancelled." : "Upload failed. Please try again."],
+                },
+                error: String(error),
+            });
+            setStatus(cancelled ? "Upload cancelled." : "Upload failed. Please try again.");
+        } finally {
+            activeRequest = null;
+            if (fileInput) {
+                fileInput.value = "";
+            }
+            const currentButton = document.getElementById("upload-sites-stream-btn");
+            if (currentButton) {
+                currentButton.disabled = false;
+                currentButton.textContent = originalText;
+            }
+            const cancelButton = document.getElementById("upload-sites-stream-cancel-btn");
+            if (cancelButton) {
+                cancelButton.disabled = true;
+                cancelButton.style.display = "none";
+            }
+        }
+    }
 
-        fileInput.addEventListener("change", async () => {
-            const file = fileInput.files && fileInput.files[0];
-            if (!file) {
+    function bindUploadControls() {
+        if (bound) {
+            return;
+        }
+        bound = true;
+
+        fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.id = "upload-sites-stream-input";
+        fileInput.accept = ".geojson,.json,.gpkg,.zip,.tar.gz,.tgz";
+        fileInput.hidden = true;
+        fileInput.setAttribute("aria-hidden", "true");
+        document.body.appendChild(fileInput);
+
+        document.addEventListener("click", (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (!target) {
+                return;
+            }
+            const uploadButton = target.closest("#upload-sites-stream-btn");
+            if (uploadButton) {
+                if (!activeRequest) {
+                    fileInput.click();
+                }
                 return;
             }
 
-            const originalText = button.textContent;
-            let shouldRestoreOriginalText = true;
-            button.disabled = true;
-            button.textContent = "Uploading... 0%";
+            const cancelButton = target.closest("#upload-sites-stream-cancel-btn");
+            if (cancelButton && activeRequest) {
+                activeRequest.abort();
+            }
+        });
 
-            try {
-                const response = await uploadFileWithProgress(
-                    file,
-                    (loaded, total) => {
-                        const pct = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
-                        button.textContent = `Uploading... ${pct}% (${formatBytes(loaded)} / ${formatBytes(total)})`;
-                    },
-                );
-
-                // Upload bytes have reached the server; server may still be
-                // parsing the file and generating a preview.
-                button.textContent = "Processing preview...";
-
-                const body = response.body || {
-                    ok: false,
-                    errors: ["Unexpected server response while uploading file."],
-                };
-
-                const emitted = emitPayload({
-                    ts: Date.now(),
-                    status: response.ok && body.ok ? "ok" : "error",
-                    filename: file.name,
-                    response: body,
-                    http_status: response.status,
-                });
-                if (!emitted) {
-                    button.textContent = "Upload finished, but UI refresh is required.";
-                    shouldRestoreOriginalText = false;
-                }
-            } catch (error) {
-                emitPayload({
-                    ts: Date.now(),
-                    status: "error",
-                    filename: file.name,
-                    response: {
-                        ok: false,
-                        errors: ["Upload failed. Please try again."],
-                    },
-                    error: String(error),
-                });
-            } finally {
-                fileInput.value = "";
-                button.disabled = false;
-                if (shouldRestoreOriginalText) {
-                    button.textContent = originalText;
-                }
+        fileInput.addEventListener("change", () => {
+            const file = fileInput.files && fileInput.files[0];
+            if (file) {
+                handleFile(file);
             }
         });
     }
 
     function init() {
         bindUploadControls();
+        const cancelButton = document.getElementById("upload-sites-stream-cancel-btn");
+        if (cancelButton) {
+            cancelButton.disabled = !activeRequest;
+        }
     }
 
     document.addEventListener("DOMContentLoaded", init);
     const observer = new MutationObserver(init);
     observer.observe(document.documentElement, { childList: true, subtree: true });
+    init();
 })();
