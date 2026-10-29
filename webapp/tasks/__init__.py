@@ -15,6 +15,7 @@ from tasks.analysis import (  # noqa: F401
 )
 from tasks.covariate import (  # noqa: F401
     auto_merge_unmerged,
+    auto_repair_covariate_metadata,
     poll_gee_exports,
     run_cog_merge,
 )

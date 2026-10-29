@@ -107,6 +107,10 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.auto_merge_unmerged",
         "schedule": 120.0,  # every 2 minutes
     },
+    "auto-repair-covariate-metadata": {
+        "task": "tasks.auto_repair_covariate_metadata",
+        "schedule": 120.0,
+    },
     # Re-export reference layers monthly so that any re-imports (e.g. after a
     # geoboundaries update) are reflected in S3 without manual intervention.
     # Layers are also exported immediately after each vector import, so a

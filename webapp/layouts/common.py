@@ -328,7 +328,7 @@ COVARIATE_COLUMNS = [
         "headerName": "Actions",
         "field": "actions",
         "flex": 1.5,
-        "minWidth": 235,
+        "minWidth": 170,
         "cellRenderer": "CovariateActions",
         "sortable": False,
         "filter": False,

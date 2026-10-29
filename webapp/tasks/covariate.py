@@ -13,6 +13,20 @@ from tasks.reference_layers import _MergeSuperseded, ingest_sdg_cog_task
 logger = logging.getLogger(__name__)
 
 
+@celery_app.task(name="tasks.auto_repair_covariate_metadata")
+def auto_repair_covariate_metadata():
+    """Reconcile existing S3 COG metadata independently of GEE/GCS availability."""
+    from services.covariate import get_covariate_inventory
+
+    rows = get_covariate_inventory()
+    return {
+        "repaired": sum(row["metadata_repaired"] for row in rows),
+        "failed": sum(
+            row["analysis_readiness"] == "Metadata repair failed" for row in rows
+        ),
+    }
+
+
 @celery_app.task(
     name="tasks.run_cog_merge",
     bind=True,

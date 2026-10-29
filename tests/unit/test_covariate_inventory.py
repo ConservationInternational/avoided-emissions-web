@@ -7,7 +7,9 @@ import pytest
 from botocore.exceptions import ClientError
 from callbacks import _registration as registration
 from config import Config
+from dash.exceptions import PreventUpdate
 from services import covariate
+from tasks.covariate import auto_repair_covariate_metadata
 
 pytestmark = pytest.mark.unit
 
@@ -41,6 +43,9 @@ def inventory(mocker, mock_db):
     mocker.patch.object(covariate, "get_db", return_value=mock_db)
     mocker.patch.object(Config, "GCS_BUCKET", "")
     objects = mocker.patch("cog_merge.list_s3_cog_objects", return_value=[])
+    repair = mocker.patch.object(
+        covariate, "repair_covariate_metadata", return_value=True
+    )
 
     def build(records=(), files=()):
         mock_db.query.return_value.all.return_value = records
@@ -52,53 +57,132 @@ def inventory(mocker, mock_db):
             for row in covariate.get_covariate_inventory()
         }
 
+    build.repair = repair
     return build
 
 
-def test_s3_file_without_metadata_is_repairable_not_ready(inventory):
+def test_s3_file_without_metadata_is_automatically_repaired(inventory):
     row = inventory(files=[_object()])[("precip", 1000)]
     assert row["on_s3"]
-    assert not row["ready_for_analysis"]
-    assert row["can_repair"]
-    assert row["analysis_readiness"] == "File only - repair metadata"
-    assert row["status"] == ""
+    assert row["ready_for_analysis"]
+    assert row["metadata_repaired"]
+    assert row["analysis_readiness"] == "Ready"
+    assert row["status"] == "merged"
+    inventory.repair.assert_called_once_with("precip", None, resolution_m=1000)
 
 
 @pytest.mark.parametrize("url", [None, ""])
 def test_merged_record_without_url_needs_repair(inventory, url):
     row = inventory([_record(url=url)], [_object()])[("precip", 1000)]
-    assert row["can_repair"]
-    assert not row["ready_for_analysis"]
+    assert row["metadata_repaired"]
+    assert row["ready_for_analysis"]
+    inventory.repair.assert_called_once()
 
 
 def test_ready_requires_file_and_metadata_at_same_resolution(inventory):
     rows = inventory([_record()], [_object(resolution=250)])
     assert not rows[("precip", 1000)]["ready_for_analysis"]
     assert rows[("precip", 1000)]["analysis_readiness"] == "S3 file missing"
-    assert rows[("precip", 250)]["can_repair"]
+    assert rows[("precip", 250)]["metadata_repaired"]
+    inventory.repair.assert_called_once_with("precip", None, resolution_m=250)
 
 
 def test_registered_file_is_ready_and_cannot_be_repaired(inventory):
     row = inventory([_record()], [_object()])[("precip", 1000)]
     assert row["ready_for_analysis"]
     assert row["analysis_readiness"] == "Ready"
-    assert not row["can_repair"]
+    assert not row["metadata_repaired"]
+    inventory.repair.assert_not_called()
 
 
 @pytest.mark.parametrize("status", sorted(covariate.ACTIVE_COVARIATE_STATUSES))
 def test_active_processing_is_not_repairable(inventory, status):
     row = inventory([_record(status=status, url=None)], [_object()])[("precip", 1000)]
-    assert not row["can_repair"]
+    assert not row["metadata_repaired"]
     assert row["analysis_readiness"] == "Processing"
+    inventory.repair.assert_not_called()
 
 
 def test_non_gee_layers_support_repair_and_unknown_files_do_not(inventory):
     rows = inventory(
         files=[_object("sdg_baseline"), _object("admin1"), _object("unrecognized")]
     )
-    assert rows[("sdg_baseline", 1000)]["can_repair"]
-    assert rows[("admin1", 1000)]["can_repair"]
-    assert not rows[("unrecognized", 1000)]["can_repair"]
+    assert rows[("sdg_baseline", 1000)]["metadata_repaired"]
+    assert rows[("admin1", 1000)]["metadata_repaired"]
+    assert not rows[("unrecognized", 1000)]["metadata_repaired"]
+    assert inventory.repair.call_count == 2
+
+
+def test_repair_failure_is_visible_reported_and_does_not_stop_other_layers(
+    inventory, mocker
+):
+    report = mocker.patch.object(covariate, "report_exception")
+    inventory.repair.side_effect = [RuntimeError("S3 access denied"), True]
+    rows = inventory(files=[_object("precip"), _object("temp")])
+    failed = rows[("precip", 1000)]
+    assert not failed["ready_for_analysis"]
+    assert failed["analysis_readiness"] == "Metadata repair failed"
+    assert "retried" in failed["error_message"]
+    assert rows[("temp", 1000)]["ready_for_analysis"]
+    report.assert_called_once_with(covariate="precip", resolution_m=1000)
+
+
+def test_concurrently_registered_layer_is_shown_ready(inventory):
+    inventory.repair.return_value = False
+    row = inventory(files=[_object()])[("precip", 1000)]
+    assert row["ready_for_analysis"]
+    assert not row["metadata_repaired"]
+
+
+def test_periodic_task_repairs_without_gcs_or_admin_visit(repair, mocker):
+    db, s3, _ = repair
+    db.query.return_value.all.return_value = []
+    mocker.patch.object(Config, "GCS_BUCKET", "")
+    mocker.patch(
+        "cog_merge.list_s3_cog_objects",
+        side_effect=lambda bucket, prefix, region: (
+            [_object()] if prefix.endswith("cog_1km") else []
+        ),
+    )
+    assert auto_repair_covariate_metadata.run() == {"repaired": 1, "failed": 0}
+    layer = db.add.call_args.args[0]
+    assert layer.status == "merged"
+    assert layer.covariate_name == "precip"
+    assert layer.started_by is None
+    db.query.return_value.all.return_value = [layer]
+    assert auto_repair_covariate_metadata.run() == {"repaired": 0, "failed": 0}
+    db.add.assert_called_once()
+    s3.head_object.assert_called_once()
+
+
+def test_periodic_task_reports_failures_and_retries_next_run(repair, mocker):
+    db, s3, _ = repair
+    db.query.return_value.all.return_value = []
+    mocker.patch.object(Config, "GCS_BUCKET", "")
+    mocker.patch.object(covariate, "report_exception")
+    mocker.patch(
+        "cog_merge.list_s3_cog_objects",
+        side_effect=lambda bucket, prefix, region: (
+            [_object()] if prefix.endswith("cog_1km") else []
+        ),
+    )
+    s3.head_object.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied"}}, "HeadObject"
+    )
+    assert auto_repair_covariate_metadata.run() == {"repaired": 0, "failed": 1}
+    db.rollback.assert_called_once()
+    db.add.assert_not_called()
+    s3.head_object.side_effect = None
+    assert auto_repair_covariate_metadata.run() == {"repaired": 1, "failed": 0}
+    db.add.assert_called_once()
+
+
+def test_periodic_task_is_registered_and_scheduled():
+    from celery_app import celery_app
+
+    entry = celery_app.conf.beat_schedule["auto-repair-covariate-metadata"]
+    assert entry == {"task": auto_repair_covariate_metadata.name, "schedule": 120.0}
+    assert entry["task"] in celery_app.tasks
 
 
 @pytest.fixture
@@ -242,19 +326,7 @@ def callbacks(mocker):
     return functions
 
 
-def _repair_event():
-    return {
-        "value": {"_action": "repair", "covariate_name": "precip", "resolution_m": 250}
-    }
-
-
-def test_admin_callback_repairs_and_refreshes_inventory(callbacks, mocker):
-    repair = mocker.patch.object(
-        registration, "repair_covariate_metadata", return_value=True
-    )
-    alert = callbacks["handle_covariate_action"](_repair_event())
-    assert alert.color == "success"
-    repair.assert_called_once_with("precip", None, resolution_m=250)
+def test_admin_refresh_shows_ready_count(callbacks, mocker):
     mocker.patch.object(
         registration,
         "get_covariate_inventory",
@@ -267,22 +339,11 @@ def test_admin_callback_repairs_and_refreshes_inventory(callbacks, mocker):
     assert "On S3: 1 | Ready: 1" in summary
 
 
-def test_non_admin_cannot_repair(callbacks, mocker):
+def test_non_admin_cannot_trigger_inventory_repair(callbacks, mocker):
     mocker.patch.object(
         registration, "get_current_user", return_value=SimpleNamespace(is_admin=False)
     )
-    repair = mocker.patch.object(registration, "repair_covariate_metadata")
-    alert = callbacks["handle_covariate_action"](_repair_event())
-    assert alert.color == "danger"
-    repair.assert_not_called()
-
-
-def test_failed_repair_does_not_add_failed_lifecycle_record(callbacks, mocker):
-    mocker.patch.object(
-        registration, "repair_covariate_metadata", side_effect=ValueError("No file")
-    )
-    mocker.patch.object(registration, "report_exception")
-    failure = mocker.patch.object(registration, "_record_covariate_action_failure")
-    alert = callbacks["handle_covariate_action"](_repair_event())
-    assert alert.color == "danger"
-    failure.assert_not_called()
+    inventory = mocker.patch.object(registration, "get_covariate_inventory")
+    with pytest.raises(PreventUpdate):
+        callbacks["refresh_covariate_inventory"](0, None, None, "250")
+    inventory.assert_not_called()

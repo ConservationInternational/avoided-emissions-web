@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import boto3
 import tasks as webapp_tasks
 from botocore.exceptions import ClientError
-from config import Config
+from config import Config, report_exception
 from models import (
     Covariate,
     get_db,
@@ -402,7 +402,7 @@ def force_remerge(covariate_name, user_id, *, resolution_m=1000):
 
 
 def get_covariate_inventory():
-    """Build a comprehensive inventory of all covariates with GCS/S3 status.
+    """Build the inventory and automatically repair missing merged metadata.
 
     Scans GCS for exported tiles, S3 for merged COGs, and the database
     for export/merge status.  Returns one row per (covariate, resolution)
@@ -607,7 +607,7 @@ def get_covariate_inventory():
     for row in rows:
         key = (row["covariate_name"], row["resolution_m"])
         row["ready_for_analysis"] = row["on_s3"] and key in registered_keys
-        row["can_repair"] = (
+        can_repair = (
             row["on_s3"]
             and key not in registered_keys
             and key not in active_keys
@@ -616,14 +616,38 @@ def get_covariate_inventory():
         row["analysis_readiness"] = (
             "Ready"
             if row["ready_for_analysis"]
-            else "File only - repair metadata"
-            if row["can_repair"]
             else "Processing"
             if key in active_keys
             else "S3 file missing"
             if not row["on_s3"]
             else "Not registered"
         )
+        row["metadata_repaired"] = False
+        if can_repair:
+            try:
+                row["metadata_repaired"] = repair_covariate_metadata(
+                    row["covariate_name"], None, resolution_m=row["resolution_m"]
+                )
+            except Exception:
+                logger.exception(
+                    "Automatic metadata repair failed for %s at %s m", *key
+                )
+                report_exception(
+                    covariate=row["covariate_name"],
+                    resolution_m=row["resolution_m"],
+                )
+                row["analysis_readiness"] = "Metadata repair failed"
+                row["error_message"] = (
+                    "Automatic metadata repair failed. Check S3 access and active "
+                    "processing; see server logs for details. Repair will be retried."
+                )
+            else:
+                row["ready_for_analysis"] = True
+                row["analysis_readiness"] = "Ready"
+                row["status"] = "merged"
+                row["merged_url"] = s3_cogs[key]["url"]
+                row["size_mb"] = round(s3_cogs[key]["size"] / (1024 * 1024), 1)
+                row["error_message"] = ""
     return rows
 
 

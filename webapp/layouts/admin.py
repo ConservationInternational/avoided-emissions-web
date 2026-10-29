@@ -778,8 +778,8 @@ def admin_layout(user, user_status=None):
                                                     html.P(
                                                         "On S3 means a raster file exists. Ready means "
                                                         "the file also has merged database metadata at "
-                                                        "this resolution. Repair registers existing files "
-                                                        "without re-exporting or changing them. Forest-cover "
+                                                        "this resolution. Missing metadata is repaired "
+                                                        "automatically without changing files. Forest-cover "
                                                         "layers are used automatically, not listed as "
                                                         "matching covariates.",
                                                         className="small text-muted",

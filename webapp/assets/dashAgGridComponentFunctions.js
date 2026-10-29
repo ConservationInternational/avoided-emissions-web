@@ -246,7 +246,6 @@ dagcomponentfuncs.TileCount = function (props) {
  * Shows per-layer action buttons:
  *   - "Re-export" : force re-export from GEE (deletes GCS tiles + S3 COG)
  *   - "Re-merge"  : force re-merge GCS tiles to S3 (deletes S3 COG)
- *   - "Repair"   : register an existing S3 COG without changing files
  *
  * Buttons are disabled when the covariate is already in a transitional state.
  * Clicking a button triggers setData which the Dash cellClicked callback reads.
@@ -326,29 +325,11 @@ dagcomponentfuncs.CovariateActions = function (props) {
         "\u21BB Merge"
     );
 
-    var repairBtn = data.can_repair ? React.createElement(
-        "button",
-        {
-            className: "btn btn-outline-warning",
-            style: { padding: "1px 6px", fontSize: "10px", fontWeight: 600 },
-            title: "Register the existing S3 file as merged; no files are changed",
-            onClick: function (e) {
-                e.stopPropagation();
-                props.setData(Object.assign({}, data, {
-                    _action: "repair",
-                    _actionTs: Date.now(),
-                }));
-            },
-        },
-        "Repair"
-    ) : null;
-
     return React.createElement(
         "div",
         { style: { display: "flex", alignItems: "center", gap: "2px" } },
         reexportBtn,
-        remergeBtn,
-        repairBtn
+        remergeBtn
     );
 };
 
