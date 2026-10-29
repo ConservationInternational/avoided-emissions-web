@@ -51,6 +51,7 @@ from services import (
     list_user_site_uploads,
     queue_analysis_task,
     rename_user_site_set,
+    repair_covariate_metadata,
     revoke_share_link,
     save_covariate_preset,
     save_matching_settings_preset,
@@ -2327,7 +2328,11 @@ def register_callbacks(app, limiter=None):
 
         gcs_count = sum(1 for r in rows if r.get("gcs_tiles", 0) > 0)
         s3_count = sum(1 for r in rows if r.get("on_s3"))
-        total_label = f"Total: {len(rows)} | On GCS: {gcs_count} | On S3: {s3_count}"
+        ready_count = sum(1 for r in rows if r.get("ready_for_analysis"))
+        total_label = (
+            f"Total: {len(rows)} | On GCS: {gcs_count} | On S3: {s3_count}"
+            f" | Ready: {ready_count}"
+        )
 
         return rows, total_label
 
@@ -2355,7 +2360,20 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
 
         try:
-            if action == "reexport":
+            if action == "repair":
+                repaired = repair_covariate_metadata(
+                    covariate_name, user.id, resolution_m=resolution_m
+                )
+                return dbc.Alert(
+                    (
+                        f"Metadata repaired for '{covariate_name}'. No files were changed."
+                        if repaired
+                        else f"'{covariate_name}' is already registered. No changes made."
+                    ),
+                    color="success",
+                    duration=6000,
+                )
+            elif action == "reexport":
                 force_reexport(covariate_name, user.id, resolution_m=resolution_m)
                 return dbc.Alert(
                     f"Re-export started for '{covariate_name}'. "
@@ -2378,6 +2396,15 @@ def register_callbacks(app, limiter=None):
                 "Covariate action '%s' failed for %s", action, covariate_name
             )
             report_exception(covariate=covariate_name, action=action)
+            if action == "repair":
+                return dbc.Alert(
+                    f"Metadata repair failed for '{covariate_name}'. "
+                    "No files or existing metadata were changed. "
+                    "Check that the S3 file exists and no processing is active; "
+                    "see logs for details.",
+                    color="danger",
+                    duration=10000,
+                )
             # Persist a 'failed' record so the table row reflects the error
             try:
                 _record_covariate_action_failure(

@@ -3,13 +3,17 @@
 import json
 import logging
 import os
+from datetime import UTC, datetime
 
+import boto3
 import tasks as webapp_tasks
+from botocore.exceptions import ClientError
 from config import Config
 from models import (
     Covariate,
     get_db,
 )
+from sqlalchemy import text
 
 from gee_export import gee_config, gee_tasks
 
@@ -17,6 +21,98 @@ logger = logging.getLogger(__name__)
 
 FC_YEAR_MIN = gee_config.FC_YEAR_MIN
 FC_YEAR_MAX = gee_config.FC_YEAR_MAX
+
+ACTIVE_COVARIATE_STATUSES = {
+    "pending_export",
+    "exporting",
+    "pending_merge",
+    "merging",
+    "rasterizing",
+}
+
+
+def _has_merged_metadata(record):
+    return record.status == "merged" and bool(record.merged_url)
+
+
+def repair_covariate_metadata(covariate_name, user_id, *, resolution_m=1000):
+    """Register an existing S3 COG without modifying raster files or history."""
+    from ingest_sdg_cog import SDG_LAYERS
+    from rasterize_vectors import VECTOR_LAYERS
+
+    known_names = (
+        set(gee_config.COVARIATES)
+        | set(SDG_LAYERS)
+        | {layer["output_name"] for layer in VECTOR_LAYERS}
+    )
+    if covariate_name not in known_names:
+        raise ValueError("Unknown covariate.")
+    if resolution_m not in gee_config.RESOLUTIONS:
+        raise ValueError("Invalid resolution.")
+    if not Config.S3_BUCKET:
+        raise ValueError("S3 bucket is not configured.")
+
+    db = get_db()
+    try:
+        # Serialize repairs even when there is no existing row to lock.
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+            {"key": f"covariate-repair:{covariate_name}:{resolution_m}"},
+        )
+        records = (
+            db.query(Covariate)
+            .filter(
+                Covariate.covariate_name == covariate_name,
+                Covariate.resolution_m == resolution_m,
+            )
+            .with_for_update()
+            .all()
+        )
+        if any(rec.status in ACTIVE_COVARIATE_STATUSES for rec in records):
+            raise ValueError(
+                "Export, merge, or rasterization is active for this layer."
+            )
+
+        prefix = f"{Config.S3_PREFIX}/cog{gee_config.get_cog_suffix(resolution_m)}"
+        s3 = boto3.client("s3", region_name=Config.AWS_REGION)
+        key = f"{prefix}/{covariate_name}.tif"
+        try:
+            obj = s3.head_object(Bucket=Config.S3_BUCKET, Key=key)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
+                raise ValueError(
+                    "No S3 COG exists at the requested resolution."
+                ) from exc
+            raise
+        if obj["ContentLength"] <= 0:
+            raise ValueError("The S3 COG is empty.")
+
+        if any(_has_merged_metadata(rec) for rec in records):
+            db.commit()
+            return False
+
+        db.add(
+            Covariate(
+                covariate_name=covariate_name,
+                resolution_m=resolution_m,
+                status="merged",
+                merged_url=f"https://{Config.S3_BUCKET}.s3.amazonaws.com/{key}",
+                output_bucket=Config.S3_BUCKET,
+                output_prefix=prefix,
+                size_bytes=obj["ContentLength"],
+                started_by=user_id,
+                completed_at=datetime.now(UTC),
+                extra_metadata={"repaired_from_s3": True, "etag": obj.get("ETag")},
+            )
+        )
+        db.commit()
+        logger.info("Repaired metadata for %s at %s m", covariate_name, resolution_m)
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def _cleanup_covariate_downstream(covariate_name, db, *, resolution_m=None):
@@ -392,10 +488,16 @@ def get_covariate_inventory():
 
     # 3. Get most recent DB record per (covariate, resolution)
     db_records: dict[tuple[str, int], Covariate] = {}
+    registered_keys = set()
+    active_keys = set()
     db = get_db()
     try:
         for rec in db.query(Covariate).all():
             key = (rec.covariate_name, rec.resolution_m)
+            if _has_merged_metadata(rec):
+                registered_keys.add(key)
+            if rec.status in ACTIVE_COVARIATE_STATUSES:
+                active_keys.add(key)
             existing = db_records.get(key)
             if existing is None or (
                 rec.started_at
@@ -501,6 +603,27 @@ def get_covariate_inventory():
         }
         rows.append(row)
 
+    known_names = set(covariates) | set(_non_gee_covariates)
+    for row in rows:
+        key = (row["covariate_name"], row["resolution_m"])
+        row["ready_for_analysis"] = row["on_s3"] and key in registered_keys
+        row["can_repair"] = (
+            row["on_s3"]
+            and key not in registered_keys
+            and key not in active_keys
+            and row["covariate_name"] in known_names
+        )
+        row["analysis_readiness"] = (
+            "Ready"
+            if row["ready_for_analysis"]
+            else "File only - repair metadata"
+            if row["can_repair"]
+            else "Processing"
+            if key in active_keys
+            else "S3 file missing"
+            if not row["on_s3"]
+            else "Not registered"
+        )
     return rows
 
 
@@ -517,6 +640,9 @@ def get_ready_covariate_names(resolution_m=1000):
     """
     # gee_config already imported at module level
     covariate_order = list(gee_config.COVARIATES.keys())
+    from ingest_sdg_cog import SDG_LAYERS
+
+    covariate_order.extend(SDG_LAYERS)
 
     # Build a set of covariate names that are merged at the desired resolution.
     merged_at_res: set[str] = set()
@@ -528,6 +654,7 @@ def get_ready_covariate_names(resolution_m=1000):
                 Covariate.resolution_m == resolution_m,
                 Covariate.status == "merged",
                 Covariate.merged_url.isnot(None),
+                Covariate.merged_url != "",
             )
             .all()
         ):
@@ -576,6 +703,7 @@ def get_ready_exact_match_names(resolution_m=1000):
                 Covariate.resolution_m == resolution_m,
                 Covariate.status == "merged",
                 Covariate.merged_url.isnot(None),
+                Covariate.merged_url != "",
             )
             .all()
         ):

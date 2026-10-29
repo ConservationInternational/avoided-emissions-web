@@ -775,6 +775,15 @@ def admin_layout(user, user_status=None):
                                                         ],
                                                         className="ae-action-bar align-items-center mb-3",
                                                     ),
+                                                    html.P(
+                                                        "On S3 means a raster file exists. Ready means "
+                                                        "the file also has merged database metadata at "
+                                                        "this resolution. Repair registers existing files "
+                                                        "without re-exporting or changing them. Forest-cover "
+                                                        "layers are used automatically, not listed as "
+                                                        "matching covariates.",
+                                                        className="small text-muted",
+                                                    ),
                                                     _make_ag_grid(
                                                         table_id="covariates-table",
                                                         column_defs=COVARIATE_COLUMNS,

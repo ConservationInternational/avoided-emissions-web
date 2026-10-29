@@ -290,6 +290,13 @@ COVARIATE_COLUMNS = [
         "cellRenderer": "S3Status",
     },
     {
+        "headerName": "Analysis readiness",
+        "field": "analysis_readiness",
+        "minWidth": 210,
+        "filter": "agTextColumnFilter",
+        "tooltipField": "analysis_readiness",
+    },
+    {
         "headerName": "Size (MB)",
         "field": "size_mb",
         "flex": 0.8,
@@ -321,7 +328,7 @@ COVARIATE_COLUMNS = [
         "headerName": "Actions",
         "field": "actions",
         "flex": 1.5,
-        "minWidth": 170,
+        "minWidth": 235,
         "cellRenderer": "CovariateActions",
         "sortable": False,
         "filter": False,
@@ -498,18 +505,6 @@ USER_MANAGEMENT_COLUMNS = [
         "minWidth": 150,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "institution",
-    },
-    {
-        "headerName": "Email verified",
-        "field": "email_verified",
-        "flex": 0.7,
-        "minWidth": 90,
-    },
-    {
-        "headerName": "TE account active",
-        "field": "active",
-        "flex": 0.7,
-        "minWidth": 90,
     },
 ]
 
@@ -885,11 +880,11 @@ COVARIATE_STATUS_ROW_STYLES = [
     },
     # Merged / on S3
     {
-        "condition": "params.data.on_s3 && !params.data.status",
-        "style": {"backgroundColor": "#D1E7DD", "color": "#0F5132"},
+        "condition": "params.data.on_s3 && !params.data.ready_for_analysis && !params.data.status",
+        "style": {"backgroundColor": "#FFF3CD", "color": "#664D03"},
     },
     {
-        "condition": "params.data.status === 'merged' && params.data.on_s3",
+        "condition": "params.data.ready_for_analysis",
         "style": {"backgroundColor": "#D1E7DD", "color": "#0F5132"},
     },
     # Failed / cancelled

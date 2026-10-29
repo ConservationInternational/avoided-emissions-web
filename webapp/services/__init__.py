@@ -49,6 +49,7 @@ from services.covariate import (
     get_ready_covariate_names,
     get_ready_exact_match_names,
     list_export_tiles,
+    repair_covariate_metadata,
     start_gee_export,
 )
 
@@ -210,6 +211,7 @@ __all__ = [
     "list_user_site_uploads",
     "queue_analysis_task",
     "rename_user_site_set",
+    "repair_covariate_metadata",
     "resubmit_analysis_task",
     "revoke_share_link",
     "save_covariate_preset",
