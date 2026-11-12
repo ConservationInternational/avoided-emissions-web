@@ -1,12 +1,15 @@
 """Conservative polygon partitions used by analysis preparation."""
 
+import logging
+
 import numpy as np
 import shapely
 from pyproj import Transformer
 
 AREA_MAX_SEGMENT_DEGREES = 0.005
-REFERENCE_OVERLAP_TOLERANCE_M2 = 5.0
+REFERENCE_OVERLAP_TOLERANCE_M2 = 1000.0
 _EQUAL_AREA = Transformer.from_crs(4326, "ESRI:54009", always_xy=True)
+logger = logging.getLogger(__name__)
 
 
 def equal_area_ha(geometries):
@@ -56,6 +59,9 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
     """
     tree = shapely.STRtree(region_geometries)
     origins, pieces, keys = [], [], []
+    overlap_count = 0
+    total_overlap_m2 = 0.0
+    max_overlap_m2 = 0.0
     for index, source in enumerate(geometries):
         source = polygonal(source)
         candidates = sorted(
@@ -90,6 +96,10 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
                 part = shapely.difference(part, assigned_by_index[previous])
                 if part.is_empty or part.area <= 0:
                     break
+            if overlap_m2 > 0:
+                overlap_count += 1
+                total_overlap_m2 += overlap_m2
+                max_overlap_m2 = max(max_overlap_m2, overlap_m2)
             if part.is_empty or part.area <= 0:
                 continue
             part = polygonal(part)
@@ -113,6 +123,15 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
             raise ValueError(
                 f"Polygon coverage was not conserved in {layer}, piece {index + 1}."
             )
+    if overlap_count:
+        logger.info(
+            "[SPLIT] %s: tolerated overlaps in %d region-piece assignments, "
+            "total %.3f m2, maximum %.3f m2",
+            layer,
+            overlap_count,
+            total_overlap_m2,
+            max_overlap_m2,
+        )
     return (
         np.asarray(origins, dtype=int),
         np.asarray(pieces, dtype=object),

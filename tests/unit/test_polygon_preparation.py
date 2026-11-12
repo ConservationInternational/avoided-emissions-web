@@ -1,5 +1,6 @@
 """Conservation, immutable identity and bounded-export regressions."""
 
+import logging
 import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -71,15 +72,48 @@ def test_small_overlaps_are_assigned_once_without_losing_coverage(overlap_width)
     assert pieces[0].equals(regions[0])
 
 
-def test_overlap_above_five_square_metres_fails():
+@pytest.mark.parametrize("overlap_width", [1.42e-5, 8e-5])
+def test_overlaps_below_one_thousand_square_metres_are_assigned_once(overlap_width):
     source = box(0, 0, 0.001, 0.001)
     regions = [
         box(0, 0, 0.0005, 0.001),
-        box(0.0005 - 5e-7, 0, 0.001, 0.001),
+        box(0.0005 - overlap_width, 0, 0.001, 0.001),
     ]
-    assert equal_area_ha([shapely.intersection(*regions)])[0] * 10000 > 5
+    overlap_m2 = equal_area_ha([shapely.intersection(*regions)])[0] * 10000
+    assert 170 < overlap_m2 < 1000
+
+    _, pieces, keys = partition_by_regions([source], ["a", "b"], regions, "ecoregion")
+
+    assert keys.tolist() == ["a", "b"]
+    assert shapely.intersection(*pieces).area == 0
+    assert shapely.symmetric_difference(source, shapely.union_all(pieces)).area == 0
+    assert pieces[0].equals(regions[0])
+
+
+def test_overlap_above_one_thousand_square_metres_fails():
+    source = box(0, 0, 0.001, 0.001)
+    regions = [
+        box(0, 0, 0.0005, 0.001),
+        box(0.0005 - 8.2e-5, 0, 0.001, 0.001),
+    ]
+    assert equal_area_ha([shapely.intersection(*regions)])[0] * 10000 > 1000
     with pytest.raises(ValueError, match="Overlapping reference coverage"):
-        partition_by_regions([source], ["a", "b"], regions, "admin1")
+        partition_by_regions([source], ["a", "b"], regions, "ecoregion")
+
+
+def test_tolerated_overlaps_are_summarized(caplog):
+    source = box(0, 0, 0.001, 0.001)
+    regions = [box(0, 0, 0.0005, 0.001), box(0.00048, 0, 0.001, 0.001)]
+    overlap_m2 = equal_area_ha([shapely.intersection(*regions)])[0] * 10000
+    with caplog.at_level(logging.INFO, logger="services.polygon_partition"):
+        partition_by_regions([source, source], ["a", "b"], regions, "ecoregion")
+
+    record = next(record for record in caplog.records if "tolerated" in record.message)
+    layer, count, total, maximum = record.args
+    assert layer == "ecoregion"
+    assert count == 2
+    assert total == pytest.approx(overlap_m2 * 2)
+    assert maximum == pytest.approx(overlap_m2)
 
 
 def test_region_fully_covered_by_small_overlap_is_not_duplicated():

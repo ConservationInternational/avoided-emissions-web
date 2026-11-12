@@ -170,11 +170,12 @@ changes stored analytical geometries or their GeoParquet exports.
 
 Preparation uses authoritative reference boundaries, not display simplifications.
 All positive polygon coverage survives splitting, including tiny cross-stratum
-pieces and uncovered residuals. Reference overlaps of up to 5 square metres
+pieces and uncovered residuals. Reference overlaps of up to 1,000 square metres
 per region and input piece are assigned once to the first region in
 lexicographic ID order. Larger overlaps are errors identifying the layer and
 regions. A missing selected reference table must be imported before preparation
-can proceed.
+can proceed. Preparation logs the count, total and maximum tolerated overlap
+per layer; totals count overlaps in overlapping input sites separately.
 
 The minimum-area setting applies to whole input features before splitting.
 Fragments lacking any selected polygon-region key remain in the downloadable
