@@ -7,7 +7,6 @@ import shapely
 from pyproj import Transformer
 
 AREA_MAX_SEGMENT_DEGREES = 0.005
-REFERENCE_OVERLAP_TOLERANCE_M2 = 1000.0
 _EQUAL_AREA = Transformer.from_crs(4326, "ESRI:54009", always_xy=True)
 logger = logging.getLogger(__name__)
 
@@ -54,8 +53,8 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
     """Return original indices, partition geometries and region IDs.
 
     Candidate work is bounded to one input piece at a time. Residual coverage
-    is retained with a null key. Small overlaps are assigned to the first
-    region by ID; larger overlaps are errors.
+    is retained with a null key. Overlaps are assigned to the first region
+    in lexicographic ID order and each conflict is logged.
     """
     tree = shapely.STRtree(region_geometries)
     origins, pieces, keys = [], [], []
@@ -85,14 +84,17 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
                 overlap = shapely.intersection(part, assigned_by_index[previous])
                 if overlap.is_empty or overlap.area <= 0:
                     continue
-                overlap_m2 += equal_area_ha([overlap])[0] * 10000
-                if overlap_m2 > REFERENCE_OVERLAP_TOLERANCE_M2:
-                    raise ValueError(
-                        f"Overlapping reference coverage in {layer}, "
-                        f"regions {region_ids[previous]} and {region_ids[candidate]}, "
-                        f"input piece {index + 1} (overlap {overlap_m2:.3f} m2). "
-                        "Repair the reference layer before submitting."
-                    )
+                conflict_m2 = equal_area_ha([overlap])[0] * 10000
+                overlap_m2 += conflict_m2
+                logger.warning(
+                    "[SPLIT] %s: resolved reference overlap for input piece %d; "
+                    "region %s takes priority over %s (overlap %.6g m2)",
+                    layer,
+                    index + 1,
+                    region_ids[previous],
+                    region_ids[candidate],
+                    conflict_m2,
+                )
                 part = shapely.difference(part, assigned_by_index[previous])
                 if part.is_empty or part.area <= 0:
                     break
@@ -125,7 +127,7 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
             )
     if overlap_count:
         logger.info(
-            "[SPLIT] %s: tolerated overlaps in %d region-piece assignments, "
+            "[SPLIT] %s: resolved overlaps in %d region-piece assignments, "
             "total %.3f m2, maximum %.3f m2",
             layer,
             overlap_count,

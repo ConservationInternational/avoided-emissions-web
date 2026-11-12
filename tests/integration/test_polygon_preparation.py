@@ -79,14 +79,19 @@ def test_authoritative_queries_preserve_scattered_sites_and_residual(
     assert exported.crs.to_epsg() == 4326
 
 
-def test_reference_overlaps_fail_before_any_submission(reference_db):
+def test_reference_overlaps_are_resolved_during_preparation(reference_db):
     insert_region(reference_db, "a", box(0, 0, 0.8, 1))
     insert_region(reference_db, "b", box(0.2, 0, 1, 1))
     frame = gpd.GeoDataFrame(
         {"site_id": ["immutable"]}, geometry=[box(0, 0, 1, 1)], crs=4326
     )
-    with pytest.raises(ValueError, match="Overlapping reference coverage"):
-        split_with_db(reference_db, frame)
+    result, groups = split_with_db(reference_db, frame)
+    assert result.admin1.tolist() == ["TST:a", "TST:b"]
+    assert result.geometry.iloc[0].equals(box(0, 0, 0.8, 1))
+    assert result.geometry.iloc[1].equals(box(0.8, 0, 1, 1))
+    assert sum(g.area for g in result.geometry) == pytest.approx(1)
+    assert shapely.union_all(result.geometry).equals(frame.geometry.iloc[0])
+    assert sum(len(members) for members in groups.values()) == 2
 
 
 def test_empty_reference_table_is_not_treated_as_uncovered(reference_db):

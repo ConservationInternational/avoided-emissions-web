@@ -439,8 +439,8 @@ def compute_exact_match_groups_with_splitting(
     exact-match values it falls within.
 
     All positive polygonal coverage is retained, including slivers and
-    unassigned residuals. Small reference overlaps are assigned once; larger
-    overlaps are rejected.
+    unassigned residuals. Reference overlaps are assigned once to the first
+    region in lexicographic ID order, with each conflict logged.
 
     Performance
     -----------

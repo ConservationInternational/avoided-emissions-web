@@ -44,14 +44,32 @@ def test_partitions_conserve_every_polygon(source, regions, expected):
         assert keys.tolist() == [None]
 
 
-def test_overlapping_reference_regions_fail_visibly():
-    with pytest.raises(ValueError, match="Overlapping reference coverage"):
-        partition_by_regions(
-            [box(0, 0, 1, 1)],
-            ["first", "second"],
-            [box(0, 0, 0.7, 1), box(0.3, 0, 1, 1)],
-            "admin1",
+@pytest.mark.parametrize("layer", ["admin1", "ecoregion"])
+@pytest.mark.parametrize("order", [[0, 1, 2], [2, 1, 0]])
+def test_reference_conflicts_use_stable_priority_and_log_each_resolution(
+    layer, order, caplog
+):
+    source = box(0, 0, 1, 1)
+    ids = ["10", "2", "3"]
+    regions = [box(0, 0, 0.7, 1), box(0.3, 0, 0.9, 1), box(0.5, 0, 1, 1)]
+    with caplog.at_level(logging.WARNING, logger="services.polygon_partition"):
+        origins, pieces, keys = partition_by_regions(
+            [source], [ids[i] for i in order], [regions[i] for i in order], layer
         )
+
+    assert origins.tolist() == [0, 0, 0]
+    assert keys.tolist() == ids
+    expected = [box(0, 0, 0.7, 1), box(0.7, 0, 0.9, 1), box(0.9, 0, 1, 1)]
+    assert shapely.equals(pieces, expected).all()
+    assert shapely.symmetric_difference(source, shapely.union_all(pieces)).area == 0
+    assert sum(piece.area for piece in pieces) == pytest.approx(source.area)
+    records = [r for r in caplog.records if "resolved reference overlap" in r.message]
+    assert len(records) == 3
+    assert [(r.args[2], r.args[3]) for r in records] == [
+        ("10", "2"), ("10", "3"), ("2", "3")
+    ]
+    assert all(r.args[0] == layer and r.args[1] == 1 for r in records)
+    assert all(r.args[4] > 0 for r in records)
 
 
 @pytest.mark.parametrize("overlap_width", [1e-12, 3e-7])
@@ -90,25 +108,30 @@ def test_overlaps_below_one_thousand_square_metres_are_assigned_once(overlap_wid
     assert pieces[0].equals(regions[0])
 
 
-def test_overlap_above_one_thousand_square_metres_fails():
+def test_overlap_above_one_thousand_square_metres_is_assigned_once():
     source = box(0, 0, 0.001, 0.001)
     regions = [
         box(0, 0, 0.0005, 0.001),
         box(0.0005 - 8.2e-5, 0, 0.001, 0.001),
     ]
     assert equal_area_ha([shapely.intersection(*regions)])[0] * 10000 > 1000
-    with pytest.raises(ValueError, match="Overlapping reference coverage"):
-        partition_by_regions([source], ["a", "b"], regions, "ecoregion")
+    _, pieces, keys = partition_by_regions([source], ["a", "b"], regions, "ecoregion")
+    assert keys.tolist() == ["a", "b"]
+    assert shapely.intersection(*pieces).area == 0
+    assert shapely.symmetric_difference(source, shapely.union_all(pieces)).area == 0
+    assert pieces[0].equals(regions[0])
 
 
-def test_tolerated_overlaps_are_summarized(caplog):
+def test_resolved_overlaps_are_summarized(caplog):
     source = box(0, 0, 0.001, 0.001)
     regions = [box(0, 0, 0.0005, 0.001), box(0.00048, 0, 0.001, 0.001)]
     overlap_m2 = equal_area_ha([shapely.intersection(*regions)])[0] * 10000
     with caplog.at_level(logging.INFO, logger="services.polygon_partition"):
         partition_by_regions([source, source], ["a", "b"], regions, "ecoregion")
 
-    record = next(record for record in caplog.records if "tolerated" in record.message)
+    record = next(
+        record for record in caplog.records if "region-piece assignments" in record.message
+    )
     layer, count, total, maximum = record.args
     assert layer == "ecoregion"
     assert count == 2
