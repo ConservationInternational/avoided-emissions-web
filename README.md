@@ -77,7 +77,7 @@ webapp/
   auth.py             Flask-Login user/session helpers (Trends.Earth identities)
   auth_routes.py      /auth/login, /auth/callback, /auth/logout (OIDC flow)
   oidc.py             Trends.Earth OIDC client (PKCE, token verification)
-  session_store.py    Redis-backed sessions holding Trends.Earth tokens
+  session_store.py    Valkey-backed sessions holding Trends.Earth tokens
   celery_app.py       Celery factory with beat schedule and task routing
   cog_merge.py        Merge GEE tiles into single COGs via GDAL
   layer_config.py     Visualization styles for covariate COG map overlays
@@ -196,7 +196,7 @@ Trends.Earth with the signed-in user's own token.
 - App admins approve, revoke or change roles (`member` / `admin`) on the
   **Admin → Users** tab, or in the Trends.Earth API UI (**App Access** tab).
   Trends.Earth superadmins are always admins.
-- Sessions are stored server-side in Redis; refresh tokens never reach the
+- Sessions are stored server-side in Valkey; refresh tokens never reach the
   browser.
 
 ### Granting the first admin

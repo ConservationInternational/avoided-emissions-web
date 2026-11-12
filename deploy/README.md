@@ -30,6 +30,20 @@ configured manually.
 - **S3** ─ Deployment packages and analysis data/results
 - **CodeDeploy** ─ Deploys new versions from S3 to EC2 via GitHub Actions
 
+### Valkey broker and session storage
+
+Development, staging, and production use `valkey/valkey:9.1.3-alpine`.
+The service remains named `redis`, and `redis://` URLs and the Python `redis`
+client are retained for Redis-protocol compatibility. The Python client uses
+redis-py 8.1 or later (below 9), within the Celery/Kombu Redis transport's
+supported dependency range.
+
+The stacks do not configure persistent storage for this service. Before replacing
+an existing Redis server, stop new task submissions and drain queued and active
+Celery tasks in a maintenance window. Without a separate data migration, replacing
+the server can discard queued tasks, cached results, and sign-in sessions; users
+will need to sign in again.
+
 ---
 
 ## Quick Start

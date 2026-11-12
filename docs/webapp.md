@@ -1,7 +1,7 @@
 # Web Application Guide
 
 The web application is a [Dash](https://dash.plotly.com/) (Plotly) single-page
-application backed by Flask, PostgreSQL/PostGIS, Celery, and Redis. It is the
+application backed by Flask, PostgreSQL/PostGIS, Celery, and Valkey. It is the
 primary user interface for uploading sites, submitting analysis tasks, monitoring
 progress, and viewing results.
 
@@ -56,12 +56,12 @@ access token is refreshed (within about five minutes).
 ### Sessions and tokens
 
 The Flask session cookie holds only an opaque session id. The session record
-(identity, access token, rotating refresh token and ID token) lives in Redis
+(identity, access token, rotating refresh token and ID token) lives in Valkey
 so the Celery workers can submit analyses with the user's token. Refreshes
-are serialised per session with a Redis lock, because Trends.Earth revokes the
-whole refresh-token family if a rotated token is reused. Sessions last up to
-30 days (`OIDC_SESSION_MAX_AGE`) while Trends.Earth keeps honouring the
-refresh token.
+are serialised per session with a Redis-compatible lock, because Trends.Earth
+revokes the whole refresh-token family if a rotated token is reused. Sessions
+last up to 30 days (`OIDC_SESSION_MAX_AGE`) while Trends.Earth keeps honouring
+the refresh token.
 
 Signing out revokes the refresh token, clears the session and ends the
 Trends.Earth browser session via its logout endpoint. Password resets happen

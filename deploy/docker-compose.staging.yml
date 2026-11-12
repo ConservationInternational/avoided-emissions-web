@@ -35,9 +35,9 @@ services:
           memory: 512M
 
   redis:
-    image: redis:7-alpine
+    image: valkey/valkey:9.1.3-alpine
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
