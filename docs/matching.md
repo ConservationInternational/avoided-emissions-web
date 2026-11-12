@@ -231,10 +231,11 @@ For Mahalanobis matching no caliper is applied and `pscore` is `NA`.
 **Range**: `1` to `1000`
 
 Each replicate repeats the pixel sampling and matching with a different
-random draw and writes `m_{id_numeric}_rep{k}.rds`. Step 3 aggregates each
-replicate separately, then reports the mean and the 2.5% / 97.5% quantiles
-across replicates at each reported level (site-year, site total, and all
-sites). Bounds are never summed across sites or years.
+random draw (seeded per fragment and replicate, so results do not depend on
+how replicates are grouped into array elements via `replicate_block_size`).
+Step 3 aggregates each replicate separately, then reports the mean and the
+2.5% / 97.5% quantiles across replicates at each reported level (site-year,
+site total, and all sites). Bounds are never summed across sites or years.
 
 These bounds are the **range across matching replicates**: they reflect
 variability from pixel sampling and matching only. They are not confidence

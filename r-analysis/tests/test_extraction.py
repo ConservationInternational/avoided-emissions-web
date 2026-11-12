@@ -161,6 +161,125 @@ class ExtractionTests(unittest.TestCase):
         buffer = extract.shape(extract.compute_sites_exclusion_buffer(sites, 10))
         self.assertFalse(buffer.covers(Point(0, 0)))
 
+    def test_buffers_crossing_the_antimeridian_stay_local(self):
+        from pyproj import Geod
+
+        geod = Geod(ellps="WGS84")
+        sites = gpd.GeoDataFrame(
+            geometry=[
+                box(-179.98, -24.45, -179.95, -24.40),
+                box(179.95, -16.80, 179.98, -16.75),
+                Point(10, 0),
+            ],
+            crs="EPSG:4326",
+        )
+        buffer = extract.shape(extract.compute_sites_exclusion_buffer(sites, 10))
+        self.assertTrue(buffer.is_valid)
+        self.assertGreaterEqual(buffer.bounds[0], -180)
+        self.assertLessEqual(buffer.bounds[2], 180)
+        # Each buffer is about 0.03 x 0.05 deg plus 10 km on each side.
+        self.assertLess(buffer.area, 3 * 0.1)
+        for lon, lat in ((-179.95, -24.42), (179.95, -16.77)):
+            across = Point(*geod.fwd(lon, lat, 90 if lon > 0 else 270, 5000)[:2])
+            self.assertTrue(buffer.covers(across), (lon, lat))
+            self.assertFalse(buffer.covers(Point(0, lat)), (lon, lat))
+        self.assertFalse(buffer.covers(Point(90, -20)))
+
+    def test_buffer_width_guard_rejects_wrapped_buffers(self):
+        with self.assertRaisesRegex(ValueError, "wrap around the globe"):
+            extract._check_buffer_width(
+                box(-180, -25, 180, -24), box(179.9, -24.5, 179.95, -24.4), 10
+            )
+
+    def test_unmapped_fragments_are_neither_treatment_nor_controls(self):
+        with tempfile.TemporaryDirectory() as output:
+            transform = from_origin(0, 0.025, 1 / 120, 1 / 120)
+            ref = (
+                xr.DataArray(
+                    np.ones((3, 3)),
+                    dims=("y", "x"),
+                    coords={
+                        "x": (np.arange(3) + 0.5) / 120,
+                        "y": 0.025 - (np.arange(3) + 0.5) / 120,
+                    },
+                )
+                .rio.write_crs("EPSG:4326")
+                .rio.write_transform(transform)
+            )
+            sites = gpd.GeoDataFrame(
+                {
+                    "site_id": ["A", "B"],
+                    "sub_site_index": [0, 0],
+                    "id_numeric": [1, 2],
+                },
+                geometry=[
+                    box(0, 0, 1 / 120, 0.025),
+                    box(2 / 120, 0, 0.025, 0.025),
+                ],
+                crs="EPSG:4326",
+            )
+            config = {
+                "output_dir": output,
+                "cog_bucket": "test",
+                "cog_prefix": "test",
+                "covariates": [],
+                "fc_years": [2014, 2015],
+                "exact_match_vars": ["admin1"],
+                "resolution_m": 1000,
+                "matching_extent": mapping(box(0, 0, 0.025, 0.025)),
+                "exact_match_group_mapping": {"1": [["A", 0]]},
+            }
+
+            def layer(uri, name, bounds, grid, rows, cols):
+                if name.startswith("fc_"):
+                    # The top-left treatment pixel never has forest.
+                    return np.where((rows == 0) & (cols == 0), 0, 100).astype(
+                        np.float32
+                    )
+                return np.ones(len(rows), dtype=np.float32)
+
+            with (
+                patch.object(extract, "open_reference_grid", return_value=ref),
+                patch.object(extract, "_load_layer_fresh", side_effect=layer),
+            ):
+                extract.extract_covariates(config, sites)
+            treatment = pd.read_parquet(Path(output) / "treatment_pixels.parquet")
+            controls = pq.ParquetDataset(Path(output) / "control_pixels").read()
+            key = pd.read_parquet(Path(output) / "treatment_cell_key.parquet")
+            self.assertEqual(sorted(treatment.cell), [3, 6])
+            self.assertEqual(sorted(controls.column("cell").to_pylist()), [1, 4, 7])
+            self.assertEqual(key.groupby("id_numeric").size().to_dict(), {1: 3, 2: 3})
+
+    def test_matching_extent_uses_used_regions_and_neighbours(self):
+        regions = gpd.GeoDataFrame(
+            {"region_id": ["a", "b", "c"]},
+            geometry=[box(0, 0, 1, 1), box(1, 0, 2, 1), box(5, 0, 6, 1)],
+            crs="EPSG:4326",
+        )
+        sites = gpd.GeoDataFrame(
+            {"admin1": ["a", None]},
+            geometry=[box(0.2, 0.2, 0.4, 0.4), box(5.2, 0.2, 5.4, 0.4)],
+            crs="EPSG:4326",
+        )
+        with patch.object(extract, "_load_reference_layer", return_value=regions):
+            extent = extract.shape(
+                extract.compute_matching_extent(
+                    sites, ["admin1"], {"admin1": "s3://x/admin1.parquet"}, "/tmp"
+                )
+            )
+            self.assertAlmostEqual(extent.area, 2.0)
+            self.assertFalse(extent.covers(Point(5.5, 0.5)))
+            # Without region IDs, every region in the sites bbox is used.
+            bbox_extent = extract.shape(
+                extract.compute_matching_extent(
+                    sites.drop(columns="admin1"),
+                    ["admin1"],
+                    {"admin1": "s3://x/admin1.parquet"},
+                    "/tmp",
+                )
+            )
+            self.assertAlmostEqual(bbox_extent.area, 3.0)
+
     def test_exclusion_preserves_treatment_and_empty_control_schema(self):
         with tempfile.TemporaryDirectory() as output:
             transform = from_origin(0, 0.025, 1 / 120, 1 / 120)

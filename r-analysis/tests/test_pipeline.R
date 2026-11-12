@@ -85,6 +85,16 @@ run_script <- function(script, config_path, array_index = NULL) {
     log
 }
 
+read_batches <- function(out) {
+    paths <- list.files(file.path(out, "matches"), "^mb_.*\\.parquet$", full.names = TRUE)
+    bind_rows(lapply(paths, read_parquet))
+}
+
+read_sidecars <- function(out) {
+    lapply(list.files(file.path(out, "matches"), "^mb_.*\\.json$", full.names = TRUE),
+           fromJSON, simplifyVector = FALSE)
+}
+
 test_that("summary uses the same complete strata for estimates and pixel downloads", {
     data_dir <- tempfile("ae_summary_")
     config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
@@ -96,10 +106,14 @@ test_that("summary uses the same complete strata for estimates and pixel downloa
             match_group = c("stable_1", "stable_1", "unstable_1", "unstable_1"),
             match_weight = 1, sampling_weight = 10,
             area_ha = 100, total_biomass_2000 = 100, fc_2000 = 100, x1 = 0, pscore = 0.5,
-            n_eligible = 20, n_sampled = 2, n_control_pool = 100, n_control_sampled = 10
+            n_eligible = 20, n_sampled = 2, n_control_pool = 100, n_control_sampled = 10,
+            id_numeric = 1L, replicate = k, n_forest_pixels = 30L
         ) %>% bind_cols(forest_cover(4, 1))
         if (k == 2) m <- filter(m, group == "stable")
-        saveRDS(m, file.path(out, "matches", paste0("m_1_rep", k, ".rds")))
+        write_parquet(m, file.path(out, "matches", paste0("mb_u1_b", k, ".parquet")))
+        write_json(list(batch = paste0("u1_b", k), matches_file = paste0("mb_u1_b", k, ".parquet"),
+                        failures = list(), diagnostics = list(), na_exclusions = list()),
+                   file.path(out, "matches", paste0("mb_u1_b", k, ".json")), auto_unbox = TRUE)
     }
     run_script("03_summarize_results.R", config_path)
     totals <- read.csv(file.path(out, "results_by_site_total.csv"))
@@ -108,6 +122,9 @@ test_that("summary uses the same complete strata for estimates and pixel downloa
     summary <- fromJSON(file.path(out, "results_summary.json"))
     expect_equal(totals$n_sample_pixels, 1)
     expect_equal(totals$coverage_fraction, 10 / 60)
+    # Fragment 2 of site A has no output, so the site is only partly estimated.
+    expect_equal(totals$forest_coverage_fraction, 10 / 30)
+    expect_equal(totals$status, "partial")
     expect_equal(sort(unique(detail$cell)), sort(unique(covariates$cell)))
     expect_equal(unique(detail$cell), 1:2)
     expect_true(any(summary$methodology_warnings$code == "inconsistent_strata"))
@@ -152,8 +169,9 @@ test_that("overlapping features keep independent treatment memberships and resul
     config$max_treatment_pixels <- 100
     write_json(config, config_path, auto_unbox = TRUE)
     run_script("02_perform_matching.R", config_path)
+    batch <- read_batches(out)
     for (id in c(1, 3)) {
-        matched <- readRDS(file.path(out, "matches", paste0("m_", id, "_rep1.rds")))
+        matched <- filter(batch, id_numeric == id, replicate == 1)
         expect_true(shared_cell %in% matched$cell[matched$treatment])
     }
     run_script("03_summarize_results.R", config_path)
@@ -181,9 +199,10 @@ for (method in c("optimal", "nearest")) {
         totals <- read.csv(file.path(out, "results_by_site_total.csv"))
         expect_equal(sort(totals$site_id), c("A", "B"))
         expect_false(any(grepl("_ci_", names(totals))))
-        m <- readRDS(file.path(out, "matches", "m_1_rep1.rds"))
+        m <- filter(read_batches(out), id_numeric == 1)
         expect_true(all(is.na(m$pscore)))
-        expect_equal(attr(m, "group_diagnostics")[[1]]$method, "constant")
+        diagnostics <- read_sidecars(out)[[1]]$diagnostics
+        expect_equal(diagnostics[[1]]$group_diagnostics[[1]]$method, "constant")
     })
 }
 
@@ -197,8 +216,9 @@ for (method in c("optimal", "nearest")) {
         run_script("03_summarize_results.R", config_path)
         out <- file.path(data_dir, "output")
 
-        for (path in list.files(file.path(out, "matches"), "^m_.*\\.rds$", full.names = TRUE)) {
-            m <- readRDS(path)
+        batches <- read_batches(out)
+        expect_equal(nrow(distinct(batches, id_numeric, replicate)), 9)
+        for (m in split(batches, list(batches$id_numeric, batches$replicate), drop = TRUE)) {
             sets <- m %>%
                 group_by(match_group) %>%
                 summarise(t = sum(match_weight[treatment]), c = sum(match_weight[!treatment]))
@@ -214,7 +234,18 @@ for (method in c("optimal", "nearest")) {
 
         expect_equal(sort(totals$site_id), c("A", "B"))
         expect_equal(failed$site_id, "C")
+        expect_equal(failed$status, "failed")
         expect_match(failed$error, "No overlapping")
+        status <- read.csv(file.path(out, "results_site_status.csv"))
+        expect_equal(setNames(status$status, status$site_id),
+                     c(A = "estimated", B = "estimated", C = "failed")[status$site_id])
+        # Site B's non-forest pixel is outside the forest denominator.
+        expect_equal(totals$forest_coverage_fraction, c(1, 1))
+        reps <- read.csv(file.path(out, "results_by_site_replicate_total.csv"))
+        expect_equal(nrow(reps), 6)
+        rep_means <- tapply(reps$extrapolated_emissions_avoided_mgco2e, reps$site_id, mean)
+        expect_equal(as.vector(rep_means[totals$site_id]),
+                     totals$extrapolated_emissions_avoided_mgco2e)
         expect_equal(summary$n_failed_sites, 1)
         expect_equal(summary$biomass_reference_year, 2000)
         expect_false("sub_site_index" %in% names(by_year))
@@ -237,3 +268,45 @@ for (method in c("optimal", "nearest")) {
         expect_true(any(summary$methodology_warnings$code == "replicate_range"))
     })
 }
+
+test_that("replicate blocks reproduce single-replicate matches", {
+    run_blocked <- function(block_size, n_array) {
+        data_dir <- tempfile("ae_block_")
+        config_path <- make_fixture(data_dir, "nearest", n_replicates = 3)
+        config <- fromJSON(config_path, simplifyVector = FALSE)
+        config$replicate_block_size <- block_size
+        write_json(config, config_path, auto_unbox = TRUE)
+        for (i in seq_len(n_array) - 1L) run_script("02_perform_matching.R", config_path, i)
+        out <- file.path(data_dir, "output")
+        list(
+            n_batches = length(list.files(file.path(out, "matches"), "^mb_.*\\.json$")),
+            matches = read_batches(out) %>% arrange(id_numeric, replicate, cell, treatment)
+        )
+    }
+    single <- run_blocked(1L, 9L)
+    blocked <- run_blocked(2L, 6L)
+    expect_equal(single$n_batches, 9)
+    expect_equal(blocked$n_batches, 6)
+    cols <- c("id_numeric", "replicate", "cell", "treatment", "match_weight", "sampling_weight")
+    expect_equal(blocked$matches[cols], single$matches[cols])
+})
+
+test_that("fragments without baseline forest are not applicable", {
+    data_dir <- tempfile("ae_noforest_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)
+    out <- file.path(data_dir, "output")
+    pixels <- read_parquet(file.path(out, "treatment_pixels.parquet"))
+    key <- read_parquet(file.path(out, "treatment_cell_key.parquet"))
+    c_cells <- key$cell[key$id_numeric == 4]
+    pixels[pixels$cell %in% c_cells, paste0("fc_", FC_YEARS)] <- 0
+    write_parquet(pixels, file.path(out, "treatment_pixels.parquet"))
+    run_script("02_perform_matching.R", config_path)
+    run_script("03_summarize_results.R", config_path)
+    failed <- read.csv(file.path(out, "results_failed_sites.csv"))
+    summary <- fromJSON(file.path(out, "results_summary.json"))
+    expect_equal(failed$site_id, "C")
+    expect_equal(failed$status, "not_applicable")
+    expect_equal(summary$n_failed_sites, 0)
+    expect_equal(summary$n_not_applicable_sites, 1)
+    expect_equal(length(summary$failed_sites), 0)
+})

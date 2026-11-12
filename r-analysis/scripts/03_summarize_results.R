@@ -9,10 +9,13 @@
 #
 # An exact-match stratum of a site fragment is included only when it was
 # matched in every replicate; fragments with no such stratum are reported as
-# failed.
+# failed, or as not applicable when they have no exact-match region or no
+# forest at baseline.
 #
 # Output (in {output_dir}):
-#   results_by_site_year.csv, results_by_site_total.csv, results_summary.json,
+#   results_by_site_year.csv, results_by_site_total.csv,
+#   results_by_site_replicate_total.csv, results_site_status.csv,
+#   results_summary.json,
 #   results_pixel_year_emissions.csv (replicate 1), results_pixel_covariates.csv,
 #   results_covariate_balance.csv, results_propensity_scores.csv,
 #   results_pixel_locations.csv, results_match_quality_summary.json,
@@ -72,20 +75,36 @@ sites <- fragments %>%
 write_csv(select(sites, site_id, display_site_id, site_name), out_path("site_identity.csv"))
 
 
-# -- Work reconciliation -----------------------------------------------------
+# -- Batch outputs -----------------------------------------------------------
 
-match_paths <- list.files(config$matches_dir, "^m_[0-9]+_rep[0-9]+\\.rds$", full.names = TRUE)
-matched_files <- tibble(
-    path = match_paths,
-    id_numeric = as.integer(sub("^m_([0-9]+)_rep.*$", "\\1", basename(match_paths))),
-    replicate = as.integer(sub("^.*_rep([0-9]+)\\.rds$", "\\1", basename(match_paths)))
-) %>%
+# Each match batch writes mb_{batch}.parquet (matched pixels) and
+# mb_{batch}.json (diagnostics, failure markers, missing-data exclusions).
+read_sidecar <- function(path) fromJSON(path, simplifyVector = FALSE)
+sidecars <- lapply(
+    list.files(config$matches_dir, "^mb_.*\\.json$", full.names = TRUE), read_sidecar
+)
+batch_files <- unlist(lapply(sidecars, function(x) x$matches_file))
+batch_paths <- file.path(config$matches_dir, batch_files)
+batch_paths <- batch_paths[file.exists(batch_paths)]
+
+# A fragment is used only when every replicate was matched.
+matched_reps <- if (length(batch_paths) > 0) {
+    open_dataset(batch_paths) %>%
+        distinct(id_numeric, replicate) %>%
+        collect()
+} else {
+    tibble(id_numeric = integer(), replicate = integer())
+}
+matched_ids <- matched_reps %>%
     group_by(id_numeric) %>%
     filter(n_distinct(replicate) == N_REPLICATES) %>%
-    ungroup()
+    pull(id_numeric) %>%
+    unique()
+frag_row <- function(id) fragments[match(id, fragments$id_numeric), ]
+diagnostics_by_rep <- unlist(lapply(sidecars, function(x) x$diagnostics), recursive = FALSE)
 
 
-# -- Read each match file once -----------------------------------------------
+# -- Read each batch once ----------------------------------------------------
 
 stratum_rows <- list()
 strata <- list()
@@ -95,48 +114,64 @@ diagnostics <- list()
 detail_path <- out_path("results_pixel_year_emissions.csv")
 if (file.exists(detail_path)) file.remove(detail_path)
 
-for (i in seq_len(nrow(matched_files))) {
-    file_info <- matched_files[i, ]
-    frag <- filter(fragments, id_numeric == file_info$id_numeric)
-    m <- readRDS(file_info$path)
-    outcomes <- pixel_outcomes(m, frag$start_year, FC_YEAR_MIN, FC_YEAR_MAX)
-    ids <- tibble(id_numeric = file_info$id_numeric, site_id = frag$site_id,
-                  replicate = file_info$replicate)
-    stratum_rows[[i]] <- bind_cols(ids, aggregate_outcomes(m, outcomes))
-    # Eligible pixels per matched stratum (sampling_weight = n_eligible / n_matched).
-    strata[[i]] <- bind_cols(ids, m %>%
-        filter(treatment) %>%
-        group_by(group) %>%
-        summarise(n_matched = n(), n_eligible = sampling_weight[1] * n(), .groups = "drop"))
-    count_rows[[i]] <- bind_cols(ids, tibble(
-        n_eligible = m$n_eligible[1], n_sampled = m$n_sampled[1],
-        n_control_pool = m$n_control_pool[1], n_control_sampled = m$n_control_sampled[1]
-    ))
-    if (file_info$replicate == 1L) {
-        n_years <- length(outcomes$years)
-        write_csv(
-            tibble(
-                cell = rep(m$cell, times = n_years),
-                id_numeric = file_info$id_numeric,
-                site_id = frag$site_id,
-                group = rep(m$group, times = n_years),
-                year = rep(outcomes$years, each = nrow(m)),
-                treatment = rep(m$treatment, times = n_years),
-                match_group = rep(m$match_group, times = n_years),
-                match_weight = rep(m$match_weight, times = n_years),
-                sampling_weight = rep(m$sampling_weight, times = n_years),
-                forest_loss_ha = as.vector(outcomes$loss_ha),
-                emissions_mgco2e = as.vector(outcomes$emissions)
-            ),
-            detail_path, append = file.exists(detail_path)
-        )
-        cov_rows[[length(cov_rows) + 1]] <- m %>%
-            select(cell, group, treatment, match_group, match_weight, pscore,
-                   any_of(COVARIATES)) %>%
-            mutate(id_numeric = file_info$id_numeric, site_id = frag$site_id, .before = 1)
-        diagnostics <- c(diagnostics, attr(m, "group_diagnostics"))
+seen <- character()
+for (path in batch_paths) {
+    batch <- read_parquet(path) %>%
+        filter(id_numeric %in% matched_ids) %>%
+        as_tibble()
+    for (m in split(batch, list(batch$id_numeric, batch$replicate), drop = TRUE)) {
+        id <- m$id_numeric[1]
+        k <- m$replicate[1]
+        # A retried batch can repeat a fragment-replicate; use it once.
+        key <- paste(id, k)
+        if (key %in% seen) next
+        seen <- c(seen, key)
+        frag <- frag_row(id)
+        outcomes <- pixel_outcomes(m, frag$start_year, FC_YEAR_MIN, FC_YEAR_MAX)
+        ids <- tibble(id_numeric = id, site_id = frag$site_id, replicate = k)
+        i <- length(stratum_rows) + 1L
+        stratum_rows[[i]] <- bind_cols(ids, aggregate_outcomes(m, outcomes))
+        # Eligible pixels per matched stratum (sampling_weight = n_eligible / n_matched).
+        strata[[i]] <- bind_cols(ids, m %>%
+            filter(treatment) %>%
+            group_by(group) %>%
+            summarise(n_matched = n(), n_eligible = sampling_weight[1] * n(), .groups = "drop"))
+        count_rows[[i]] <- bind_cols(ids, tibble(
+            n_eligible = m$n_eligible[1], n_sampled = m$n_sampled[1],
+            n_forest_pixels = m$n_forest_pixels[1],
+            n_control_pool = m$n_control_pool[1], n_control_sampled = m$n_control_sampled[1]
+        ))
+        if (k == 1L) {
+            n_years <- length(outcomes$years)
+            write_csv(
+                tibble(
+                    cell = rep(m$cell, times = n_years),
+                    id_numeric = id,
+                    site_id = frag$site_id,
+                    group = rep(m$group, times = n_years),
+                    year = rep(outcomes$years, each = nrow(m)),
+                    treatment = rep(m$treatment, times = n_years),
+                    match_group = rep(m$match_group, times = n_years),
+                    match_weight = rep(m$match_weight, times = n_years),
+                    sampling_weight = rep(m$sampling_weight, times = n_years),
+                    forest_loss_ha = as.vector(outcomes$loss_ha),
+                    emissions_mgco2e = as.vector(outcomes$emissions)
+                ),
+                detail_path, append = file.exists(detail_path)
+            )
+            cov_rows[[length(cov_rows) + 1]] <- m %>%
+                select(cell, group, treatment, match_group, match_weight, pscore,
+                       any_of(COVARIATES)) %>%
+                mutate(id_numeric = id, site_id = frag$site_id, .before = 1)
+        }
     }
+    rm(batch)
+    gc()
 }
+diagnostics <- unlist(lapply(
+    Filter(function(d) d$replicate == 1L && d$id_numeric %in% matched_ids, diagnostics_by_rep),
+    function(d) d$group_diagnostics
+), recursive = FALSE)
 if (!file.exists(detail_path)) {
     write_csv(tibble(cell = integer(), site_id = character(), year = integer()), detail_path)
 }
@@ -179,17 +214,28 @@ if (n_inconsistent_strata > 0) {
 
 # -- Work reconciliation -----------------------------------------------------
 
-# Failure markers for outputs that were later produced (e.g. a retried spot
-# job) are ignored.  Worker-level markers (failed_array_*.json) are kept.
-markers <- lapply(
-    list.files(config$matches_dir, "^failed_.*\\.json$", full.names = TRUE),
+# Fragment-level markers come from the batch sidecars; worker-level markers
+# (failed_array_*.json) are written when a whole match worker crashed.
+fragment_markers <- unlist(lapply(sidecars, function(x) x$failures), recursive = FALSE)
+worker_failures <- lapply(
+    list.files(config$matches_dir, "^failed_array_.*\\.json$", full.names = TRUE),
     fromJSON, simplifyVector = FALSE
 )
-markers <- Filter(function(mk) {
-    is.null(mk$match_file) || !file.exists(file.path(config$matches_dir, mk$match_file))
-}, markers)
-fragment_markers <- Filter(function(mk) !is.null(mk$id_numeric), markers)
-worker_failures <- Filter(function(mk) is.null(mk$id_numeric), markers)
+markers <- if (length(fragment_markers) > 0) {
+    tibble(
+        id_numeric = vapply(fragment_markers, function(x) as.integer(x$id_numeric), integer(1)),
+        reason = vapply(fragment_markers, function(x) {
+            if (is.null(x$reason)) "error" else x$reason
+        }, character(1)),
+        error = vapply(fragment_markers, function(x) x$error, character(1)),
+        n_forest_pixels = vapply(fragment_markers, function(x) {
+            if (is.null(x$n_forest_pixels)) NA_real_ else as.numeric(x$n_forest_pixels)
+        }, numeric(1))
+    ) %>% distinct(id_numeric, .keep_all = TRUE)
+} else {
+    tibble(id_numeric = integer(), reason = character(), error = character(),
+           n_forest_pixels = numeric())
+}
 
 mapped_keys <- if (is.null(GROUP_MAPPING)) {
     NULL
@@ -197,35 +243,42 @@ mapped_keys <- if (is.null(GROUP_MAPPING)) {
     vapply(unlist(GROUP_MAPPING, recursive = FALSE),
            function(m) paste(m[[1]], m[[2]], sep = "\r"), character(1))
 }
-failure_reason <- function(id, site_id, sub_site_index) {
-    mk <- Filter(function(x) identical(as.integer(x$id_numeric), as.integer(id)), fragment_markers)
-    if (length(mk) > 0) return(mk[[1]]$error)
-    if (id %in% matched_files$id_numeric) {
-        return("No exact-match stratum was matched in every replicate")
-    }
-    if (!is.null(mapped_keys) && !paste(site_id, sub_site_index, sep = "\r") %in% mapped_keys) {
-        return("Site has no exact-match region assignment and was not matched")
-    }
-    if (length(worker_failures) > 0) {
-        return(paste("No match output; worker failure:", worker_failures[[1]]$error))
-    }
+# Fragments without any pixel (e.g. slivers smaller than a pixel) have nothing
+# to estimate and are neither failures nor not applicable.
+unused_fragments <- fragments %>%
+    filter(!id_numeric %in% included_ids, n_site_pixels > 0) %>%
+    left_join(markers, by = "id_numeric")
+unmapped <- if (is.null(mapped_keys)) {
+    rep(FALSE, nrow(unused_fragments))
+} else {
+    !paste(unused_fragments$site_id, unused_fragments$sub_site_index, sep = "\r") %in% mapped_keys
+}
+worker_error <- if (length(worker_failures) > 0) {
+    paste("No match output; worker failure:", worker_failures[[1]]$error)
+} else {
     "No match output for one or more replicates"
 }
-# Fragments without any pixel (e.g. slivers smaller than a pixel) have nothing
-# to estimate and are not failures.
-failed_fragments <- filter(fragments, !id_numeric %in% included_ids, n_site_pixels > 0)
-failed_fragments$error <- vapply(seq_len(nrow(failed_fragments)), function(i) {
-    failure_reason(failed_fragments$id_numeric[i], failed_fragments$site_id[i],
-                   failed_fragments$sub_site_index[i])
-}, character(1))
+unused_fragments <- unused_fragments %>%
+    mutate(
+        error = case_when(
+            unmapped ~ "Site has no exact-match region assignment and was not matched",
+            !is.na(error) ~ error,
+            id_numeric %in% matched_ids ~ "No exact-match stratum was matched in every replicate",
+            TRUE ~ worker_error
+        ),
+        status = if_else(unmapped | coalesce(reason, "") == "no_eligible_treatment",
+                         "not_applicable", "failed")
+    )
+failed_fragments <- filter(unused_fragments, status == "failed")
 write_csv(
-    select(failed_fragments, id_numeric, site_id, site_name, sub_site_index, error),
+    select(unused_fragments, id_numeric, site_id, site_name, sub_site_index, status, error),
     out_path("results_failed_sites.csv")
 )
 n_failed_sites <- n_distinct(failed_fragments$site_id)
 message("  ", length(included_ids), " fragment(s) included; ", nrow(failed_fragments),
-        " fragment(s) in ", n_failed_sites, " site(s) failed; ", n_inconsistent_strata,
-        " stratum/strata excluded for not matching in every replicate")
+        " fragment(s) in ", n_failed_sites, " site(s) failed; ",
+        nrow(unused_fragments) - nrow(failed_fragments), " fragment(s) not applicable; ",
+        n_inconsistent_strata, " stratum/strata excluded for not matching in every replicate")
 
 
 # -- Estimates ---------------------------------------------------------------
@@ -253,8 +306,8 @@ site_year_rep <- bind_rows(
 
 site_counts <- bind_rows(
     tibble(id_numeric = integer(), site_id = character(), replicate = integer(),
-           n_eligible = numeric(), n_sampled = numeric(), n_control_pool = numeric(),
-           n_control_sampled = numeric()),
+           n_eligible = numeric(), n_sampled = numeric(), n_forest_pixels = numeric(),
+           n_control_pool = numeric(), n_control_sampled = numeric()),
     count_rows
 ) %>%
     filter(id_numeric %in% included_ids) %>%
@@ -270,6 +323,7 @@ site_counts <- bind_rows(
         n_sample_pixels = as.integer(round(sum(n_matched) / N_REPLICATES)),
         n_eligible_pixels = sum(n_eligible) / N_REPLICATES,
         n_represented_pixels = sum(n_represented) / N_REPLICATES,
+        n_forest_pixels = sum(n_forest_pixels) / N_REPLICATES,
         sampled_fraction = sum(n_sampled) / sum(n_eligible),
         match_rate = sum(n_matched) / sum(n_sampled),
         n_control_pool = sum(n_control_pool) / N_REPLICATES,
@@ -277,8 +331,49 @@ site_counts <- bind_rows(
         .groups = "drop"
     ) %>%
     left_join(select(sites, site_id, n_site_pixels), by = "site_id") %>%
-    # Share of the site's pixels that the estimates represent.
-    mutate(coverage_fraction = n_represented_pixels / n_site_pixels)
+    # Forest pixels of fragments that were matched but not used.
+    left_join(
+        failed_fragments %>%
+            group_by(site_id) %>%
+            summarise(n_failed_fragments = n(),
+                      n_failed_forest = sum(n_forest_pixels, na.rm = TRUE), .groups = "drop"),
+        by = "site_id"
+    ) %>%
+    mutate(
+        n_failed_fragments = coalesce(n_failed_fragments, 0L),
+        n_forest_pixels = n_forest_pixels + coalesce(n_failed_forest, 0),
+        # Share of the site's pixels, and of its forested pixels, that the
+        # estimates represent.
+        coverage_fraction = n_represented_pixels / n_site_pixels,
+        forest_coverage_fraction = n_represented_pixels / n_forest_pixels,
+        status = if_else(forest_coverage_fraction < LOW_COVERAGE | n_failed_fragments > 0,
+                         "partial", "estimated")
+    ) %>%
+    select(-n_failed_forest, -n_failed_fragments)
+
+# Status of every site with pixels: estimated / partial from site_counts,
+# otherwise failed if any fragment failed, else not applicable.
+site_status <- sites %>%
+    filter(n_site_pixels > 0) %>%
+    select(site_id, display_site_id, site_name, n_site_pixels) %>%
+    left_join(select(site_counts, site_id, status, n_forest_pixels,
+                     coverage_fraction, forest_coverage_fraction), by = "site_id") %>%
+    left_join(
+        unused_fragments %>%
+            group_by(site_id) %>%
+            summarise(
+                any_failed = any(status == "failed"),
+                status_reason = paste(unique(error), collapse = "; "),
+                .groups = "drop"
+            ),
+        by = "site_id"
+    ) %>%
+    mutate(
+        status = coalesce(status, if_else(coalesce(any_failed, FALSE), "failed", "not_applicable")),
+        status_reason = if_else(status == "estimated", NA_character_, status_reason)
+    ) %>%
+    select(-any_failed)
+write_csv(site_status, out_path("results_site_status.csv"))
 
 results_by_year <- (if (nrow(site_year_rep) > 0) {
     summarise_replicates(site_year_rep, c("site_id", "year"), metric_cols)
@@ -300,6 +395,13 @@ intervention_rep <- site_year_rep %>%
 site_total_rep <- intervention_rep %>%
     group_by(replicate, site_id) %>%
     summarise(across(all_of(metric_cols), sum), .groups = "drop")
+# Per-replicate totals let consumers aggregate sites with correct ranges.
+write_csv(
+    site_total_rep %>%
+        select(site_id, replicate, starts_with("extrapolated_")) %>%
+        arrange(site_id, replicate),
+    out_path("results_by_site_replicate_total.csv")
+)
 results_total <- (if (nrow(site_total_rep) > 0) {
     summarise_replicates(site_total_rep, "site_id", metric_cols)
 } else {
@@ -456,16 +558,16 @@ write_csv(sampling_by_site, out_path("results_sampling_by_site.csv"))
 
 as_records <- function(df) unname(lapply(seq_len(nrow(df)), function(i) as.list(df[i, ])))
 
-na_files <- list.files(config$matches_dir, "_na_exclusion\\.json$", full.names = TRUE)
+na_records <- unlist(lapply(sidecars, function(x) x$na_exclusions), recursive = FALSE)
 na_summary <- NULL
-if (length(na_files) > 0) {
-    na_df <- bind_rows(lapply(na_files, function(path) {
-        x <- fromJSON(path)
+if (length(na_records) > 0) {
+    na_df <- bind_rows(lapply(na_records, function(x) {
         x$variables_with_na <- paste(
             names(x$variables_with_na), unlist(x$variables_with_na), sep = "=", collapse = "; "
         )
         as_tibble(x)
-    }))
+    })) %>%
+        distinct(id_numeric, .keep_all = TRUE)
     write_csv(na_df, out_path("na_exclusion_summary.csv"))
     substantial <- filter(na_df, substantial_exclusion)
     na_summary <- list(
@@ -546,6 +648,8 @@ summary_data <- list(
     resolution_m = config$resolution_m,
     n_sites = nrow(results_total),
     n_failed_sites = n_failed_sites,
+    n_not_applicable_sites = sum(site_status$status == "not_applicable"),
+    n_partial_sites = sum(site_status$status == "partial"),
     random_seed = RANDOM_SEED,
     n_replicates = N_REPLICATES,
     biomass_reference_year = 2000L,
@@ -566,8 +670,10 @@ summary_data <- list(
     subsampled_sites = as_records(subsampled),
     na_exclusion_summary = na_summary,
     methodology_warnings = warnings,
-    group_diagnostics = c(diagnostics, unlist(lapply(fragment_markers, function(x) x$group_diagnostics),
-                                              recursive = FALSE)),
+    group_diagnostics = c(diagnostics, unlist(lapply(
+        Filter(function(x) identical(as.integer(x$replicate), 1L), fragment_markers),
+        function(x) x$group_diagnostics
+    ), recursive = FALSE)),
     portfolio = list(
         yearly = if (length(portfolio_yearly) > 0) as_records(portfolio_yearly) else list(),
         total = portfolio_total

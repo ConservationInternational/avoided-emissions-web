@@ -69,14 +69,15 @@ s3://{S3_BUCKET}/{S3_PREFIX}/
 │   │   ├── grid_metadata.json
 │   │   ├── prep_summary.json
 │   │   └── matches/
-│   │       ├── m_{id_numeric}_rep{k}.rds
-│   │       ├── m_{id_numeric}_na_exclusion.json
-│   │       ├── failed_{id_numeric}_rep{k}.json
-│   │       └── failed_array_{index}.json
+│   │       ├── mb_{batch}.parquet
+│   │       ├── mb_{batch}.json
+│   │       └── failed_array_{step}_{index}.json
 │   │
 │   └── results/                    # Step 3 final outputs
 │       ├── results_by_site_year.csv
 │       ├── results_by_site_total.csv
+│       ├── results_by_site_replicate_total.csv
+│       ├── results_site_status.csv
 │       ├── results_pixel_year_emissions.csv
 │       ├── results_pixel_covariates.csv
 │       ├── results_covariate_balance.csv
@@ -97,9 +98,9 @@ These files are produced by `01_extract_covariates.py` and consumed by
 | File | Format | Description |
 |---|---|---|
 | `sites_processed.parquet` | Parquet | One row per site fragment (sites split across exact-match regions have several), with `site_id`, `sub_site_index`, `id_numeric`, `start_year`, `end_year`, `area_ha` |
-| `treatment_cell_key.parquet` | Parquet | Raster cell index → `id_numeric` for every treatment pixel |
-| `treatment_pixels.parquet` | Parquet | Covariate, `area_ha` (cell area), `total_biomass_2000`, `fc_2000`, and outcome-window `fc_YYYY` values for treatment pixels |
-| `control_pixels/` | Parquet dataset | The same columns for candidate control pixels, partitioned by the first exact-match variable. A missing partition value is stored as `-1` |
+| `treatment_cell_key.parquet` | Parquet | Raster cell index → `id_numeric` for every pixel of every site fragment, including fragments that are not matched |
+| `treatment_pixels.parquet` | Parquet | Covariate, `area_ha` (cell area), `total_biomass_2000`, `fc_2000`, and outcome-window `fc_YYYY` values for pixels of matched fragments (those in `exact_match_group_mapping`) with forest in at least one year |
+| `control_pixels/` | Parquet dataset | The same columns for candidate control pixels, partitioned by the first exact-match variable. Pixels inside any site are never controls. A missing partition value is stored as `-1` |
 | `formula.json` | JSON | Propensity score formula (e.g. `"treatment ~ precip + temp + ..."`) |
 | `site_id_key.csv` | CSV | Integer `id_numeric` ↔ string `site_id` mapping |
 | `grid_metadata.json` | JSON | Grid transform and size, used to convert cell indices to lon/lat |
@@ -112,13 +113,18 @@ layer's transform or shape differs from the reference layer.
 
 ## Match Files (Step 2 → Step 3)
 
-These files are produced by `02_perform_matching.R` (one per site fragment
-and replicate) and consumed by `03_summarize_results.R`.
+These files are produced by `02_perform_matching.R` and consumed by
+`03_summarize_results.R`. Each match batch (one AWS Batch array element: a
+match unit and a block of `replicate_block_size` replicates) writes one pair
+of files, named `u{unit}_b{block}` (`all` or `site_{site_id}` outside AWS
+Batch). The JSON sidecar is written last, so its presence marks a complete
+batch; a rerun skips complete batches.
 
-### Per-fragment match file
+### Batch match file
 
-**Pattern**: `matches/m_{id_numeric}_rep{k}.rds`  
-**Format**: R data frame serialised with `saveRDS()`
+**Pattern**: `matches/mb_{batch}.parquet`  
+**Format**: Parquet, one row per matched pixel of every fragment and
+replicate in the batch (absent when nothing in the batch matched)
 
 | Column | Type | Description |
 |---|---|---|
@@ -137,6 +143,7 @@ and replicate) and consumed by `03_summarize_results.R`.
 | `fc_YYYY` | numeric | Forest cover (percent, 0–100) per year |
 | covariates | numeric | Matching covariates, including `defor_pre_intervention` when used |
 | `n_site_pixels`, `n_eligible`, `n_sampled`, `n_matched` | integer | Treatment pixel counts for the fragment |
+| `n_forest_pixels` | integer | Fragment pixels with forest at the site's baseline year |
 | `n_control_pool`, `n_control_sampled` | integer | Control pixel counts for the fragment |
 
 The `group_diagnostics` attribute lists, per stratum, the treatment and
@@ -202,8 +209,37 @@ pre-intervention years
 | `sampled_fraction` | numeric | Sampled / eligible treatment pixels |
 | `n_represented_pixels` | numeric | Eligible treatment pixels in strata matched in every replicate |
 | `coverage_fraction` | numeric | Represented / all treatment pixels |
+| `n_forest_pixels` | numeric | Pixels with forest at baseline in matched fragments |
+| `forest_coverage_fraction` | numeric | Represented / forest pixels |
+| `status` | string | `estimated`, or `partial` when `forest_coverage_fraction` < 0.8 or a matched fragment failed |
 | `match_rate` | numeric | Matched / sampled treatment pixels |
 | `n_control_pool`, `n_control_sampled` | numeric | Control pixel counts |
+
+---
+
+### results\_by\_site\_replicate\_total.csv
+
+**Granularity**: One row per `(site_id, replicate)` for sites in
+`results_by_site_total.csv`
+
+Columns: `site_id`, `replicate`, and the intervention-period totals of the
+`extrapolated_*` metrics. Use it to aggregate sites (e.g. by program): sum
+within each replicate, then take the mean and quantiles across replicates.
+Bounds in the other files cannot be summed.
+
+---
+
+### results\_site\_status.csv
+
+**Granularity**: One row per site with at least one pixel
+
+| Column | Type | Description |
+|---|---|---|
+| `site_id`, `display_site_id`, `site_name` | string | Site |
+| `n_site_pixels` | integer | All pixels in the site |
+| `status` | string | `estimated`, `partial`, `failed` (a fragment that should have been matched was not), or `not_applicable` (no exact-match region, or no forest at baseline) |
+| `n_forest_pixels`, `coverage_fraction`, `forest_coverage_fraction` | numeric | As in `results_by_site_total.csv`; empty for sites without estimates |
+| `status_reason` | string | Reasons of the fragments that were not included |
 
 ---
 
@@ -319,13 +355,15 @@ pixels on the Task Detail map.
 | `id_numeric` | integer | Fragment index |
 | `site_id`, `site_name` | string | Site |
 | `sub_site_index` | integer | Fragment within the site (0 for unsplit sites) |
+| `status` | string | `failed`, or `not_applicable` for fragments with no exact-match region or no forest at baseline |
 | `error` | string | Reason the fragment was not included |
 
 ---
 
 ### results\_summary.json
 
-Task-level summary: `n_sites`, `n_failed_sites` (distinct sites), `n_replicates`,
+Task-level summary: `n_sites`, `n_failed_sites` (distinct sites with a
+failed fragment), `n_not_applicable_sites`, `n_partial_sites`, `n_replicates`,
 `bounds_label`, extrapolated and sample totals, `total_area_ha`,
 `year_range`, `failed_sites`, `worker_failures`, `subsampled_sites`,
 `na_exclusion_summary`, `methodology_warnings`, `group_diagnostics`, and
@@ -340,28 +378,40 @@ holds the all-site totals and bounds.
 
 ## Failure Markers
 
-Step 2 writes `matches/failed_{id_numeric}_rep{k}.json` when a fragment
-cannot be matched (for example, no shared exact-match stratum, separation
-without the fallback, or no feasible match):
+Step 2 lists fragments it could not match in the `failures` array of the
+batch sidecar `matches/mb_{batch}.json`, one entry per fragment and
+replicate (for example, no forest at baseline, no shared exact-match
+stratum, separation without the fallback, or no feasible match):
 
 ```json
 {
-  "id_numeric": 7,
-  "site_id": "SITE_ABC",
-  "site_name": "Site ABC",
-  "replicate": 1,
-  "error": "No matches found (treatment=40, control=2000)",
-  "reason": "no_matches",
-  "match_file": "m_7_rep1.rds",
-  "group_diagnostics": [ ... ]
+  "batch": "u12_b1",
+  "matches_file": "mb_u12_b1.parquet",
+  "failures": [
+    {
+      "id_numeric": 7,
+      "site_id": "SITE_ABC",
+      "site_name": "Site ABC",
+      "replicate": 1,
+      "error": "No matches found (treatment=40, control=2000)",
+      "reason": "no_matches",
+      "n_forest_pixels": 412,
+      "group_diagnostics": [ ... ]
+    }
+  ],
+  "diagnostics": [{"id_numeric": 8, "replicate": 1, "group_diagnostics": [ ... ]}],
+  "na_exclusions": [ ... ]
 }
 ```
 
+`reason` is `no_eligible_treatment` (no forest at baseline; reported as
+not applicable), `no_overlap`, `no_matches`, or `error`.
+
 If the R process crashes, the Python wrapper writes
-`matches/failed_array_{index}.json` with the array index and error, without
-attributing it to a site. Step 3 ignores a marker whose `match_file` exists
-(a retry succeeded) and reports every fragment without a match file for
-every replicate as failed, using the marker's error when available.
+`matches/failed_array_{step}_{index}.json` with the array index and error,
+without attributing it to a site. Step 3 reports every fragment without
+output for every replicate as failed, using the marker's error when
+available.
 
 ---
 

@@ -8,14 +8,17 @@
 # On AWS Batch each array element processes one match unit (an entry of
 # config$exact_match_group_mapping, which the webapp packs to at most
 # match_batch_size site fragments, or one site when no mapping is given) for
-# one replicate:
-#   unit_index      = floor(array_index / N_REPLICATES)
-#   replicate_index = (array_index %% N_REPLICATES) + 1
+# one block of up to REPLICATE_BLOCK_SIZE replicates:
+#   n_blocks    = ceiling(N_REPLICATES / REPLICATE_BLOCK_SIZE)
+#   unit_index  = floor(array_index / n_blocks)
+#   block_index = array_index %% n_blocks
 #
-# Output, per site fragment {id} and replicate {k}:
-#   - {matches_dir}/m_{id}_rep{k}.rds          matched pixels
-#   - {matches_dir}/failed_{id}_rep{k}.json    failure marker
-#   - {matches_dir}/m_{id}_na_exclusion.json   missing-data exclusions
+# Output, one pair of files per batch (array element):
+#   - {matches_dir}/mb_{batch}.parquet  matched pixels of every fragment and
+#                                       replicate (id_numeric, replicate columns)
+#   - {matches_dir}/mb_{batch}.json     match diagnostics, failure markers and
+#                                       missing-data exclusions; written last,
+#                                       so its presence marks a complete batch
 
 library(dplyr, warn.conflicts = FALSE)
 library(optmatch)
@@ -49,6 +52,12 @@ CALIPER_WIDTH <- config$caliper_width
 MAX_CONTROLS <- config$max_controls_per_treatment
 RANDOM_SEED <- if (is.null(config$random_seed)) NULL else as.integer(config$random_seed)
 N_REPLICATES <- if (is.null(config$n_replicates)) 1L else as.integer(config$n_replicates)
+REPLICATE_BLOCK_SIZE <- if (is.null(config$replicate_block_size)) {
+    1L
+} else {
+    min(as.integer(config$replicate_block_size), N_REPLICATES)
+}
+N_BLOCKS <- as.integer(ceiling(N_REPLICATES / REPLICATE_BLOCK_SIZE))
 SEPARATION_FALLBACK <- isTRUE(config$separation_fallback_mahalanobis)
 EXACT_MATCH_VARS <- config$exact_match_vars
 MATCHING_METHOD <- if (is.null(config$matching_method)) "optimal" else config$matching_method
@@ -69,9 +78,8 @@ sites <- read_parquet(
     col_select = c("site_id", "site_name", "id_numeric", "sub_site_index", "start_year")
 ) %>% as_tibble()
 
-treatment_key <- read_parquet(file.path(config$output_dir, "treatment_cell_key.parquet"))
-treatment_table <- read_parquet(file.path(config$output_dir, "treatment_pixels.parquet")) %>%
-    as_tibble()
+treatment_key_dataset <- open_dataset(file.path(config$output_dir, "treatment_cell_key.parquet"))
+treatment_dataset <- open_dataset(file.path(config$output_dir, "treatment_pixels.parquet"))
 # Control pixels are a hive-partitioned Arrow dataset, streamed from S3 in
 # pipeline mode or read from local disk in all-in-one mode.
 control_pixels_uri <- if (!is.null(config$control_pixels_s3_uri)) {
@@ -88,7 +96,8 @@ f <- as.formula(formula_json$formula_str)
 # -- Work selection ----------------------------------------------------------
 
 select_work <- function() {
-    # Returns the site fragments and replicates this process should handle.
+    # Returns the site fragments and replicates this process should handle,
+    # and a batch name unique within the task for its output files.
     all_reps <- seq_len(N_REPLICATES)
     mapped <- if (is.null(GROUP_MAPPING)) {
         sites
@@ -98,25 +107,34 @@ select_work <- function() {
         filter(sites, paste(site_id, sub_site_index, sep = "\r") %in% keys)
     }
     if (!is.null(config$site_id)) {
-        return(list(sites = filter(mapped, site_id == config$site_id), replicates = all_reps))
+        return(list(sites = filter(mapped, site_id == config$site_id), replicates = all_reps,
+                    batch = paste0("site_", gsub("[^A-Za-z0-9_-]", "_", config$site_id))))
     }
     array_index <- Sys.getenv("AWS_BATCH_JOB_ARRAY_INDEX", "")
     if (array_index == "") {
-        return(list(sites = mapped, replicates = all_reps))
+        return(list(sites = mapped, replicates = all_reps, batch = "all"))
     }
     ai <- as.integer(array_index)
-    unit <- ai %/% N_REPLICATES + 1L
-    replicate <- ai %% N_REPLICATES + 1L
-    message("Array index ", ai, ": unit ", unit, ", replicate ", replicate)
+    unit <- ai %/% N_BLOCKS + 1L
+    block <- ai %% N_BLOCKS
+    replicates <- seq(block * REPLICATE_BLOCK_SIZE + 1L,
+                      min((block + 1L) * REPLICATE_BLOCK_SIZE, N_REPLICATES))
+    message("Array index ", ai, ": unit ", unit, ", replicate(s) ",
+            min(replicates), "-", max(replicates))
     if (is.null(GROUP_MAPPING)) {
         selected <- filter(sites, id_numeric == sort(sites$id_numeric)[unit])
+        unit_name <- paste0("s", selected$id_numeric[1])
     } else if (unit <= length(GROUP_MAPPING)) {
         keys <- vapply(GROUP_MAPPING[[unit]], function(m) paste(m[[1]], m[[2]], sep = "\r"), character(1))
         selected <- filter(sites, paste(site_id, sub_site_index, sep = "\r") %in% keys)
+        # Unit names are unique across match chunks; positions are not.
+        unit_name <- if (is.null(names(GROUP_MAPPING))) unit else names(GROUP_MAPPING)[unit]
     } else {
         selected <- sites[0, ]
+        unit_name <- paste0("none", unit)
     }
-    list(sites = selected, replicates = replicate)
+    list(sites = selected, replicates = replicates,
+         batch = paste0("u", unit_name, "_b", block + 1L))
 }
 
 
@@ -131,14 +149,18 @@ load_worker_pixels <- function(site_rows) {
         "cell", "area_ha", EXACT_MATCH_VARS, setdiff(all.vars(f), "treatment"),
         "total_biomass_2000", FC_COLS
     ))
-    tk <- treatment_key %>%
-        filter(id_numeric %in% site_rows$id_numeric) %>%
-        select(cell, id_numeric)
+    ids <- site_rows$id_numeric
+    tk <- treatment_key_dataset %>%
+        filter(id_numeric %in% ids) %>%
+        select(cell, id_numeric) %>%
+        collect()
+    cells <- unique(tk$cell)
     # The extract step encodes missing partition values as -1.
     partition_var <- EXACT_MATCH_VARS[1]
-    t_rows <- treatment_table %>%
-        filter(cell %in% tk$cell) %>%
+    t_rows <- treatment_dataset %>%
+        filter(cell %in% cells) %>%
         select(all_of(needed)) %>%
+        collect() %>%
         mutate(across(all_of(partition_var), ~ if_else(.x == -1L, NA, .x))) %>%
         inner_join(tk, by = "cell")
 
@@ -157,7 +179,7 @@ load_worker_pixels <- function(site_rows) {
         mutate(treatment = !is.na(id_numeric)) %>%
         filter(if_all(all_of(EXACT_MATCH_VARS), ~ !is.na(.x)))
     pixels$group <- interaction(pixels[EXACT_MATCH_VARS], drop = TRUE)
-    pixels
+    list(pixels = pixels, site_pixels = count(tk, id_numeric, name = "n"))
 }
 
 
@@ -280,59 +302,75 @@ match_strata <- function(d, f) {
 
 # -- Per-site processing -----------------------------------------------------
 
-match_file <- function(id, k) paste0("m_", id, "_rep", k, ".rds")
+# Results of this batch, written together at the end.
+batch_out <- new.env()
+batch_out$matches <- list()
+batch_out$failures <- list()
+batch_out$diagnostics <- list()
+batch_out$na_exclusions <- list()
+append_to <- function(name, x) batch_out[[name]][[length(batch_out[[name]]) + 1L]] <- x
 
-write_failure <- function(site, k, error, reason = "error", diagnostics = NULL) {
-    write_json(
-        list(
-            id_numeric = site$id_numeric, site_id = site$site_id,
-            site_name = site$site_name, replicate = k, error = error,
-            reason = reason, match_file = match_file(site$id_numeric, k),
-            group_diagnostics = diagnostics
-        ),
-        file.path(config$matches_dir, paste0("failed_", site$id_numeric, "_rep", k, ".json")),
-        auto_unbox = TRUE, pretty = TRUE, null = "null"
-    )
+record_failure <- function(site, k, error, reason = "error", diagnostics = NULL,
+                           n_forest_pixels = NA_integer_) {
+    append_to("failures", list(
+        id_numeric = site$id_numeric, site_id = site$site_id,
+        site_name = site$site_name, replicate = k, error = error,
+        reason = reason, n_forest_pixels = n_forest_pixels,
+        group_diagnostics = diagnostics
+    ))
 }
 
-write_na_exclusion <- function(site, vals, complete, required) {
+record_na_exclusion <- function(site, vals, complete, required) {
     na_counts <- vapply(required, function(v) sum(is.na(vals[[v]])), integer(1))
     pct <- function(x, n) if (n > 0) round(x / n * 100, 2) else 0
     n_t <- sum(vals$treatment)
     n_c <- sum(!vals$treatment)
     dropped_t <- sum(vals$treatment & !complete)
     dropped_c <- sum(!vals$treatment & !complete)
+    append_to("na_exclusions", list(
+        id_numeric = site$id_numeric, site_id = site$site_id,
+        site_name = site$site_name, sub_site_index = site$sub_site_index,
+        n_before_exclusion = nrow(vals), n_dropped = sum(!complete),
+        pct_excluded_overall = pct(sum(!complete), nrow(vals)),
+        n_treatment_before = n_t, n_treatment_dropped = dropped_t,
+        pct_treatment_excluded = pct(dropped_t, n_t),
+        n_control_before = n_c, n_control_dropped = dropped_c,
+        pct_control_excluded = pct(dropped_c, n_c),
+        variables_with_na = as.list(na_counts[na_counts > 0]),
+        substantial_exclusion = pct(sum(!complete), nrow(vals)) > 10 ||
+            pct(dropped_t, n_t) > 10
+    ))
+}
+
+write_batch <- function(batch) {
+    # The Parquet file is written before the JSON sidecar, each via a
+    # temporary file, so a complete sidecar implies complete matches.
+    stem <- file.path(config$matches_dir, paste0("mb_", batch))
+    matches_file <- NULL
+    if (length(batch_out$matches) > 0) {
+        matches_file <- paste0(basename(stem), ".parquet")
+        tmp <- paste0(stem, ".parquet.tmp")
+        write_parquet(bind_rows(batch_out$matches), tmp)
+        if (!file.rename(tmp, paste0(stem, ".parquet"))) stop("Could not write ", stem, ".parquet")
+    }
+    tmp <- paste0(stem, ".json.tmp")
     write_json(
-        list(
-            id_numeric = site$id_numeric, site_id = site$site_id,
-            site_name = site$site_name, sub_site_index = site$sub_site_index,
-            n_before_exclusion = nrow(vals), n_dropped = sum(!complete),
-            pct_excluded_overall = pct(sum(!complete), nrow(vals)),
-            n_treatment_before = n_t, n_treatment_dropped = dropped_t,
-            pct_treatment_excluded = pct(dropped_t, n_t),
-            n_control_before = n_c, n_control_dropped = dropped_c,
-            pct_control_excluded = pct(dropped_c, n_c),
-            variables_with_na = as.list(na_counts[na_counts > 0]),
-            substantial_exclusion = pct(sum(!complete), nrow(vals)) > 10 ||
-                pct(dropped_t, n_t) > 10
-        ),
-        file.path(config$matches_dir, paste0("m_", site$id_numeric, "_na_exclusion.json")),
-        auto_unbox = TRUE, pretty = TRUE
+        list(batch = batch, matches_file = matches_file, failures = batch_out$failures,
+             diagnostics = batch_out$diagnostics, na_exclusions = batch_out$na_exclusions),
+        tmp, auto_unbox = TRUE, null = "null", na = "null", digits = NA
     )
+    if (!file.rename(tmp, paste0(stem, ".json"))) stop("Could not write ", stem, ".json")
 }
 
 replicate_seed <- function(id, k) {
     bitwXor(RANDOM_SEED, bitwXor(bitwShiftL(as.integer(id) %% 65536L, 10L), as.integer(k)))
 }
 
-process_site <- function(site, pixels, replicates) {
+process_site <- function(site, pixels, n_site_pixels, replicates) {
     this_id <- site$id_numeric
-    todo <- replicates[!file.exists(file.path(config$matches_dir, match_file(this_id, replicates)))]
-    if (length(todo) == 0) return(invisible())
     message("  Site ", site$site_id, " (fragment ", site$sub_site_index,
-            ", id ", this_id, "), replicate(s) ", paste(todo, collapse = ","))
+            ", id ", this_id, "), replicate(s) ", paste(range(replicates), collapse = "-"))
 
-    n_site_pixels <- sum(treatment_key$id_numeric == this_id)
     # This site's treatment pixels and the controls in its strata only.
     is_site <- pixels$treatment & pixels$id_numeric %in% this_id
     vals <- pixels[is_site | (!pixels$treatment & pixels$group %in% pixels$group[is_site]), ]
@@ -348,14 +386,25 @@ process_site <- function(site, pixels, replicates) {
     # the site's baseline year (pixels without forest cannot lose any).
     required <- unique(c(setdiff(all.vars(this_f), "treatment"), "total_biomass_2000", FC_COLS))
     complete <- complete.cases(vals[required])
-    write_na_exclusion(site, vals, complete, required)
+    record_na_exclusion(site, vals, complete, required)
     baseline <- paste0("fc_", baseline_year(site$start_year, min(FC_YEARS)))
-    vals <- vals[complete & vals[[baseline]] > 0, ]
+    forest <- !is.na(vals[[baseline]]) & vals[[baseline]] > 0
+    n_forest_pixels <- sum(vals$treatment & forest)
+    if (n_forest_pixels == 0) {
+        for (k in replicates) {
+            record_failure(site, k, paste0("No forest at the ", baseline, " baseline"),
+                           reason = "no_eligible_treatment", n_forest_pixels = 0L)
+        }
+        return(invisible())
+    }
+    vals <- vals[complete & forest, ]
     vals <- filter_groups(vals, EXACT_MATCH_VARS)
     if (sum(vals$treatment) == 0 || sum(!vals$treatment) == 0) {
         msg <- paste0("No overlapping exact-match strata between eligible treatment and ",
                       "control pixels (T=", sum(vals$treatment), ", C=", sum(!vals$treatment), ")")
-        for (k in todo) write_failure(site, k, msg, reason = "no_overlap")
+        for (k in replicates) {
+            record_failure(site, k, msg, reason = "no_overlap", n_forest_pixels = n_forest_pixels)
+        }
         return(invisible())
     }
     eligible <- vals %>%
@@ -367,15 +416,16 @@ process_site <- function(site, pixels, replicates) {
         "area_ha", "total_biomass_2000", FC_COLS, setdiff(all.vars(this_f), "treatment")
     ))
 
-    for (k in todo) {
+    for (k in replicates) {
         if (!is.null(RANDOM_SEED)) set.seed(replicate_seed(this_id, k))
         sampled <- sample_strata(vals, MAX_TREATMENT, CONTROL_MULTIPLIER)
         res <- match_strata(sampled, this_f)
         if (is.null(res$result)) {
-            write_failure(site, k, paste0(
+            record_failure(site, k, paste0(
                 "No matches found (treatment=", sum(sampled$treatment),
                 ", control=", sum(!sampled$treatment), ")"
-            ), reason = "no_matches", diagnostics = res$diagnostics)
+            ), reason = "no_matches", diagnostics = res$diagnostics,
+            n_forest_pixels = n_forest_pixels)
             next
         }
         # Stratum weights scale matched treatment pixels (and their controls)
@@ -391,14 +441,16 @@ process_site <- function(site, pixels, replicates) {
             mutate(
                 id_numeric = this_id, site_id = site$site_id, replicate = k,
                 n_site_pixels = n_site_pixels,
+                n_forest_pixels = n_forest_pixels,
                 n_eligible = sum(eligible$n_eligible),
                 n_sampled = sum(sampled$treatment),
                 n_matched = sum(treatment),
                 n_control_pool = sum(!vals$treatment),
                 n_control_sampled = sum(!sampled$treatment)
             )
-        attr(m, "group_diagnostics") <- res$diagnostics
-        saveRDS(m, file.path(config$matches_dir, match_file(this_id, k)))
+        append_to("matches", m)
+        append_to("diagnostics", list(id_numeric = this_id, replicate = k,
+                                      group_diagnostics = res$diagnostics))
         message("    Replicate ", k, ": ", sum(m$treatment), " of ",
                 sum(sampled$treatment), " sampled treatment pixels matched")
     }
@@ -408,25 +460,33 @@ process_site <- function(site, pixels, replicates) {
 # -- Main --------------------------------------------------------------------
 
 work <- select_work()
-message("Processing ", nrow(work$sites), " site fragment(s)")
-if (nrow(work$sites) > 0) {
-    pixels <- load_worker_pixels(work$sites)
-    for (i in seq_len(nrow(work$sites))) {
-        site <- work$sites[i, ]
-        tryCatch(
-            process_site(site, pixels, work$replicates),
-            error = function(e) {
-                msg <- conditionMessage(e)
-                message("  ERROR for site ", site$site_id, ": ", msg)
-                rollbar_report_error(msg)
-                done <- file.exists(file.path(
-                    config$matches_dir, match_file(site$id_numeric, work$replicates)
-                ))
-                for (k in work$replicates[!done]) write_failure(site, k, msg)
-            }
-        )
-        gc()
+message("Processing ", nrow(work$sites), " site fragment(s) as batch ", work$batch)
+if (file.exists(file.path(config$matches_dir, paste0("mb_", work$batch, ".json")))) {
+    message("Batch ", work$batch, " is already complete; skipping")
+} else {
+    if (nrow(work$sites) > 0) {
+        loaded <- load_worker_pixels(work$sites)
+        for (i in seq_len(nrow(work$sites))) {
+            site <- work$sites[i, ]
+            n_site_pixels <- sum(loaded$site_pixels$n[loaded$site_pixels$id_numeric == site$id_numeric])
+            n_before <- length(batch_out$matches)
+            n_diag_before <- length(batch_out$diagnostics)
+            tryCatch(
+                process_site(site, loaded$pixels, n_site_pixels, work$replicates),
+                error = function(e) {
+                    msg <- conditionMessage(e)
+                    message("  ERROR for site ", site$site_id, ": ", msg)
+                    rollbar_report_error(msg)
+                    # Drop partial results so the fragment fails as a whole.
+                    batch_out$matches <- batch_out$matches[seq_len(n_before)]
+                    batch_out$diagnostics <- batch_out$diagnostics[seq_len(n_diag_before)]
+                    for (k in work$replicates) record_failure(site, k, msg)
+                }
+            )
+            gc()
+        }
     }
+    write_batch(work$batch)
 }
 
 message("[TIMING] Step 2 total: ", round((proc.time() - step2_timer)["elapsed"], 1), "s")

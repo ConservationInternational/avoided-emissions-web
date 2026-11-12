@@ -24,10 +24,12 @@ import os
 import subprocess
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import boto3
 from bootstrap import ensure_scripts_dir_on_path
+from botocore.config import Config
 from te_schemas.analysis import AnalysisRecord, AnalysisResults, AnalysisTimeStep
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,8 @@ REQUIRES_GEE = False
 
 R_SCRIPTS_DIR = os.environ.get("R_SCRIPTS_DIR", "/app/scripts")
 R_STEP_TIMEOUT = int(os.environ.get("R_STEP_TIMEOUT", "14400"))
+# Concurrent S3 transfers for prefix uploads and downloads.
+S3_TRANSFER_WORKERS = int(os.environ.get("S3_TRANSFER_WORKERS", "32"))
 
 STEP_SCRIPTS = {
     "extract": "01_extract_covariates.py",
@@ -261,6 +265,8 @@ def run(params, log=None):
         config["random_seed"] = int(params["random_seed"])
     if params.get("n_replicates") is not None:
         config["n_replicates"] = int(params["n_replicates"])
+    if params.get("replicate_block_size") is not None:
+        config["replicate_block_size"] = int(params["replicate_block_size"])
     if params.get("matching_extent"):
         config["matching_extent"] = params["matching_extent"]
     if params.get("sites_exclusion_buffer"):
@@ -355,7 +361,7 @@ def run(params, log=None):
                     "Match step failed — writing failure marker: %s",
                     exc,
                 )
-                _write_match_failure_marker(matches_dir, str(exc), log)
+                _write_match_failure_marker(matches_dir, s, str(exc), log)
         else:
             _run_r_script(
                 script_path,
@@ -480,7 +486,7 @@ def _run_r_script(script_path, config_path, site_id, log):
         )
 
 
-def _write_match_failure_marker(matches_dir, error_msg, log):
+def _write_match_failure_marker(matches_dir, step, error_msg, log):
     """Write a worker-level failure marker after the R subprocess crashed.
 
     One array element can process several site fragments, so the marker does
@@ -490,10 +496,12 @@ def _write_match_failure_marker(matches_dir, error_msg, log):
     array_index = os.environ.get("AWS_BATCH_JOB_ARRAY_INDEX", "unknown")
     marker = {
         "array_index": array_index,
+        "step": step,
         "error": error_msg,
         "timestamp": datetime.now(tz=UTC).isoformat(),
     }
-    path = os.path.join(matches_dir, f"failed_array_{array_index}.json")
+    # Each match chunk is its own array job, so the step keeps names unique.
+    path = os.path.join(matches_dir, f"failed_array_{step}_{array_index}.json")
     with open(path, "w") as f:
         json.dump(marker, f)
     log.info("Failure marker written to %s", path)
@@ -532,22 +540,46 @@ def _parse_s3_uri(uri):
 # ---------------------------------------------------------------------------
 
 
+def _s3_client():
+    """S3 client sized for concurrent transfers, with adaptive retries."""
+    return boto3.client(
+        "s3",
+        config=Config(
+            max_pool_connections=S3_TRANSFER_WORKERS,
+            retries={"max_attempts": 10, "mode": "adaptive"},
+        ),
+    )
+
+
+def _run_transfers(transfer, items, description, log):
+    """Run *transfer* for every item concurrently; raise on any failure."""
+    with ThreadPoolExecutor(max_workers=S3_TRANSFER_WORKERS) as pool:
+        for n, _ in enumerate(pool.map(transfer, items), 1):
+            if n % 1000 == 0:
+                log.info("%s: %d of %d files", description, n, len(items))
+    return len(items)
+
+
 def _upload_to_s3_prefix(local_dir, s3_uri, log):
     """Upload all files under *local_dir* to the S3 prefix in *s3_uri*.
 
     Walks subdirectories and preserves the relative path structure.
     """
     bucket, prefix = _parse_s3_uri(s3_uri)
-    s3 = boto3.client("s3")
-    count = 0
+    s3 = _s3_client()
+    items = []
     for root, _dirs, files in os.walk(local_dir):
         for fname in files:
             local_path = os.path.join(root, fname)
             rel = os.path.relpath(local_path, local_dir)
-            key = f"{prefix}/{rel}".replace("\\", "/")
-            log.info("Uploading %s → s3://%s/%s", local_path, bucket, key)
-            s3.upload_file(local_path, bucket, key)
-            count += 1
+            items.append((local_path, f"{prefix}/{rel}".replace("\\", "/")))
+
+    def upload(item):
+        local_path, key = item
+        log.debug("Uploading %s → s3://%s/%s", local_path, bucket, key)
+        s3.upload_file(local_path, bucket, key)
+
+    count = _run_transfers(upload, items, "Uploading", log)
     log.info("Uploaded %d files to s3://%s/%s", count, bucket, prefix)
 
 
@@ -558,20 +590,24 @@ def _download_s3_prefix(s3_uri, local_dir, log):
     """
     bucket, prefix = _parse_s3_uri(s3_uri)
     prefix = prefix.rstrip("/")
-    s3 = boto3.client("s3")
+    s3 = _s3_client()
     paginator = s3.get_paginator("list_objects_v2")
-    count = 0
+    items = []
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             rel = key[len(prefix) :].lstrip("/")
-            if not rel:
-                continue
-            local_path = os.path.join(local_dir, rel)
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            log.info("Downloading s3://%s/%s → %s", bucket, key, local_path)
-            s3.download_file(bucket, key, local_path)
-            count += 1
+            if rel:
+                items.append((key, os.path.join(local_dir, rel)))
+    for directory in {os.path.dirname(path) for _key, path in items}:
+        os.makedirs(directory, exist_ok=True)
+
+    def download(item):
+        key, local_path = item
+        log.debug("Downloading s3://%s/%s → %s", bucket, key, local_path)
+        s3.download_file(bucket, key, local_path)
+
+    count = _run_transfers(download, items, "Downloading", log)
     log.info("Downloaded %d files from s3://%s/%s", count, bucket, prefix)
 
 

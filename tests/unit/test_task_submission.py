@@ -13,7 +13,11 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
-from services.analysis_task import _pack_match_units, queue_analysis_task
+from services.analysis_task import (
+    _pack_match_units,
+    _replicate_blocks,
+    queue_analysis_task,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -261,6 +265,25 @@ def test_pack_match_units_bounds_large_groups_without_losing_fragments(batch_siz
     assert [member for members in units.values() for member in members] == (
         groups[1] + groups[2]
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("n_replicates", "block_size", "expected"),
+    [(1, 10, (1, 1)), (100, 10, (10, 10)), (25, 10, (10, 3)), (7, 0, (1, 7))],
+)
+def test_replicate_blocks_cover_every_replicate_once(
+    n_replicates, block_size, expected
+):
+    size, n_blocks = _replicate_blocks(n_replicates, block_size)
+    assert (size, n_blocks) == expected
+    # Same block layout as select_work() in 02_perform_matching.R.
+    replicates = [
+        k
+        for block in range(n_blocks)
+        for k in range(block * size + 1, min((block + 1) * size, n_replicates) + 1)
+    ]
+    assert replicates == list(range(1, n_replicates + 1))
 
 
 @pytest.mark.unit

@@ -57,6 +57,10 @@ DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-gp3"
 # Submitting more than this causes a ClientException at SubmitJob time.
 BATCH_MAX_ARRAY_SIZE = 10_000
 
+# Warn when more than this share of the site area has no exact-match region
+# (e.g. marine sites) and so cannot be matched.
+UNCOVERED_AREA_WARNING_FRACTION = 0.2
+
 # -- Analysis task default settings ------------------------------------------
 # Single source of truth for matching parameter defaults.  Imported by
 # layouts.py (UI form pre-fill) and callbacks.py (server-side fallbacks).
@@ -74,6 +78,9 @@ ANALYSIS_DEFAULTS = {
     "matching_method": "optimal",
     "n_replicates": 1,
     "match_batch_size": 25,
+    # Replicates matched by one Batch array element, which loads its pixels
+    # once for the whole block.
+    "replicate_block_size": 10,
     "match_memory_gb": 30,
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
     "fc_year_start": FC_YEAR_MIN,
@@ -96,6 +103,16 @@ def _pack_match_units(group_mapping, batch_size):
         i // batch_size + 1: fragments[i : i + batch_size]
         for i in range(0, len(fragments), batch_size)
     }
+
+
+def _replicate_blocks(n_replicates, block_size):
+    """Return ``(block_size, n_blocks)`` for splitting replicates across workers.
+
+    Each Batch array element matches one unit for one block of replicates;
+    the R matching step derives the same blocks from ``replicate_block_size``.
+    """
+    block_size = max(1, min(int(block_size), int(n_replicates)))
+    return block_size, -(-int(n_replicates) // block_size)
 
 
 def queue_analysis_task(
@@ -683,14 +700,36 @@ def _complete_analysis_task_submission(task_id, user_id):
                     for sid, sub in zip(_sid_arr, _sub_idx_arr, strict=True)
                 ]
             )
+        _fragment_area = float(_areas_ha_arr.sum())
+        _uncovered_area = float(_areas_ha_arr[~assigned_mask].sum())
+        _warnings = []
+        if (
+            _fragment_area > 0
+            and _uncovered_area / _fragment_area > UNCOVERED_AREA_WARNING_FRACTION
+        ):
+            _warnings.append(
+                {
+                    "code": "large_uncovered_area",
+                    "message": (
+                        f"{_uncovered_area / _fragment_area:.0%} of the site area "
+                        f"({_uncovered_area:,.0f} ha) has no exact-match region "
+                        "(for example marine areas) and will not be matched. "
+                        "Consider removing these sites before upload."
+                    ),
+                }
+            )
+            logger.warning(
+                "[SUBMIT-WORKER] Task %s: %s", task_id, _warnings[-1]["message"]
+            )
         task.extra_metadata = {
             **(task.extra_metadata or {}),
             "preparation": {
                 **preparation,
                 "fragments": len(gdf_for_db),
-                "fragment_area_ha": float(_areas_ha_arr.sum()),
+                "fragment_area_ha": _fragment_area,
                 "covered_area_ha": float(_areas_ha_arr[assigned_mask].sum()),
-                "uncovered_area_ha": float(_areas_ha_arr[~assigned_mask].sum()),
+                "uncovered_area_ha": _uncovered_area,
+                "warnings": _warnings,
                 "reassigned_area_ha": 0.0,
                 "unmatched_fragments": int((~assigned_mask).sum()),
                 "excluded_from_matching_sites": len(
@@ -731,7 +770,7 @@ def _complete_analysis_task_submission(task_id, user_id):
 
         # Determine match units and pre-compute match pipeline steps.  Each
         # Batch array element matches one unit (at most match_batch_size site
-        # fragments, see _pack_match_units) for one replicate.
+        # fragments, see _pack_match_units) for one block of replicates.
         #
         # Group 0 holds sites with no exact-match region assignment (all polygon
         # exact_match_vars were NULL for that site).  Exclude group 0 from the
@@ -756,7 +795,10 @@ def _complete_analysis_task_submission(task_id, user_id):
         )
         # Without a group mapping each site fragment is its own unit.
         _n_match_units = len(match_units) if match_units else len(gdf_for_db)
-        _raw_array_size = _n_match_units * n_replicates
+        _block_size, _n_blocks = _replicate_blocks(
+            n_replicates, ANALYSIS_DEFAULTS["replicate_block_size"]
+        )
+        _raw_array_size = _n_match_units * _n_blocks
         _match_step_base = {
             "timeout_seconds": 14400,  # 4 h per element
             "memory_mib": match_memory_mib,
@@ -775,8 +817,8 @@ def _complete_analysis_task_submission(task_id, user_id):
             _match_chunks = None
         else:
             # Each chunk may contain at most this many match units, so that
-            # units * n_replicates <= BATCH_MAX_ARRAY_SIZE.
-            _units_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // n_replicates)
+            # units * n_blocks <= BATCH_MAX_ARRAY_SIZE.
+            _units_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // _n_blocks)
             _unit_ids = (
                 list(match_units) if match_units else list(range(_n_match_units))
             )
@@ -788,7 +830,7 @@ def _complete_analysis_task_submission(task_id, user_id):
                 {
                     "name": f"match_chunk_{i}",
                     "command": [f"match_chunk_{i}"],
-                    "array_size": len(chunk) * n_replicates,
+                    "array_size": len(chunk) * _n_blocks,
                     **_match_step_base,
                 }
                 for i, chunk in enumerate(_chunks)
@@ -831,6 +873,7 @@ def _complete_analysis_task_submission(task_id, user_id):
             "separation_fallback_mahalanobis": bool(separation_fallback_mahalanobis),
             "matching_method": matching_method,
             "n_replicates": n_replicates,
+            "replicate_block_size": _block_size,
             **(
                 {"sites_exclusion_buffer": sites_exclusion_buffer}
                 if sites_exclusion_buffer
@@ -868,8 +911,8 @@ def _complete_analysis_task_submission(task_id, user_id):
                         {
                             "name": "summarize",
                             "command": ["summarize"],
-                            "timeout_seconds": 7200,  # 2 h
-                            "memory_mib": max(16384, match_memory_mib // 2),
+                            "timeout_seconds": 21600,  # 6 h
+                            "memory_mib": max(32768, match_memory_mib),
                             "vcpus": 2,
                             "retry_attempts": 3,
                         },

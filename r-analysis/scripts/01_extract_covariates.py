@@ -440,8 +440,16 @@ def _treatment_memberships(sites, transform, width, height, ys, xres, yres):
     from rasterio.windows import transform as window_transform
 
     frames = []
-    for row in sites.itertuples():
-        window = from_bounds(*row.geometry.bounds, transform=transform)
+    # Window each polygon part separately: a MultiPolygon with parts on both
+    # sides of the antimeridian would otherwise scan the full grid width.
+    parts = [
+        (part, row)
+        for row in sites.itertuples()
+        for part in getattr(row.geometry, "geoms", [row.geometry])
+        if part is not None and not part.is_empty
+    ]
+    for part, row in parts:
+        window = from_bounds(*part.bounds, transform=transform)
         left = max(0, int(np.floor(window.col_off)))
         top = max(0, int(np.floor(window.row_off)))
         right = min(width, int(np.ceil(window.col_off + window.width)))
@@ -455,7 +463,7 @@ def _treatment_memberships(sites, transform, width, height, ys, xres, yres):
                 end = min(col + 512, right)
                 tile = Window(col, start, end - col, stop - start)
                 mask = rasterize(
-                    [(row.geometry, 1)],
+                    [(part, 1)],
                     out_shape=(stop - start, end - col),
                     transform=window_transform(tile, transform),
                     fill=0,
@@ -485,12 +493,35 @@ def _treatment_memberships(sites, transform, width, height, ys, xres, yres):
                 "area_ha": pd.Series(dtype="float64"),
             }
         )
-    return pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True).drop_duplicates(
+        ["cell", "id_numeric"], ignore_index=True
+    )
 
 
 # ---------------------------------------------------------------------------
 # Core extraction logic (GDAL + xarray)
 # ---------------------------------------------------------------------------
+
+
+def _mapped_fragment_ids(config: dict, sites: gpd.GeoDataFrame) -> np.ndarray:
+    """``id_numeric`` of fragments in the exact-match group mapping.
+
+    Fragments outside the mapping (no exact-match region) are never matched,
+    so their pixels are not extracted as treatment.  Without a mapping every
+    fragment is matched.
+    """
+    mapping_ = config.get("exact_match_group_mapping")
+    if not mapping_:
+        return sites["id_numeric"].to_numpy()
+    units = mapping_.values() if isinstance(mapping_, dict) else mapping_
+    keys = {(str(s), int(i)) for unit in units for s, i in unit}
+    fragment_keys = zip(
+        sites["site_id"].astype(str), sites["sub_site_index"].astype(int)
+    )
+    mapped = np.fromiter(
+        (k in keys for k in fragment_keys), dtype=bool, count=len(sites)
+    )
+    return sites["id_numeric"].to_numpy()[mapped]
 
 
 def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
@@ -580,13 +611,28 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         )
 
     log.info("Building sparse treatment cell membership...")
+    # The key keeps every fragment so the summary can count pixels of
+    # fragments that are not matched (e.g. no exact-match region).
     treatment_key = _treatment_memberships(
         sites, transform, width, height, ys, xres, yres
     )
-    treatment_indices = np.unique(treatment_key["cell"].to_numpy(dtype=np.int64))
+    site_mask = np.zeros(height * width, dtype=bool)
+    site_mask[treatment_key["cell"].to_numpy(dtype=np.int64)] = True
+    mapped_ids = _mapped_fragment_ids(config, sites)
+    matched_key = treatment_key[treatment_key["id_numeric"].isin(mapped_ids)]
+    treatment_indices = np.unique(matched_key["cell"].to_numpy(dtype=np.int64))
+    del matched_key
     treatment_mask = np.zeros(height * width, dtype=bool)
     treatment_mask[treatment_indices] = True
-    log.info("Treatment cells: %d", len(treatment_key))
+    log.info(
+        "Treatment cells: %d memberships; %d cells in %d matched fragment(s) "
+        "(%d of %d fragments are not matched)",
+        len(treatment_key),
+        len(treatment_indices),
+        len(mapped_ids),
+        len(sites) - len(mapped_ids),
+        len(sites),
+    )
 
     # --- 6. determine candidate control pixels ---
     # Rasterize the matching extent polygon to identify the area
@@ -623,6 +669,9 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         )
         in_extent &= near_sites == 0
         del near_sites
+    # No pixel inside any site, matched or not, may serve as a control.
+    in_extent &= ~site_mask
+    del site_mask
     candidate_mask = in_extent | treatment_mask
     del in_extent, treatment_mask  # free boolean arrays
 
@@ -681,7 +730,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         # Keep pixels that either belong to a treatment site (unconditionally)
         # or had some tree cover in the baseline year.  Hansen GFC encodes
         # water/non-land as 0, so ref_vals > 0 is correct.
-        _is_treatment = np.isin(candidate_indices, treatment_key["cell"].values)
+        _is_treatment = np.isin(candidate_indices, treatment_indices)
         _keep = _is_treatment | (_ref_vals > 0)
         del _is_treatment
         n_before = len(candidate_indices)
@@ -838,10 +887,21 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         return written
 
     # Treatment membership mask (numpy bool, ~N bytes).
-    _treatment_mask = np.isin(data["cell"], treatment_key["cell"].to_numpy())
+    _treatment_mask = np.isin(data["cell"], treatment_indices)
 
-    # 1. treatment_pixels.parquet -- all columns, all treatment rows.
-    _treatment_idx = np.flatnonzero(_treatment_mask)
+    # Treatment pixels without forest in any year can never be eligible for
+    # matching, whatever the site's baseline year, so they are not written.
+    _ever_forest = np.zeros(len(data["cell"]), dtype=bool)
+    for _col in [c for c in _all_cols if c.startswith("fc_")]:
+        _ever_forest |= np.nan_to_num(data[_col], nan=0.0) > 0
+
+    # 1. treatment_pixels.parquet -- all columns, treatment rows with forest.
+    _treatment_idx = np.flatnonzero(_treatment_mask & _ever_forest)
+    log.info(
+        "Dropping %d never-forested treatment pixels",
+        int(np.count_nonzero(_treatment_mask & ~_ever_forest)),
+    )
+    del _ever_forest
     _n_treatment = _write_rows_blocked(
         data,
         os.path.join(output_dir, "treatment_pixels.parquet"),
@@ -999,13 +1059,46 @@ def _load_reference_layer(
     return gdf
 
 
+def _used_region_ids(sites_gdf: gpd.GeoDataFrame, polygon_vars: list[str]):
+    """Region IDs of fragments assigned to every polygon var, or None."""
+    if not all(v in sites_gdf.columns for v in polygon_vars):
+        return None
+    mapped = sites_gdf[polygon_vars].notna().all(axis=1)
+    if not mapped.any():
+        return None
+    return {v: set(sites_gdf.loc[mapped, v].astype(str).unique()) for v in polygon_vars}
+
+
+def _regions_for_extent(ref_gdf, sites_bbox, used_ids):
+    """Reference features that can hold controls for the used strata.
+
+    With known region IDs this is the used regions plus their neighbours:
+    raster stratum values of fragment edge pixels can fall in an adjacent
+    region.  Otherwise every feature in the sites bbox is used.
+    """
+    if used_ids is None or "region_id" not in ref_gdf.columns:
+        return ref_gdf[ref_gdf.intersects(sites_bbox)]
+    used = ref_gdf[ref_gdf["region_id"].astype(str).isin(used_ids)]
+    if used.empty:
+        return used
+    idx = ref_gdf.sindex.query(
+        used.geometry.make_valid().to_numpy(), predicate="intersects"
+    )[1]
+    return ref_gdf.iloc[np.unique(idx)]
+
+
 def compute_matching_extent(
     sites_gdf: gpd.GeoDataFrame,
     exact_match_vars: list[str],
     reference_layer_uris: dict[str, str],
     tmp_dir: str,
 ) -> dict | None:
-    """Return the intersection of reference-layer unions within the sites bbox."""
+    """Return the intersection of reference-layer unions for the analysis.
+
+    Each layer contributes the regions used by mapped fragments and their
+    neighbours when fragments carry region IDs, else all features within the
+    sites bbox.
+    """
     polygon_vars = [
         v for v in exact_match_vars if v in _POLYGON_VARS and v in reference_layer_uris
     ]
@@ -1016,6 +1109,7 @@ def compute_matching_extent(
     minx, miny, maxx, maxy = sites_gdf.total_bounds
     pad = 0.1
     sites_bbox = box(minx - pad, miny - pad, maxx + pad, maxy + pad)
+    used_region_ids = _used_region_ids(sites_gdf, polygon_vars)
 
     # Download all reference layers in parallel — each is an independent
     # S3 read that can proceed concurrently with the others.
@@ -1023,12 +1117,17 @@ def compute_matching_extent(
         ref_gdf = _load_reference_layer(
             reference_layer_uris[var_name], tmp_dir, var_name
         )
-        filtered = ref_gdf[ref_gdf.intersects(sites_bbox)].copy()
+        filtered = _regions_for_extent(
+            ref_gdf,
+            sites_bbox,
+            None if used_region_ids is None else used_region_ids[var_name],
+        )
         log.info(
-            "Reference layer '%s': %d/%d features intersect sites bbox",
+            "Reference layer '%s': %d/%d features selected (%s)",
             var_name,
             len(filtered),
             len(ref_gdf),
+            "used regions + neighbours" if used_region_ids else "sites bbox",
         )
         if filtered.empty:
             log.warning(
@@ -1074,6 +1173,47 @@ def compute_matching_extent(
     return mapping(result)
 
 
+def _split_at_antimeridian(geom) -> list:
+    """Return pieces of a lon-wrapped geometry translated into [-180, 180]."""
+    from shapely.affinity import translate
+
+    if not geom.is_valid:
+        geom = make_valid(geom)
+    pieces = []
+    for offset in (-360.0, 0.0, 360.0):
+        window = box(-180.0 - offset, -90.0, 180.0 - offset, 90.0)
+        if not geom.intersects(window):
+            continue
+        piece = geom.intersection(window)
+        if piece.is_empty or piece.area == 0:
+            continue
+        pieces.append(translate(piece, xoff=offset) if offset else piece)
+    return pieces
+
+
+def _check_buffer_width(buffered, source, distance_km: float) -> None:
+    """Fail loudly if a buffer is far wider than its source plus the buffer.
+
+    A buffer torn across the antimeridian turns into a band around the globe,
+    which would silently exclude every control at that latitude.
+    """
+    if buffered.is_empty:
+        raise ValueError("Exclusion buffer for a site is empty")
+    minx, miny, maxx, maxy = buffered.bounds
+    max_abs_lat = min(max(abs(miny), abs(maxy)), 89.0)
+    if max_abs_lat > 85.0:
+        return  # Near the poles a legitimate buffer can span all longitudes.
+    km_per_deg = 111.32 * math.cos(math.radians(max_abs_lat))
+    allowed = (source.bounds[2] - source.bounds[0]) + 2 * distance_km / km_per_deg
+    if (maxx - minx) > allowed + 1.0:
+        raise ValueError(
+            f"Exclusion buffer spans {maxx - minx:.2f} degrees of longitude but "
+            f"its site spans {source.bounds[2] - source.bounds[0]:.2f}; refusing a "
+            "buffer that would wrap around the globe (site bounds "
+            f"{tuple(round(v, 4) for v in source.bounds)})"
+        )
+
+
 def compute_sites_exclusion_buffer(
     sites_gdf: gpd.GeoDataFrame,
     distance_km: float,
@@ -1106,12 +1246,20 @@ def compute_sites_exclusion_buffer(
     buffered = []
     for (lon, lat), geoms in local_groups.items():
         local_crs = f"+proj=aeqd +lat_0={lat} +lon_0={lon} +datum=WGS84 +units=m"
-        projected = gpd.GeoSeries(geoms, crs="EPSG:4326").to_crs(local_crs)
-        buffered.extend(
+        # Longitudes continuous around the group centre, so buffers that cross
+        # the antimeridian are not torn into 360-degree-wide invalid polygons.
+        wrapped_crs = f"+proj=longlat +datum=WGS84 +lon_wrap={lon} +no_defs"
+        source = gpd.GeoSeries(geoms, crs="EPSG:4326")
+        projected = source.to_crs(local_crs)
+        wrapped = (
             projected.simplify(min(100.0, distance_m / 100), preserve_topology=True)
             .buffer(distance_m)
-            .to_crs("EPSG:4326")
+            .to_crs(wrapped_crs)
         )
+        source_wrapped = source.to_crs(wrapped_crs)
+        for geom, src in zip(wrapped, source_wrapped):
+            _check_buffer_width(geom, src, distance_km)
+            buffered.extend(_split_at_antimeridian(geom))
     result = make_valid(unary_union(buffered))
     if result is None or result.is_empty:
         raise ValueError("Exclusion buffer is empty after reprojection")

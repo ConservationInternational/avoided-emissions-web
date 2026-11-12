@@ -68,6 +68,12 @@ def _build_preparation_summary(task):
                 className="row",
             )
             for key, value in preparation.items()
+            if key != "warnings"
+        ]
+        alerts = [
+            dbc.Alert(w.get("message", ""), color="warning", className="py-2")
+            for w in preparation.get("warnings") or []
+            if isinstance(w, dict)
         ]
         links = [
             html.A(
@@ -91,6 +97,7 @@ def _build_preparation_summary(task):
                 "Areas are hectares; the report records reference versions and exclusions.",
                 className="small text-muted",
             ),
+            *alerts,
             html.Dl(fields),
             html.Div(links),
         ]
@@ -1055,9 +1062,15 @@ _FILE_DESCRIPTIONS = {
     "formula.json": "Propensity score model formula used for matching",
     "grid_metadata.json": "Raster grid dimensions and affine transform",
     "results_by_site_total.csv": "Avoided emissions totals per site",
+    "results_by_site_replicate_total.csv": (
+        "Avoided emissions totals per site and matching replicate"
+    ),
+    "results_site_status.csv": "Estimation status of every site",
     "results_by_site_year.csv": "Avoided emissions per site per year",
     "results_covariate_balance.csv": "Covariate balance SMD statistics (Love plot)",
-    "results_failed_sites.csv": "Sites that failed matching with reasons",
+    "results_failed_sites.csv": (
+        "Site fragments that were not estimated, with status and reason"
+    ),
     "results_match_quality_summary.json": "Match quality diagnostics per site",
     "results_pixel_covariates.csv": "Covariate values for each matched pixel",
     "results_pixel_locations.csv": "Lon/lat coordinates for matched pixels (map)",
@@ -1107,11 +1120,11 @@ def _build_raw_results(task):
     rows = []
     for f in sorted(files, key=lambda x: x["filename"]):
         desc = _FILE_DESCRIPTIONS.get(f["filename"], "")
-        # Match files inside subdirectories (e.g. matches/m_1.rds)
+        # Match files inside subdirectories (e.g. matches/mb_u1_b1.parquet)
         if not desc and "/" in f["filename"]:
             prefix = f["filename"].split("/")[0]
             if prefix == "matches":
-                desc = "Serialized R match object for one site"
+                desc = "Matched pixels or diagnostics for one match batch"
         rows.append(
             html.Tr(
                 [
