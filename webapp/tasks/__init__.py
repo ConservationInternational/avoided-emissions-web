@@ -27,6 +27,7 @@ from tasks.site_upload import (  # noqa: F401
     audit_site_upload_stages,
     import_user_site_upload_task,
     recover_site_uploads,
+    warm_partition_cache_task,
 )
 from tasks.vector_import import (  # noqa: F401
     import_vector_data_task,

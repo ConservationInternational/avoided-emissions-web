@@ -3,6 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 
+from geoalchemy2 import Geometry
 from sqlalchemy import (
     BigInteger,
     Column,
@@ -162,3 +163,19 @@ class ReferenceLayerExport(Base):
     # schema changes so downstream consumers can detect stale artifacts.
     schema_version = Column(Integer, nullable=False, default=1)
     exported_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class ReferenceRegionPiece(Base):
+    """Validated ``ST_Subdivide`` pieces of one reference-layer export.
+
+    Rows are keyed by the content-addressed ``export_uri`` so site splitting
+    reads pieces that exactly match the export used in its cache key.
+    """
+
+    __tablename__ = "reference_region_pieces"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    layer_name = Column(String(100), nullable=False)
+    export_uri = Column(String(500), nullable=False)
+    region_id = Column(Text, nullable=False)
+    geom = Column(Geometry("GEOMETRY", srid=4326, spatial_index=True), nullable=False)

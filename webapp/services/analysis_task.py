@@ -529,6 +529,9 @@ def _complete_analysis_task_submission(task_id, user_id):
         gdf["area_ha"] = _equal_area_ha(gdf.geometry)
         input_count = len(gdf)
         input_area = float(gdf["area_ha"].sum())
+        # The partition cache covers the whole site set so any minimum-area
+        # setting reuses the same entry.
+        all_sites = gdf[["site_id", "geometry"]]
         gdf = gdf[gdf["area_ha"] >= min_site_area_ha].reset_index(drop=True)
         preparation = {
             "version": "authoritative-conservative-v1",
@@ -557,7 +560,10 @@ def _complete_analysis_task_submission(task_id, user_id):
         if exact_match_vars:
             _split_t0 = _time.perf_counter()
             split_gdf, group_mapping = compute_exact_match_groups_with_splitting(
-                gdf, exact_match_vars
+                gdf,
+                exact_match_vars,
+                reference_layer_uris=reference_layer_uris,
+                cache_sites=all_sites,
             )
             logger.info(
                 "[SUBMIT-WORKER] Task %s: site splitting %d → %d in %.2fs",

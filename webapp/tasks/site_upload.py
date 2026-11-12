@@ -14,6 +14,34 @@ SITE_UPLOAD_MAX_ATTEMPTS = 3
 
 
 @celery_app.task(
+    name="tasks.warm_partition_cache",
+    bind=True,
+    max_retries=0,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    soft_time_limit=7200,
+    time_limit=7500,
+)
+def warm_partition_cache_task(self, site_set_id, user_id=None) -> dict:
+    """Precompute exact-match site partitions so submissions hit the cache.
+
+    Best effort: failures are logged and never affect the upload, and a
+    submission that misses the cache still computes the partition itself.
+    """
+    from services.partition_cache import warm_site_set_partition_cache
+
+    try:
+        return warm_site_set_partition_cache(
+            uuid.UUID(str(site_set_id)),
+            uuid.UUID(str(user_id)) if user_id else None,
+        )
+    except Exception:
+        logger.exception("Partition cache warmup failed for site set %s", site_set_id)
+        report_exception()
+        return {"status": "failed"}
+
+
+@celery_app.task(
     name="tasks.import_user_site_upload",
     bind=True,
     max_retries=3,
@@ -70,6 +98,16 @@ def import_user_site_upload_task(
             logger.warning(
                 "Could not remove successful upload stage %s",
                 upload_uuid,
+                exc_info=True,
+            )
+        try:
+            warm_partition_cache_task.apply_async(
+                kwargs={"site_set_id": str(detail["id"]), "user_id": str(user_uuid)}
+            )
+        except Exception:
+            logger.warning(
+                "Could not queue partition cache warmup for site set %s",
+                detail["id"],
                 exc_info=True,
             )
         return {

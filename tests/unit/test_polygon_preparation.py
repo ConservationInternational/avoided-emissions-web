@@ -1,5 +1,6 @@
 """Conservation, immutable identity and bounded-export regressions."""
 
+import io
 import logging
 import uuid
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import geopandas as gpd
 import pandas as pd
 import pytest
 import shapely
+from botocore.exceptions import ClientError
 from services.polygon_partition import equal_area_ha, partition_by_regions, polygonal
 from services.reference_layers import compute_exact_match_groups_with_splitting
 from services.site_set import _stream_site_set_to_parquet_buf
@@ -364,3 +366,126 @@ def test_read_only_artifact_audit_checks_source_coverage(tmp_path):
     fragments.iloc[:1].to_parquet(fragment_path)
     with pytest.raises(ValueError, match="Coverage differs"):
         audit_fragments(fragment_path, source_path)
+
+
+def test_subdivided_regions_partition_like_whole_regions():
+    source = Polygon([(0.2, 0.1), (1.9, 0.4), (1.5, 1.9), (0.1, 1.6)])
+    whole = [box(0, 0, 1, 2), box(1, 0, 2, 2)]
+    subdivided = [box(0, 0, 1, 1), box(0, 1, 1, 2), box(1, 0, 2, 1), box(1, 1, 2, 2)]
+
+    _, whole_pieces, whole_keys = partition_by_regions(
+        [source], ["a", "b"], whole, "admin1"
+    )
+    _, pieces, keys = partition_by_regions(
+        [source],
+        ["b", "a", "a", "b"],
+        subdivided[2:3] + subdivided[:2] + subdivided[3:],
+        "admin1",
+    )
+
+    assert keys.tolist() == whole_keys.tolist() == ["a", "b"]
+    for piece, expected in zip(pieces, whole_pieces, strict=True):
+        assert shapely.symmetric_difference(piece, expected).area < 1e-14
+
+
+class _FakeS3:
+    def __init__(self):
+        self.objects = {}
+
+    def get_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        body, metadata = self.objects[Key]
+        return {"Body": io.BytesIO(body), "Metadata": metadata}
+
+    def upload_file(self, path, bucket, key, ExtraArgs=None):
+        with open(path, "rb") as source:
+            self.objects[key] = (source.read(), dict(ExtraArgs["Metadata"]))
+
+
+_CACHE_URIS = {"admin1": "s3://bucket/reference/admin1/v1.parquet"}
+
+
+def _cache_sites():
+    return gpd.GeoDataFrame(
+        {
+            "site_id": ["s1", "s2", "s3"],
+            "display_site_id": ["one", "two", "three"],
+            "site_name": ["One", "Two", "Three"],
+        },
+        geometry=[box(0, 0, 2, 1), box(0.2, 0.2, 0.4, 0.4), box(5, 0, 6, 1)],
+        crs=4326,
+    )
+
+
+def _split_with_cache(frame, s3, uris=None, cache_sites=None, current_uris=None):
+    db = MagicMock()
+    db.execute.return_value.fetchall.return_value = [
+        ("country:a", box(0, 0, 1, 1).wkb),
+        ("country:b", box(1, 0, 2, 1).wkb),
+    ]
+    with (
+        patch("services.reference_layers.get_db", return_value=db),
+        patch("services.reference_layers.region_piece_uris", return_value={}),
+        patch(
+            "services.reference_layers.get_reference_layer_uris",
+            return_value=current_uris or uris,
+        ),
+        patch("services.partition_cache.get_s3_client", return_value=s3),
+    ):
+        result = compute_exact_match_groups_with_splitting(
+            frame, ["admin1", "pa"], reference_layer_uris=uris, cache_sites=cache_sites
+        )
+    return result, db.execute.call_count
+
+
+def test_partition_cache_hit_for_filtered_sites_matches_fresh_split():
+    sites, s3 = _cache_sites(), _FakeS3()
+    _, miss_queries = _split_with_cache(sites, s3, _CACHE_URIS)
+    assert miss_queries == 1
+    assert len(s3.objects) == 1
+
+    retained = sites.iloc[[2, 0]].reset_index(drop=True)
+    (cached, cached_groups), hit_queries = _split_with_cache(
+        retained, s3, _CACHE_URIS, cache_sites=sites
+    )
+    (fresh, fresh_groups), _ = _split_with_cache(retained, _FakeS3())
+
+    assert hit_queries == 0
+    assert cached_groups == fresh_groups
+    columns = ["site_id", "display_site_id", "sub_site_index", "is_sub_site", "admin1"]
+    assert cached[columns].equals(fresh[columns])
+    assert shapely.equals(cached.geometry.to_numpy(), fresh.geometry.to_numpy()).all()
+    assert cached.attrs["reference_versions"]["admin1"]
+    assert cached.attrs["reference_versions"] == fresh.attrs["reference_versions"]
+
+
+def test_partition_cache_is_not_written_when_references_change_mid_split():
+    s3 = _FakeS3()
+    _split_with_cache(
+        _cache_sites(),
+        s3,
+        _CACHE_URIS,
+        current_uris={"admin1": "s3://bucket/reference/admin1/v2.parquet"},
+    )
+    assert s3.objects == {}
+
+
+def test_partition_cache_key_tracks_sites_references_and_algorithm():
+    from services.partition_cache import partition_cache_key
+
+    sites = _cache_sites()
+    key = partition_cache_key(sites, ["admin1"], _CACHE_URIS, {})
+    assert partition_cache_key(sites.iloc[::-1], ["admin1"], _CACHE_URIS, {}) == key
+    moved = sites.copy()
+    moved.loc[0, "geometry"] = box(0, 0, 2, 1.5)
+    assert partition_cache_key(moved, ["admin1"], _CACHE_URIS, {}) != key
+    assert (
+        partition_cache_key(
+            sites, ["admin1"], {"admin1": "s3://bucket/admin1/v2.parquet"}, {}
+        )
+        != key
+    )
+    assert partition_cache_key(sites, ["admin1"], _CACHE_URIS, _CACHE_URIS) != key
+    with patch("services.partition_cache.PARTITION_ALGO_VERSION", 999):
+        assert partition_cache_key(sites, ["admin1"], _CACHE_URIS, {}) != key

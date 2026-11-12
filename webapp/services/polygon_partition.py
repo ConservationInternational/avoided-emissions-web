@@ -7,6 +7,9 @@ import shapely
 from pyproj import Transformer
 
 AREA_MAX_SEGMENT_DEGREES = 0.005
+# Bump whenever partition output can change for identical inputs; it is part
+# of the site-partition cache key (services.partition_cache).
+PARTITION_ALGO_VERSION = 1
 _EQUAL_AREA = Transformer.from_crs(4326, "ESRI:54009", always_xy=True)
 logger = logging.getLogger(__name__)
 
@@ -55,7 +58,13 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
     Candidate work is bounded to one input piece at a time. Residual coverage
     is retained with a null key. Overlaps are assigned to the first region
     in lexicographic ID order and each conflict is logged.
+
+    ``region_ids`` may repeat: a region may be supplied as several pieces
+    (e.g. from ``ST_Subdivide``). Pieces of one region near each input are
+    merged before intersecting, so huge regions are never overlaid whole.
     """
+    region_geometries = np.asarray(region_geometries, dtype=object)
+    region_keys = [str(region_id) for region_id in region_ids]
     tree = shapely.STRtree(region_geometries)
     origins, pieces, keys = [], [], []
     overlap_count = 0
@@ -63,25 +72,26 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
     max_overlap_m2 = 0.0
     for index, source in enumerate(geometries):
         source = polygonal(source)
-        candidates = sorted(
-            tree.query(source).tolist(), key=lambda i: str(region_ids[i])
-        )
-        assigned = []
-        assigned_by_index = {}
-        for candidate in candidates:
-            part = shapely.intersection(source, region_geometries[candidate])
+        members_by_region = {}
+        for candidate in tree.query(source).tolist():
+            members_by_region.setdefault(region_keys[candidate], []).append(candidate)
+        assigned = {}
+        for region_key in sorted(members_by_region):
+            members = members_by_region[region_key]
+            region = (
+                region_geometries[members[0]]
+                if len(members) == 1
+                else shapely.union_all(region_geometries[members])
+            )
+            part = shapely.intersection(source, region)
             if part.is_empty or part.area <= 0:
                 continue
             part = polygonal(part)
             overlap_m2 = 0.0
-            previous_candidates = sorted(
-                tree.query(part, predicate="intersects").tolist(),
-                key=lambda i: str(region_ids[i]),
-            )
-            for previous in previous_candidates:
-                if previous not in assigned_by_index:
+            for previous_key, previous_part in assigned.items():
+                if not shapely.intersects(part, previous_part):
                     continue
-                overlap = shapely.intersection(part, assigned_by_index[previous])
+                overlap = shapely.intersection(part, previous_part)
                 if overlap.is_empty or overlap.area <= 0:
                     continue
                 conflict_m2 = equal_area_ha([overlap])[0] * 10000
@@ -91,11 +101,11 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
                     "region %s takes priority over %s (overlap %.6g m2)",
                     layer,
                     index + 1,
-                    region_ids[previous],
-                    region_ids[candidate],
+                    previous_key,
+                    region_key,
                     conflict_m2,
                 )
-                part = shapely.difference(part, assigned_by_index[previous])
+                part = shapely.difference(part, previous_part)
                 if part.is_empty or part.area <= 0:
                     break
             if overlap_m2 > 0:
@@ -105,21 +115,21 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
             if part.is_empty or part.area <= 0:
                 continue
             part = polygonal(part)
-            assigned.append(part)
-            assigned_by_index[candidate] = part
+            assigned[region_key] = part
             origins.append(index)
             pieces.append(part)
-            keys.append(str(region_ids[candidate]))
+            keys.append(region_key)
+        assigned_parts = list(assigned.values())
         residual = (
-            shapely.difference(source, shapely.union_all(assigned))
-            if assigned
+            shapely.difference(source, shapely.union_all(assigned_parts))
+            if assigned_parts
             else source
         )
         if not residual.is_empty and residual.area > 0:
             origins.append(index)
             pieces.append(polygonal(residual))
             keys.append(None)
-        output = shapely.union_all(assigned + [residual])
+        output = shapely.union_all(assigned_parts + [residual])
         error = shapely.symmetric_difference(source, output).area
         if error > max(1e-14, source.area * 1e-10):
             raise ValueError(

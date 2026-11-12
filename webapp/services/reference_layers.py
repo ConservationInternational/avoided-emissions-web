@@ -141,6 +141,9 @@ def export_reference_layers_to_s3() -> dict[str, str]:
 
         s3_uri = f"s3://{Config.S3_BUCKET}/{parquet_key}"
         exported[layer_name] = s3_uri
+        # Pieces must exist before the export row points at this URI so a
+        # submission never sees a current export without its pieces.
+        build_reference_region_pieces(layer_name, s3_uri)
 
         # Upsert ReferenceLayerExport row.
         db2 = get_db()
@@ -166,6 +169,14 @@ def export_reference_layers_to_s3() -> dict[str, str]:
                     )
                 )
             db2.commit()
+            db2.execute(
+                text(
+                    "DELETE FROM reference_region_pieces "
+                    "WHERE layer_name = :layer AND export_uri <> :uri"
+                ),
+                {"layer": layer_name, "uri": s3_uri},
+            )
+            db2.commit()
         finally:
             db2.close()
 
@@ -177,6 +188,58 @@ def export_reference_layers_to_s3() -> dict[str, str]:
         )
 
     return exported
+
+
+REGION_PIECE_MAX_VERTICES = 256
+
+
+def build_reference_region_pieces(layer_name, export_uri) -> int:
+    """Store validated ``ST_Subdivide`` pieces for one reference export.
+
+    Idempotent per ``export_uri``: an export whose content is unchanged
+    keeps its existing pieces.
+    """
+    table = _EXTENT_TABLE_MAP[layer_name]
+    if not _SAFE_TABLE_RE.match(table):
+        raise ValueError(f"Unsafe table name: {table!r}")
+    identity = _REGION_ID_SQL[layer_name]
+    params = {"layer": layer_name, "uri": export_uri}
+    db = get_db()
+    try:
+        existing = db.execute(
+            text(
+                "SELECT count(*) FROM reference_region_pieces "
+                "WHERE layer_name = :layer AND export_uri = :uri"
+            ),
+            params,
+        ).scalar()
+        if existing:
+            return int(existing)
+        count = db.execute(
+            text(
+                f"INSERT INTO reference_region_pieces "
+                f"(layer_name, export_uri, region_id, geom) "
+                f"SELECT :layer, :uri, rid, piece FROM ("
+                f"  SELECT {identity} AS rid, ST_Subdivide("
+                f"    ST_CollectionExtract(ST_MakeValid(geom), 3), "
+                f"    {int(REGION_PIECE_MAX_VERTICES)}) AS piece "
+                f"  FROM {table} WHERE geom IS NOT NULL"
+                f") s WHERE rid IS NOT NULL AND NOT ST_IsEmpty(piece)"
+            ),
+            params,
+        ).rowcount
+        db.commit()
+        logger.info(
+            "[EXPORT-REF] Layer %s: stored %d subdivided region pieces",
+            layer_name,
+            count,
+        )
+        return count
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def get_reference_layer_uris(required_layers=None) -> dict[str, str]:
@@ -427,91 +490,43 @@ def compute_sites_exclusion_buffer(gdf, distance_km, site_set_id=None):
         db.close()
 
 
-def compute_exact_match_groups_with_splitting(
-    gdf: gpd.GeoDataFrame,
-    exact_match_vars: list[str],
-) -> tuple[gpd.GeoDataFrame, dict[int, list[tuple[str, int]]]]:
-    """Split sites crossing exact-match boundaries and build group mapping.
+def split_polygon_vars(exact_match_vars) -> list[str]:
+    """Return the sorted exact-match variables that define spatial regions."""
+    return sorted({v for v in exact_match_vars or [] if v in _EXTENT_TABLE_MAP})
 
-    Sites spanning multiple exact-match regions (e.g., admin boundaries) are
-    split into sub-polygons.  Each sub-polygon is assigned a separate
-    exact-match group ID based on the combination of all polygon-type
-    exact-match values it falls within.
 
-    All positive polygonal coverage is retained, including slivers and
-    unassigned residuals. Reference overlaps are assigned once to the first
-    region in lexicographic ID order, with each conflict logged.
+def region_piece_uris(polygon_vars, reference_layer_uris) -> dict[str, str]:
+    """Return ``var → export URI`` for layers with stored subdivided pieces."""
+    if not reference_layer_uris:
+        return {}
+    db = get_db()
+    try:
+        available = {}
+        for var_name in polygon_vars:
+            uri = reference_layer_uris.get(var_name)
+            if (
+                uri
+                and db.execute(
+                    text(
+                        "SELECT EXISTS(SELECT 1 FROM reference_region_pieces "
+                        "WHERE layer_name = :layer AND export_uri = :uri)"
+                    ),
+                    {"layer": var_name, "uri": uri},
+                ).scalar()
+            ):
+                available[var_name] = uri
+        return available
+    finally:
+        db.close()
 
-    Performance
-    -----------
-    Executes exactly **one PostGIS query per polygon-type exact-match
-    variable** (regardless of site count), then performs all intersection
-    math with Shapely using an in-memory STRtree.  This replaces the prior
-    O(N × M) query pattern (one query per site per variable) that stalled
-    submissions with large site sets.
 
-    Returns
-    -------
-    split_gdf : gpd.GeoDataFrame
-        Modified GeoDataFrame with potential sub-site rows.  Added columns:
-        - ``sub_site_index``: 0 for unsplit sites, 1+ for split fragments
-        - ``is_sub_site``: True when site was split
-        - ``original_area_ha``: Original site area before splitting
-        - One column per polygon-type exact-match var with the region ID
-    group_mapping : dict[int, list[tuple[str, int]]]
-        Maps exact-match group ID → list of (site_id, sub_site_index).
-        Group IDs are sequential integers starting from 1.
-
-    Notes
-    -----
-    - Binary exact-match variables (e.g., ``pa``) are not used for
-      splitting because they don't define discrete spatial regions.
-    - Sites that don't intersect any exact-match layers are assigned to
-      group 0 (ungrouped).
-    """
-    import time as _time
-
+def _site_envelopes_geojson(geometries, cell_degrees) -> str:
+    """Group site bounds into grid cells and return one envelope per cell."""
     import numpy as np
-    import pandas as pd
-    import shapely
-    from shapely.geometry import box as _bbox_box
-    from shapely.geometry import mapping
-    from shapely.validation import make_valid
+    from shapely.geometry import box, mapping
 
-    from services.polygon_partition import (
-        equal_area_ha,
-        partition_by_regions,
-        polygonal,
-    )
-
-    # Filter to polygon-type exact-match variables
-    polygon_vars = sorted({v for v in exact_match_vars if v in _EXTENT_TABLE_MAP})
-    if gdf.crs is None or gdf.crs.to_epsg() != 4326:
-        raise ValueError("Site splitting requires validated EPSG:4326 geometry.")
-    if gdf.empty:
-        raise ValueError("No sites available for splitting.")
-    if gdf["site_id"].isna().any() or gdf["site_id"].duplicated().any():
-        raise ValueError("Analysis site_id must be a unique immutable feature key.")
-    gdf = gdf.copy()
-    gdf["geometry"] = [polygonal(geom) for geom in gdf.geometry]
-    if not polygon_vars:
-        # No polygon variables → no splitting
-        gdf_out = gdf.copy()
-        gdf_out["sub_site_index"] = 0
-        gdf_out["is_sub_site"] = False
-        gdf_out["original_area_ha"] = None
-        # All sites in one group
-        group_mapping = {1: [(row["site_id"], 0) for _, row in gdf_out.iterrows()]}
-        return gdf_out, group_mapping
-
-    t0 = _time.perf_counter()
-
-    non_empty_mask = ~(gdf.geometry.isna() | gdf.geometry.is_empty)
-    if not non_empty_mask.any():
-        raise ValueError("No valid polygon geometries available for splitting.")
-
-    bounds = gdf.geometry.bounds.to_numpy()
-    buckets = np.floor((bounds[:, :2] + bounds[:, 2:]) / 10).astype(int)
+    bounds = gpd.GeoSeries(geometries).bounds.to_numpy()
+    buckets = np.floor((bounds[:, :2] + bounds[:, 2:]) / 2 / cell_degrees).astype(int)
     envelopes = {}
     for bucket, site_bounds in zip(buckets, bounds, strict=True):
         key = tuple(bucket)
@@ -520,113 +535,192 @@ def compute_exact_match_groups_with_splitting(
         else:
             envelopes[key][:2] = np.minimum(envelopes[key][:2], site_bounds[:2])
             envelopes[key][2:] = np.maximum(envelopes[key][2:], site_bounds[2:])
-    sites_envelopes_geojson = json.dumps(
-        [mapping(_bbox_box(*extent)) for extent in envelopes.values()]
-    )
+    return json.dumps([mapping(box(*extent)) for extent in envelopes.values()])
 
-    var_regions: dict[str, tuple[list[str], np.ndarray]] = {}
+
+def _load_split_regions(db, var_name, geometries, piece_uri):
+    """Load reference regions near the sites for one exact-match variable."""
+    import shapely
+
+    from services.polygon_partition import polygonal
+
+    if piece_uri:
+        # Subdivided pieces are small, so fine envelopes avoid transferring
+        # far-away pieces of huge regions.
+        rows = db.execute(
+            text(
+                "WITH boxes AS (SELECT ST_SetSRID(ST_GeomFromGeoJSON(b::text), "
+                "4326) AS g FROM jsonb_array_elements(CAST(:bboxes AS jsonb)) b), "
+                "hits AS (SELECT DISTINCT p.id FROM reference_region_pieces p "
+                "JOIN boxes ON p.geom && boxes.g "
+                "WHERE p.layer_name = :layer AND p.export_uri = :uri) "
+                "SELECT p.region_id, ST_AsBinary(p.geom) "
+                "FROM reference_region_pieces p JOIN hits h ON h.id = p.id "
+                "ORDER BY p.region_id, p.id"
+            ),
+            {
+                "bboxes": _site_envelopes_geojson(geometries, 1),
+                "layer": var_name,
+                "uri": piece_uri,
+            },
+        ).fetchall()
+    else:
+        table = _EXTENT_TABLE_MAP[var_name]
+        # table comes from the hardcoded _EXTENT_TABLE_MAP constant dict,
+        # never from user input.  The check below is a defence-in-depth
+        # guard against accidental misconfiguration; raise an explicit
+        # error so it can't be silently skipped with python -O.
+        if not _SAFE_TABLE_RE.match(table):
+            raise ValueError(
+                f"Table name {table!r} does not match the expected safe "
+                f"identifier pattern (lowercase letters, digits, underscores, "
+                f"must start with a letter or underscore)."
+            )
+        id_col = _REGION_ID_SQL[var_name]
+        rows = db.execute(
+            text(
+                f"WITH candidate_ids AS (SELECT DISTINCT r.id "
+                f"FROM jsonb_array_elements(CAST(:bboxes AS jsonb)) b "
+                f"JOIN {table} r ON ST_Intersects(r.geom, "
+                f"ST_SetSRID(ST_GeomFromGeoJSON(b::text), 4326))) "
+                f"SELECT {id_col}, ST_AsBinary(geom) "
+                f"FROM {table} r JOIN candidate_ids c ON c.id = r.id "
+                f"ORDER BY 1"
+            ),
+            {"bboxes": _site_envelopes_geojson(geometries, 5)},
+        ).fetchall()
+        if not rows:
+            ready = db.execute(text(f"SELECT EXISTS(SELECT 1 FROM {table})")).scalar()
+            if not ready:
+                raise ValueError(
+                    f"Reference layer {var_name} is not ready: import it first."
+                )
+
+    region_ids: list[str] = []
+    region_geoms: list = []
+    for rid, geom_wkb in rows:
+        if not geom_wkb or rid is None:
+            raise ValueError(f"Missing reference identity or geometry in {var_name}.")
+        region_ids.append(str(rid))
+        region_geoms.append(polygonal(shapely.from_wkb(bytes(geom_wkb))))
+    if not piece_uri and len(set(region_ids)) != len(region_ids):
+        raise ValueError(f"Duplicate reference identities in {var_name}.")
+    return region_ids, region_geoms
+
+
+def split_sites_into_pieces(
+    sites: gpd.GeoDataFrame,
+    polygon_vars: list[str],
+    piece_uris: dict[str, str] | None = None,
+) -> gpd.GeoDataFrame:
+    """Partition sites by every polygon exact-match layer.
+
+    This is the expensive, cacheable stage: each site's pieces depend only on
+    its geometry and the reference regions. Returns one row per piece with
+    ``site_id``, ``geometry`` and one region-ID column per variable, ordered
+    by input site and then piece. ``attrs["reference_versions"]`` holds a
+    digest of the regions used per variable.
+    """
+    import time as _time
+
+    import numpy as np
+    import shapely
+
+    from services.polygon_partition import partition_by_regions, polygonal
+
+    piece_uris = piece_uris or {}
+    t0 = _time.perf_counter()
+    curr_geoms = np.asarray([polygonal(geom) for geom in sites.geometry], dtype=object)
+    if not len(curr_geoms):
+        raise ValueError("No valid polygon geometries available for splitting.")
+
+    var_regions = {}
     reference_digests = {}
     db = get_db()
     try:
         for var_name in polygon_vars:
-            table = _EXTENT_TABLE_MAP[var_name]
-            # table comes from the hardcoded _EXTENT_TABLE_MAP constant dict,
-            # never from user input.  The check below is a defence-in-depth
-            # guard against accidental misconfiguration; raise an explicit
-            # error so it can't be silently skipped with python -O.
-            if not _SAFE_TABLE_RE.match(table):
-                raise ValueError(
-                    f"Table name {table!r} does not match the expected safe "
-                    f"identifier pattern (lowercase letters, digits, underscores, "
-                    f"must start with a letter or underscore)."
-                )
-            id_col = _REGION_ID_SQL[var_name]
-            rows = db.execute(
-                text(
-                    f"WITH candidate_ids AS (SELECT DISTINCT r.id "
-                    f"FROM jsonb_array_elements(CAST(:bboxes AS jsonb)) b "
-                    f"JOIN {table} r ON ST_Intersects(r.geom, "
-                    f"ST_SetSRID(ST_GeomFromGeoJSON(b::text), 4326))) "
-                    f"SELECT {id_col}, ST_AsBinary(geom) "
-                    f"FROM {table} r JOIN candidate_ids c ON c.id = r.id "
-                    f"ORDER BY 1"
-                ),
-                {"bboxes": sites_envelopes_geojson},
-            ).fetchall()
-
-            if not rows:
-                ready = db.execute(
-                    text(f"SELECT EXISTS(SELECT 1 FROM {table})")
-                ).scalar()
-                if not ready:
-                    raise ValueError(
-                        f"Reference layer {var_name} is not ready: import it first."
-                    )
-            region_ids: list[str] = []
-            region_geom_list: list = []
-            for rid, geom_wkb in rows:
-                if not geom_wkb or rid is None:
-                    raise ValueError(
-                        f"Missing reference identity or geometry in {var_name}."
-                    )
-                g = shapely.from_wkb(bytes(geom_wkb))
-                if not g.is_valid:
-                    g = make_valid(g)
-                region_ids.append(str(rid))
-                region_geom_list.append(polygonal(g))
-            if len(set(region_ids)) != len(region_ids):
-                raise ValueError(f"Duplicate reference identities in {var_name}.")
-
-            region_geoms_arr = np.asarray(region_geom_list, dtype=object)
+            region_ids, region_geoms = _load_split_regions(
+                db, var_name, curr_geoms, piece_uris.get(var_name)
+            )
             digest = hashlib.sha256()
-            for rid, geom in zip(region_ids, region_geom_list, strict=True):
+            for rid, geom in zip(region_ids, region_geoms, strict=True):
                 digest.update(rid.encode())
-                digest.update(geom.wkb)
+                digest.update(shapely.to_wkb(geom))
             reference_digests[var_name] = digest.hexdigest()
-            var_regions[var_name] = (region_ids, region_geoms_arr)
-
+            var_regions[var_name] = (
+                region_ids,
+                np.asarray(region_geoms, dtype=object),
+            )
             logger.info(
-                "[SPLIT] Loaded %d regions for %s from %s in %.2fs",
+                "[SPLIT] Loaded %d %s for %s in %.2fs",
                 len(region_ids),
+                "subdivided pieces" if piece_uris.get(var_name) else "regions",
                 var_name,
-                table,
                 _time.perf_counter() - t0,
             )
     finally:
         db.close()
 
     # Bound candidate work to one piece while retaining all prior stratum keys.
-    curr_orig_idxs: np.ndarray = np.arange(len(gdf))
-    curr_geoms: np.ndarray = np.asarray(
-        [polygonal(geom) for geom in gdf.geometry], dtype=object
-    )
+    curr_orig_idxs = np.arange(len(curr_geoms))
     processed_vals: dict[str, np.ndarray] = {}
-
     for var_name in polygon_vars:
-        _var_t0 = _time.perf_counter()
-        region_ids_list, region_geoms_arr = var_regions[var_name]
-        n_curr = len(curr_geoms)
-
-        if not region_ids_list:
-            processed_vals[var_name] = np.full(n_curr, None, dtype=object)
+        var_t0 = _time.perf_counter()
+        region_ids, region_geoms = var_regions[var_name]
+        if not region_ids:
+            processed_vals[var_name] = np.full(len(curr_geoms), None, dtype=object)
             continue
-
-        piece_idxs, new_geoms, new_var_ids = partition_by_regions(
-            curr_geoms, region_ids_list, region_geoms_arr, var_name
+        piece_idxs, curr_geoms, new_var_ids = partition_by_regions(
+            curr_geoms, region_ids, region_geoms, var_name
         )
         curr_orig_idxs = curr_orig_idxs[piece_idxs]
-        curr_geoms = new_geoms
         processed_vals = {
             name: values[piece_idxs] for name, values in processed_vals.items()
         }
         processed_vals[var_name] = new_var_ids
-
         logger.info(
             "[SPLIT] %s: variable done in %.2fs → %d output pieces total",
             var_name,
-            _time.perf_counter() - _var_t0,
+            _time.perf_counter() - var_t0,
             len(curr_geoms),
         )
+
+    pieces = gpd.GeoDataFrame(
+        {
+            "site_id": sites["site_id"].to_numpy()[curr_orig_idxs],
+            **processed_vals,
+        },
+        geometry=list(curr_geoms),
+        crs=4326,
+    )
+    pieces.attrs["reference_versions"] = reference_digests
+    return pieces
+
+
+def _assemble_split_sites(gdf, pieces, polygon_vars):
+    """Attach site attributes to pieces and build exact-match groups."""
+    import numpy as np
+    import pandas as pd
+
+    from services.polygon_partition import equal_area_ha
+
+    position = pd.Index(gdf["site_id"]).get_indexer(pieces["site_id"])
+    keep = position >= 0
+    order = np.argsort(position[keep], kind="stable")
+    curr_orig_idxs = position[keep][order]
+    if len(np.unique(curr_orig_idxs)) != len(gdf):
+        raise ValueError("Site partition is missing pieces for some sites.")
+    curr_geoms = np.asarray(pieces.geometry, dtype=object)[keep][order]
+    processed_vals = {
+        var_name: np.asarray(
+            [
+                None if pd.isna(value) else str(value)
+                for value in pieces[var_name].to_numpy(dtype=object)[keep][order]
+            ],
+            dtype=object,
+        )
+        for var_name in polygon_vars
+    }
 
     site_id_arr = gdf["site_id"].to_numpy()[curr_orig_idxs]
 
@@ -678,13 +772,13 @@ def compute_exact_match_groups_with_splitting(
         out_data[var_name] = processed_vals[var_name]
 
     split_gdf = gpd.GeoDataFrame(out_data, crs=gdf.crs, geometry="geometry")
-    split_gdf.attrs["reference_versions"] = reference_digests
+    split_gdf.attrs["reference_versions"] = dict(
+        pieces.attrs.get("reference_versions", {})
+    )
 
-    # ── Step 5: build group mapping ───────────────────────────────────────────
     group_key_to_id: dict = {}
     next_group_id = 1
     group_mapping: dict[int, list[tuple[str, int]]] = {}
-
     for i in range(len(split_gdf)):
         key_values = tuple(processed_vals[var_name][i] for var_name in polygon_vars)
         if any(v is None for v in key_values):
@@ -694,17 +788,94 @@ def compute_exact_match_groups_with_splitting(
                 group_key_to_id[key_values] = next_group_id
                 next_group_id += 1
             group_id = group_key_to_id[key_values]
-        if group_id not in group_mapping:
-            group_mapping[group_id] = []
-        group_mapping[group_id].append((site_id_arr[i], int(sub_site_index_arr[i])))
+        group_mapping.setdefault(group_id, []).append(
+            (site_id_arr[i], int(sub_site_index_arr[i]))
+        )
+    return split_gdf, group_mapping
 
-    elapsed = _time.perf_counter() - t0
+
+def compute_exact_match_groups_with_splitting(
+    gdf: gpd.GeoDataFrame,
+    exact_match_vars: list[str],
+    reference_layer_uris: dict[str, str] | None = None,
+    cache_sites: gpd.GeoDataFrame | None = None,
+) -> tuple[gpd.GeoDataFrame, dict[int, list[tuple[str, int]]]]:
+    """Split sites crossing exact-match boundaries and build group mapping.
+
+    Sites spanning multiple exact-match regions (e.g., admin boundaries) are
+    split into sub-polygons.  Each sub-polygon is assigned a separate
+    exact-match group ID based on the combination of all polygon-type
+    exact-match values it falls within.
+
+    All positive polygonal coverage is retained, including slivers and
+    unassigned residuals. Reference overlaps are assigned once to the first
+    region in lexicographic ID order, with each conflict logged.
+
+    Performance
+    -----------
+    When ``reference_layer_uris`` covers every polygon variable, the
+    per-site partition is read from (or written to) the S3 partition cache
+    keyed by site content, variables, reference exports and algorithm
+    version (see :mod:`services.partition_cache`).  ``cache_sites`` may be a
+    superset of ``gdf`` (e.g. before the minimum-area filter) so one cache
+    entry serves every filter setting.  On a miss, regions are read as
+    pre-subdivided pieces when available, otherwise as whole polygons with
+    one PostGIS query per variable.
+
+    Returns
+    -------
+    split_gdf : gpd.GeoDataFrame
+        Modified GeoDataFrame with potential sub-site rows.  Added columns:
+        - ``sub_site_index``: 0 for unsplit sites, 1+ for split fragments
+        - ``is_sub_site``: True when site was split
+        - ``original_area_ha``: Original site area before splitting
+        - One column per polygon-type exact-match var with the region ID
+    group_mapping : dict[int, list[tuple[str, int]]]
+        Maps exact-match group ID → list of (site_id, sub_site_index).
+        Group IDs are sequential integers starting from 1.
+
+    Notes
+    -----
+    - Binary exact-match variables (e.g., ``pa``) are not used for
+      splitting because they don't define discrete spatial regions.
+    - Sites that don't intersect any exact-match layers are assigned to
+      group 0 (ungrouped).
+    """
+    import time as _time
+
+    from services.partition_cache import get_or_compute_site_pieces
+    from services.polygon_partition import polygonal
+
+    polygon_vars = split_polygon_vars(exact_match_vars)
+    if gdf.crs is None or gdf.crs.to_epsg() != 4326:
+        raise ValueError("Site splitting requires validated EPSG:4326 geometry.")
+    if gdf.empty:
+        raise ValueError("No sites available for splitting.")
+    if gdf["site_id"].isna().any() or gdf["site_id"].duplicated().any():
+        raise ValueError("Analysis site_id must be a unique immutable feature key.")
+    gdf = gdf.copy()
+    gdf["geometry"] = [polygonal(geom) for geom in gdf.geometry]
+    if not polygon_vars:
+        gdf_out = gdf.copy()
+        gdf_out["sub_site_index"] = 0
+        gdf_out["is_sub_site"] = False
+        gdf_out["original_area_ha"] = None
+        group_mapping = {1: [(row["site_id"], 0) for _, row in gdf_out.iterrows()]}
+        return gdf_out, group_mapping
+
+    t0 = _time.perf_counter()
+    if cache_sites is None:
+        cache_sites = gdf
+    elif not set(gdf["site_id"]).issubset(cache_sites["site_id"]):
+        raise ValueError("cache_sites must include every site being split.")
+    pieces = get_or_compute_site_pieces(cache_sites, polygon_vars, reference_layer_uris)
+    split_gdf, group_mapping = _assemble_split_sites(gdf, pieces, polygon_vars)
+
     logger.info(
         "[SPLIT] Exact-match site splitting: %d sites → %d pieces in %.2fs",
         len(gdf),
         len(split_gdf),
-        elapsed,
+        _time.perf_counter() - t0,
     )
     logger.info("[SPLIT] Created %d exact-match groups", len(group_mapping))
-
     return split_gdf, group_mapping

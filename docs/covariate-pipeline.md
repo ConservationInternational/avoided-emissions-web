@@ -154,6 +154,26 @@ The Celery beat task `tasks.export_reference_layers_task` re-exports all
 reference layer parquets on the 1st and 15th of each month to pick up
 WDPA updates.
 
+Each export also stores validated `ST_Subdivide` pieces (at most 256
+vertices) of every region in the `reference_region_pieces` table, keyed by
+the export's content-addressed S3 URI. Site splitting reads only pieces near
+the sites, so huge regions (e.g. ecoregions) are never overlaid whole. Until
+a layer has been exported after deployment, splitting falls back to whole
+region polygons.
+
+### Site partition cache
+
+Splitting submitted sites across exact-match regions is stored at
+`{S3_PREFIX}/partition-cache/{cache_key}.parquet` and reused by later
+submissions. The key hashes the whole site set (IDs and geometry, before the
+minimum-area filter), the polygon exact-match variables, the reference export
+URIs and `PARTITION_ALGO_VERSION` in `services/polygon_partition.py` (bump it
+whenever partition output can change). The cache is used only when current
+reference exports exist, and `tasks.warm_partition_cache` precomputes it
+after each site upload for the default exact-match variables and the
+uploader's presets. Set `PARTITION_CACHE_ENABLED=false` to disable it.
+Consider an S3 lifecycle rule on the `partition-cache/` prefix.
+
 ---
 
 ## Stage 4 — Pixel Extraction

@@ -7,7 +7,12 @@ This package re-exports every model and utility so that all existing
 # Import all submodules first so every model class is registered with
 # Base.metadata before any mapper configuration or query runs.
 from models.base import Base, SessionLocal, engine, get_db
-from models.covariate import Covariate, GeeExportMetadata, ReferenceLayerExport
+from models.covariate import (
+    Covariate,
+    GeeExportMetadata,
+    ReferenceLayerExport,
+    ReferenceRegionPiece,
+)
 from models.preset import CovariatePreset, MatchingSettingsPreset
 from models.sharing import TaskShareLink
 from models.site import UserSiteFeature, UserSiteSet, UserSiteUpload
@@ -39,6 +44,7 @@ __all__ = [
     "MatchingSettingsPreset",
     "ProtectedArea",
     "ReferenceLayerExport",
+    "ReferenceRegionPiece",
     "SessionLocal",
     "TaskResult",
     "TaskResultTotal",

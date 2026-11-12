@@ -44,6 +44,9 @@ s3://{S3_BUCKET}/{S3_PREFIX}/
 ├── reference/                      # Reference layer parquets
 │   └── {layer_name}.parquet
 │
+├── partition-cache/                # Cached per-site exact-match splits
+│   └── {cache_key}.parquet         # (see covariate-pipeline.md)
+│
 ├── site-upload-stage/              # Staged file uploads (TTL 12 h)
 │   ├── {token}.bin
 │   └── {token}.json

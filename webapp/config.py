@@ -122,6 +122,10 @@ class Config:
     AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
     S3_BUCKET = os.environ.get("S3_BUCKET", "avoided-emissions-data")
     S3_PREFIX = os.environ.get("S3_PREFIX", "avoided-emissions")
+    # Reuse per-site exact-match partitions across submissions (S3 cache).
+    PARTITION_CACHE_ENABLED = (
+        os.environ.get("PARTITION_CACHE_ENABLED", "true").lower() == "true"
+    )
     GCS_BUCKET = os.environ.get("GCS_BUCKET", "")
     GCS_PREFIX = os.environ.get("GCS_PREFIX", "avoided-emissions/covariates_1km")
     GEE_PROJECT_ID = os.environ.get("GOOGLE_PROJECT_ID", "")

@@ -71,6 +71,7 @@ celery_app.conf.update(
         "tasks.rasterize_vectors": {"queue": "heavy"},
         "tasks.import_vector_data": {"queue": "heavy"},
         "tasks.import_user_site_upload": {"queue": "heavy"},
+        "tasks.warm_partition_cache": {"queue": "heavy"},
         "tasks.ingest_sdg_cog": {"queue": "heavy"},
         # submit_analysis_task_worker has its own dedicated queue so that
         # long-running site uploads on the heavy worker cannot delay or

@@ -210,3 +210,38 @@ def test_submission_keeps_database_artifact_and_group_identities_consistent(
         ).delete()
         db.commit()
         db.close()
+
+
+def test_subdivided_reference_pieces_split_like_whole_regions(reference_db):
+    from services.reference_layers import (
+        build_reference_region_pieces,
+        region_piece_uris,
+        split_sites_into_pieces,
+    )
+
+    circle = shapely.Point(0, 0).buffer(1, 400)
+    insert_region(reference_db, "west", circle.intersection(box(-2, -2, 0, 2)))
+    insert_region(reference_db, "east", circle.intersection(box(0, -2, 2, 2)))
+    frame = gpd.GeoDataFrame(
+        {"site_id": ["edge", "inside", "outside"]},
+        geometry=[box(-0.3, 0.7, 0.4, 1.2), box(-0.5, -0.5, 0.5, 0.2), box(3, 3, 4, 4)],
+        crs=4326,
+    )
+    uri = "s3://bucket/reference/admin1/test.parquet"
+    proxy = SimpleNamespace(
+        execute=reference_db.execute,
+        commit=lambda: None,
+        rollback=lambda: None,
+        close=lambda: None,
+    )
+    with patch("services.reference_layers.get_db", return_value=proxy):
+        assert build_reference_region_pieces("admin1", uri) > 2
+        assert build_reference_region_pieces("admin1", uri) > 2
+        assert region_piece_uris(["admin1"], {"admin1": uri}) == {"admin1": uri}
+        whole = split_sites_into_pieces(frame, ["admin1"])
+        pieces = split_sites_into_pieces(frame, ["admin1"], {"admin1": uri})
+
+    assert pieces.site_id.tolist() == whole.site_id.tolist()
+    assert pieces.admin1.tolist() == whole.admin1.tolist()
+    for piece, expected in zip(pieces.geometry, whole.geometry, strict=True):
+        assert shapely.symmetric_difference(piece, expected).area < 1e-12
