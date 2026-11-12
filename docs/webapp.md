@@ -170,10 +170,11 @@ changes stored analytical geometries or their GeoParquet exports.
 
 Preparation uses authoritative reference boundaries, not display simplifications.
 All positive polygon coverage survives splitting, including tiny cross-stratum
-pieces and uncovered residuals. Overlapping reference coverage is an error with
-the layer and region identified; it is never resolved by double-counting or
-assigning a sliver to a different stratum. A missing selected reference table
-must be imported before preparation can proceed.
+pieces and uncovered residuals. Reference overlaps of up to 5 square metres
+per region and input piece are assigned once to the first region in
+lexicographic ID order. Larger overlaps are errors identifying the layer and
+regions. A missing selected reference table must be imported before preparation
+can proceed.
 
 The minimum-area setting applies to whole input features before splitting.
 Fragments lacking any selected polygon-region key remain in the downloadable

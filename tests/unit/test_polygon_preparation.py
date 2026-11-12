@@ -53,6 +53,67 @@ def test_overlapping_reference_regions_fail_visibly():
         )
 
 
+@pytest.mark.parametrize("overlap_width", [1e-12, 3e-7])
+def test_small_overlaps_are_assigned_once_without_losing_coverage(overlap_width):
+    source = box(0, 0, 0.001, 0.001)
+    regions = [
+        box(0, 0, 0.0005, 0.001),
+        box(0.0005 - overlap_width, 0, 0.001, 0.001),
+    ]
+    overlap_m2 = equal_area_ha([shapely.intersection(*regions)])[0] * 10000
+    assert 0 < overlap_m2 < 5
+
+    _, pieces, keys = partition_by_regions([source], ["a", "b"], regions, "admin1")
+
+    assert keys.tolist() == ["a", "b"]
+    assert shapely.intersection(*pieces).area == 0
+    assert shapely.symmetric_difference(source, shapely.union_all(pieces)).area == 0
+    assert pieces[0].equals(regions[0])
+
+
+def test_overlap_above_five_square_metres_fails():
+    source = box(0, 0, 0.001, 0.001)
+    regions = [
+        box(0, 0, 0.0005, 0.001),
+        box(0.0005 - 5e-7, 0, 0.001, 0.001),
+    ]
+    assert equal_area_ha([shapely.intersection(*regions)])[0] * 10000 > 5
+    with pytest.raises(ValueError, match="Overlapping reference coverage"):
+        partition_by_regions([source], ["a", "b"], regions, "admin1")
+
+
+def test_region_fully_covered_by_small_overlap_is_not_duplicated():
+    source = box(0, 0, 0.001, 0.001)
+    regions = [source, box(0, 0, 1e-5, 1e-5)]
+    _, pieces, keys = partition_by_regions([source], ["a", "b"], regions, "admin1")
+    assert keys.tolist() == ["a"]
+    assert len(pieces) == 1
+    assert pieces[0].equals(source)
+
+
+def test_shared_boundary_clipping_precision_does_not_fail():
+    lower = (0.20085357812873517, 0)
+    upper = (0.6827075678744093, 1)
+    regions = [
+        Polygon([(0, 0), lower, upper, (0, 1)]),
+        Polygon([lower, (1, 0), (1, 1), upper]),
+    ]
+    source = Polygon(
+        [
+            (0.4433601270152475, 0.9392303518756908),
+            (0.3649442336514104, 0.926234284308656),
+            (0.6119254728311683, 0.39777461488088106),
+        ]
+    )
+    assert shapely.intersection(*regions).area == 0
+
+    _, pieces, keys = partition_by_regions([source], ["a", "b"], regions, "admin1")
+
+    assert {"a", "b"}.issubset(keys)
+    assert shapely.symmetric_difference(source, shapely.union_all(pieces)).area < 1e-14
+    assert sum(piece.area for piece in pieces) == pytest.approx(source.area)
+
+
 def test_polygon_repair_ignores_nested_nonpolygon_members():
     source = shapely.GeometryCollection(
         [

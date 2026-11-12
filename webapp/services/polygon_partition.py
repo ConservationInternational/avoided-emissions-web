@@ -5,6 +5,7 @@ import shapely
 from pyproj import Transformer
 
 AREA_MAX_SEGMENT_DEGREES = 0.005
+REFERENCE_OVERLAP_TOLERANCE_M2 = 5.0
 _EQUAL_AREA = Transformer.from_crs(4326, "ESRI:54009", always_xy=True)
 
 
@@ -50,7 +51,8 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
     """Return original indices, partition geometries and region IDs.
 
     Candidate work is bounded to one input piece at a time. Residual coverage
-    is retained with a null key; any positive overlapping assignment is an error.
+    is retained with a null key. Small overlaps are assigned to the first
+    region by ID; larger overlaps are errors.
     """
     tree = shapely.STRtree(region_geometries)
     origins, pieces, keys = [], [], []
@@ -60,24 +62,39 @@ def partition_by_regions(geometries, region_ids, region_geometries, layer):
             tree.query(source).tolist(), key=lambda i: str(region_ids[i])
         )
         assigned = []
-        assigned_indices = set()
+        assigned_by_index = {}
         for candidate in candidates:
             part = shapely.intersection(source, region_geometries[candidate])
             if part.is_empty or part.area <= 0:
                 continue
             part = polygonal(part)
-            for previous in tree.query(part, predicate="intersects"):
-                if (
-                    previous in assigned_indices
-                    and shapely.intersection(part, region_geometries[previous]).area > 0
-                ):
+            overlap_m2 = 0.0
+            previous_candidates = sorted(
+                tree.query(part, predicate="intersects").tolist(),
+                key=lambda i: str(region_ids[i]),
+            )
+            for previous in previous_candidates:
+                if previous not in assigned_by_index:
+                    continue
+                overlap = shapely.intersection(part, assigned_by_index[previous])
+                if overlap.is_empty or overlap.area <= 0:
+                    continue
+                overlap_m2 += equal_area_ha([overlap])[0] * 10000
+                if overlap_m2 > REFERENCE_OVERLAP_TOLERANCE_M2:
                     raise ValueError(
                         f"Overlapping reference coverage in {layer}, "
-                        f"region {region_ids[candidate]}, input piece {index + 1}. "
+                        f"regions {region_ids[previous]} and {region_ids[candidate]}, "
+                        f"input piece {index + 1} (overlap {overlap_m2:.3f} m2). "
                         "Repair the reference layer before submitting."
                     )
+                part = shapely.difference(part, assigned_by_index[previous])
+                if part.is_empty or part.area <= 0:
+                    break
+            if part.is_empty or part.area <= 0:
+                continue
+            part = polygonal(part)
             assigned.append(part)
-            assigned_indices.add(candidate)
+            assigned_by_index[candidate] = part
             origins.append(index)
             pieces.append(part)
             keys.append(str(region_ids[candidate]))
