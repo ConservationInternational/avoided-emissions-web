@@ -109,13 +109,49 @@ These files are produced by `01_extract_covariates.py` and consumed by
 Every covariate layer must be on the same pixel grid; extraction fails if a
 layer's transform or shape differs from the reference layer.
 
-Extraction reads spatial tiles of at most 1024 × 1024 cells, rather than
-materializing the full matching-extent bounding box or retaining every
-candidate's covariates in memory. Pixel arrays and masks are bounded to one
-tile; completed tiles are streamed to the outputs. Cell IDs and
-`grid_metadata.json` still refer to the full clipped reference grid.
+Extraction defaults to four spawned process workers reading 1024 × 1024-cell
+tiles, rather than materializing the full matching-extent bounding box or
+retaining every candidate's covariates in memory. Pixel arrays and masks are
+bounded to one tile per worker. At most one tile per worker is outstanding;
+workers return file paths, and completed tiles are merged in stable tile order.
+Cell IDs and `grid_metadata.json` still refer to the full clipped reference grid.
 Each control partition can contain several Parquet files (one per occupied
 tile); consumers must read the partition as a dataset.
+
+Each worker reads layers sequentially through persistent, worker-owned Rasterio
+handles. No GDAL handles are inherited through `fork`, and reads do not pass
+through rioxarray's shared read lock or Dask. Transient read failures discard
+the affected handle before retrying; deterministic failures abort extraction.
+Per-worker GDAL settings use one decoder thread, a 128 MiB raster cache, and a
+4 MiB VSI cache per file.
+
+The analysis container accepts these tuning environment variables (positive
+integers; no task-schema change is required):
+
+| Variable | Default | Description |
+|---|---:|---|
+| `AE_EXTRACT_WORKERS` | `4` | Maximum tile processes; capped at the occupied tile count. Set `1` for sequential execution. |
+| `AE_EXTRACT_TILE_SIZE` | `1024` | Maximum tile width and height in cells. Larger tiles increase memory per worker. |
+
+INFO logs report occupied tile count, worker count, completed/total tiles,
+tiles per minute, and an estimated time remaining for tile processing. Detailed
+per-tile selection and writing messages are DEBUG-level.
+
+A local synthetic benchmark (4096 × 4096 cells, 39 compressed raster layers,
+16,610,856 retained pixels, four-CPU/six-GiB container limit) gave:
+
+| Workers | Tile size | Extraction time | Peak summed process RSS |
+|---:|---:|---:|---:|
+| 1 | 1024 | 12.75 s | 729 MiB |
+| 4 | 1024 | 5.64 s | 2824 MiB |
+| 1 | 2048 | 12.50 s | 1215 MiB |
+| 4 | 2048 | 5.66 s | 4393 MiB |
+
+All runs produced the same row count and matching sums for cell IDs and
+non-partition covariates; regression tests also compare complete pixel and
+membership tables across sequential/parallel runs and tile sizes. These
+single-run local-file measurements do not predict S3 throughput. The default
+remains 1024 because 2048 did not improve this sample and used more memory.
 
 ---
 

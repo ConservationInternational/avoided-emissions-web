@@ -1,35 +1,36 @@
 """Extraction regressions; run with the analysis image's Python dependencies."""
 
-import importlib.util
+import importlib
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import rasterio
-import xarray as xr
 from rasterio.transform import from_origin
 from rasterio.windows import Window
 from shapely.geometry import Point, box, mapping
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-spec = importlib.util.spec_from_file_location(
-    "extract_covariates", SCRIPTS / "01_extract_covariates.py"
-)
-extract = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(extract)
+extract = importlib.import_module("01_extract_covariates")
 
 
 class ExtractionTests(unittest.TestCase):
+    def setUp(self):
+        environment = patch.dict(os.environ, {"AE_EXTRACT_WORKERS": "1"})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_sparse_global_extent_never_loads_a_global_raster(self):
         with tempfile.TemporaryDirectory() as output:
             root = Path(output)
@@ -85,20 +86,19 @@ class ExtractionTests(unittest.TestCase):
                 "resolution_m": 250,
                 "matching_extent": mapping(geometries[0].union(geometries[1])),
             }
-            original_open = extract._open_single_cog
-            original_load = extract._load_layer_fresh
+            original_load = extract._load_layer
 
-            def load(uri, name, bounds, grid, rows, cols):
+            def load(uri, name, grid, rows, cols, readers):
                 self.assertLessEqual(max(grid[1]), 1024)
-                return original_load(uri, name, bounds, grid, rows, cols)
+                return original_load(uri, name, grid, rows, cols, readers)
 
             with (
                 patch.object(
                     extract,
-                    "_open_single_cog",
-                    side_effect=lambda uri, name: original_open(str(path), name),
+                    "_s3_path",
+                    return_value=str(path),
                 ),
-                patch.object(extract, "_load_layer_fresh", side_effect=load) as reader,
+                patch.object(extract, "_load_layer", side_effect=load) as reader,
             ):
                 extract.extract_covariates(config, sites)
             pixels = pd.read_parquet(destination / "treatment_pixels.parquet")
@@ -167,47 +167,171 @@ class ExtractionTests(unittest.TestCase):
                 "sites_exclusion_buffer": mapping(rectangle(4, 0, 5, 2)),
                 "exact_match_group_mapping": {"1": [["A", 0], ["C", 0]]},
             }
-            original_open = extract._open_single_cog
-            original_load = extract._load_layer_fresh
-            for tile_size in (1024, 2):
-                destination = root / str(tile_size)
+            original_load = extract._load_layer
+            for tile_size, workers in [(1024, 1), (2, 1), (2, 2)]:
+                destination = root / f"{tile_size}-{workers}"
                 destination.mkdir()
 
-                def load(uri, name, bounds, grid, rows, cols, tile_size=tile_size):
+                def load(uri, name, grid, rows, cols, readers, tile_size=tile_size):
                     self.assertLessEqual(max(grid[1]), tile_size)
-                    return original_load(uri, name, bounds, grid, rows, cols)
+                    return original_load(uri, name, grid, rows, cols, readers)
 
                 with (
                     patch.object(extract, "_EXTRACTION_TILE_SIZE", tile_size),
+                    patch.dict(os.environ, {"AE_EXTRACT_WORKERS": str(workers)}),
                     patch.object(
                         extract,
-                        "_open_single_cog",
-                        side_effect=lambda uri, name: original_open(
-                            str(root / f"{name}.tif"), name
+                        "_s3_path",
+                        side_effect=lambda bucket, prefix, name: str(
+                            root / f"{name}.tif"
                         ),
                     ),
-                    patch.object(extract, "_load_layer_fresh", side_effect=load),
+                    patch.object(extract, "_load_layer", side_effect=load),
+                    self.assertLogs(extract.log, level="INFO") as logs,
                 ):
                     extract.extract_covariates(
                         {**config, "output_dir": str(destination)}, sites
                     )
+                self.assertIn("ETA", "\n".join(logs.output))
+                if workers > 1:
+                    pids = set(re.findall(r"worker=(\d+)", "\n".join(logs.output)))
+                    self.assertEqual(len(pids), workers)
+                    self.assertNotIn(str(os.getpid()), pids)
             for filename, order in [
                 ("treatment_pixels.parquet", ["cell"]),
                 ("treatment_cell_key.parquet", ["cell", "id_numeric"]),
                 ("control_pixels", ["cell"]),
             ]:
                 frames = []
-                for tile_size in (1024, 2):
-                    frame = pd.read_parquet(root / str(tile_size) / filename)
+                for version in ("1024-1", "2-1", "2-2"):
+                    frame = pd.read_parquet(root / version / filename)
                     if "admin1" in frame:
                         frame["admin1"] = frame.admin1.astype("int32")
                     frames.append(frame.sort_values(order).reset_index(drop=True))
-                pd.testing.assert_frame_equal(*frames)
+                pd.testing.assert_frame_equal(frames[0], frames[1])
+                pd.testing.assert_frame_equal(frames[1], frames[2])
             with (
-                open(root / "1024" / "grid_metadata.json") as single,
-                open(root / "2" / "grid_metadata.json") as tiled,
+                open(root / "1024-1" / "grid_metadata.json") as single,
+                open(root / "2-2" / "grid_metadata.json") as tiled,
             ):
                 self.assertEqual(json.load(single), json.load(tiled))
+
+    def test_worker_failure_is_reported_and_temporary_outputs_are_cleaned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transform = from_origin(0, 0.025, 1 / 120, 1 / 120)
+            for name in ("temp", "fc_2000", "fc_2014", "total_biomass_2000"):
+                with rasterio.open(
+                    root / f"{name}.tif",
+                    "w",
+                    driver="GTiff",
+                    width=3,
+                    height=3,
+                    count=1,
+                    dtype="float32",
+                    crs=4326,
+                    transform=(
+                        transform * rasterio.Affine.translation(0.5, 0)
+                        if name == "fc_2000"
+                        else transform
+                    ),
+                ) as dst:
+                    dst.write(np.ones((3, 3), dtype="float32"), 1)
+            output = root / "output"
+            output.mkdir()
+            geometry = box(0, 0, 0.025, 0.025)
+            sites = gpd.GeoDataFrame(
+                {"site_id": ["A"], "id_numeric": [1]}, geometry=[geometry], crs=4326
+            )
+            config = {
+                "output_dir": str(output),
+                "cog_bucket": "test",
+                "cog_prefix": "test",
+                "covariates": ["temp"],
+                "fc_years": [2014],
+                "exact_match_vars": [],
+                "matching_extent": mapping(geometry),
+            }
+            with (
+                patch.dict(
+                    os.environ, {"AE_EXTRACT_WORKERS": "2", "AE_EXTRACT_TILE_SIZE": "2"}
+                ),
+                patch.object(
+                    extract,
+                    "_s3_path",
+                    side_effect=lambda b, p, n: str(root / f"{n}.tif"),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError, r"Extraction tile \d+ failed"
+                ) as error,
+            ):
+                extract.extract_covariates(config, sites)
+            self.assertIsInstance(error.exception.__cause__, extract.GridMismatchError)
+            self.assertFalse((output / "grid_metadata.json").exists())
+            self.assertEqual(list(output.glob("extract-*")), [])
+
+    def test_cached_readers_reuse_handles_and_reopen_after_transient_read_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "layer.tif")
+            transform = from_origin(0, 3, 1, 1)
+            with rasterio.open(
+                path,
+                "w",
+                driver="GTiff",
+                width=3,
+                height=3,
+                count=1,
+                dtype="float32",
+                crs=4326,
+                transform=transform,
+            ) as dst:
+                dst.write(np.arange(9, dtype="float32").reshape(3, 3), 1)
+            original_open = extract._open_single_cog
+            with (
+                patch.object(
+                    extract, "_open_single_cog", wraps=original_open
+                ) as opener,
+                extract._RasterReaders() as readers,
+            ):
+                for col in (0, 1):
+                    grid = (transform * rasterio.Affine.translation(col, 0), (1, 1))
+                    values = extract._load_layer(
+                        path, "layer", grid, np.array([0]), np.array([0]), readers
+                    )
+                    self.assertEqual(values.tolist(), [col])
+                self.assertEqual(opener.call_count, 1)
+                handle = readers.get(path, "layer")
+            self.assertTrue(handle.closed)
+
+            first = rasterio.open(path)
+            second = rasterio.open(path)
+            faulty = Mock(wraps=first)
+            for attribute in ("transform", "width", "height", "nodata", "dtypes"):
+                setattr(faulty, attribute, getattr(first, attribute))
+            faulty.read.side_effect = rasterio.errors.RasterioIOError(
+                "HTTP response_code=503"
+            )
+            with (
+                patch.object(
+                    extract,
+                    "_open_single_cog",
+                    side_effect=[("layer", faulty), ("layer", second)],
+                ) as opener,
+                patch.object(extract.time, "sleep"),
+                extract._RasterReaders() as readers,
+            ):
+                values = extract._load_layer(
+                    path,
+                    "layer",
+                    (transform, (3, 3)),
+                    np.array([1]),
+                    np.array([1]),
+                    readers,
+                )
+                self.assertEqual(values.tolist(), [4])
+                self.assertEqual(opener.call_count, 2)
+                self.assertTrue(first.closed)
+            self.assertTrue(second.closed)
 
     def test_prepared_high_latitude_area_is_preserved_and_validated(self):
         source = box(0, 70, 12, 72)
@@ -278,11 +402,14 @@ class ExtractionTests(unittest.TestCase):
             ) as open_cog,
             patch.object(extract.time, "sleep") as sleep,
         ):
-            with self.assertRaisesRegex(
-                rasterio.errors.RasterioIOError, "not a supported file format"
+            with (
+                self.assertRaisesRegex(
+                    rasterio.errors.RasterioIOError, "not a supported file format"
+                ),
+                extract._RasterReaders() as readers,
             ):
-                extract._load_layer_fresh(
-                    "test.tif", "test", (0, 0, 1, 1), (), np.array([0]), np.array([0])
+                extract._load_layer(
+                    "test.tif", "test", (), np.array([0]), np.array([0]), readers
                 )
             self.assertEqual(open_cog.call_count, 2)
             sleep.assert_called_once()
@@ -306,14 +433,15 @@ class ExtractionTests(unittest.TestCase):
                 dst.write(
                     np.array([[-9999, 0, 1], [1, 1, 1], [1, 1, 1]], dtype=np.float32), 1
                 )
-            values = extract._load_layer_fresh(
-                str(path),
-                "total_biomass_2000",
-                (0, 0.7, 0.3, 1),
-                (transform, (3, 3)),
-                np.array([0, 0, 0]),
-                np.array([0, 1, 2]),
-            )
+            with extract._RasterReaders() as readers:
+                values = extract._load_layer(
+                    str(path),
+                    "total_biomass_2000",
+                    (transform, (3, 3)),
+                    np.array([0, 0, 0]),
+                    np.array([0, 1, 2]),
+                    readers,
+                )
             self.assertTrue(np.isnan(values[0]))
             self.assertEqual(values[1:].tolist(), [0, 1])
 
@@ -375,18 +503,7 @@ class ExtractionTests(unittest.TestCase):
     def test_unmapped_fragments_are_neither_treatment_nor_controls(self):
         with tempfile.TemporaryDirectory() as output:
             transform = from_origin(0, 0.025, 1 / 120, 1 / 120)
-            ref = (
-                xr.DataArray(
-                    np.ones((3, 3)),
-                    dims=("y", "x"),
-                    coords={
-                        "x": (np.arange(3) + 0.5) / 120,
-                        "y": 0.025 - (np.arange(3) + 0.5) / 120,
-                    },
-                )
-                .rio.write_crs("EPSG:4326")
-                .rio.write_transform(transform)
-            )
+            ref = (transform, (3, 3))
             sites = gpd.GeoDataFrame(
                 {
                     "site_id": ["A", "B"],
@@ -411,7 +528,7 @@ class ExtractionTests(unittest.TestCase):
                 "exact_match_group_mapping": {"1": [["A", 0]]},
             }
 
-            def layer(uri, name, bounds, grid, rows, cols):
+            def layer(uri, name, grid, rows, cols, readers):
                 if name.startswith("fc_"):
                     # The top-left treatment pixel never has forest.
                     return np.where((rows == 0) & (cols == 0), 0, 100).astype(
@@ -421,7 +538,7 @@ class ExtractionTests(unittest.TestCase):
 
             with (
                 patch.object(extract, "open_reference_grid", return_value=ref),
-                patch.object(extract, "_load_layer_fresh", side_effect=layer),
+                patch.object(extract, "_load_layer", side_effect=layer),
             ):
                 extract.extract_covariates(config, sites)
             treatment = pd.read_parquet(Path(output) / "treatment_pixels.parquet")
@@ -464,18 +581,7 @@ class ExtractionTests(unittest.TestCase):
     def test_exclusion_preserves_treatment_and_empty_control_schema(self):
         with tempfile.TemporaryDirectory() as output:
             transform = from_origin(0, 0.025, 1 / 120, 1 / 120)
-            ref = (
-                xr.DataArray(
-                    np.ones((3, 3)),
-                    dims=("y", "x"),
-                    coords={
-                        "x": (np.arange(3) + 0.5) / 120,
-                        "y": 0.025 - (np.arange(3) + 0.5) / 120,
-                    },
-                )
-                .rio.write_crs("EPSG:4326")
-                .rio.write_transform(transform)
-            )
+            ref = (transform, (3, 3))
             sites = gpd.GeoDataFrame(
                 {"site_id": ["A"], "id_numeric": [1]},
                 geometry=[box(0, 0, 1 / 120, 0.025)],
@@ -496,8 +602,8 @@ class ExtractionTests(unittest.TestCase):
                 patch.object(extract, "open_reference_grid", return_value=ref),
                 patch.object(
                     extract,
-                    "_load_layer_fresh",
-                    side_effect=lambda uri, name, bounds, grid, rows, cols: np.full(
+                    "_load_layer",
+                    side_effect=lambda uri, name, grid, rows, cols, readers: np.full(
                         len(rows),
                         100 if name.startswith("fc_") else 1,
                         dtype=np.float32,

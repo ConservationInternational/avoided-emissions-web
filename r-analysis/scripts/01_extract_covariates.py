@@ -29,13 +29,18 @@ import gc
 import json
 import logging
 import math
+import multiprocessing
 import os
 import random
 import sys
 import tempfile
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
+from dataclasses import dataclass
+from multiprocessing.util import Finalize
 from pathlib import Path
 
 import boto3
@@ -45,12 +50,11 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import rasterio
-import rioxarray
-import xarray as xr
 from logging_utils import configure_third_party_logging
 from rasterio.features import rasterize
-from rasterio.windows import Window
+from rasterio.windows import Window, from_bounds
 from rasterio.windows import bounds as window_bounds
+from rasterio.windows import transform as window_transform
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
@@ -86,11 +90,12 @@ _GDAL_OPTS = {
 }
 
 
-def _configure_gdal() -> rasterio.Env:
+def _configure_gdal(overrides: dict | None = None) -> rasterio.Env:
     """Configure Rasterio's GDAL and propagate options to worker threads."""
-    for key, val in _GDAL_OPTS.items():
+    options = {**_GDAL_OPTS, **(overrides or {})}
+    for key, val in options.items():
         os.environ.setdefault(key, str(val))
-    return rasterio.Env(**_GDAL_OPTS)
+    return rasterio.Env(**options)
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +212,7 @@ def load_sites(sites_path: str) -> gpd.GeoDataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Covariate loading via rioxarray (reads COGs lazily over S3)
+# Covariate loading via worker-owned Rasterio handles
 # ---------------------------------------------------------------------------
 
 
@@ -216,12 +221,34 @@ def _s3_path(bucket: str, prefix: str, name: str) -> str:
     return f"/vsis3/{bucket}/{prefix}/{name}.tif"
 
 
-def _open_single_cog(uri: str, name: str) -> tuple[str, xr.DataArray]:
+def _open_single_cog(uri: str, name: str) -> tuple[str, rasterio.io.DatasetReader]:
     """Open a single COG lazily (metadata only).  Thread-pool friendly."""
-    da = rioxarray.open_rasterio(uri, chunks="auto")
-    if "band" in da.dims and da.sizes["band"] == 1:
-        da = da.squeeze("band", drop=True)
-    return name, da
+    return name, rasterio.open(uri)
+
+
+class _RasterReaders:
+    """Persistent handles owned by one process, never shared across workers."""
+
+    def __init__(self):
+        self.handles: dict[str, rasterio.io.DatasetReader] = {}
+
+    def get(self, uri, name):
+        if uri not in self.handles:
+            self.handles[uri] = _open_single_cog(uri, name)[1]
+        return self.handles[uri]
+
+    def discard(self, uri):
+        handle = self.handles.pop(uri, None)
+        if handle is not None:
+            handle.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        for handle in self.handles.values():
+            handle.close()
+        self.handles.clear()
 
 
 def _is_transient_raster_error(exc: Exception) -> bool:
@@ -254,49 +281,43 @@ def _is_transient_raster_error(exc: Exception) -> bool:
     return False
 
 
-def _load_layer_fresh(
+def _load_layer(
     uri: str,
     layer_name: str,
-    _clip_bounds: tuple[float, float, float, float],
     grid: tuple,
     rows: np.ndarray,
     cols: np.ndarray,
+    readers: _RasterReaders,
     max_attempts: int = 5,
     base_delay_seconds: float = 1.5,
 ) -> np.ndarray:
-    """Open a COG from scratch and extract candidate pixel values.
-
-    Thread-safe: does not use any shared xr.Dataset. Only the reference
-    tile is read. ``grid`` is its ``(transform, shape)``; a layer on a
-    different grid raises instead of being silently misaligned.
-    """
+    """Read one integer window, reopening a cached handle on transient errors."""
     delay = base_delay_seconds
     for attempt in range(1, max_attempts + 1):
         try:
-            _, opened = _open_single_cog(uri, layer_name)
-            try:
-                # Integer windows avoid clip_box rounding across tile edges and
-                # support final tiles that are only one pixel wide or high.
-                ref_transform, (height, width) = grid
-                col, row = ~opened.rio.transform() * (ref_transform.c, ref_transform.f)
-                left, top = round(col), round(row)
-                if left < 0 or top < 0:
-                    raise GridMismatchError(
-                        f"Layer '{layer_name}' does not cover the reference tile."
-                    )
-                da = opened.isel(
-                    y=slice(top, top + height), x=slice(left, left + width)
+            opened = readers.get(uri, layer_name)
+            ref_transform, (height, width) = grid
+            col, row = ~opened.transform * (ref_transform.c, ref_transform.f)
+            left, top = round(col), round(row)
+            if (
+                left < 0
+                or top < 0
+                or left + width > opened.width
+                or top + height > opened.height
+            ):
+                raise GridMismatchError(
+                    f"Layer '{layer_name}' does not cover the reference tile."
                 )
-                _check_grid(layer_name, da, grid)
-                nodata = da.rio.nodata
-                arr = da.values
-            finally:
-                opened.close()
-            del da
-            if arr.ndim == 3:
-                arr = arr[0]
-            vals = arr[rows, cols]
-            del arr  # free full-grid array; only candidate values survive
+            window = Window(left, top, width, height)
+            _check_grid(layer_name, opened.window_transform(window), grid)
+            nodata = opened.nodata
+            # Empty candidates still validate metadata and preserve the dtype.
+            if not len(rows):
+                vals = np.empty(0, dtype=opened.dtypes[0])
+            else:
+                arr = opened.read(1, window=window)
+                vals = arr[rows, cols]
+                del arr
             if vals.dtype == np.float64:
                 vals = vals.astype(np.float32)
             if nodata is not None and nodata != 0:
@@ -305,6 +326,7 @@ def _load_layer_fresh(
         except GridMismatchError:
             raise
         except Exception as exc:
+            readers.discard(uri)
             if attempt == max_attempts or not _is_transient_raster_error(exc):
                 raise
             sleep_for = delay + random.uniform(0, 0.5)
@@ -325,24 +347,20 @@ class GridMismatchError(RuntimeError):
     """A covariate layer is not on the reference pixel grid."""
 
 
-def _check_grid(layer_name: str, da: xr.DataArray, grid: tuple) -> None:
-    """Raise unless *da* has the reference transform and shape.
+def _check_grid(layer_name: str, transform, grid: tuple) -> None:
+    """Raise unless the requested window has the reference transform.
 
     All COGs are exported with the same ``crsTransform``, so valid layers
     match exactly apart from floating-point noise in the pixel size.
     """
-    ref_transform, ref_shape = grid
-    transform = da.rio.transform()
-    shape_ = (da.sizes["y"], da.sizes["x"])
+    ref_transform, _ = grid
     tol = abs(ref_transform.a) * 1e-3
-    same = shape_ == ref_shape and all(
-        abs(a - b) <= tol for a, b in zip(transform[:6], ref_transform[:6])
-    )
+    same = all(abs(a - b) <= tol for a, b in zip(transform[:6], ref_transform[:6]))
     if not same:
         raise GridMismatchError(
             f"Layer '{layer_name}' is not on the reference grid: "
-            f"transform {tuple(transform)[:6]}, shape {shape_}; expected "
-            f"{tuple(ref_transform)[:6]}, shape {ref_shape}"
+            f"transform {tuple(transform)[:6]}; expected "
+            f"{tuple(ref_transform)[:6]}"
         )
 
 
@@ -350,46 +368,54 @@ def open_reference_grid(
     cog_bucket: str,
     cog_prefix: str,
     covariate_names: list[str],
-) -> xr.DataArray:
+) -> tuple:
     """Open all covariate COGs (metadata only) and return the first one.
 
     Fails early if any layer has a different CRS or pixel size.  Exact
     alignment of the clipped window is checked for every layer when its
-    pixels are read (``_load_layer_fresh``).
+    pixels are read (``_load_layer``).
     """
     uris = {name: _s3_path(cog_bucket, cog_prefix, name) for name in covariate_names}
     n_workers = min(8, len(covariate_names))
     log.info(
         "  Opening %d COGs in parallel (%d workers)...", len(covariate_names), n_workers
     )
-    opened: dict[str, xr.DataArray] = {}
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {
-            pool.submit(_open_single_cog, uri, name): name for name, uri in uris.items()
-        }
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                opened[name] = future.result()[1]
-            except Exception as exc:
+    opened: dict[str, rasterio.io.DatasetReader] = {}
+    try:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {
+                pool.submit(_open_single_cog, uri, name): name
+                for name, uri in uris.items()
+            }
+            # Collect every successfully opened handle even when another fails.
+            errors = []
+            for future in as_completed(futures):
+                name = futures[future]
+                exc = future.exception()
+                if exc is not None:
+                    errors.append((name, exc))
+                else:
+                    opened[name] = future.result()[1]
+            if errors:
+                name, exc = errors[0]
                 raise RuntimeError(
                     f"Failed to open covariate '{name}' at {uris[name]}"
                 ) from exc
-
-    ref = opened[covariate_names[0]]
-    ref_res = ref.rio.resolution()
-    for name in covariate_names[1:]:
-        da = opened[name]
-        if da.rio.crs != ref.rio.crs:
-            raise GridMismatchError(
-                f"CRS mismatch: '{name}' has {da.rio.crs}, expected {ref.rio.crs}"
-            )
-        if any(abs(a - b) > 1e-9 for a, b in zip(da.rio.resolution(), ref_res)):
-            raise GridMismatchError(
-                f"Resolution mismatch: '{name}' has {da.rio.resolution()}, "
-                f"expected {ref_res}"
-            )
-    return ref
+        ref = opened[covariate_names[0]]
+        for name in covariate_names[1:]:
+            da = opened[name]
+            if da.crs != ref.crs:
+                raise GridMismatchError(
+                    f"CRS mismatch: '{name}' has {da.crs}, expected {ref.crs}"
+                )
+            if any(abs(a - b) > 1e-9 for a, b in zip(da.res, ref.res)):
+                raise GridMismatchError(
+                    f"Resolution mismatch: '{name}' has {da.res}, expected {ref.res}"
+                )
+        return ref.transform, (ref.height, ref.width)
+    finally:
+        for handle in opened.values():
+            handle.close()
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +569,109 @@ def _mapped_fragment_ids(config: dict, sites: gpd.GeoDataFrame) -> np.ndarray:
 _EXTRACTION_TILE_SIZE = 1024
 
 
+@dataclass(frozen=True)
+class _TileTask:
+    index: int
+    window: Window
+    positions: np.ndarray
+
+
+class _TileWorker:
+    def __init__(self, config, sites, grid, all_layers, layer_uris, directory):
+        self.config = config
+        self.sites = sites
+        self.grid = grid
+        self.all_layers = all_layers
+        self.layer_uris = layer_uris
+        self.directory = directory
+        self.resources = ExitStack()
+        self.resources.enter_context(
+            _configure_gdal(
+                {
+                    "GDAL_NUM_THREADS": "1",
+                    "GDAL_CACHEMAX": 128 * 1024**2,
+                    "VSI_CACHE_SIZE": str(4 * 1024**2),
+                }
+            )
+        )
+        self.readers = self.resources.enter_context(_RasterReaders())
+
+    def run(self, task: _TileTask):
+        started = time.monotonic()
+        window = task.window
+        directory = Path(self.directory) / f"tile-{task.index:06d}"
+        directory.mkdir()
+        tile_grid = (
+            window_transform(window, self.grid[0]),
+            (int(window.height), int(window.width)),
+        )
+        _extract_tile(
+            {**self.config, "output_dir": str(directory)},
+            self.sites.iloc[task.positions],
+            tile_grid,
+            self.all_layers,
+            self.layer_uris,
+            self.readers,
+            int(window.row_off),
+            int(window.col_off),
+            self.grid[1][1],
+        )
+        return str(directory), time.monotonic() - started, os.getpid()
+
+
+_tile_worker: _TileWorker | None = None
+
+
+def _init_tile_worker(*args):
+    global _tile_worker
+    _tile_worker = _TileWorker(*args)
+    Finalize(None, _tile_worker.resources.close, exitpriority=10)
+
+
+def _run_tile(task):
+    if _tile_worker is None:
+        raise RuntimeError("Extraction worker has not been initialized.")
+    return _tile_worker.run(task)
+
+
+def _tile_results(tasks, workers, worker_args):
+    """Keep at most ``workers`` tiles outstanding and merge in stable order."""
+    if workers == 1:
+        worker = _TileWorker(*worker_args)
+        with worker.resources:
+            for task in tasks:
+                yield task, worker.run(task)
+        return
+    # Never fork an active GDAL runtime or inherit its dataset handles.
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_init_tile_worker,
+        initargs=worker_args,
+    ) as pool:
+        remaining = iter(tasks)
+        pending = deque()
+        for _ in range(workers):
+            task = next(remaining, None)
+            if task is not None:
+                pending.append((task, pool.submit(_run_tile, task)))
+        while pending:
+            task, future = pending.popleft()
+            try:
+                result = future.result()
+            except Exception as exc:
+                for _, queued in pending:
+                    queued.cancel()
+                raise RuntimeError(
+                    f"Extraction tile {task.index + 1} failed "
+                    f"(row={task.window.row_off}, col={task.window.col_off})"
+                ) from exc
+            yield task, result
+            following = next(remaining, None)
+            if following is not None:
+                pending.append((following, pool.submit(_run_tile, following)))
+
+
 def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     """Extract bounded spatial tiles, preserving global cell IDs and schemas."""
     cog_bucket = config["cog_bucket"]
@@ -589,9 +718,24 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     clip_bounds = clip_box.bounds
     log.info("Clipping covariates to matching extent bbox: %s", clip_box.bounds)
 
-    ref = ref.rio.clip_box(*clip_bounds)
-    transform = ref.rio.transform()
-    height, width = ref.sizes["y"], ref.sizes["x"]
+    source_transform, (source_height, source_width) = ref
+    clip = from_bounds(*clip_bounds, transform=source_transform).intersection(
+        Window(0, 0, source_width, source_height)
+    )
+    left = max(0, math.floor(clip.col_off + 1e-8))
+    top = max(0, math.floor(clip.row_off + 1e-8))
+    right = min(source_width, math.ceil(clip.col_off + clip.width - 1e-8))
+    bottom = min(source_height, math.ceil(clip.row_off + clip.height - 1e-8))
+    transform = window_transform(
+        Window(left, top, right - left, bottom - top), source_transform
+    )
+    height, width = bottom - top, right - left
+    tile_size = int(os.environ.get("AE_EXTRACT_TILE_SIZE", _EXTRACTION_TILE_SIZE))
+    workers = int(os.environ.get("AE_EXTRACT_WORKERS", "4"))
+    if tile_size < 1 or workers < 1:
+        raise ValueError(
+            "AE_EXTRACT_TILE_SIZE and AE_EXTRACT_WORKERS must be positive."
+        )
     if expected_pix is not None and abs(abs(transform.a) - expected_pix) > 1e-6:
         raise RuntimeError(
             f"COG pixel size ({abs(transform.a):.8f}°) does not match the requested "
@@ -603,14 +747,33 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         "Grid: %d x %d; extracting tiles of at most %d x %d cells",
         width,
         height,
-        _EXTRACTION_TILE_SIZE,
-        _EXTRACTION_TILE_SIZE,
+        tile_size,
+        tile_size,
     )
     output = Path(config["output_dir"])
     controls_dir = output / "control_pixels"
     controls_dir.mkdir(exist_ok=True)
     extent = prep(extent_geom)
     site_index = sites.sindex
+    tasks = []
+    for top in range(0, height, tile_size):
+        for left in range(0, width, tile_size):
+            window = Window(
+                left, top, min(tile_size, width - left), min(tile_size, height - top)
+            )
+            tile_geom = box(*window_bounds(window, transform))
+            positions = site_index.query(tile_geom, predicate="intersects")
+            if len(positions) or extent.intersects(tile_geom):
+                tasks.append(_TileTask(len(tasks), window, positions))
+    if not tasks:
+        raise RuntimeError("No extraction tiles intersect the reference grid.")
+    workers = min(workers, len(tasks))
+    log.info(
+        "Extraction plan: %d occupied tiles, %d process worker(s), sequential "
+        "layer reads with persistent Rasterio handles",
+        len(tasks),
+        workers,
+    )
     key_schema = pa.schema(
         [
             ("cell", pa.int64()),
@@ -622,82 +785,83 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     empty_control_schema = None
     control_files = 0
     tile_count = 0
-    # One tile's temporary files exist at a time. Writers for the two single-file
-    # outputs retain only Parquet metadata, never previous tiles' pixel arrays.
+    # Completed results are file paths, not arrays. Only a bounded number of
+    # tiles can be buffered on disk while the single-file outputs are assembled.
     with (
         tempfile.TemporaryDirectory(prefix="extract-", dir=output) as temp,
         pq.ParquetWriter(
             output / "treatment_cell_key.parquet", key_schema, compression="zstd"
         ) as key_writer,
+        ExitStack() as task_cleanup,
     ):
         treatment_writer = None
         try:
-            for top in range(0, height, _EXTRACTION_TILE_SIZE):
-                for left in range(0, width, _EXTRACTION_TILE_SIZE):
-                    window = Window(
-                        left,
-                        top,
-                        min(_EXTRACTION_TILE_SIZE, width - left),
-                        min(_EXTRACTION_TILE_SIZE, height - top),
-                    )
-                    bounds = window_bounds(window, transform)
-                    tile_geom = box(*bounds)
-                    positions = site_index.query(tile_geom, predicate="intersects")
-                    if not len(positions) and not extent.intersects(tile_geom):
-                        continue
-                    tile = tempfile.TemporaryDirectory(dir=temp)
-                    tile_dir = Path(tile.name)
-                    _extract_tile(
-                        {**config, "output_dir": str(tile_dir)},
-                        sites.iloc[positions],
-                        ref.isel(
-                            y=slice(top, top + int(window.height)),
-                            x=slice(left, left + int(window.width)),
-                        ),
-                        bounds,
-                        all_layers,
-                        layer_uris,
-                        top,
-                        left,
-                        width,
-                    )
-                    key_path = tile_dir / "treatment_cell_key.parquet"
-                    with pq.ParquetFile(key_path) as source:
-                        for batch in source.iter_batches(batch_size=65536):
-                            key_writer.write_table(
-                                pa.Table.from_batches([batch]).cast(key_schema)
-                            )
-                    key_path.unlink()
-                    treatment_path = tile_dir / "treatment_pixels.parquet"
-                    with pq.ParquetFile(treatment_path) as source:
-                        if treatment_writer is None:
-                            treatment_writer = pq.ParquetWriter(
-                                output / "treatment_pixels.parquet",
-                                source.schema_arrow,
-                                compression="zstd",
-                            )
-                        for batch in source.iter_batches(batch_size=65536):
-                            treatment_writer.write_batch(batch)
-                    treatment_path.unlink()
-                    for path in (tile_dir / "control_pixels").rglob("*.parquet"):
-                        with pq.ParquetFile(path) as source:
-                            if source.metadata.num_rows == 0:
-                                empty_control_schema = source.schema_arrow
-                                path.unlink()
-                                continue
-                        relative = path.relative_to(tile_dir / "control_pixels")
-                        destination = controls_dir / relative.parent
-                        destination.mkdir(parents=True, exist_ok=True)
-                        path.replace(destination / f"part-{tile_count}.parquet")
-                        control_files += 1
-                    tile.cleanup()
-                    tile_count += 1
-                    log.info(
-                        "Finished extraction tile %d (row=%d, col=%d)",
-                        tile_count,
-                        top,
-                        left,
-                    )
+            started = time.monotonic()
+            results = _tile_results(
+                tasks,
+                workers,
+                (
+                    config,
+                    sites,
+                    (transform, (height, width)),
+                    all_layers,
+                    layer_uris,
+                    temp,
+                ),
+            )
+            task_cleanup.callback(results.close)
+            for task, (directory, tile_seconds, pid) in results:
+                tile_dir = Path(directory)
+                key_path = tile_dir / "treatment_cell_key.parquet"
+                with pq.ParquetFile(key_path) as source:
+                    for batch in source.iter_batches(batch_size=65536):
+                        key_writer.write_table(
+                            pa.Table.from_batches([batch]).cast(key_schema)
+                        )
+                key_path.unlink()
+                treatment_path = tile_dir / "treatment_pixels.parquet"
+                with pq.ParquetFile(treatment_path) as source:
+                    if treatment_writer is None:
+                        treatment_writer = pq.ParquetWriter(
+                            output / "treatment_pixels.parquet",
+                            source.schema_arrow,
+                            compression="zstd",
+                        )
+                    for batch in source.iter_batches(batch_size=65536):
+                        treatment_writer.write_batch(batch)
+                treatment_path.unlink()
+                for path in (tile_dir / "control_pixels").rglob("*.parquet"):
+                    with pq.ParquetFile(path) as source:
+                        if source.metadata.num_rows == 0:
+                            empty_control_schema = source.schema_arrow
+                            path.unlink()
+                            continue
+                    relative = path.relative_to(tile_dir / "control_pixels")
+                    destination = controls_dir / relative.parent
+                    destination.mkdir(parents=True, exist_ok=True)
+                    path.replace(destination / f"part-{task.index:06d}.parquet")
+                    control_files += 1
+                for directory in (tile_dir / "control_pixels").iterdir():
+                    if directory.is_dir():
+                        directory.rmdir()
+                (tile_dir / "control_pixels").rmdir()
+                tile_dir.rmdir()
+                tile_count += 1
+                elapsed = time.monotonic() - started
+                rate = tile_count / elapsed
+                log.info(
+                    "Extraction tiles %d/%d (%.1f%%); %.2f tiles/min; ETA %.1f min; "
+                    "last tile %.2fs (worker=%d, row=%d, col=%d)",
+                    tile_count,
+                    len(tasks),
+                    100 * tile_count / len(tasks),
+                    60 * rate,
+                    (len(tasks) - tile_count) / rate / 60,
+                    tile_seconds,
+                    pid,
+                    task.window.row_off,
+                    task.window.col_off,
+                )
         finally:
             if treatment_writer is not None:
                 treatment_writer.close()
@@ -712,28 +876,24 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             compression="zstd",
         )
     _write_grid_metadata(config, transform, width, height)
-    ref.close()
     log.info("Extraction complete: %d bounded tiles", tile_count)
 
 
 def _extract_tile(
-    config, sites, ref, clip_bounds, all_layers, layer_uris, top, left, global_width
+    config, sites, grid, all_layers, layer_uris, readers, top, left, global_width
 ):
     """Apply the pixel-selection rules to one tile and write its outputs."""
     extent_geom = shape(config["matching_extent"])
 
     # Tile metadata only; no pixel data has been fetched yet.
-    transform = ref.rio.transform()
+    transform, (height, width) = grid
     xres = abs(transform.a)
     yres = abs(transform.e)
-    ys = ref.coords["y"].values
-    height, width = len(ys), len(ref.coords["x"].values)
-    grid = (transform, (height, width))
-    del ref
+    ys = transform.f + (np.arange(height) + 0.5) * transform.e
 
-    log.info("Grid: %d x %d (xres=%.6f, yres=%.6f)", width, height, xres, yres)
+    log.debug("Grid: %d x %d (xres=%.6f, yres=%.6f)", width, height, xres, yres)
 
-    log.info("Building sparse treatment cell membership...")
+    log.debug("Building sparse treatment cell membership...")
     # The key keeps every fragment so the summary can count pixels of
     # fragments that are not matched (e.g. no exact-match region).
     treatment_key = _treatment_memberships(
@@ -747,7 +907,7 @@ def _extract_tile(
     del matched_key
     treatment_mask = np.zeros(height * width, dtype=bool)
     treatment_mask[treatment_indices] = True
-    log.info(
+    log.debug(
         "Treatment cells: %d memberships; %d cells in %d matched fragment(s) "
         "(%d of %d fragments are not matched)",
         len(treatment_key),
@@ -786,7 +946,7 @@ def _extract_tile(
             dtype="uint8",
             all_touched=False,
         ).ravel()
-        log.info(
+        log.debug(
             "Excluding %d candidate pixels within the site exclusion buffer",
             int(np.count_nonzero(in_extent & (near_sites > 0))),
         )
@@ -801,7 +961,7 @@ def _extract_tile(
     candidate_indices = np.nonzero(candidate_mask)[0]
     del candidate_mask
 
-    log.info(
+    log.debug(
         "Extracting covariate values for %d candidate pixels...", len(candidate_indices)
     )
 
@@ -833,19 +993,19 @@ def _extract_tile(
     _fc_years = config.get("fc_years") or []
     _PRUNE_LAYER = f"fc_{min(_fc_years)}" if _fc_years else None
     if _PRUNE_LAYER and _PRUNE_LAYER in all_layers:
-        log.info(
+        log.debug(
             "Pre-loading '%s' (baseline forest cover) to prune non-forest "
             "candidate pixels (%d candidates before pruning)...",
             _PRUNE_LAYER,
             len(candidate_indices),
         )
-        _ref_vals = _load_layer_fresh(
+        _ref_vals = _load_layer(
             layer_uris[_PRUNE_LAYER],
             _PRUNE_LAYER,
-            clip_bounds,
             grid,
             rows,
             cols,
+            readers,
         )
         # Keep pixels that either belong to a treatment site (unconditionally)
         # or had some tree cover in the baseline year.  Hansen GFC encodes
@@ -860,7 +1020,7 @@ def _extract_tile(
         candidate_pixel_areas = candidate_pixel_areas[_keep]
         _ref_vals = _ref_vals[_keep]
         del _keep
-        log.info(
+        log.debug(
             "Non-forest pruning: %d → %d candidates (%d non-forest/water pixels removed)",
             n_before,
             len(candidate_indices),
@@ -887,36 +1047,13 @@ def _extract_tile(
             )
 
     # Only this tile's candidate arrays accumulate, regardless of job extent.
-    _N_PARALLEL = 4
-    layers_to_load = [name for name in all_layers if name not in _preloaded]
-    layer_futures: dict = {}
-    with ThreadPoolExecutor(max_workers=_N_PARALLEL) as pool:
-        for layer_name in layers_to_load:
-            layer_futures[layer_name] = pool.submit(
-                _load_layer_fresh,
-                layer_uris[layer_name],
-                layer_name,
-                clip_bounds,
-                grid,
-                rows,
-                cols,
+    for layer_name in all_layers:
+        if layer_name not in _preloaded:
+            data[layer_name] = _load_layer(
+                layer_uris[layer_name], layer_name, grid, rows, cols, readers
             )
-        # Collect in all_layers order to keep log messages sequential and
-        # preserve column order in the output DataFrame.
-        for i, layer_name in enumerate(all_layers, 1):
-            if layer_name in _preloaded:
-                log.info(
-                    "  [%d/%d] Already loaded %s (pre-pruning)",
-                    i,
-                    len(all_layers),
-                    layer_name,
-                )
-                continue
-            log.info("  [%d/%d] Awaiting %s", i, len(all_layers), layer_name)
-            data[layer_name] = layer_futures[layer_name].result()
-            log.info("  [%d/%d] Done    %s", i, len(all_layers), layer_name)
 
-    log.info("Total covariate values extracted: %d pixels", len(data["cell"]))
+    log.debug("Total covariate values extracted: %d pixels", len(data["cell"]))
 
     # --- 8. save outputs ---
     output_dir = config["output_dir"]
@@ -967,7 +1104,7 @@ def _extract_tile(
         )
         del _pv
         gc.collect()
-        log.info("Cast '%s' to int32 for hive partition keys", _partition_var)
+        log.debug("Cast '%s' to int32 for hive partition keys", _partition_var)
 
     def _write_rows_blocked(rows, path, idx, columns):
         """Stream the given row indices of ``rows`` to one Parquet file.
@@ -1004,7 +1141,7 @@ def _extract_tile(
 
     # 1. treatment_pixels.parquet -- all columns, treatment rows with forest.
     _treatment_idx = np.flatnonzero(_treatment_mask & _ever_forest)
-    log.info(
+    log.debug(
         "Dropping %d never-forested treatment pixels",
         int(np.count_nonzero(_treatment_mask & ~_ever_forest)),
     )
@@ -1017,7 +1154,7 @@ def _extract_tile(
     )
     del _treatment_idx
     gc.collect()
-    log.info("Written treatment_pixels.parquet: %d rows", _n_treatment)
+    log.debug("Written treatment_pixels.parquet: %d rows", _n_treatment)
 
     # 2. control_pixels/ -- every pixel that is not a treatment pixel.
     _control_mask = ~_treatment_mask
@@ -1034,7 +1171,7 @@ def _extract_tile(
         _part_col = data[_partition_var]
         _value_cols = [c for c in _all_cols if c != _partition_var]
         _uniq = np.unique(_part_col[_control_mask])
-        log.info(
+        log.debug(
             "Writing control_pixels/ for %d partition value(s) of '%s' ...",
             len(_uniq),
             _partition_var,
@@ -1052,7 +1189,7 @@ def _extract_tile(
                 _value_cols,
             )
             del _idx
-        log.info(
+        log.debug(
             "Written control_pixels/ (%d rows across %d partitions of '%s')",
             _control_count,
             len(_uniq),
@@ -1068,7 +1205,7 @@ def _extract_tile(
             _all_cols,
         )
         del _idx
-        log.info(
+        log.debug(
             "Written control_pixels/part-0.parquet (%d rows, unpartitioned)",
             _control_count,
         )
@@ -1077,7 +1214,7 @@ def _extract_tile(
     del data
     gc.collect()
 
-    log.info(
+    log.debug(
         "Saved treatment_cell_key.parquet, treatment_pixels.parquet, "
         "and control_pixels/"
     )
