@@ -1,6 +1,7 @@
 """Extraction regressions; run with the analysis image's Python dependencies."""
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -16,6 +17,7 @@ import pyarrow.parquet as pq
 import rasterio
 import xarray as xr
 from rasterio.transform import from_origin
+from rasterio.windows import Window
 from shapely.geometry import Point, box, mapping
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -28,6 +30,185 @@ spec.loader.exec_module(extract)
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_sparse_global_extent_never_loads_a_global_raster(self):
+        with tempfile.TemporaryDirectory() as output:
+            root = Path(output)
+            path = root / "global.tif"
+            width, height = 146100, 32846
+            resolution = 1 / 480
+            transform = from_origin(-160.35, 24.26, resolution, resolution)
+            with rasterio.open(
+                path,
+                "w",
+                driver="GTiff",
+                width=width,
+                height=height,
+                count=1,
+                dtype="float32",
+                crs=4326,
+                transform=transform,
+                tiled=True,
+                blockxsize=256,
+                blockysize=256,
+                SPARSE_OK=True,
+                BIGTIFF="YES",
+            ) as dst:
+                for col, row in [(2, 2), (width - 4, height - 4)]:
+                    dst.write(
+                        np.ones((2, 2), dtype="float32"),
+                        1,
+                        window=Window(col, row, 2, 2),
+                    )
+            geometries = []
+            expected_cells = []
+            for col, row in [(2, 2), (width - 4, height - 4)]:
+                west, north = transform * (col, row)
+                east, south = transform * (col + 2, row + 2)
+                geometries.append(box(west, south, east, north))
+                expected_cells.extend(
+                    (row + r) * width + col + c for r in range(2) for c in range(2)
+                )
+            sites = gpd.GeoDataFrame(
+                {"site_id": ["A", "B"], "id_numeric": [1, 2]},
+                geometry=geometries,
+                crs=4326,
+            )
+            destination = root / "output"
+            destination.mkdir()
+            config = {
+                "output_dir": str(destination),
+                "cog_bucket": "test",
+                "cog_prefix": "test",
+                "covariates": [],
+                "fc_years": [2014],
+                "exact_match_vars": [],
+                "resolution_m": 250,
+                "matching_extent": mapping(geometries[0].union(geometries[1])),
+            }
+            original_open = extract._open_single_cog
+            original_load = extract._load_layer_fresh
+
+            def load(uri, name, bounds, grid, rows, cols):
+                self.assertLessEqual(max(grid[1]), 1024)
+                return original_load(uri, name, bounds, grid, rows, cols)
+
+            with (
+                patch.object(
+                    extract,
+                    "_open_single_cog",
+                    side_effect=lambda uri, name: original_open(str(path), name),
+                ),
+                patch.object(extract, "_load_layer_fresh", side_effect=load) as reader,
+            ):
+                extract.extract_covariates(config, sites)
+            pixels = pd.read_parquet(destination / "treatment_pixels.parquet")
+            self.assertEqual(sorted(pixels.cell), sorted(expected_cells))
+            self.assertEqual(reader.call_count, 6)  # 3 layers, 2 occupied tiles
+            with open(destination / "grid_metadata.json") as source:
+                metadata = json.load(source)
+            self.assertEqual((metadata["width"], metadata["height"]), (width, height))
+
+    def test_tiled_extraction_preserves_pixels_memberships_and_global_grid(self):
+        with tempfile.TemporaryDirectory() as output:
+            root = Path(output)
+            resolution = 1 / 480
+            transform = from_origin(-160.35, 24.26, resolution, resolution)
+            height, width = 5, 7
+            cells = np.arange(height * width).reshape(height, width)
+            layers = {
+                "temp": cells.astype("float32"),
+                "fc_2000": np.where(cells % 3 == 0, 0, 100).astype("float32"),
+                "fc_2014": np.where(cells % 3 == 0, 0, 80).astype("float32"),
+                "fc_2015": np.where(cells % 5 == 0, 0, 60).astype("float32"),
+                "total_biomass_2000": (cells + 20).astype("float32"),
+                "admin1": np.where(cells % 4 == 0, -9999, cells % 2).astype("float32"),
+            }
+            for name, values in layers.items():
+                with rasterio.open(
+                    root / f"{name}.tif",
+                    "w",
+                    driver="GTiff",
+                    width=width,
+                    height=height,
+                    count=1,
+                    dtype="float32",
+                    crs="EPSG:4326",
+                    transform=transform,
+                    nodata=-9999,
+                ) as dst:
+                    dst.write(values, 1)
+
+            def rectangle(left, top, right, bottom):
+                west, north = transform * (left, top)
+                east, south = transform * (right, bottom)
+                return box(west, south, east, north)
+
+            sites = gpd.GeoDataFrame(
+                {
+                    "site_id": ["A", "B", "C"],
+                    "id_numeric": [1, 2, 3],
+                    "sub_site_index": [0, 0, 0],
+                },
+                geometry=[
+                    rectangle(0, 0, 3, 5),
+                    rectangle(6, 0, 7, 5),
+                    rectangle(1, 0, 4, 3),
+                ],
+                crs=4326,
+            )
+            config = {
+                "cog_bucket": "test",
+                "cog_prefix": "test",
+                "covariates": ["temp"],
+                "fc_years": [2014, 2015],
+                "exact_match_vars": ["admin1"],
+                "resolution_m": 250,
+                "matching_extent": mapping(rectangle(0, 0, 7, 5)),
+                "sites_exclusion_buffer": mapping(rectangle(4, 0, 5, 2)),
+                "exact_match_group_mapping": {"1": [["A", 0], ["C", 0]]},
+            }
+            original_open = extract._open_single_cog
+            original_load = extract._load_layer_fresh
+            for tile_size in (1024, 2):
+                destination = root / str(tile_size)
+                destination.mkdir()
+
+                def load(uri, name, bounds, grid, rows, cols, tile_size=tile_size):
+                    self.assertLessEqual(max(grid[1]), tile_size)
+                    return original_load(uri, name, bounds, grid, rows, cols)
+
+                with (
+                    patch.object(extract, "_EXTRACTION_TILE_SIZE", tile_size),
+                    patch.object(
+                        extract,
+                        "_open_single_cog",
+                        side_effect=lambda uri, name: original_open(
+                            str(root / f"{name}.tif"), name
+                        ),
+                    ),
+                    patch.object(extract, "_load_layer_fresh", side_effect=load),
+                ):
+                    extract.extract_covariates(
+                        {**config, "output_dir": str(destination)}, sites
+                    )
+            for filename, order in [
+                ("treatment_pixels.parquet", ["cell"]),
+                ("treatment_cell_key.parquet", ["cell", "id_numeric"]),
+                ("control_pixels", ["cell"]),
+            ]:
+                frames = []
+                for tile_size in (1024, 2):
+                    frame = pd.read_parquet(root / str(tile_size) / filename)
+                    if "admin1" in frame:
+                        frame["admin1"] = frame.admin1.astype("int32")
+                    frames.append(frame.sort_values(order).reset_index(drop=True))
+                pd.testing.assert_frame_equal(*frames)
+            with (
+                open(root / "1024" / "grid_metadata.json") as single,
+                open(root / "2" / "grid_metadata.json") as tiled,
+            ):
+                self.assertEqual(json.load(single), json.load(tiled))
+
     def test_prepared_high_latitude_area_is_preserved_and_validated(self):
         source = box(0, 70, 12, 72)
         sites = gpd.GeoDataFrame(

@@ -36,6 +36,7 @@ import tempfile
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import boto3
 import geopandas as gpd
@@ -48,8 +49,11 @@ import rioxarray
 import xarray as xr
 from logging_utils import configure_third_party_logging
 from rasterio.features import rasterize
+from rasterio.windows import Window
+from rasterio.windows import bounds as window_bounds
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
+from shapely.prepared import prep
 from shapely.validation import make_valid
 
 # Silence GDAL/rasterio deprecation noise
@@ -253,7 +257,7 @@ def _is_transient_raster_error(exc: Exception) -> bool:
 def _load_layer_fresh(
     uri: str,
     layer_name: str,
-    clip_bounds: tuple[float, float, float, float],
+    _clip_bounds: tuple[float, float, float, float],
     grid: tuple,
     rows: np.ndarray,
     cols: np.ndarray,
@@ -262,21 +266,33 @@ def _load_layer_fresh(
 ) -> np.ndarray:
     """Open a COG from scratch and extract candidate pixel values.
 
-    Thread-safe: does not use any shared xr.Dataset.  The full-grid array
-    is freed before the function returns, so each caller only retains the
-    small candidate-pixel array.  ``grid`` is the reference ``(transform,
-    shape)``; a layer on a different grid raises instead of being silently
-    misaligned.
+    Thread-safe: does not use any shared xr.Dataset. Only the reference
+    tile is read. ``grid`` is its ``(transform, shape)``; a layer on a
+    different grid raises instead of being silently misaligned.
     """
     delay = base_delay_seconds
     for attempt in range(1, max_attempts + 1):
         try:
-            _, da = _open_single_cog(uri, layer_name)
-            da = da.rio.clip_box(*clip_bounds)
-            _check_grid(layer_name, da, grid)
-            nodata = da.rio.nodata
-            arr = da.values
-            del da  # free DataArray before full-grid array
+            _, opened = _open_single_cog(uri, layer_name)
+            try:
+                # Integer windows avoid clip_box rounding across tile edges and
+                # support final tiles that are only one pixel wide or high.
+                ref_transform, (height, width) = grid
+                col, row = ~opened.rio.transform() * (ref_transform.c, ref_transform.f)
+                left, top = round(col), round(row)
+                if left < 0 or top < 0:
+                    raise GridMismatchError(
+                        f"Layer '{layer_name}' does not cover the reference tile."
+                    )
+                da = opened.isel(
+                    y=slice(top, top + height), x=slice(left, left + width)
+                )
+                _check_grid(layer_name, da, grid)
+                nodata = da.rio.nodata
+                arr = da.values
+            finally:
+                opened.close()
+            del da
             if arr.ndim == 3:
                 arr = arr[0]
             vals = arr[rows, cols]
@@ -524,24 +540,11 @@ def _mapped_fragment_ids(config: dict, sites: gpd.GeoDataFrame) -> np.ndarray:
     return sites["id_numeric"].to_numpy()[mapped]
 
 
-def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
-    """Extract treatment & control pixel values from COG layers.
+_EXTRACTION_TILE_SIZE = 1024
 
-    Strategy:
-    1. Open all COGs to validate CRS/resolution and get grid metadata
-       (transform, shape).  No pixel data is fetched at this stage.
-    2. Determine the spatial clip window from the ``matching_extent``
-       polygon (intersection of exact-match reference layers within
-       the sites bbox).
-    3. Clip the dataset to that window; extract grid metadata.
-    4. Rasterize sites and compute candidate pixel indices.
-    5. Load the baseline forest-cover layer to prune non-forest/water
-       pixels from the candidate set, reducing memory for global extents.
-    6. Load all remaining layers in parallel — each thread opens its COG
-       fresh, extracts candidate values, and frees the full grid before
-       returning.  Peak memory is O(N_parallel × grid + N_candidates × N_layers).
-    7. Build treatment_cell_key and the full pixel DataFrame in-memory.
-    """
+
+def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
+    """Extract bounded spatial tiles, preserving global cell IDs and schemas."""
     cog_bucket = config["cog_bucket"]
     cog_prefix = config["cog_prefix"]
 
@@ -587,10 +590,139 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     log.info("Clipping covariates to matching extent bbox: %s", clip_box.bounds)
 
     ref = ref.rio.clip_box(*clip_bounds)
+    transform = ref.rio.transform()
+    height, width = ref.sizes["y"], ref.sizes["x"]
+    if expected_pix is not None and abs(abs(transform.a) - expected_pix) > 1e-6:
+        raise RuntimeError(
+            f"COG pixel size ({abs(transform.a):.8f}°) does not match the requested "
+            f"resolution_m={resolution_m} (expected {expected_pix:.8f}°). "
+            f"Check that cog_prefix '{cog_prefix}' points to the correct "
+            f"resolution COGs."
+        )
+    log.info(
+        "Grid: %d x %d; extracting tiles of at most %d x %d cells",
+        width,
+        height,
+        _EXTRACTION_TILE_SIZE,
+        _EXTRACTION_TILE_SIZE,
+    )
+    output = Path(config["output_dir"])
+    controls_dir = output / "control_pixels"
+    controls_dir.mkdir(exist_ok=True)
+    extent = prep(extent_geom)
+    site_index = sites.sindex
+    key_schema = pa.schema(
+        [
+            ("cell", pa.int64()),
+            ("id_numeric", pa.int64()),
+            ("site_id", pa.string()),
+            ("area_ha", pa.float64()),
+        ]
+    )
+    empty_control_schema = None
+    control_files = 0
+    tile_count = 0
+    # One tile's temporary files exist at a time. Writers for the two single-file
+    # outputs retain only Parquet metadata, never previous tiles' pixel arrays.
+    with (
+        tempfile.TemporaryDirectory(prefix="extract-", dir=output) as temp,
+        pq.ParquetWriter(
+            output / "treatment_cell_key.parquet", key_schema, compression="zstd"
+        ) as key_writer,
+    ):
+        treatment_writer = None
+        try:
+            for top in range(0, height, _EXTRACTION_TILE_SIZE):
+                for left in range(0, width, _EXTRACTION_TILE_SIZE):
+                    window = Window(
+                        left,
+                        top,
+                        min(_EXTRACTION_TILE_SIZE, width - left),
+                        min(_EXTRACTION_TILE_SIZE, height - top),
+                    )
+                    bounds = window_bounds(window, transform)
+                    tile_geom = box(*bounds)
+                    positions = site_index.query(tile_geom, predicate="intersects")
+                    if not len(positions) and not extent.intersects(tile_geom):
+                        continue
+                    tile = tempfile.TemporaryDirectory(dir=temp)
+                    tile_dir = Path(tile.name)
+                    _extract_tile(
+                        {**config, "output_dir": str(tile_dir)},
+                        sites.iloc[positions],
+                        ref.isel(
+                            y=slice(top, top + int(window.height)),
+                            x=slice(left, left + int(window.width)),
+                        ),
+                        bounds,
+                        all_layers,
+                        layer_uris,
+                        top,
+                        left,
+                        width,
+                    )
+                    key_path = tile_dir / "treatment_cell_key.parquet"
+                    with pq.ParquetFile(key_path) as source:
+                        for batch in source.iter_batches(batch_size=65536):
+                            key_writer.write_table(
+                                pa.Table.from_batches([batch]).cast(key_schema)
+                            )
+                    key_path.unlink()
+                    treatment_path = tile_dir / "treatment_pixels.parquet"
+                    with pq.ParquetFile(treatment_path) as source:
+                        if treatment_writer is None:
+                            treatment_writer = pq.ParquetWriter(
+                                output / "treatment_pixels.parquet",
+                                source.schema_arrow,
+                                compression="zstd",
+                            )
+                        for batch in source.iter_batches(batch_size=65536):
+                            treatment_writer.write_batch(batch)
+                    treatment_path.unlink()
+                    for path in (tile_dir / "control_pixels").rglob("*.parquet"):
+                        with pq.ParquetFile(path) as source:
+                            if source.metadata.num_rows == 0:
+                                empty_control_schema = source.schema_arrow
+                                path.unlink()
+                                continue
+                        relative = path.relative_to(tile_dir / "control_pixels")
+                        destination = controls_dir / relative.parent
+                        destination.mkdir(parents=True, exist_ok=True)
+                        path.replace(destination / f"part-{tile_count}.parquet")
+                        control_files += 1
+                    tile.cleanup()
+                    tile_count += 1
+                    log.info(
+                        "Finished extraction tile %d (row=%d, col=%d)",
+                        tile_count,
+                        top,
+                        left,
+                    )
+        finally:
+            if treatment_writer is not None:
+                treatment_writer.close()
+    if treatment_writer is None:
+        raise RuntimeError("No extraction tiles intersect the reference grid.")
+    if not control_files:
+        if empty_control_schema is None:
+            raise RuntimeError("Extraction did not produce a control pixel schema.")
+        pq.write_table(
+            pa.Table.from_batches([], schema=empty_control_schema),
+            controls_dir / "part-0.parquet",
+            compression="zstd",
+        )
+    _write_grid_metadata(config, transform, width, height)
+    ref.close()
+    log.info("Extraction complete: %d bounded tiles", tile_count)
 
-    # --- 3. grid metadata from the *unloaded* reference layer ---
-    # rioxarray reads CRS, transform, and shape from COG headers;
-    # no pixel data has been fetched yet.
+
+def _extract_tile(
+    config, sites, ref, clip_bounds, all_layers, layer_uris, top, left, global_width
+):
+    """Apply the pixel-selection rules to one tile and write its outputs."""
+    extent_geom = shape(config["matching_extent"])
+
+    # Tile metadata only; no pixel data has been fetched yet.
     transform = ref.rio.transform()
     xres = abs(transform.a)
     yres = abs(transform.e)
@@ -600,15 +732,6 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     del ref
 
     log.info("Grid: %d x %d (xres=%.6f, yres=%.6f)", width, height, xres, yres)
-
-    # Validate that the actual COG pixel size matches the requested resolution.
-    if expected_pix is not None and abs(xres - expected_pix) > 1e-6:
-        raise RuntimeError(
-            f"COG pixel size ({xres:.8f}°) does not match the requested "
-            f"resolution_m={resolution_m} (expected {expected_pix:.8f}°). "
-            f"Check that cog_prefix '{cog_prefix}' points to the correct "
-            f"resolution COGs."
-        )
 
     log.info("Building sparse treatment cell membership...")
     # The key keeps every fragment so the summary can count pixels of
@@ -693,10 +816,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     candidate_pixel_areas = calc_pixel_area_ha(y_coords_candidates, yres, xres)
 
     # --- 7. layer-by-layer loading ---
-    # Load each layer individually from S3, extract the candidate pixel
-    # values, then discard the full grid.  Peak memory stays at
-    # O(grid + N_layers × N_candidates) instead of
-    # O(N_layers × grid + N_layers × N_candidates).
+    # Read each layer's tile and retain only this tile's candidate values.
     # Downcast float64 → float32 to halve memory and Parquet size;
     # covariates (elevation, slope, forest cover, etc.) don't need
     # float64 precision.
@@ -766,11 +886,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
                 "'%s' not in layer list — skipping non-forest pruning", _PRUNE_LAYER
             )
 
-    # Load remaining layers in parallel.  Each thread opens its COG from
-    # scratch, reads the clipped grid, extracts candidate-pixel values,
-    # then frees the full-grid array before returning — so only the small
-    # candidate arrays accumulate.  N_PARALLEL=4 gives ~4× wall-time
-    # speedup over sequential reads with ~15 GB extra peak memory.
+    # Only this tile's candidate arrays accumulate, regardless of job extent.
     _N_PARALLEL = 4
     layers_to_load = [name for name in all_layers if name not in _preloaded]
     layer_futures: dict = {}
@@ -805,6 +921,14 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     # --- 8. save outputs ---
     output_dir = config["output_dir"]
 
+    # Selection above uses tile-local cells; downstream consumers require the
+    # same IDs as an untiled read of the complete clipped reference grid.
+    def global_cells(cells):
+        return (cells // width + top) * global_width + cells % width + left
+
+    treatment_key["cell"] = global_cells(treatment_key["cell"].to_numpy())
+    _treatment_mask = np.isin(data["cell"], treatment_indices)
+    data["cell"] = global_cells(data["cell"])
     treatment_key.to_parquet(
         os.path.join(output_dir, "treatment_cell_key.parquet"),
         index=False,
@@ -818,25 +942,11 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     # in its site's treatment pixels.  This avoids downloading the full control
     # pool for every one of the thousands of match workers.
     #
-    # MEMORY STRATEGY (critical):
-    #   The full pixel table is ~26 GB (148M rows x ~42 columns x 4 bytes) and
-    #   that already dominates the container's available memory.  Anything that
-    #   copies the table (pa.Table.filter), holds a second copy, or buffers one
-    #   open Parquet writer per partition (pad.write_dataset over unsorted data)
-    #   pushes peak memory over the limit and triggers the OOM killer.
-    #
-    #   So we never build a combined Arrow table and never sort/copy the whole
-    #   dataset.  We operate directly on the numpy `data` dict and write each
-    #   output by streaming row-blocks: for any set of rows we gather at most
-    #   _WRITE_BLOCK rows across all columns at a time (~700 MB), append them to
-    #   a single ParquetWriter, and free the block.  Peak stays at
-    #   floor (~26 GB) + one block (~0.7 GB).
-    #
     # The combined treatments_and_controls.parquet is no longer written: neither
     # the match step nor the summarize step reads it.
 
     _all_cols = list(data.keys())
-    _WRITE_BLOCK = 4_000_000  # rows gathered per parquet write block (~700 MB)
+    _WRITE_BLOCK = 65536
 
     # Determine the hive partition variable (first exact-match var present).
     _exact_match_vars: list[str] = config.get("exact_match_vars") or []
@@ -886,9 +996,6 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             )
         return written
 
-    # Treatment membership mask (numpy bool, ~N bytes).
-    _treatment_mask = np.isin(data["cell"], treatment_indices)
-
     # Treatment pixels without forest in any year can never be eligible for
     # matching, whatever the site's baseline year, so they are not written.
     _ever_forest = np.zeros(len(data["cell"]), dtype=bool)
@@ -923,8 +1030,7 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         # One hive directory + one file per distinct partition value.  For each
         # value we build a boolean mask over the (cheap, single-column) int32
         # partition array, collect that partition's control row indices, and
-        # stream them in blocks.  Peak extra memory = one block + the per-value
-        # masks (~150 MB), never a second copy of the table.
+        # stream them in blocks without copying the complete tile table.
         _part_col = data[_partition_var]
         _value_cols = [c for c in _all_cols if c != _partition_var]
         _uniq = np.unique(_part_col[_control_mask])
@@ -971,12 +1077,17 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
     del data
     gc.collect()
 
-    # Save grid metadata so downstream steps can convert cell indices
-    # back to geographic coordinates (lon/lat).
+    log.info(
+        "Saved treatment_cell_key.parquet, treatment_pixels.parquet, "
+        "and control_pixels/"
+    )
+
+
+def _write_grid_metadata(config, transform, width, height):
     grid_meta = {
         "width": width,
         "height": height,
-        "pixel_size_deg": float(xres),
+        "pixel_size_deg": float(abs(transform.a)),
         "resolution_m": config.get("resolution_m"),
         "transform": [
             float(transform.a),
@@ -987,13 +1098,8 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
             float(transform.f),
         ],
     }
-    with open(os.path.join(output_dir, "grid_metadata.json"), "w") as gf:
+    with open(os.path.join(config["output_dir"], "grid_metadata.json"), "w") as gf:
         json.dump(grid_meta, gf)
-
-    log.info(
-        "Saved treatment_cell_key.parquet, treatment_pixels.parquet, "
-        "and control_pixels/"
-    )
 
 
 # ---------------------------------------------------------------------------

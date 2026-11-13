@@ -109,6 +109,14 @@ These files are produced by `01_extract_covariates.py` and consumed by
 Every covariate layer must be on the same pixel grid; extraction fails if a
 layer's transform or shape differs from the reference layer.
 
+Extraction reads spatial tiles of at most 1024 × 1024 cells, rather than
+materializing the full matching-extent bounding box or retaining every
+candidate's covariates in memory. Pixel arrays and masks are bounded to one
+tile; completed tiles are streamed to the outputs. Cell IDs and
+`grid_metadata.json` still refer to the full clipped reference grid.
+Each control partition can contain several Parquet files (one per occupied
+tile); consumers must read the partition as a dataset.
+
 ---
 
 ## Match Files (Step 2 → Step 3)
