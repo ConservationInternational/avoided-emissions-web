@@ -268,7 +268,7 @@ def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
     previous_int = signal.signal(signal.SIGINT, interrupt)
     process = None
     started = time.monotonic()
-    batch = boto3.client("batch")
+    batch = boto3.client("batch", region_name=env["AWS_REGION"])
     try:
         process = subprocess.Popen(command, env=process_env, start_new_session=True)
         store.write_json("status.json", {"phase": "running"})

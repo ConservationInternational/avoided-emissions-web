@@ -399,6 +399,7 @@ class WorkflowTests(unittest.TestCase):
     def test_driver_launch_matches_api_optional_environment_and_explicit_resume(self):
         store = Store(str(self.root / "state"))
         env = {
+            "AWS_REGION": "us-east-1",
             "EXECUTION_ID": "11111111-2222-3333-4444-555555555555",
             "NEXTFLOW_TASK_IMAGE": "registry/analysis@sha256:" + "a" * 64,
             "NEXTFLOW_WORK_URI": "s3://work/execution",
@@ -415,9 +416,12 @@ class WorkflowTests(unittest.TestCase):
         with (
             contextlib.chdir(self.root),
             patch.object(driver.subprocess, "Popen", return_value=process) as popen,
-            patch.object(driver.boto3, "client"),
+            patch.object(driver.boto3, "client") as batch_client,
         ):
             driver.launch(store, analysis, env, False)
+            batch_client.assert_called_once_with(
+                "batch", region_name=env["AWS_REGION"]
+            )
             command = popen.call_args.args[0]
             self.assertEqual(
                 command[command.index("-name") + 1],
@@ -431,6 +435,7 @@ class WorkflowTests(unittest.TestCase):
             session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
             store.write_json("session.json", {"session_id": session})
             driver.launch(store, analysis, env, True)
+            batch_client.assert_called_with("batch", region_name=env["AWS_REGION"])
             command = popen.call_args.args[0]
             self.assertEqual(command[command.index("-resume") + 1], session)
 
