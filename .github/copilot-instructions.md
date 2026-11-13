@@ -61,8 +61,9 @@ r-analysis/                   # R analysis Docker container
     utils.R                   # R utility functions
     py_utils.py               # Python utility functions
   src/
-    main.py                   # CLI entry point for the analysis container
-    batch_runner.py           # AWS Batch integration (S3 param retrieval)
+    main.py                   # Nextflow result serialization
+    nextflow_worker.py        # Checkpointed analysis stage workers
+    workflow_store.py         # Immutable artifacts and completion receipts
 deploy/                       # Deployment configuration
   .env.example                # Template for .env — copy to repo root
   docker-compose.develop.yml  # Local dev: postgres, redis, webapp, worker, merge-worker, beat

@@ -749,10 +749,10 @@ def _complete_analysis_task_submission(task_id, user_id):
                 task_id,
                 len(group_mapping[0]),
             )
-            group_mapping_for_batch = {k: v for k, v in group_mapping.items() if k != 0}
+            match_groups = {k: v for k, v in group_mapping.items() if k != 0}
         else:
-            group_mapping_for_batch = group_mapping
-        if group_mapping is not None and not group_mapping_for_batch:
+            match_groups = group_mapping
+        if group_mapping is not None and not match_groups:
             raise ValueError("No sites have exact-match region assignments.")
         # Build params matching AvoidedEmissionsParams schema.
         _cog_suffixes = {1000: "_1km", 250: "_250m"}
@@ -792,8 +792,8 @@ def _complete_analysis_task_submission(task_id, user_id):
                 else {}
             ),
             **(
-                {"exact_match_group_mapping": group_mapping_for_batch}
-                if group_mapping_for_batch is not None
+                {"exact_match_group_mapping": match_groups}
+                if match_groups is not None
                 else {}
             ),
             **({"random_seed": random_seed} if random_seed is not None else {}),
