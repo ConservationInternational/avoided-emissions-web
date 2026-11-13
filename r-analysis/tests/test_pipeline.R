@@ -291,6 +291,66 @@ test_that("replicate blocks reproduce single-replicate matches", {
     expect_equal(blocked$matches[cols], single$matches[cols])
 })
 
+for (method in c("optimal", "nearest")) {
+test_that(paste(method, "checkpoints yield, resume strata, and preserve seeded matches"), {
+    legacy <- tempfile("ae_legacy_")
+    legacy_config <- make_fixture(legacy, method, n_replicates = 2)
+    run_script("02_perform_matching.R", legacy_config)
+    expected <- read_batches(file.path(legacy, "output")) %>%
+        arrange(id_numeric, replicate, cell, treatment)
+
+    data_dir <- tempfile("ae_checkpoint_")
+    config_path <- make_fixture(data_dir, method, n_replicates = 2)
+    config <- fromJSON(config_path, simplifyVector = FALSE)
+    config$match_checkpoints <- TRUE
+    config$checkpoint_uri <- tempfile("ae_store_")
+    config$match_work <- list(ids = 1:4, replicates = 1:2)
+    config$match_soft_seconds <- 0
+    write_json(config, config_path, auto_unbox = TRUE)
+    run_script("02_perform_matching.R", config_path)
+    expect_length(read_sidecars(file.path(data_dir, "output")), 0)
+    expect_equal(nrow(fromJSON(file.path(data_dir, "unfinished.json"))), 8)
+
+    config$match_soft_seconds <- 3600
+    write_json(config, config_path, auto_unbox = TRUE)
+    run_script("02_perform_matching.R", config_path)
+    out <- file.path(data_dir, "output")
+    actual <- read_batches(out) %>% arrange(id_numeric, replicate, cell, treatment)
+    expect_equal(actual, expected)
+    expect_length(read_sidecars(out), 8)
+    expect_length(fromJSON(file.path(data_dir, "unfinished.json")), 0)
+    receipts <- list.files(config$checkpoint_uri, "\\.receipt\\.json$", recursive = TRUE)
+    expect_true("f1/mb_f1_r1.json.receipt.json" %in% receipts)
+    expect_true("f1/f1_r1_sample.rds.receipt.json" %in% receipts)
+
+    checkpoints <- file.path(out, "matches", c("f1_r1_sample.rds", "f1_r1_g1.rds"))
+    checksums <- tools::md5sum(checkpoints)
+    unlink(file.path(out, "matches", c("mb_f1_r1.json", "mb_f1_r1.parquet")))
+    config$match_work <- list(ids = 1L, replicates = 1L)
+    write_json(config, config_path, auto_unbox = TRUE)
+    log <- run_script("02_perform_matching.R", config_path)
+    expect_false(any(grepl("Starting stratum", log)))
+    expect_equal(tools::md5sum(checkpoints), checksums)
+    resumed <- read_batches(out) %>% arrange(id_numeric, replicate, cell, treatment)
+    expect_equal(resumed, expected)
+    log <- run_script("02_perform_matching.R", config_path)
+    expect_false(any(grepl("Replicate 1:", log)))
+    run_script("03_summarize_results.R", config_path)
+    expect_equal(fromJSON(file.path(out, "results_summary.json"))$n_sites, 2)
+})
+}
+
+test_that("Nextflow workers stage, checkpoint, reconcile, and summarize real matches", {
+    data_dir <- tempfile("ae_workers_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
+    log <- suppressWarnings(system2(
+        Sys.getenv("AE_PYTHON", "python"),
+        c(shQuote(file.path(scripts_dir, "../tests/test_nextflow.py")), "--fixture", shQuote(config_path)),
+        env = paste0("R_SCRIPTS_DIR=", scripts_dir), stdout = TRUE, stderr = TRUE
+    ))
+    expect_true(is.null(attr(log, "status")), info = paste(tail(log, 40), collapse = "\n"))
+})
+
 test_that("fragments without baseline forest are not applicable", {
     data_dir <- tempfile("ae_noforest_")
     config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)

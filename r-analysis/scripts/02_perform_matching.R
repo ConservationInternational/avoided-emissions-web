@@ -64,6 +64,28 @@ MATCHING_METHOD <- if (is.null(config$matching_method)) "optimal" else config$ma
 FC_YEARS <- as.integer(config$fc_years)
 FC_COLS <- unique(c("fc_2000", paste0("fc_", FC_YEARS)))
 GROUP_MAPPING <- fromJSON(config$config_path, simplifyVector = FALSE)$exact_match_group_mapping
+CHECKPOINT_MODE <- isTRUE(config$match_checkpoints)
+soft_deadline <- if (is.null(config$match_soft_seconds)) Inf else config$match_soft_seconds
+yield_requested <- FALSE
+progress <- new.env()
+progress$last_item_seconds <- 0
+
+checkpoint_publish <- function(paths) {
+    if (is.null(config$checkpoint_uri)) return(invisible(NULL))
+    worker <- file.path(scripts_dir, "../nextflow_worker.py")
+    if (!file.exists(worker)) worker <- file.path(scripts_dir, "../src/nextflow_worker.py")
+    status <- system2(
+        Sys.getenv("AE_PYTHON", "python"),
+        c(shQuote(worker), "commit",
+          "--config", shQuote(config$config_path), "--files", shQuote(paths))
+    )
+    if (status != 0) stop("Could not persist match checkpoint")
+}
+
+checkpoint_path <- function(name) file.path(config$matches_dir, name)
+item_name <- function(id, k) paste0("f", id, "_r", k)
+item_complete <- function(id, k) file.exists(checkpoint_path(paste0("mb_", item_name(id, k), ".json")))
+should_yield <- function() (proc.time() - step2_timer)["elapsed"] >= soft_deadline
 
 if (length(EXACT_MATCH_VARS) == 0) {
     stop("At least one exact-match variable is required")
@@ -99,6 +121,13 @@ select_work <- function() {
     # Returns the site fragments and replicates this process should handle,
     # and a batch name unique within the task for its output files.
     all_reps <- seq_len(N_REPLICATES)
+    if (!is.null(config$match_work)) {
+        return(list(
+            sites = filter(sites, id_numeric %in% config$match_work$ids),
+            replicates = as.integer(config$match_work$replicates),
+            batch = "checkpointed"
+        ))
+    }
     mapped <- if (is.null(GROUP_MAPPING)) {
         sites
     } else {
@@ -280,8 +309,33 @@ match_strata <- function(d, f) {
     results <- list()
     diags <- list()
     for (g in unique(d$group)) {
+        if (CHECKPOINT_MODE && should_yield()) {
+            yield_requested <<- TRUE
+            return(NULL)
+        }
         gd <- d[d$group == g, , drop = FALSE]
-        out <- match_stratum(gd, f)
+        stratum_path <- if (CHECKPOINT_MODE) {
+            checkpoint_path(paste0(progress$current_item, "_g", match(g, unique(d$group)), ".rds"))
+        } else {
+            NULL
+        }
+        timer <- proc.time()
+        if (!is.null(stratum_path) && file.exists(stratum_path)) {
+            saved <- readRDS(stratum_path)
+            if (!identical(saved$group, g)) stop("Incompatible stratum checkpoint")
+            out <- saved$out
+            assign(".Random.seed", saved$rng, envir = .GlobalEnv)
+        } else {
+            message("    Starting stratum ", g)
+            out <- match_stratum(gd, f)
+            if (!is.null(stratum_path)) {
+                tmp <- paste0(stratum_path, ".tmp")
+                saveRDS(list(group = g, out = out, rng = .Random.seed), tmp)
+                if (!file.rename(tmp, stratum_path)) stop("Could not commit stratum checkpoint")
+                checkpoint_publish(stratum_path)
+            }
+        }
+        message("[TIMING] Stratum ", g, ": ", round((proc.time() - timer)["elapsed"], 2), "s")
         n_matched <- if (is.null(out$result)) 0L else sum(out$result$treatment)
         message("    Stratum ", g, ": T=", sum(gd$treatment), " C=", sum(!gd$treatment),
                 " -> ", n_matched, " matched (", out$diag$method, ")")
@@ -362,6 +416,21 @@ write_batch <- function(batch) {
     if (!file.rename(tmp, paste0(stem, ".json"))) stop("Could not write ", stem, ".json")
 }
 
+begin_item <- function(na_exclusions) {
+    batch_out$matches <- list()
+    batch_out$failures <- list()
+    batch_out$diagnostics <- list()
+    batch_out$na_exclusions <- na_exclusions
+}
+
+commit_item <- function(id, k) {
+    batch <- item_name(id, k)
+    write_batch(batch)
+    stem <- checkpoint_path(paste0("mb_", batch))
+    paths <- c(paste0(stem, ".parquet"), paste0(stem, ".json"))
+    checkpoint_publish(paths[file.exists(paths)])
+}
+
 replicate_seed <- function(id, k) {
     bitwXor(RANDOM_SEED, bitwXor(bitwShiftL(as.integer(id) %% 65536L, 10L), as.integer(k)))
 }
@@ -387,13 +456,19 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
     required <- unique(c(setdiff(all.vars(this_f), "treatment"), "total_biomass_2000", FC_COLS))
     complete <- complete.cases(vals[required])
     record_na_exclusion(site, vals, complete, required)
+    na_exclusions <- tail(batch_out$na_exclusions, 1)
     baseline <- paste0("fc_", baseline_year(site$start_year, min(FC_YEARS)))
     forest <- !is.na(vals[[baseline]]) & vals[[baseline]] > 0
     n_forest_pixels <- sum(vals$treatment & forest)
     if (n_forest_pixels == 0) {
         for (k in replicates) {
+            if (CHECKPOINT_MODE) {
+                if (item_complete(this_id, k)) next
+                begin_item(na_exclusions)
+            }
             record_failure(site, k, paste0("No forest at the ", baseline, " baseline"),
                            reason = "no_eligible_treatment", n_forest_pixels = 0L)
+            if (CHECKPOINT_MODE) commit_item(this_id, k)
         }
         return(invisible())
     }
@@ -403,7 +478,12 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
         msg <- paste0("No overlapping exact-match strata between eligible treatment and ",
                       "control pixels (T=", sum(vals$treatment), ", C=", sum(!vals$treatment), ")")
         for (k in replicates) {
+            if (CHECKPOINT_MODE) {
+                if (item_complete(this_id, k)) next
+                begin_item(na_exclusions)
+            }
             record_failure(site, k, msg, reason = "no_overlap", n_forest_pixels = n_forest_pixels)
+            if (CHECKPOINT_MODE) commit_item(this_id, k)
         }
         return(invisible())
     }
@@ -417,15 +497,44 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
     ))
 
     for (k in replicates) {
+        if (CHECKPOINT_MODE) {
+            if (item_complete(this_id, k)) next
+            elapsed <- (proc.time() - step2_timer)["elapsed"]
+            if (should_yield() || elapsed + progress$last_item_seconds > soft_deadline) {
+                yield_requested <<- TRUE
+                return(invisible(NULL))
+            }
+            begin_item(na_exclusions)
+        }
+        item_timer <- proc.time()
         if (!is.null(RANDOM_SEED)) set.seed(replicate_seed(this_id, k))
-        sampled <- sample_strata(vals, MAX_TREATMENT, CONTROL_MULTIPLIER)
+        progress$current_item <- item_name(this_id, k)
+        sample_path <- checkpoint_path(paste0(progress$current_item, "_sample.rds"))
+        if (CHECKPOINT_MODE && file.exists(sample_path)) {
+            saved_sample <- readRDS(sample_path)
+            sampled <- saved_sample$data
+            assign(".Random.seed", saved_sample$rng, envir = .GlobalEnv)
+        } else {
+            sampled <- sample_strata(vals, MAX_TREATMENT, CONTROL_MULTIPLIER)
+            if (CHECKPOINT_MODE) {
+                tmp <- paste0(sample_path, ".tmp")
+                saveRDS(list(data = sampled, rng = .Random.seed), tmp)
+                if (!file.rename(tmp, sample_path)) stop("Could not commit sample checkpoint")
+                checkpoint_publish(sample_path)
+            }
+        }
         res <- match_strata(sampled, this_f)
+        if (yield_requested) return(invisible(NULL))
         if (is.null(res$result)) {
             record_failure(site, k, paste0(
                 "No matches found (treatment=", sum(sampled$treatment),
                 ", control=", sum(!sampled$treatment), ")"
             ), reason = "no_matches", diagnostics = res$diagnostics,
             n_forest_pixels = n_forest_pixels)
+            if (CHECKPOINT_MODE) {
+                commit_item(this_id, k)
+                progress$last_item_seconds <- (proc.time() - item_timer)["elapsed"]
+            }
             next
         }
         # Stratum weights scale matched treatment pixels (and their controls)
@@ -453,6 +562,10 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
                                       group_diagnostics = res$diagnostics))
         message("    Replicate ", k, ": ", sum(m$treatment), " of ",
                 sum(sampled$treatment), " sampled treatment pixels matched")
+        if (CHECKPOINT_MODE) {
+            commit_item(this_id, k)
+            progress$last_item_seconds <- (proc.time() - item_timer)["elapsed"]
+        }
     }
 }
 
@@ -461,19 +574,25 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
 
 work <- select_work()
 message("Processing ", nrow(work$sites), " site fragment(s) as batch ", work$batch)
-if (file.exists(file.path(config$matches_dir, paste0("mb_", work$batch, ".json")))) {
+if (!CHECKPOINT_MODE && file.exists(file.path(config$matches_dir, paste0("mb_", work$batch, ".json")))) {
     message("Batch ", work$batch, " is already complete; skipping")
 } else {
     if (nrow(work$sites) > 0) {
         loaded <- load_worker_pixels(work$sites)
         for (i in seq_len(nrow(work$sites))) {
             site <- work$sites[i, ]
+            already_complete <- CHECKPOINT_MODE &&
+                all(vapply(work$replicates, function(k) item_complete(site$id_numeric, k), logical(1)))
+            if (already_complete) {
+                next
+            }
             n_site_pixels <- sum(loaded$site_pixels$n[loaded$site_pixels$id_numeric == site$id_numeric])
             n_before <- length(batch_out$matches)
             n_diag_before <- length(batch_out$diagnostics)
             tryCatch(
                 process_site(site, loaded$pixels, n_site_pixels, work$replicates),
                 error = function(e) {
+                    if (CHECKPOINT_MODE) stop(e)
                     msg <- conditionMessage(e)
                     message("  ERROR for site ", site$site_id, ": ", msg)
                     rollbar_report_error(msg)
@@ -484,11 +603,21 @@ if (file.exists(file.path(config$matches_dir, paste0("mb_", work$batch, ".json")
                 }
             )
             gc()
+            if (yield_requested) break
         }
     }
-    write_batch(work$batch)
+    if (!CHECKPOINT_MODE) write_batch(work$batch)
 }
 
+if (CHECKPOINT_MODE) {
+    unfinished <- list()
+    for (id in work$sites$id_numeric) {
+        for (k in work$replicates) {
+            if (!item_complete(id, k)) unfinished[[length(unfinished) + 1L]] <- list(id = id, replicate = k)
+        }
+    }
+    write_json(unfinished, file.path(config$data_dir, "unfinished.json"), auto_unbox = TRUE)
+}
 message("[TIMING] Step 2 total: ", round((proc.time() - step2_timer)["elapsed"], 1), "s")
 message("Step 2 complete.")
 

@@ -191,6 +191,7 @@ jobs:
         TRENDSEARTH_SCRIPT_ID: ${{ vars.TRENDSEARTH_SCRIPT_ID }}
         BATCH_JOB_QUEUE: ${{ vars.BATCH_JOB_QUEUE }}
         BATCH_JOB_DEFINITION: ${{ vars.BATCH_JOB_DEFINITION }}
+        ANALYSIS_WORKFLOW_BACKEND: ${{ vars.ANALYSIS_WORKFLOW_BACKEND }}
         ROLLBAR_ACCESS_TOKEN: ${{ secrets.ROLLBAR_ACCESS_TOKEN }}
         APP_URL: ${{ vars.APP_URL }}
         OIDC_ISSUER: ${{ vars.OIDC_ISSUER || 'https://api.trends.earth' }}
@@ -249,6 +250,7 @@ jobs:
           echo "TRENDSEARTH_SCRIPT_ID=$TRENDSEARTH_SCRIPT_ID"
           echo "BATCH_JOB_QUEUE=$BATCH_JOB_QUEUE"
           echo "BATCH_JOB_DEFINITION=$BATCH_JOB_DEFINITION"
+          echo "ANALYSIS_WORKFLOW_BACKEND=${ANALYSIS_WORKFLOW_BACKEND:-batch}"
           echo ""
           echo "# Deployment info"
           echo "GIT_REVISION=${{ github.sha }}"

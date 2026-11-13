@@ -874,6 +874,7 @@ def _complete_analysis_task_submission(task_id, user_id):
             "matching_method": matching_method,
             "n_replicates": n_replicates,
             "replicate_block_size": _block_size,
+            "match_batch_size": match_batch_size,
             **(
                 {"sites_exclusion_buffer": sites_exclusion_buffer}
                 if sites_exclusion_buffer
@@ -936,6 +937,12 @@ def _complete_analysis_task_submission(task_id, user_id):
         if Config.BATCH_JOB_DEFINITION:
             batch_overrides["job_definition"] = Config.BATCH_JOB_DEFINITION
         params["batch"] = batch_overrides
+        if Config.ANALYSIS_WORKFLOW_BACKEND == "nextflow":
+            params["workflow_backend"] = "nextflow"
+            params.pop("pipeline", None)
+            params.pop("match_chunks", None)
+        elif Config.ANALYSIS_WORKFLOW_BACKEND != "batch":
+            raise ValueError("ANALYSIS_WORKFLOW_BACKEND must be batch or nextflow")
 
         # Submit as the user, with a fresh access token from their session
         # (refreshed here if it is about to expire).

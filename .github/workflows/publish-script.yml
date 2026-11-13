@@ -216,3 +216,22 @@ jobs:
           r-analysis/
 
         echo "::notice::Pushed R analysis image: $IMAGE_URI"
+
+    - name: Build and push pinned Nextflow driver
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+      run: |
+        REPO=avoided-emissions-nextflow
+        if ! aws ecr describe-repositories --repository-names "$REPO" >/dev/null 2>&1; then
+          aws ecr create-repository --repository-name "$REPO" \
+            --image-scanning-configuration scanOnPush=true \
+            --tags Key=Project,Value=avoided-emissions
+        fi
+        docker buildx build \
+          --platform linux/amd64 \
+          --tag "$ECR_REGISTRY/$REPO:${ENVIRONMENT}-${{ github.sha }}" \
+          --cache-from=type=gha,scope=nextflow-driver \
+          --cache-to=type=gha,mode=max,scope=nextflow-driver \
+          --push --file r-analysis/nextflow/Dockerfile r-analysis/
+        echo "::notice::Register a pinned Batch job-definition revision before enabling Nextflow."

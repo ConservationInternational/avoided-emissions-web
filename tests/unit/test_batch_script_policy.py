@@ -41,4 +41,8 @@ def test_published_policy_keeps_infrastructure_server_controlled(script_config):
     assert set(script_config["batch_execution_config"]) == {
         "allowed_commands",
         "allowed_job_queues",
+        "allowed_workflow_backends",
     }
+    assert script_config["batch_execution_config"]["allowed_workflow_backends"] == [
+        "nextflow"
+    ]

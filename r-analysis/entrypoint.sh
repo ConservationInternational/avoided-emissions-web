@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+if [[ "${1:-}" == "/bin/bash" || "${1:-}" == "bash" ]]; then
+    exec "$@"
+fi
+
 # Entrypoint for the R analysis container. Dispatches to the appropriate
 # analysis step based on the first argument.
 #

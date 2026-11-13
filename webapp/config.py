@@ -185,6 +185,7 @@ class Config:
     # Leave blank to use the defaults configured on the API / Script model.
     BATCH_JOB_QUEUE = os.environ.get("BATCH_JOB_QUEUE", "")
     BATCH_JOB_DEFINITION = os.environ.get("BATCH_JOB_DEFINITION", "")
+    ANALYSIS_WORKFLOW_BACKEND = os.environ.get("ANALYSIS_WORKFLOW_BACKEND", "batch")
     # Total timeout for the Batch job in seconds.  When using pipeline mode
     # (separate extract → match → summarize jobs), each step has its own
     # timeout in the pipeline descriptor.  This value is used as the

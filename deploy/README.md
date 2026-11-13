@@ -30,6 +30,16 @@ configured manually.
 - **S3** ─ Deployment packages and analysis data/results
 - **CodeDeploy** ─ Deploys new versions from S3 to EC2 via GitHub Actions
 
+### Opt-in Nextflow analysis backend
+
+The legacy Batch dispatcher remains the default. The
+[Nextflow implementation and rollout guide](../docs/matching-reliability-plan.md#8-implementation-and-operational-contract)
+describes the separate pinned On-Demand driver, child-job policies, IAM, durable
+cache/checkpoints, explicit resume, and required AWS canaries. Deploy the
+companion API changes before setting `ANALYSIS_WORKFLOW_BACKEND=nextflow`.
+The publishing workflow builds both images but does not enable this backend or
+register its driver job definition automatically.
+
 ### Valkey broker and session storage
 
 Development, staging, and production use `valkey/valkey:9.1.3-alpine`.

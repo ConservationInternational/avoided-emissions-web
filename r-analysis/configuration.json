@@ -6,6 +6,7 @@
   "compute_type": "batch",
   "batch_image": "avoided-emissions-ranalysis:production-latest",
   "batch_execution_config": {
+    "allowed_workflow_backends": ["nextflow"],
     "allowed_commands": [
       ["extract"],
       ["match"],
