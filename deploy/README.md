@@ -30,15 +30,17 @@ configured manually.
 - **S3** ─ Deployment packages and analysis data/results
 - **CodeDeploy** ─ Deploys new versions from S3 to EC2 via GitHub Actions
 
-### Opt-in Nextflow analysis backend
+### Required Nextflow analysis backend
 
-The legacy Batch dispatcher remains the default. The
+Nextflow is the sole analysis backend, including single-site analyses. The
 [Nextflow implementation and rollout guide](../docs/matching-reliability-plan.md#8-implementation-and-operational-contract)
 describes the separate pinned On-Demand driver, child-job policies, IAM, durable
 cache/checkpoints, explicit resume, and required AWS canaries. Deploy the
-companion API changes before setting `ANALYSIS_WORKFLOW_BACKEND=nextflow`.
-The publishing workflow builds both images but does not enable this backend or
-register its driver job definition automatically.
+companion API changes and configure its driver before deploying this webapp.
+Republish the script policy: it both defaults to and permits only Nextflow,
+including submissions made directly through the API. There is no legacy fallback.
+The publishing workflow builds both images but does not configure the API's
+driver or register its job definition automatically.
 
 ### Valkey broker and session storage
 
@@ -102,8 +104,9 @@ already exist.
 |---|---|
 | `avoided-emissions-webapp` | Python 3.13 Dash/Flask webapp image |
 | `avoided-emissions-ranalysis` | R 4.5.2 analysis container image |
+| `avoided-emissions-nextflow` | Nextflow driver container image |
 
-Both repos have a lifecycle policy that expires untagged images after 14 days.
+All three repos have a lifecycle policy that expires untagged images after 14 days.
 
 ### 2. S3 Buckets
 
@@ -289,17 +292,25 @@ aws batch create-job-queue \
 Job definitions are registered on the **trends.earth API** as part of the
 `Script` model configuration.  The webapp does not manage Batch job definitions
 directly — it creates an execution on the API, which dispatches to Batch using
-the job definition and queue configured on the Script (or overridden via
-`BATCH_JOB_QUEUE` / `BATCH_JOB_DEFINITION` environment variables).
+the trusted Nextflow driver configured on the API. Nextflow owns all extraction,
+matching, recovery, and summary jobs. The webapp sends only approved initial
+matching memory/queue preferences; it does not submit pipeline descriptors,
+array jobs, commands, timeouts, retry counts, or job definitions.
 
-Default resources per job:
+Resource defaults are process-specific:
 
 | Resource | Value |
 |---|---|
-| vCPUs | 4 |
-| Memory | 16,384 MiB (16 GB) |
-| Timeout | 14,400 s (4 hours) |
-| Retries | 2 |
+| Driver | At least 2 vCPUs / 4 GiB, On-Demand, one native attempt |
+| Matching | 30 GiB initially by default; up to 120 GiB after confirmed OOM |
+| Matching timeout | 4/8/16 hours across Nextflow retries |
+| Extraction | 128 GiB initially; up to 512 GiB after confirmed OOM |
+| Child retries | One native Batch attempt; at most three Nextflow submissions |
+
+Configure workflow-specific `AE_NEXTFLOW_*` settings on the driver job
+definition, not on the API. The API supplies generic `NEXTFLOW_*` lifecycle
+variables and leaves the driver command unchanged. Matching memory and initial
+queue are workflow inputs validated by this repository's driver.
 
 ---
 
@@ -353,8 +364,6 @@ to the trends.earth API) uses its own OAuth2 credentials:
 | `OIDC_ACCESS_AUDIENCE` | staging: `avoided-emissions-staging`; production: `avoided-emissions` | Expected access-token audience |
 | `OIDC_APP_KEY` | staging: `avoided_emissions_staging`; production: `avoided_emissions` | Trends.Earth app key for access grants and roles |
 | `TRENDSEARTH_SCRIPT_ID` | *(none — required)* | UUID of the avoided-emissions R analysis script registered on the trends.earth API |
-| `BATCH_JOB_QUEUE` | *(empty — uses API default)* | Optional AWS Batch job queue override. Passed to the API in `params["batch"]` when creating an execution |
-| `BATCH_JOB_DEFINITION` | *(empty — uses API default)* | Optional AWS Batch job definition override. Passed to the API in `params["batch"]` when creating an execution |
 
 ### Generated `.env` File
 

@@ -20,7 +20,7 @@ from workflow_store import Store
 
 log = logging.getLogger(__name__)
 WORKFLOW = Path(__file__).with_name("main.nf")
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 JOB_ID = re.compile(r"submitted > job=([0-9a-f-]{36});")
 
 
@@ -95,6 +95,24 @@ def prepare(client, store: Store, params: dict, image: str, resume: bool) -> dic
         raise ValueError("The analysis image must be pinned to a SHA256 digest")
     if "_workflow" in params:
         raise ValueError("Client-supplied workflow runtime configuration is forbidden")
+    memory = params.get(
+        "match_memory_mib", bounded_env("AE_NEXTFLOW_MATCH_MEMORY_MIB", 30720, 122880)
+    )
+    if type(memory) is not int or not 1 <= memory <= 122880:
+        raise ValueError("match_memory_mib must be an integer between 1 and 122880")
+    approved_queues = {
+        os.environ.get("AE_NEXTFLOW_SPOT_QUEUE", "ae-spot-gp3"),
+        os.environ.get("AE_NEXTFLOW_ONDEMAND_QUEUE", "ae-ondemand-gp3"),
+    }
+    initial_queue = params.get(
+        "matching_job_queue", os.environ.get("AE_NEXTFLOW_SPOT_QUEUE", "ae-spot-gp3")
+    )
+    if (
+        not isinstance(initial_queue, str)
+        or not initial_queue
+        or initial_queue not in approved_queues
+    ):
+        raise ValueError("matching_job_queue must be an approved workflow worker queue")
     current_inputs = input_manifest(client, params)
     existing = store.json("snapshot.json")
     if existing is not None:
@@ -152,7 +170,8 @@ def prepare(client, store: Store, params: dict, image: str, resume: bool) -> dic
         "identity": identity,
         "state_uri": store.uri,
         "results_uri": results_uri,
-        "match_memory_mib": bounded_env("AE_NEXTFLOW_MATCH_MEMORY_MIB", 30720, 122880),
+        "match_memory_mib": memory,
+        "initial_queue": initial_queue,
     }
     store.write_json(
         "snapshot.json",
@@ -201,7 +220,7 @@ def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
         "-name",
         f"ae_{env['EXECUTION_ID'].replace('-', '_')}",
         "-work-dir",
-        env["AE_NEXTFLOW_WORK_URI"],
+        env["NEXTFLOW_WORK_URI"],
         "--analysis_file",
         str(Path("analysis.json").resolve()),
         "--state_uri",
@@ -209,9 +228,9 @@ def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
         "--execution_id",
         env["EXECUTION_ID"],
         "--image",
-        env["AE_NEXTFLOW_IMAGE"],
+        env["NEXTFLOW_TASK_IMAGE"],
         "--spot_queue",
-        env.get("AE_NEXTFLOW_SPOT_QUEUE", "ae-spot-gp3"),
+        analysis["_workflow"]["initial_queue"],
         "--ondemand_queue",
         env.get("AE_NEXTFLOW_ONDEMAND_QUEUE", "ae-ondemand-gp3"),
         "--max_forks",
@@ -235,11 +254,9 @@ def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
     process_env["NXF_CLOUDCACHE_PATH"] = f"{store.uri}/cache"
     process_env["NXF_IGNORE_RESUME_HISTORY"] = "true"
     process_env["NXF_ANSI_LOG"] = "false"
-    hours = float(env.get("AE_NEXTFLOW_MAX_HOURS", "72"))
+    hours = float(env.get("NEXTFLOW_MAX_HOURS", "72"))
     if not 0 < hours <= 168:
-        raise ValueError(
-            "AE_NEXTFLOW_MAX_HOURS must be greater than zero and at most 168"
-        )
+        raise ValueError("NEXTFLOW_MAX_HOURS must be greater than zero and at most 168")
     duration = hours * 3600
     interrupted = False
 
@@ -288,7 +305,7 @@ def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
 
 def main() -> None:
     env = dict(os.environ)
-    store = Store(env["AE_NEXTFLOW_STATE_URI"])
+    store = Store(env["NEXTFLOW_STATE_URI"])
     execution_id = env["EXECUTION_ID"]
     client = boto3.client("s3")
     key = f"{env['PARAMS_S3_PREFIX'].rstrip('/')}/{execution_id}"
@@ -302,8 +319,8 @@ def main() -> None:
                 ].read()
             )
         )
-        resume = env.get("AE_NEXTFLOW_RESUME", "false").lower() == "true"
-        analysis = prepare(client, store, params, env["AE_NEXTFLOW_IMAGE"], resume)
+        resume = env.get("NEXTFLOW_RESUME", "false").lower() == "true"
+        analysis = prepare(client, store, params, env["NEXTFLOW_TASK_IMAGE"], resume)
         launch(store, analysis, env, resume)
         if store.json("cancelled.json") is not None:
             raise InterruptedError("Execution cancelled before publication")

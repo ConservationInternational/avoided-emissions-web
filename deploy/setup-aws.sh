@@ -25,6 +25,7 @@ GITHUB_REPO="avoided-emissions-web"
 APP_NAME="avoided-emissions-web"
 ECR_WEBAPP="avoided-emissions-webapp"
 ECR_RANALYSIS="avoided-emissions-ranalysis"
+ECR_NEXTFLOW="avoided-emissions-nextflow"
 S3_DEPLOY_PREFIX="avoided-emissions-deployments"
 S3_DATA_BUCKET="avoided-emissions-data"
 BATCH_COMPUTE_ENV="avoided-emissions-ce"
@@ -140,6 +141,7 @@ create_ecr_repo() {
 info "--- ECR Repositories ---"
 create_ecr_repo "$ECR_WEBAPP"
 create_ecr_repo "$ECR_RANALYSIS"
+create_ecr_repo "$ECR_NEXTFLOW"
 echo ""
 
 # ============================================================================
@@ -271,7 +273,8 @@ GH_ACTIONS_POLICY=$(cat <<EOF
             ],
             "Resource": [
                 "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/${ECR_WEBAPP}",
-                "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/${ECR_RANALYSIS}"
+                "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/${ECR_RANALYSIS}",
+                "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/${ECR_NEXTFLOW}"
             ]
         },
         {
@@ -616,6 +619,7 @@ echo ""
 echo "Resources created/verified:"
 echo "  ECR:        ${ECR_REGISTRY}/${ECR_WEBAPP}"
 echo "              ${ECR_REGISTRY}/${ECR_RANALYSIS}"
+echo "              ${ECR_REGISTRY}/${ECR_NEXTFLOW}"
 echo "  S3:         ${S3_DEPLOY_BUCKET} (deployments)"
 echo "              ${S3_DATA_BUCKET} (analysis data)"
 echo "  CodeDeploy: ${APP_NAME} (staging + production groups)"

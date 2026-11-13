@@ -812,10 +812,6 @@ def submit_layout(user, recompute_config=None):
                                                                                                         "label": "120 GB",
                                                                                                         "value": 120,
                                                                                                     },
-                                                                                                    {
-                                                                                                        "label": "240 GB",
-                                                                                                        "value": 240,
-                                                                                                    },
                                                                                                 ],
                                                                                                 value=rc.get(
                                                                                                     "match_memory_gb",
@@ -826,8 +822,9 @@ def submit_layout(user, recompute_config=None):
                                                                                                 clearable=False,
                                                                                             ),
                                                                                             html.Small(
-                                                                                                "Increase if matching jobs fail with exit code -9 (out of memory). "
-                                                                                                "Costs increase if more memory is requested",
+                                                                                                "Initial memory per Nextflow matching worker. "
+                                                                                                "Confirmed out-of-memory failures retry with more memory, "
+                                                                                                "up to 120 GB. Higher memory increases costs.",
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
@@ -837,7 +834,7 @@ def submit_layout(user, recompute_config=None):
                                                                                     dbc.Col(
                                                                                         [
                                                                                             dbc.Label(
-                                                                                                "Batch job queue"
+                                                                                                "Matching worker queue"
                                                                                             ),
                                                                                             dcc.Dropdown(
                                                                                                 id="matching-job-queue",

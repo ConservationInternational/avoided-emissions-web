@@ -53,10 +53,6 @@ ALLOWED_MATCHING_JOB_QUEUES = {
 
 DEFAULT_MATCHING_JOB_QUEUE = "ae-spot-gp3"
 
-# Maximum number of elements in an AWS Batch array job.
-# Submitting more than this causes a ClientException at SubmitJob time.
-BATCH_MAX_ARRAY_SIZE = 10_000
-
 # Warn when more than this share of the site area has no exact-match region
 # (e.g. marine sites) and so cannot be matched.
 UNCOVERED_AREA_WARNING_FRACTION = 0.2
@@ -78,8 +74,7 @@ ANALYSIS_DEFAULTS = {
     "matching_method": "optimal",
     "n_replicates": 1,
     "match_batch_size": 25,
-    # Replicates matched by one Batch array element, which loads its pixels
-    # once for the whole block.
+    # Replicates matched by one Nextflow worker with its pixels loaded once.
     "replicate_block_size": 10,
     "match_memory_gb": 30,
     "match_memory_mib": 30 * 1024,  # 30 GB in MiB
@@ -87,32 +82,6 @@ ANALYSIS_DEFAULTS = {
     "fc_year_end": FC_YEAR_MAX + 1,  # exclusive upper bound for range()
     "resolution_m": 1000,  # nominal resolution: 1000 m (1 km) or 250 m
 }
-
-
-def _pack_match_units(group_mapping, batch_size):
-    """Pack site fragments into match units of at most *batch_size* fragments.
-
-    *group_mapping* maps exact-match group ID to ``(site_id, sub_site_index)``
-    fragments.  Fragments stay in group order, so a unit usually needs the
-    control pixels of only one or two regions, while large groups are split
-    so that no Batch array element has an unbounded number of sites.
-    Returns ``{unit_id: [fragment, ...]}`` with unit IDs from 1.
-    """
-    fragments = [m for gid in sorted(group_mapping) for m in group_mapping[gid]]
-    return {
-        i // batch_size + 1: fragments[i : i + batch_size]
-        for i in range(0, len(fragments), batch_size)
-    }
-
-
-def _replicate_blocks(n_replicates, block_size):
-    """Return ``(block_size, n_blocks)`` for splitting replicates across workers.
-
-    Each Batch array element matches one unit for one block of replicates;
-    the R matching step derives the same blocks from ``replicate_block_size``.
-    """
-    block_size = max(1, min(int(block_size), int(n_replicates)))
-    return block_size, -(-int(n_replicates) // block_size)
 
 
 def queue_analysis_task(
@@ -211,6 +180,8 @@ def queue_analysis_task(
         raise ValueError("n_replicates must be between 1 and 1000")
     if not isinstance(match_batch_size, int) or match_batch_size < 1:
         raise ValueError("match_batch_size must be a positive integer")
+    if type(match_memory_mib) is not int or not 1 <= match_memory_mib <= 122880:
+        raise ValueError("Matching memory must be between 1 and 122880 MiB (120 GB)")
     if matching_job_queue not in ALLOWED_MATCHING_JOB_QUEUES:
         raise ValueError(
             "matching_job_queue must be one of: "
@@ -768,13 +739,8 @@ def _complete_analysis_task_submission(task_id, user_id):
             _time.perf_counter() - _s3_t0,
         )
 
-        # Determine match units and pre-compute match pipeline steps.  Each
-        # Batch array element matches one unit (at most match_batch_size site
-        # fragments, see _pack_match_units) for one block of replicates.
-        #
         # Group 0 holds sites with no exact-match region assignment (all polygon
-        # exact_match_vars were NULL for that site).  Exclude group 0 from the
-        # Batch array job; these sites are not matched and are reported as
+        # exact_match_vars were NULL for that site). These sites are reported as
         # failed by the summarize step.
         if group_mapping and 0 in group_mapping:
             logger.warning(
@@ -788,70 +754,13 @@ def _complete_analysis_task_submission(task_id, user_id):
             group_mapping_for_batch = group_mapping
         if group_mapping is not None and not group_mapping_for_batch:
             raise ValueError("No sites have exact-match region assignments.")
-        match_units = (
-            _pack_match_units(group_mapping_for_batch, match_batch_size)
-            if group_mapping_for_batch
-            else None
-        )
-        # Without a group mapping each site fragment is its own unit.
-        _n_match_units = len(match_units) if match_units else len(gdf_for_db)
-        _block_size, _n_blocks = _replicate_blocks(
-            n_replicates, ANALYSIS_DEFAULTS["replicate_block_size"]
-        )
-        _raw_array_size = _n_match_units * _n_blocks
-        _match_step_base = {
-            "timeout_seconds": 14400,  # 4 h per element
-            "memory_mib": match_memory_mib,
-            "vcpus": 2,
-            "retry_attempts": 5,
-        }
-        if _raw_array_size <= BATCH_MAX_ARRAY_SIZE:
-            _match_steps = [
-                {
-                    "name": "match",
-                    "command": ["match"],
-                    "array_size": _raw_array_size,
-                    **_match_step_base,
-                }
-            ]
-            _match_chunks = None
-        else:
-            # Each chunk may contain at most this many match units, so that
-            # units * n_blocks <= BATCH_MAX_ARRAY_SIZE.
-            _units_per_chunk = max(1, BATCH_MAX_ARRAY_SIZE // _n_blocks)
-            _unit_ids = (
-                list(match_units) if match_units else list(range(_n_match_units))
-            )
-            _chunks = [
-                _unit_ids[i : i + _units_per_chunk]
-                for i in range(0, len(_unit_ids), _units_per_chunk)
-            ]
-            _match_steps = [
-                {
-                    "name": f"match_chunk_{i}",
-                    "command": [f"match_chunk_{i}"],
-                    "array_size": len(chunk) * _n_blocks,
-                    **_match_step_base,
-                }
-                for i, chunk in enumerate(_chunks)
-            ]
-            _match_chunks = _chunks
-            logger.warning(
-                "[SUBMIT-WORKER] Task %s: array size %d exceeds limit %d; "
-                "splitting match into %d chunks of \u2264%d units",
-                task_id,
-                _raw_array_size,
-                BATCH_MAX_ARRAY_SIZE,
-                len(_chunks),
-                _units_per_chunk,
-            )
-
         # Build params matching AvoidedEmissionsParams schema.
         _cog_suffixes = {1000: "_1km", 250: "_250m"}
         _cog_suffix = _cog_suffixes.get(resolution_m, "_1km")
         cog_prefix = f"{Config.S3_PREFIX}/cog{_cog_suffix}"
 
         params = {
+            "workflow_backend": "nextflow",
             "task_id": task_id,
             "task_name": task.name,
             "task_description": task.description,
@@ -873,15 +782,20 @@ def _complete_analysis_task_submission(task_id, user_id):
             "separation_fallback_mahalanobis": bool(separation_fallback_mahalanobis),
             "matching_method": matching_method,
             "n_replicates": n_replicates,
-            "replicate_block_size": _block_size,
+            "replicate_block_size": min(
+                n_replicates, ANALYSIS_DEFAULTS["replicate_block_size"]
+            ),
             "match_batch_size": match_batch_size,
             **(
                 {"sites_exclusion_buffer": sites_exclusion_buffer}
                 if sites_exclusion_buffer
                 else {}
             ),
-            **({"exact_match_group_mapping": match_units} if match_units else {}),
-            **({"match_chunks": _match_chunks} if _match_chunks is not None else {}),
+            **(
+                {"exact_match_group_mapping": group_mapping_for_batch}
+                if group_mapping_for_batch is not None
+                else {}
+            ),
             **({"random_seed": random_seed} if random_seed is not None else {}),
             **(
                 {"reference_layer_uris": reference_layer_uris}
@@ -891,58 +805,9 @@ def _complete_analysis_task_submission(task_id, user_id):
             "results_s3_uri": (
                 f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}/tasks/{task_id}/output"
             ),
-            "intermediate_s3_uri": (
-                f"s3://{Config.S3_BUCKET}/{Config.S3_PREFIX}"
-                f"/tasks/{task_id}/intermediate"
-            ),
-            **(
-                {
-                    "pipeline": [
-                        {
-                            "name": "extract",
-                            "command": ["extract"],
-                            "timeout_seconds": 14400,  # 4 h
-                            "memory_mib": max(
-                                131072, match_memory_mib
-                            ),  # at least 128 GB
-                            "vcpus": 4,
-                            "retry_attempts": 3,
-                        },
-                        *_match_steps,
-                        {
-                            "name": "summarize",
-                            "command": ["summarize"],
-                            "timeout_seconds": 21600,  # 6 h
-                            "memory_mib": max(32768, match_memory_mib),
-                            "vcpus": 2,
-                            "retry_attempts": 3,
-                        },
-                    ],
-                }
-                if _raw_array_size > 1
-                else {}
-            ),
+            "match_memory_mib": match_memory_mib,
+            "matching_job_queue": matching_job_queue,
         }
-
-        # Attach AWS Batch overrides.
-        batch_overrides = {
-            "timeout_seconds": Config.BATCH_TIMEOUT_SECONDS,
-            "memory_mib": max(Config.BATCH_MEMORY_MIB, match_memory_mib),
-            "vcpus": Config.BATCH_VCPUS,
-        }
-        if matching_job_queue:
-            batch_overrides["job_queue"] = matching_job_queue
-        elif Config.BATCH_JOB_QUEUE:
-            batch_overrides["job_queue"] = Config.BATCH_JOB_QUEUE
-        if Config.BATCH_JOB_DEFINITION:
-            batch_overrides["job_definition"] = Config.BATCH_JOB_DEFINITION
-        params["batch"] = batch_overrides
-        if Config.ANALYSIS_WORKFLOW_BACKEND == "nextflow":
-            params["workflow_backend"] = "nextflow"
-            params.pop("pipeline", None)
-            params.pop("match_chunks", None)
-        elif Config.ANALYSIS_WORKFLOW_BACKEND != "batch":
-            raise ValueError("ANALYSIS_WORKFLOW_BACKEND must be batch or nextflow")
 
         # Submit as the user, with a fresh access token from their session
         # (refreshed here if it is about to expire).

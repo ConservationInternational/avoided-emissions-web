@@ -225,6 +225,8 @@ class WorkflowTests(unittest.TestCase):
         params = {
             "sites_parquet_s3_uri": "s3://inputs/sites.parquet",
             "results_s3_uri": "s3://results/task",
+            "match_memory_mib": 61440,
+            "matching_job_queue": "ae-ondemand-gp3",
         }
         image = "registry/analysis@sha256:" + "a" * 64
         store = Store(str(self.root / "state"))
@@ -235,6 +237,8 @@ class WorkflowTests(unittest.TestCase):
             first = driver.prepare(client, store, params, image, False)
             resumed = driver.prepare(client, store, params, image, True)
             self.assertEqual(first, resumed)
+            self.assertEqual(first["_workflow"]["match_memory_mib"], 61440)
+            self.assertEqual(first["_workflow"]["initial_queue"], "ae-ondemand-gp3")
             self.assertEqual(client.copy_object.call_count, 1)
             with self.assertRaisesRegex(ValueError, "identical"):
                 driver.prepare(
@@ -249,6 +253,23 @@ class WorkflowTests(unittest.TestCase):
             driver.prepare(client, store, params, image, True)
         with self.assertRaisesRegex(ValueError, "pinned"):
             driver.prepare(client, store, params, "registry/analysis:latest", False)
+
+    def test_driver_validates_matching_preferences_before_loading_inputs(self):
+        image = "registry/analysis@sha256:" + "a" * 64
+        store = Store(str(self.root / "invalid-input-state"))
+        client = Mock()
+        for preference in (
+            {"match_memory_mib": 0},
+            {"match_memory_mib": 122881},
+            {"match_memory_mib": True},
+            {"match_memory_mib": "30720"},
+            {"matching_job_queue": "unapproved-queue"},
+            {"matching_job_queue": ["ae-spot-gp3"]},
+        ):
+            with self.subTest(preference=preference), self.assertRaises(ValueError):
+                driver.prepare(client, store, preference, image, False)
+        client.get_paginator.assert_not_called()
+        client.copy_object.assert_not_called()
 
     def test_reconcile_requires_explicit_outcomes_for_each_requested_replicate(self):
         import pyarrow as pa
@@ -314,11 +335,11 @@ class WorkflowTests(unittest.TestCase):
             "Body": Mock(read=lambda: gzip.compress(b"{}"))
         }
         env = {
-            "AE_NEXTFLOW_STATE_URI": str(state),
+            "NEXTFLOW_STATE_URI": str(state),
             "EXECUTION_ID": "execution",
             "PARAMS_S3_BUCKET": "params",
             "PARAMS_S3_PREFIX": "production",
-            "AE_NEXTFLOW_IMAGE": "ignored-in-mocked-prepare",
+            "NEXTFLOW_TASK_IMAGE": "ignored-in-mocked-prepare",
         }
         with (
             contextlib.chdir(self.root),
@@ -379,13 +400,18 @@ class WorkflowTests(unittest.TestCase):
         store = Store(str(self.root / "state"))
         env = {
             "EXECUTION_ID": "11111111-2222-3333-4444-555555555555",
-            "AE_NEXTFLOW_IMAGE": "registry/analysis@sha256:" + "a" * 64,
-            "AE_NEXTFLOW_WORK_URI": "s3://work/execution",
-            "AE_NEXTFLOW_MAX_HOURS": "1.5",
+            "NEXTFLOW_TASK_IMAGE": "registry/analysis@sha256:" + "a" * 64,
+            "NEXTFLOW_WORK_URI": "s3://work/execution",
+            "NEXTFLOW_MAX_HOURS": "1.5",
         }
         process = Mock()
         process.poll.return_value = 0
-        analysis = {"_workflow": {"match_memory_mib": 30720}}
+        analysis = {
+            "_workflow": {
+                "match_memory_mib": 30720,
+                "initial_queue": "ae-spot-gp3",
+            }
+        }
         with (
             contextlib.chdir(self.root),
             patch.object(driver.subprocess, "Popen", return_value=process) as popen,

@@ -8,9 +8,7 @@ fi
 # Entrypoint for the R analysis container. Dispatches to the appropriate
 # analysis step based on the first argument.
 #
-# When EXECUTION_ID is set (Batch mode), batch_runner.py handles S3
-# param retrieval and result upload.  The API's monitor_batch_executions
-# periodic task manages status transitions.
+# Production stages are dispatched by Nextflow through its Bash wrapper.
 #
 # Usage (standalone / debugging):
 #   docker run r-analysis analyze --config /data/config.json
@@ -61,16 +59,6 @@ run_step() {
     }
 }
 
-# -- Batch mode: API-managed lifecycle ----------------------------------------
-# When dispatched by the trends.earth API to AWS Batch, EXECUTION_ID is set.
-# batch_runner.py handles S3 param retrieval and result upload.  The API's
-# monitor_batch_executions periodic task manages status transitions —
-# no API credentials or status callbacks are needed in this container.
-if [ -n "${EXECUTION_ID:-}" ]; then
-    echo "Batch mode: EXECUTION_ID=${EXECUTION_ID}"
-    exec python /app/batch_runner.py "$@"
-fi
-
 # -- Standalone / debug mode --------------------------------------------------
 COMMAND="${1:-help}"
 shift || true
@@ -98,9 +86,8 @@ case "$COMMAND" in
     help|--help|-h)
         echo "Avoided Emissions Analysis Container"
         echo ""
-        echo "When launched by the trends.earth API, this container's main.py"
-        echo "is placed at gefcore/script/main.py inside the Environment image."
-        echo "The entrypoint below is for standalone / debugging use only."
+        echo "Production analyses are managed exclusively by Nextflow."
+        echo "These commands are for standalone / debugging use only."
         echo ""
         echo "Commands:"
         echo "  analyze    Run the full pipeline (extract + match + summarize)"

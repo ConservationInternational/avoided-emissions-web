@@ -23,13 +23,10 @@ def test_published_policy_covers_all_selectable_queues(script_config):
     assert DEFAULT_MATCHING_JOB_QUEUE in queues
 
 
-def test_published_policy_covers_pipeline_commands(script_config):
-    assert script_config["batch_execution_config"]["allowed_commands"] == [
-        ["extract"],
-        ["match"],
-        ["match_chunk_{index}"],
-        ["summarize"],
-    ]
+def test_published_policy_defaults_to_nextflow_without_legacy_commands(script_config):
+    policy = script_config["batch_execution_config"]
+    assert policy["default_workflow_backend"] == "nextflow"
+    assert "allowed_commands" not in policy
 
 
 def test_published_policy_keeps_infrastructure_server_controlled(script_config):
@@ -39,7 +36,7 @@ def test_published_policy_keeps_infrastructure_server_controlled(script_config):
     )
     assert "allowed_job_definitions" not in script_config["batch_execution_config"]
     assert set(script_config["batch_execution_config"]) == {
-        "allowed_commands",
+        "default_workflow_backend",
         "allowed_job_queues",
         "allowed_workflow_backends",
     }

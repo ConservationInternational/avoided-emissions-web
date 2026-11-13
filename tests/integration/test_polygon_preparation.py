@@ -193,6 +193,13 @@ def test_submission_keeps_database_artifact_and_group_identities_consistent(
         assert report["fragments"] == len(rows)
         assert report["uncovered_area_ha"] == 0
         params = api.create_execution.call_args.args[1]
+        assert params["workflow_backend"] == "nextflow"
+        assert not {"pipeline", "match_chunks", "intermediate_s3_uri"} & params.keys()
+        assert params["replicate_block_size"] == min(params["n_replicates"], 10)
+        assert params["match_batch_size"] == 25
+        assert "batch" not in params
+        assert params["match_memory_mib"] == 30720
+        assert params["matching_job_queue"] == "ae-spot-gp3"
         if variables:
             packed = params["exact_match_group_mapping"]
             members = [tuple(member) for group in packed.values() for member in group]

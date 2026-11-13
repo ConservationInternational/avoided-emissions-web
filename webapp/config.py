@@ -181,24 +181,6 @@ class Config:
     TRENDSEARTH_CLIENT_SECRET = os.environ.get("TRENDSEARTH_CLIENT_SECRET", "")
     TRENDSEARTH_SCRIPT_ID = os.environ.get("TRENDSEARTH_SCRIPT_ID", "")
 
-    # AWS Batch overrides sent in params["batch"] when creating an execution.
-    # Leave blank to use the defaults configured on the API / Script model.
-    BATCH_JOB_QUEUE = os.environ.get("BATCH_JOB_QUEUE", "")
-    BATCH_JOB_DEFINITION = os.environ.get("BATCH_JOB_DEFINITION", "")
-    ANALYSIS_WORKFLOW_BACKEND = os.environ.get("ANALYSIS_WORKFLOW_BACKEND", "batch")
-    # Total timeout for the Batch job in seconds.  When using pipeline mode
-    # (separate extract → match → summarize jobs), each step has its own
-    # timeout in the pipeline descriptor.  This value is used as the
-    # default fallback for any step that doesn't specify its own timeout.
-    # Default: 50 400 s = 14 h.
-    BATCH_TIMEOUT_SECONDS = int(os.environ.get("BATCH_TIMEOUT_SECONDS", "50400"))
-    # Default memory (MiB) and vCPU count for Batch containers.
-    # The extract step loads full COG grids into memory, so the default
-    # must be large enough to avoid OOM kills.  Per-step overrides in
-    # the pipeline descriptor can refine this for lighter steps.
-    BATCH_MEMORY_MIB = int(os.environ.get("BATCH_MEMORY_MIB", "131072"))  # 128 GB
-    BATCH_VCPUS = int(os.environ.get("BATCH_VCPUS", "4"))
-
     # Public URL of the app; the OIDC redirect URI is derived from it.
     APP_URL = os.environ.get("APP_URL", "http://localhost:8050").rstrip("/")
     OIDC_REDIRECT_URI = f"{APP_URL}/auth/callback"

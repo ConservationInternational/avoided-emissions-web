@@ -19,30 +19,23 @@ Pure statistical functions shared by steps 2 and 3 live in
 is described in [docs/matching.md](../../docs/matching.md) and the outputs in
 [docs/analysis-outputs.md](../../docs/analysis-outputs.md).
 
-## AWS Batch Integration
+## Nextflow on AWS Batch
 
-- **Step 1 (extract)** runs as a single job.
-- **Step 2 (match)** runs as an array job. Each element processes one work
-  unit (from `exact_match_group_mapping`, or one fragment without a mapping)
-  for one replicate:
-  `unit = index %/% n_replicates`, `replicate = index %% n_replicates + 1`.
-  Submission packs at most `match_batch_size` fragments into each unit.
-  Pixel data is loaded once per element.
-- **Step 3 (summarize)** runs as a single job after matching completes.
+Nextflow exclusively manages extraction, locality-batched matching, bounded
+recovery, reconciliation, and summarization. Matching workers reuse loaded pixels
+across replicate blocks and publish durable sample, stratum, and replicate
+checkpoints. See the [operational contract](../../docs/matching-reliability-plan.md#8-implementation-and-operational-contract).
+Standalone commands remain available for local debugging, not API dispatch.
 
 ### API execution policy
 
 [configuration.json](../configuration.json) publishes the Batch execution policy
-required by the hardened trends.earth API. It approves only the existing
-`extract`, `match`, `match_chunk_{index}`, and `summarize` command arrays, and the
-two queues offered by the webapp (`ae-spot-gp3` and `ae-ondemand-gp3`).
-`{index}` matches digits only, allowing large matching arrays to retain their
-existing chunk commands without permitting arbitrary shell commands.
-
-Single-job analyses continue to use the image's default command. Resource,
-timeout, retry, and array-size parameters are unchanged. The Batch runner uses
-S3 and its job IAM role; it does not depend on workload API passwords or the new
-execution callback credentials.
+required by the trends.earth API. Its default and only approved backend is
+`nextflow`, including single-site and direct API submissions. It does not approve
+legacy stage commands or pipeline descriptors. Initial matching memory
+(up to 120 GiB) and queue preferences are validated by this workflow's driver; the driver,
+workflow code, roles, timeouts, retry policy, and resource ceilings remain
+server-controlled. Driver and workers use S3 and their job IAM roles.
 
 Republish this configuration to **each target API** before enabling hardened
 execution validation there. Apply the API's Batch policy database migration
@@ -50,11 +43,8 @@ first. Existing published script records do not automatically receive policy
 changes from this repository. The publishing workflow selects the matching
 `staging-latest` or `production-latest` Batch image.
 
-Custom `BATCH_JOB_DEFINITION` values must match the published script's
-`batch_job_definition` or be explicitly approved in
-`batch_execution_config.allowed_job_definitions` by the API administrator.
-Likewise, custom queues must be in the published script policy. Do not approve
-arbitrary image, command, queue, or definition overrides just for compatibility.
+Configure and enable the trusted driver on the API before deploying the webapp;
+an unconfigured driver fails explicitly rather than using legacy orchestration.
 See the [deployment guide](../../deploy/README.md#job-definitions).
 
 ## Matching (`02_perform_matching.R`)
