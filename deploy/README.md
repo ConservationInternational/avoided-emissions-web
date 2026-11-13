@@ -346,6 +346,11 @@ to the trends.earth API) uses its own OAuth2 credentials:
 | `TRENDSEARTH_CLIENT_ID` | OAuth2 client ID for the trends.earth CLI (used by the publish workflow only). |
 | `TRENDSEARTH_CLIENT_SECRET` | OAuth2 client secret for the trends.earth CLI. |
 
+Publication failures stop the workflow. Verification fetches the published
+script's compute type, Batch image, and execution policy and compares them with
+the configuration being published; an existing script's successful status alone
+does not verify an update.
+
 ### Variables
 
 | Variable | Default | Description |

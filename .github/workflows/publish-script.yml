@@ -134,14 +134,39 @@ jobs:
           PY
 
       - name: Publish script
+        shell: bash
         run: |
+          set -euo pipefail
           cd r-analysis
           trends publish --overwrite
 
       - name: Verify publication
         run: |
-          cd r-analysis
-          trends info
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          import requests
+          import yaml
+
+          expected = json.loads(Path("r-analysis/configuration.json").read_text())
+          cli_config = yaml.safe_load((Path.home() / ".tecli.yml").read_text())
+          response = requests.get(
+              f'{cli_config["url_api"].rstrip("/")}/api/v1/script/{expected["id"]}',
+              params={"include": "environment"},
+              headers={"Authorization": f'Bearer {cli_config["JWT"]}'},
+              timeout=60,
+          )
+          response.raise_for_status()
+          published = response.json()["data"]
+          for field in ("compute_type", "batch_image", "batch_execution_config"):
+              if published.get(field) != expected[field]:
+                  raise SystemExit(
+                      f"Publication verification failed for {field}: "
+                      f"expected {expected[field]!r}, got {published.get(field)!r}"
+                  )
+          print("Published Batch image and execution policy verified.")
+          PY
 
   build-ranalysis:
     name: Build & Push R Analysis Image
