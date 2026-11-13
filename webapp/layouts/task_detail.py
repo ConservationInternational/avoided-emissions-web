@@ -41,6 +41,19 @@ def task_detail_layout(user, task_id, shared_token=None):
     header_row = dbc.Row(
         [
             dbc.Col(header_children, width=True),
+            dbc.Col(
+                dbc.Button(
+                    [html.I(className="bi bi-play-circle me-1"), "Resume"],
+                    id="resume-task-btn",
+                    color="outline-primary",
+                    size="sm",
+                    className="mt-1",
+                    title="Resume the same failed Nextflow execution using retained checkpoints",
+                ),
+                id="resume-task-control",
+                width="auto",
+                style={"display": "none"},
+            ),
             # Edit / Share buttons — only shown for authenticated users
             *(
                 [
@@ -304,11 +317,13 @@ def task_detail_layout(user, task_id, shared_token=None):
             header_row,
             html.Div(id="recompute-result"),
             html.Div(id="cancel-task-result"),
+            html.Div(id="resume-task-result"),
             html.Div(id="quality-warning-banner"),
             tabs,
             edit_modal,
             share_modal,
             dcc.Store(id="task-id-store", data=task_id),
+            dcc.Store(id="task-resume-refresh"),
             dcc.Store(id="share-token-store", data=shared_token),
             dcc.Interval(id="detail-refresh-interval", interval=15000, n_intervals=0),
         ]

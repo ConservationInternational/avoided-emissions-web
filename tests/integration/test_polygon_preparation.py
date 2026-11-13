@@ -157,7 +157,12 @@ def test_submission_keeps_database_artifact_and_group_identities_consistent(
                 site_set_id=site_set_id,
                 status="submitting",
                 covariates=["elev"],
-                config={"exact_match_vars": variables, "min_site_area_ha": 0},
+                config={
+                    "exact_match_vars": variables,
+                    "min_site_area_ha": 0,
+                    "match_memory_mib": 61440,
+                    "matching_job_queue": "ae-ondemand-gp3",
+                },
             )
         )
         insert_region(db, region_ids[0], box(0, 0, 0.95, 1))
@@ -198,8 +203,9 @@ def test_submission_keeps_database_artifact_and_group_identities_consistent(
         assert params["replicate_block_size"] == min(params["n_replicates"], 10)
         assert params["match_batch_size"] == 25
         assert "batch" not in params
-        assert params["match_memory_mib"] == 30720
-        assert params["matching_job_queue"] == "ae-spot-gp3"
+        assert params["match_memory_mib"] == 61440
+        assert params["matching_job_queue"] == "ae-ondemand-gp3"
+        assert task.config["workflow_backend"] == "nextflow"
         if variables:
             packed = params["exact_match_group_mapping"]
             members = [tuple(member) for group in packed.values() for member in group]

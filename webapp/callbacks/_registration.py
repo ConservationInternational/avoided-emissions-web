@@ -22,6 +22,7 @@ from services import (
     ANALYSIS_DEFAULTS,
     AppUsersError,
     archive_user_site_set,
+    can_resume_task,
     cancel_task,
     cancel_user_site_upload,
     create_share_link,
@@ -51,6 +52,7 @@ from services import (
     list_user_site_uploads,
     queue_analysis_task,
     rename_user_site_set,
+    resume_task,
     revoke_share_link,
     save_covariate_preset,
     save_matching_settings_preset,
@@ -58,6 +60,8 @@ from services import (
     start_gee_export,
     update_task_info,
 )
+from session_store import SessionExpired, SessionUnavailable
+from trendsearth_client import TrendsEarthAPIError
 
 from callbacks._detail_builders import (
     BOUNDS_NAME,
@@ -1610,17 +1614,19 @@ def register_callbacks(app, limiter=None):
             Output("task-raw-results", "children"),
             Output("quality-warning-banner", "children"),
             Output("detail-refresh-interval", "disabled"),
+            Output("resume-task-control", "style"),
         ],
         [
             Input("detail-refresh-interval", "n_intervals"),
             Input("detail-tabs", "active_tab"),
+            Input("task-resume-refresh", "data"),
         ],
         [
             State("task-id-store", "data"),
             State("share-token-store", "data"),
         ],
     )
-    def refresh_task_detail(n, active_tab, task_id, share_token):
+    def refresh_task_detail(n, active_tab, resume_event, task_id, share_token):
         if not task_id:
             raise PreventUpdate
 
@@ -1636,6 +1642,7 @@ def register_callbacks(app, limiter=None):
                 None,
                 None,
                 True,
+                {"display": "none"},
             )
 
         # Batch task status is polled by the Celery Beat worker;
@@ -1653,6 +1660,7 @@ def register_callbacks(app, limiter=None):
                 None,
                 None,
                 True,
+                {"display": "none"},
             )
 
         task = detail["task"]
@@ -1756,6 +1764,11 @@ def register_callbacks(app, limiter=None):
             raw_results,
             quality_banner,
             disable_interval,
+            (
+                {}
+                if not share_token and can_resume_task(task, get_current_user())
+                else {"display": "none"}
+            ),
         )
 
     # -- Result downloads ----------------------------------------------------
@@ -2137,6 +2150,49 @@ def register_callbacks(app, limiter=None):
         Input("map-site-selector", "value"),
         prevent_initial_call=True,
     )
+
+    # -- Resume task (detail page) -------------------------------------------
+
+    @app.callback(
+        Output("resume-task-result", "children"),
+        Output("task-resume-refresh", "data"),
+        Input("resume-task-btn", "n_clicks"),
+        State("task-id-store", "data"),
+        State("share-token-store", "data"),
+        prevent_initial_call=True,
+        running=[(Output("resume-task-btn", "disabled"), True, False)],
+    )
+    def handle_resume_task(n_clicks, task_id, share_token):
+        if not n_clicks or not task_id or share_token:
+            raise PreventUpdate
+        user = get_current_user()
+        if not user:
+            return dbc.Alert("Please log in first.", color="danger"), no_update
+        try:
+            resume_task(task_id, user)
+        except (
+            ValueError,
+            PermissionError,
+            TrendsEarthAPIError,
+            SessionExpired,
+            SessionUnavailable,
+        ) as exc:
+            logger.warning("Could not resume task %s: %s", task_id, exc)
+            return dbc.Alert(str(exc), color="warning"), no_update
+        except Exception:
+            logger.exception("Error resuming task %s", task_id)
+            report_exception()
+            return dbc.Alert(
+                "Failed to resume task. Please try again.", color="danger"
+            ), no_update
+        return (
+            dbc.Alert(
+                "Resume requested for the same execution. Progress will refresh "
+                "automatically; completed work is reused where compatible.",
+                color="success",
+            ),
+            str(_uuid.uuid4()),
+        )
 
     # -- Cancel task (detail page) -------------------------------------------
 

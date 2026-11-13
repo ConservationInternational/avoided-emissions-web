@@ -854,6 +854,7 @@ def _complete_analysis_task_submission(task_id, user_id):
         task.sites_s3_uri = sites_uri
         task.config = {
             **config,
+            "workflow_backend": "nextflow",
             **({"sites_s3_uri": sites_uri} if sites_uri else {}),
             "sites_parquet_s3_uri": sites_parquet_uri,
         }
@@ -913,6 +914,63 @@ def _cancel_api_execution(task, user, api_exec_id):
             client_secret=Config.TRENDSEARTH_CLIENT_SECRET,
         )
     client.cancel_execution(api_exec_id)
+
+
+def can_resume_task(task, user):
+    """Whether a failed, API-backed Nextflow task can offer a resume action."""
+    config = task.config or {}
+    jobs = (task.extra_metadata or {}).get("batch_jobs") or {}
+    nextflow = config.get("workflow_backend") == "nextflow" or (
+        "workflow_backend" not in config and bool(jobs.get("nextflow"))
+    )
+    return bool(
+        user
+        and (user.is_admin or str(task.submitted_by) == str(user.id))
+        and task.status == "failed"
+        and nextflow
+        and (task.extract_job_id or "").startswith("api:")
+        and task.extract_job_id[4:]
+    )
+
+
+def resume_task(task_id, user):
+    """Resume the same API execution, then reactivate local status polling."""
+    import session_store
+    from trendsearth_client import TrendsEarthClient
+
+    db = get_db()
+    try:
+        task = (
+            db.query(AnalysisTask)
+            .filter(AnalysisTask.id == task_id)
+            .with_for_update()
+            .first()
+        )
+        if not task:
+            raise ValueError("Task not found.")
+        if not user or (not user.is_admin and str(task.submitted_by) != str(user.id)):
+            raise PermissionError("You can only resume your own tasks.")
+        if not can_resume_task(task, user):
+            raise ValueError(
+                "Only failed Nextflow tasks with an API execution can be resumed."
+            )
+        client = TrendsEarthClient(
+            api_url=Config.TRENDSEARTH_API_URL,
+            access_token=session_store.get_access_token(user.session_id),
+        )
+        client.resume_execution(task.extract_job_id[4:])
+        task.status = "submitted"
+        task.completed_at = None
+        task.error_message = None
+        task.submit_session_id = user.session_id
+        task.config = {**(task.config or {}), "workflow_backend": "nextflow"}
+        metadata = dict(task.extra_metadata or {})
+        metadata.pop("batch_jobs", None)
+        task.extra_metadata = metadata
+        db.commit()
+        logger.info("[RESUME] Task %s: resuming %s", task_id, task.extract_job_id)
+    finally:
+        db.close()
 
 
 def cancel_task(task_id, user):

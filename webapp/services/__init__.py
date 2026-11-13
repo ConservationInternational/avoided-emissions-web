@@ -30,6 +30,7 @@ from services.analysis_task import (
     ResultImportError,
     _complete_analysis_task_submission,
     adopt_api_execution,
+    can_resume_task,
     cancel_task,
     download_results_csv,
     get_task_detail,
@@ -38,6 +39,7 @@ from services.analysis_task import (
     import_execution_results,
     list_task_s3_files,
     queue_analysis_task,
+    resume_task,
     update_task_info,
 )
 
@@ -162,6 +164,7 @@ __all__ = [
     "apply_site_column_mapping",
     # site_set
     "archive_user_site_set",
+    "can_resume_task",
     "cancel_task",
     "cancel_user_site_upload",
     # reference_layers
@@ -213,6 +216,7 @@ __all__ = [
     "rename_user_site_set",
     "repair_covariate_metadata",
     "resubmit_analysis_task",
+    "resume_task",
     "revoke_share_link",
     "save_covariate_preset",
     "save_matching_settings_preset",

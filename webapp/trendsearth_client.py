@@ -306,6 +306,17 @@ class TrendsEarthClient:
         _raise_for_status(resp)
         return resp.json()
 
+    def resume_execution(self, execution_id):
+        """Resume the original failed Nextflow execution."""
+        url = f"{self.api_url}/execution/{execution_id}/resume"
+        resp = self._session.post(url, headers=self._headers(), timeout=_TIMEOUT)
+        if not resp.ok:
+            logger.warning(
+                "[TE-API] POST %s → %d %s", url, resp.status_code, resp.reason
+            )
+        _raise_for_status(resp)
+        return resp.json()
+
     def cancel_execution(self, execution_id):
         """Cancel a running execution on the API."""
         url = f"{self.api_url}/execution/{execution_id}/cancel"

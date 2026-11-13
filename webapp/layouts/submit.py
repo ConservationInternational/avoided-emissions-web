@@ -795,7 +795,7 @@ def submit_layout(user, recompute_config=None):
                                                                                     dbc.Col(
                                                                                         [
                                                                                             dbc.Label(
-                                                                                                "Matching memory (GB)"
+                                                                                                "Initial matching memory (GB)"
                                                                                             ),
                                                                                             dcc.Dropdown(
                                                                                                 id="match-memory-gb",
