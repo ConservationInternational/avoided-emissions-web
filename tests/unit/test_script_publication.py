@@ -39,6 +39,10 @@ def publication_check(tmp_path, monkeypatch):
             "allowed_workflow_backends": ["nextflow"],
             "default_workflow_backend": "nextflow",
         },
+        "batch_job_definition": (
+            "arn:aws:batch:us-east-1:123456789012:job-definition/driver:5"
+        ),
+        "batch_job_queue": "arn:aws:batch:us-east-1:123456789012:job-queue/driver",
     }
     (tmp_path / "r-analysis").mkdir()
     (tmp_path / "r-analysis/configuration.json").write_text(json.dumps(expected))
@@ -64,7 +68,7 @@ def test_publication_verifies_live_policy(publication_check, capsys):
         headers={"Authorization": "Bearer test-token"},
         timeout=60,
     )
-    assert "execution policy verified" in capsys.readouterr().out
+    assert "execution policy, and pinned driver verified" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -74,11 +78,27 @@ def test_publication_verifies_live_policy(publication_check, capsys):
         ("batch_image", "avoided-emissions-ranalysis:staging-latest"),
         ("batch_execution_config", {}),
         ("batch_execution_config", None),
+        (
+            "batch_job_definition",
+            "arn:aws:batch:us-east-1:123456789012:job-definition/driver:4",
+        ),
+        ("batch_job_definition", None),
+        ("batch_job_queue", "arn:aws:batch:us-east-1:123456789012:job-queue/old"),
+        ("batch_job_queue", None),
     ],
 )
 def test_publication_rejects_stale_script(publication_check, field, value):
     script, response, _ = publication_check
     response.json.return_value["data"][field] = value
+
+    with pytest.raises(SystemExit, match=f"verification failed for {field}"):
+        runpy.run_path(str(script))
+
+
+@pytest.mark.parametrize("field", ["batch_job_definition", "batch_job_queue"])
+def test_publication_rejects_missing_driver_setting(publication_check, field):
+    script, response, _ = publication_check
+    del response.json.return_value["data"][field]
 
     with pytest.raises(SystemExit, match=f"verification failed for {field}"):
         runpy.run_path(str(script))
