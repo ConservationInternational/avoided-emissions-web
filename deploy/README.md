@@ -124,10 +124,9 @@ With `--apply`, the script:
    attempting the API switch and contains no credentials.
 
 No API redeploy or global `NEXTFLOW_*` variable change is required: the Script
-fields take precedence. Subsequent publishing from the current
-[configuration.json](../r-analysis/configuration.json) preserves these fields
-because it does not declare them. Do not later add EC2 driver fields to that
-configuration or overwrite them manually.
+fields take precedence. Subsequent publishing clones the Script's current driver
+definition with the newly built driver image and preserves its queue, platform,
+roles, resources, and other settings. It does not undo the Fargate migration.
 
 The canary is not an end-to-end scientific analysis or an API-role submission
 test. After cutover, run a small workflow through the target API and verify
@@ -460,9 +459,46 @@ to the trends.earth API) uses its own OAuth2 credentials:
 | `TRENDSEARTH_CLIENT_SECRET` | OAuth2 client secret for the trends.earth CLI. |
 
 Publication failures stop the workflow. Verification fetches the published
-script's compute type, Batch image, and execution policy and compares them with
-the configuration being published; an existing script's successful status alone
-does not verify an update.
+script's compute type, Batch image, execution policy, driver revision, and queue
+and compares them with the configuration being published; an existing script's
+successful status alone does not verify an update.
+
+### Automated Nextflow driver rollout
+
+Publication waits for both analysis and driver images to finish building.
+[publish_nextflow_driver.py](publish_nextflow_driver.py) resolves the new driver
+image to an ECR digest, registers or reuses a revision of the **currently
+published driver definition** with only its image changed, and includes that
+revision and the existing queue in script publication. The workflow verifies
+both fields after publication. Runs targeting the same environment are serialized.
+No queues, roles, compute environments, or existing revisions are changed.
+
+For the first rollout, if the Script has no explicit driver fields, set
+`NEXTFLOW_DRIVER_JOB_DEFINITION` (revision-pinned ARN) and
+`NEXTFLOW_DRIVER_JOB_QUEUE` as GitHub Actions **environment variables** matching
+the target API's effective fallback settings. Missing settings fail explicitly;
+the workflow never guesses a template or switches EC2/Fargate platforms.
+Once published, the Script's explicit fields take precedence over these variables.
+
+The publishing OAuth client must be allowed to update this Script's Batch
+configuration. The environment's `AWS_OIDC_ROLE_ARN` needs
+`batch:DescribeJobDefinitions`, `batch:RegisterJobDefinition` for the driver
+definition, `ecr:DescribeImages` for `avoided-emissions-nextflow`, and
+`iam:PassRole` for the existing driver job/execution roles (restricted to
+`ecs-tasks.amazonaws.com`). Ensure the API submission role permits **all
+revisions of that driver definition**, not only the previous revision.
+These permissions must be provisioned before running publication.
+Re-run [setup-aws.sh](setup-aws.sh) to provision the standard GitHub Actions
+role grants for the original driver and the staging/production Fargate driver
+definitions. If your driver uses custom definition or role names, provision
+equivalent narrowly scoped grants for those names instead.
+
+**Resume retains the original execution's pinned worker image and driver
+revision.** A new rollout fixes new executions, not existing failed executions;
+start a new execution to use changed workflow code. Keep old revisions active
+for reproducible resume. If `RECONCILE` still reports a literal
+`outcomes/*.json` after the fix, compare the submitted driver's image digest
+with the digest printed by the publication workflow.
 
 ### Variables
 

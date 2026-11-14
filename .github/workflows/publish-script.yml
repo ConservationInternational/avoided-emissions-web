@@ -7,6 +7,8 @@ on:
       - main
     paths:
       - 'r-analysis/**'
+      - 'deploy/publish_nextflow_driver.py'
+      - 'deploy/migrate_nextflow_driver.py'
       - '.github/workflows/publish-script.yml'
   workflow_dispatch:
     inputs:
@@ -28,6 +30,10 @@ env:
 permissions:
   id-token: write
   contents: read
+
+concurrency:
+  group: publish-script-${{ github.event_name == 'workflow_dispatch' && inputs.api_environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+  cancel-in-progress: false
 
 jobs:
   determine-environment:
@@ -52,7 +58,8 @@ jobs:
     name: Publish to trends.earth API
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: determine-environment
+    needs: [determine-environment, build-ranalysis]
+    environment: ${{ needs.determine-environment.outputs.environment }}
 
     steps:
       - name: Checkout repository
@@ -64,7 +71,14 @@ jobs:
           python-version: '3.13'
 
       - name: Install trends.earth CLI
-        run: pip install git+https://github.com/ConservationInternational/trends.earth-CLI.git
+        run: pip install boto3 git+https://github.com/ConservationInternational/trends.earth-CLI.git
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActionsNextflowPublication
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Determine API URL
         id: api-url
@@ -133,6 +147,13 @@ jobs:
           path.write_text(json.dumps(config, indent=2) + "\n")
           PY
 
+      - name: Register and select the pinned Nextflow driver
+        env:
+          DRIVER_IMAGE: ${{ needs.build-ranalysis.outputs.driver-image }}
+          NEXTFLOW_DRIVER_JOB_DEFINITION: ${{ vars.NEXTFLOW_DRIVER_JOB_DEFINITION }}
+          NEXTFLOW_DRIVER_JOB_QUEUE: ${{ vars.NEXTFLOW_DRIVER_JOB_QUEUE }}
+        run: python deploy/publish_nextflow_driver.py --image "$DRIVER_IMAGE"
+
       - name: Publish script
         shell: bash
         run: |
@@ -159,13 +180,16 @@ jobs:
           )
           response.raise_for_status()
           published = response.json()["data"]
-          for field in ("compute_type", "batch_image", "batch_execution_config"):
+          for field in (
+              "compute_type", "batch_image", "batch_execution_config",
+              "batch_job_definition", "batch_job_queue",
+          ):
               if published.get(field) != expected[field]:
                   raise SystemExit(
                       f"Publication verification failed for {field}: "
                       f"expected {expected[field]!r}, got {published.get(field)!r}"
                   )
-          print("Published Batch image and execution policy verified.")
+          print("Published Batch image, execution policy, and pinned driver verified.")
           PY
 
   build-ranalysis:
@@ -174,6 +198,8 @@ jobs:
     timeout-minutes: 30
     needs: determine-environment
     environment: ${{ needs.determine-environment.outputs.environment }}
+    outputs:
+      driver-image: ${{ steps.driver-image.outputs.image }}
 
     steps:
     - name: Checkout code
@@ -243,6 +269,7 @@ jobs:
         echo "::notice::Pushed R analysis image: $IMAGE_URI"
 
     - name: Build and push pinned Nextflow driver
+      id: driver-image
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
@@ -259,4 +286,4 @@ jobs:
           --cache-from=type=gha,scope=nextflow-driver \
           --cache-to=type=gha,mode=max,scope=nextflow-driver \
           --push --file r-analysis/nextflow/Dockerfile r-analysis/
-        echo "::notice::Register a pinned Batch job-definition revision before enabling Nextflow."
+        echo "image=$ECR_REGISTRY/$REPO:${ENVIRONMENT}-${{ github.sha }}" >> "$GITHUB_OUTPUT"

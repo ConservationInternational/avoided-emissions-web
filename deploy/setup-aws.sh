@@ -267,6 +267,7 @@ GH_ACTIONS_POLICY=$(cat <<EOF
                 "ecr:UploadLayerPart",
                 "ecr:CompleteLayerUpload",
                 "ecr:DescribeRepositories",
+                "ecr:DescribeImages",
                 "ecr:CreateRepository",
                 "ecr:TagResource",
                 "ecr:ListTagsForResource"
@@ -276,6 +277,36 @@ GH_ACTIONS_POLICY=$(cat <<EOF
                 "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/${ECR_RANALYSIS}",
                 "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/${ECR_NEXTFLOW}"
             ]
+        },
+        {
+            "Sid": "DescribeNextflowDefinitions",
+            "Effect": "Allow",
+            "Action": "batch:DescribeJobDefinitions",
+            "Resource": "*"
+        },
+        {
+            "Sid": "RegisterNextflowDriver",
+            "Effect": "Allow",
+            "Action": "batch:RegisterJobDefinition",
+            "Resource": [
+                "arn:aws:batch:${AWS_REGION}:${AWS_ACCOUNT_ID}:job-definition/${APP_NAME}-nextflow-driver:*",
+                "arn:aws:batch:${AWS_REGION}:${AWS_ACCOUNT_ID}:job-definition/ae-nextflow-driver-staging-fargate:*",
+                "arn:aws:batch:${AWS_REGION}:${AWS_ACCOUNT_ID}:job-definition/ae-nextflow-driver-production-fargate:*"
+            ]
+        },
+        {
+            "Sid": "PassNextflowDriverRoles",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": [
+                "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${APP_NAME}-nextflow-driver",
+                "arn:aws:iam::${AWS_ACCOUNT_ID}:role/trends-earth-batch-execution-role"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": "ecs-tasks.amazonaws.com"
+                }
+            }
         },
         {
             "Sid": "S3Deploy",
