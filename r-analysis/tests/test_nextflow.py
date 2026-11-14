@@ -512,6 +512,7 @@ class WorkflowTests(unittest.TestCase):
         }
         with (
             contextlib.chdir(self.root),
+            patch.dict(os.environ, {}, clear=True),
             patch.object(driver.subprocess, "Popen", return_value=process) as popen,
             patch.object(driver.boto3, "client") as batch_client,
         ):
@@ -525,6 +526,7 @@ class WorkflowTests(unittest.TestCase):
                 "ae_" + env["EXECUTION_ID"].replace("-", "_"),
             )
             self.assertEqual(command[command.index("--spot_queue") + 1], "ae-spot-gp3")
+            self.assertEqual(command[command.index("--max_forks") + 1], "100")
             self.assertNotIn("--job_role", command)
             self.assertEqual(
                 popen.call_args.kwargs["env"]["NXF_IGNORE_RESUME_HISTORY"], "true"

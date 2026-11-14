@@ -261,10 +261,10 @@ silent success; failures beyond approved resources remain explicit and resumable
   no Fusion or Wave.
   The driver image preinstalls the plugin. Analysis and driver images must be
   deployed as digests, with a pinned driver Batch job-definition revision.
-- Default: **20 concurrent tasks per workflow**, at most 25 fragments/10
+- Default: **100 concurrent tasks per workflow**, at most 25 fragments/10
   replicates per initial matching task, serial solves inside each task.
   Fragment count is after spatial splitting, not necessarily input site count.
-  These limits do not imply 20 EC2 instances: Batch packs tasks onto its nodes.
+  These limits do not imply 100 EC2 instances: Batch packs tasks onto its nodes.
 - Native Batch attempts: **one**; Nextflow: at most **three submissions per
   process task**. Initial, recovery, and final matching are three fixed passes,
   at most nine submissions along one logical item's recovery path.
@@ -310,7 +310,7 @@ silent success; failures beyond approved resources remain explicit and resumable
    approved child-role `iam:PassRole`. Child roles need scoped artifact/input
    access; Batch compute instances need standard ECR/ECS/logging permissions.
    Check these against the pinned executor in a dedicated AWS environment.
-6. Driver environment controls include `AE_NEXTFLOW_MAX_FORKS` (default 20,
+6. Driver environment controls include `AE_NEXTFLOW_MAX_FORKS` (default 100,
    maximum 100), generic `NEXTFLOW_MAX_HOURS`, and
    `AE_NEXTFLOW_MATCH_MEMORY_MIB` (default 30720, maximum 122880).
    Set server-controlled `AE_NEXTFLOW_ALLOW_ONDEMAND=true` **only after cost
