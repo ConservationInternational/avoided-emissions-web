@@ -150,8 +150,6 @@ jobs:
       - name: Register and select the pinned Nextflow driver
         env:
           DRIVER_IMAGE: ${{ needs.build-ranalysis.outputs.driver-image }}
-          NEXTFLOW_DRIVER_JOB_DEFINITION: ${{ vars.NEXTFLOW_DRIVER_JOB_DEFINITION }}
-          NEXTFLOW_DRIVER_JOB_QUEUE: ${{ vars.NEXTFLOW_DRIVER_JOB_QUEUE }}
         run: python deploy/publish_nextflow_driver.py --image "$DRIVER_IMAGE"
 
       - name: Publish script
@@ -162,35 +160,7 @@ jobs:
           trends publish --overwrite
 
       - name: Verify publication
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          import requests
-          import yaml
-
-          expected = json.loads(Path("r-analysis/configuration.json").read_text())
-          cli_config = yaml.safe_load((Path.home() / ".tecli.yml").read_text())
-          response = requests.get(
-              f'{cli_config["url_api"].rstrip("/")}/api/v1/script/{expected["id"]}',
-              params={"include": "environment"},
-              headers={"Authorization": f'Bearer {cli_config["JWT"]}'},
-              timeout=60,
-          )
-          response.raise_for_status()
-          published = response.json()["data"]
-          for field in (
-              "compute_type", "batch_image", "batch_execution_config",
-              "batch_job_definition", "batch_job_queue",
-          ):
-              if published.get(field) != expected[field]:
-                  raise SystemExit(
-                      f"Publication verification failed for {field}: "
-                      f"expected {expected[field]!r}, got {published.get(field)!r}"
-                  )
-          print("Published Batch image, execution policy, and pinned driver verified.")
-          PY
+        run: python deploy/publish_nextflow_driver.py --verify
 
   build-ranalysis:
     name: Build & Push R Analysis Image

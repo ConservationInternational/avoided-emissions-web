@@ -39,8 +39,32 @@ cache/checkpoints, explicit resume, and required AWS canaries. Deploy the
 companion API changes and configure its driver before deploying this webapp.
 Republish the script policy: it both defaults to and permits only Nextflow,
 including submissions made directly through the API. There is no legacy fallback.
-The publishing workflow builds both images but does not configure the API's
-driver or register its job definition automatically.
+Provision the initial driver definition, queue, and API defaults separately;
+the publishing workflow builds both images and rolls out new driver revisions
+using those existing settings.
+
+### Automatic driver image rollout
+
+Deploy the companion API's `include=nextflow_driver` support before publishing
+this application. Publication reads the Script's effective driver definition
+and queue from the API, using the same Script-override/API-default precedence
+as execution submission. No duplicate `NEXTFLOW_DRIVER_JOB_DEFINITION` or
+`NEXTFLOW_DRIVER_JOB_QUEUE` GitHub variables are needed in this repository.
+
+The publisher clones that definition with the newly built, digest-pinned driver
+image, preserves its queue and other settings, and publishes the new revision
+to the Script. Subsequent publications discover the Script's current settings
+again, including changes made by a driver migration. Publication fails explicitly
+if discovery is unavailable or the settings change during registration.
+After `trends publish --overwrite` uploads and publishes the selected settings,
+`publish_nextflow_driver.py --verify` reads the Script back and checks its
+published flag, worker image, policy, and both stored and effective driver
+settings. A mismatch fails the workflow rather than reporting a successful rollout.
+
+Existing executions keep their original driver. In particular, a driver built
+before percentage reporting was added has no `progress.json`; its execution can
+remain at 0% even while Batch task-status logs advance. Publishing a newer driver
+does not retrofit progress reporting into an already-running analysis.
 
 ### Migrate the Nextflow driver to Fargate
 

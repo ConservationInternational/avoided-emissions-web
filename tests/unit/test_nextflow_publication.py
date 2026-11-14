@@ -32,8 +32,6 @@ IMAGE = f"{REGISTRY}/avoided-emissions-nextflow@sha256:" + "b" * 64
 def module(monkeypatch):
     monkeypatch.syspath_prepend(str(DEPLOY))
     SPEC.loader.exec_module(publication)
-    monkeypatch.delenv("NEXTFLOW_DRIVER_JOB_DEFINITION", raising=False)
-    monkeypatch.delenv("NEXTFLOW_DRIVER_JOB_QUEUE", raising=False)
     return publication
 
 
@@ -46,13 +44,9 @@ def test_rollout_preserves_definition_and_pins_built_image(
         if bootstrap
         else {"batch_job_definition": SOURCE_ARN, "batch_job_queue": QUEUE}
     )
-    monkeypatch.setenv(
-        "NEXTFLOW_DRIVER_JOB_DEFINITION", SOURCE_ARN if bootstrap else "unused-fallback"
-    )
-    monkeypatch.setenv(
-        "NEXTFLOW_DRIVER_JOB_QUEUE", QUEUE if bootstrap else "unused-fallback"
-    )
-    monkeypatch.setattr(module, "api_request", Mock(return_value={"data": original}))
+    original["nextflow_driver"] = {"job_definition": SOURCE_ARN, "job_queue": QUEUE}
+    request = Mock(return_value={"data": original})
+    monkeypatch.setattr(module, "api_request", request)
     source = {
         "jobDefinitionName": "driver",
         "jobDefinitionArn": SOURCE_ARN,
@@ -136,16 +130,30 @@ def test_rollout_preserves_definition_and_pins_built_image(
     }
     assert "batch_job_definition" not in config
     assert source["containerProperties"]["image"] != IMAGE
+    assert all(
+        call.kwargs["params"] == {"include": "environment,nextflow_driver"}
+        for call in request.call_args_list
+    )
     ecr.describe_images.assert_called_once_with(
         repositoryName="avoided-emissions-nextflow",
         imageIds=[{"imageTag": "production-commit"}],
     )
 
 
-def test_missing_bootstrap_settings_fail_before_registration(module, monkeypatch):
-    monkeypatch.setattr(module, "api_request", Mock(return_value={"data": {}}))
+def test_missing_effective_settings_fail_before_registration(module, monkeypatch):
+    monkeypatch.setenv("NEXTFLOW_DRIVER_JOB_DEFINITION", SOURCE_ARN)
+    monkeypatch.setenv("NEXTFLOW_DRIVER_JOB_QUEUE", QUEUE)
+    monkeypatch.setattr(
+        module,
+        "api_request",
+        Mock(
+            return_value={
+                "data": {"batch_job_definition": SOURCE_ARN, "batch_job_queue": QUEUE}
+            }
+        ),
+    )
     batch = Mock()
-    with pytest.raises(ValueError, match="Publish explicit driver settings first"):
+    with pytest.raises(ValueError, match="API did not return effective Nextflow"):
         module.prepare_publication(
             {"id": "script"},
             Mock(),
@@ -159,15 +167,22 @@ def test_missing_bootstrap_settings_fail_before_registration(module, monkeypatch
     batch.register_job_definition.assert_not_called()
 
 
-def test_bootstrap_uses_fallbacks_and_refuses_concurrent_api_changes(
-    module, monkeypatch
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"batch_job_definition": TARGET_ARN},
+        {"nextflow_driver": {"job_definition": TARGET_ARN, "job_queue": QUEUE}},
+        {"nextflow_driver": {"job_definition": SOURCE_ARN, "job_queue": "new-queue"}},
+    ],
+)
+def test_publication_refuses_concurrent_explicit_or_default_changes(
+    module, monkeypatch, change
 ):
-    monkeypatch.setenv("NEXTFLOW_DRIVER_JOB_DEFINITION", SOURCE_ARN)
-    monkeypatch.setenv("NEXTFLOW_DRIVER_JOB_QUEUE", QUEUE)
+    original = {"nextflow_driver": {"job_definition": SOURCE_ARN, "job_queue": QUEUE}}
     request = Mock(
         side_effect=[
-            {"data": {}},
-            {"data": {"batch_job_definition": TARGET_ARN}},
+            {"data": original},
+            {"data": {**original, **change}},
         ]
     )
     monkeypatch.setattr(module, "api_request", request)
@@ -200,3 +215,47 @@ def test_bootstrap_uses_fallbacks_and_refuses_concurrent_api_changes(
             IMAGE,
         )
     module.source_definition.assert_called_once_with(batch, SOURCE_ARN)
+
+
+@pytest.mark.parametrize(
+    "change,error",
+    [
+        ({}, None),
+        ({"batch_job_definition": SOURCE_ARN}, "batch_job_definition"),
+        ({"batch_job_queue": "old-queue"}, "batch_job_queue"),
+        ({"batch_image": "old-image"}, "batch_image"),
+        ({"batch_execution_config": {}}, "batch_execution_config"),
+        (
+            {"nextflow_driver": {"job_definition": SOURCE_ARN, "job_queue": QUEUE}},
+            "effective driver",
+        ),
+        ({"public": False}, "not published"),
+    ],
+)
+def test_verification_requires_published_script_with_selected_driver(
+    module, monkeypatch, change, error
+):
+    config = {
+        "id": "script",
+        "compute_type": "batch",
+        "batch_image": "avoided-emissions-ranalysis:production-latest",
+        "batch_execution_config": {"default_workflow_backend": "nextflow"},
+        "batch_job_definition": TARGET_ARN,
+        "batch_job_queue": QUEUE,
+    }
+    published = {
+        **config,
+        "public": True,
+        "nextflow_driver": {"job_definition": TARGET_ARN, "job_queue": QUEUE},
+        **change,
+    }
+    request = Mock(return_value={"data": published})
+    monkeypatch.setattr(module, "api_request", request)
+    if error:
+        with pytest.raises(RuntimeError, match=error):
+            module.verify_publication(config, Mock(), "https://api.example")
+    else:
+        module.verify_publication(config, Mock(), "https://api.example")
+    assert request.call_args.kwargs["params"] == {
+        "include": "environment,nextflow_driver"
+    }
