@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import gzip
 import hashlib
 import json
@@ -12,9 +13,11 @@ import secrets
 import signal
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from nextflow_worker import ANALYSIS_FIELDS
 from workflow_store import Store
 
@@ -22,6 +25,19 @@ log = logging.getLogger(__name__)
 WORKFLOW = Path(__file__).with_name("main.nf")
 VERSION = "1.1.0"
 JOB_ID = re.compile(r"submitted > job=([0-9a-f-]{36});")
+ACTIVE_JOB_STATUSES = {"SUBMITTED", "PENDING", "RUNNABLE", "STARTING", "RUNNING"}
+PROGRESS_INTERVAL_SECONDS = 60
+PROGRESS_MILESTONES = {
+    "EXTRACT": 10,
+    "PREPARE_MATCH_BATCHES": 20,
+    "MATCH_BATCH": 40,
+    "PREPARE_RECOVERY": 65,
+    "MATCH_RECOVERY": 70,
+    "PREPARE_LONG": 80,
+    "MATCH_LONG": 85,
+    "RECONCILE": 90,
+    "SUMMARIZE": 99,
+}
 
 
 def canonical(value) -> bytes:
@@ -198,6 +214,71 @@ def record_jobs(store: Store, logfile: Path) -> set[str]:
     return jobs
 
 
+def log_progress(batch, jobs: set[str]) -> None:
+    """Report submitted task attempts, not the unknown future workflow size."""
+    counts = Counter()
+    job_ids = sorted(jobs)
+    try:
+        for index in range(0, len(job_ids), 100):
+            chunk = job_ids[index : index + 100]
+            described = batch.describe_jobs(jobs=chunk).get("jobs", [])
+            found = set()
+            for job in described:
+                job_id = job["jobId"]
+                if job_id not in chunk or job_id in found:
+                    raise ValueError("Unexpected job in Batch describe_jobs response")
+                found.add(job_id)
+                status = job["status"]
+                if status in ACTIVE_JOB_STATUSES | {"SUCCEEDED", "FAILED"}:
+                    counts[status] += 1
+                else:
+                    counts["UNKNOWN"] += 1
+            counts["UNKNOWN"] += len(chunk) - len(found)
+    except (BotoCoreError, ClientError, KeyError, TypeError, ValueError) as exc:
+        log.warning("Could not retrieve Nextflow task progress: %s", exc)
+        return
+    remaining = sum(counts[status] for status in ACTIVE_JOB_STATUSES)
+    details = ", ".join(
+        f"{status.lower()}={count}" for status, count in sorted(counts.items()) if count
+    )
+    log.info(
+        "Nextflow submitted task attempts: total=%d, known remaining=%d, "
+        "succeeded=%d, failed=%d, unknown=%d%s; not-yet-submitted work is not counted",
+        len(job_ids),
+        remaining,
+        counts["SUCCEEDED"],
+        counts["FAILED"],
+        counts["UNKNOWN"],
+        f" ({details})" if details else "",
+    )
+
+
+def record_progress(
+    store: Store, trace: Path, previous: int, driver_job_id: str | None
+) -> int:
+    """Publish an estimated milestone percentage from completed trace records."""
+    try:
+        progress = previous
+        if trace.exists():
+            with trace.open(newline="") as stream:
+                for row in csv.DictReader(stream, delimiter="\t"):
+                    if row.get("status") not in {"COMPLETED", "CACHED"}:
+                        continue
+                    name = (row.get("name") or "").split(" (", 1)[0]
+                    progress = max(progress, PROGRESS_MILESTONES.get(name, 0))
+        if progress != previous:
+            if not driver_job_id:
+                log.warning("Cannot publish progress without AWS_BATCH_JOB_ID")
+                return previous
+            store.write_json(
+                "progress.json", {"percent": progress, "driver_job_id": driver_job_id}
+            )
+        return progress
+    except (OSError, UnicodeError, csv.Error, BotoCoreError, ClientError) as exc:
+        log.warning("Could not publish Nextflow progress estimate: %s", exc)
+        return previous
+
+
 def stop(process: subprocess.Popen, batch, jobs: set[str], reason: str) -> None:
     process.send_signal(signal.SIGTERM)
     try:
@@ -268,6 +349,8 @@ def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
     previous_int = signal.signal(signal.SIGINT, interrupt)
     process = None
     started = time.monotonic()
+    next_progress = started
+    progress = 0
     batch = boto3.client("batch", region_name=env["AWS_REGION"])
     try:
         process = subprocess.Popen(command, env=process_env, start_new_session=True)
@@ -275,7 +358,8 @@ def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
         while True:
             jobs = record_jobs(store, Path("nextflow.log"))
             cancelled = interrupted or store.json("cancelled.json") is not None
-            expired = time.monotonic() - started > duration
+            now = time.monotonic()
+            expired = now - started > duration
             if cancelled or expired:
                 reason = (
                     "Execution cancelled"
@@ -286,6 +370,13 @@ def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
                 record_jobs(store, Path("nextflow.log"))
                 raise InterruptedError(reason) if cancelled else TimeoutError(reason)
             code = process.poll()
+            if now >= next_progress or code is not None:
+                progress = record_progress(
+                    store, Path("trace.tsv"), progress, env.get("AWS_BATCH_JOB_ID")
+                )
+                log.info("Estimated workflow completion: %d%%", progress)
+                log_progress(batch, jobs)
+                next_progress = now + PROGRESS_INTERVAL_SECONDS
             if code is not None:
                 if code:
                     raise subprocess.CalledProcessError(code, command)
@@ -343,6 +434,7 @@ def main() -> None:
             ContentEncoding="gzip",
         )
         store.write_json("status.json", {"phase": "succeeded", "success": True})
+        log.info("Nextflow workflow completed successfully (100%)")
     except Exception as exc:
         phase = "cancelled" if isinstance(exc, InterruptedError) else "failed"
         store.write_json(

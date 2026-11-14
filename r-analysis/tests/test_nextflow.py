@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from botocore.exceptions import ClientError
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "nextflow"))
@@ -396,6 +398,101 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(driver.record_jobs(store, logfile), {first, second})
 
+    def test_driver_reports_known_remaining_and_unknown_jobs(self):
+        jobs = {f"job-{number:03}" for number in range(102)}
+        batch = Mock()
+
+        def describe(jobs):
+            return {
+                "jobs": [
+                    {
+                        "jobId": job,
+                        "status": "RUNNING" if job == "job-000" else "SUCCEEDED",
+                    }
+                    for job in jobs
+                    if job != "job-101"
+                ]
+            }
+
+        batch.describe_jobs.side_effect = describe
+        with self.assertLogs(driver.log, level="INFO") as messages:
+            driver.log_progress(batch, jobs)
+        self.assertIn("total=102, known remaining=1", messages.output[0])
+        self.assertIn("succeeded=100, failed=0, unknown=1", messages.output[0])
+        self.assertIn("not-yet-submitted work is not counted", messages.output[0])
+        self.assertEqual(
+            [len(call.kwargs["jobs"]) for call in batch.describe_jobs.call_args_list],
+            [100, 2],
+        )
+
+        batch.describe_jobs.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "denied"}}, "DescribeJobs"
+        )
+        with self.assertLogs(driver.log, level="WARNING") as messages:
+            driver.log_progress(batch, jobs)
+        self.assertIn("Could not retrieve Nextflow task progress", messages.output[0])
+
+    def test_driver_publishes_monotonic_estimates_for_completed_milestones(self):
+        store = Store(str(self.root / "state"))
+        trace = self.root / "trace.tsv"
+        trace.write_text(
+            "task_id\tname\tstatus\n"
+            "1\tEXTRACT\tCOMPLETED\n"
+            "2\tPREPARE_MATCH_BATCHES\tCACHED\n"
+            "3\tMATCH_BATCH (first)\tFAILED\n"
+        )
+        self.assertEqual(driver.record_progress(store, trace, 0, "driver-1"), 20)
+        self.assertEqual(
+            store.json("progress.json"), {"percent": 20, "driver_job_id": "driver-1"}
+        )
+        with trace.open("a") as stream:
+            stream.write("4\tMATCH_BATCH (second)\tCOMPLETED\n")
+        self.assertEqual(driver.record_progress(store, trace, 20, "driver-1"), 40)
+        trace.write_text("task_id\tname\tstatus\n5\tEXTRACT\tCACHED\n")
+        self.assertEqual(driver.record_progress(store, trace, 40, "driver-1"), 40)
+        self.assertEqual(store.json("progress.json")["percent"], 40)
+        trace.write_text("task_id\tname\tstatus\n6\tSUMMARIZE\tCOMPLETED\n")
+        self.assertEqual(driver.record_progress(store, trace, 40, "driver-1"), 99)
+
+    def test_driver_does_not_publish_progress_without_job_identity(self):
+        store = Store(str(self.root / "state"))
+        trace = self.root / "trace.tsv"
+        trace.write_text("task_id\tname\tstatus\n1\tEXTRACT\tCOMPLETED\n")
+        with self.assertLogs(driver.log, level="WARNING"):
+            self.assertEqual(driver.record_progress(store, trace, 0, None), 0)
+        self.assertIsNone(store.json("progress.json"))
+
+    def test_driver_logs_periodically_and_when_nextflow_exits(self):
+        store = Store(str(self.root / "state"))
+        env = {
+            "AWS_REGION": "us-east-1",
+            "EXECUTION_ID": "execution-id",
+            "NEXTFLOW_TASK_IMAGE": "image",
+            "NEXTFLOW_WORK_URI": "s3://work/execution",
+        }
+        analysis = {
+            "_workflow": {
+                "match_memory_mib": 1024,
+                "initial_queue": "queue",
+            }
+        }
+        process = Mock()
+        process.poll.side_effect = [None, None, None, 0, 0]
+        jobs = {"job-1"}
+        with (
+            contextlib.chdir(self.root),
+            patch.object(driver.subprocess, "Popen", return_value=process),
+            patch.object(driver.boto3, "client") as batch_client,
+            patch.object(driver, "record_jobs", return_value=jobs),
+            patch.object(driver, "log_progress") as progress,
+            patch.object(driver.time, "monotonic", side_effect=[0, 0, 30, 61, 62]),
+            patch.object(driver.time, "sleep"),
+        ):
+            driver.launch(store, analysis, env, False)
+        self.assertEqual(progress.call_count, 3)
+        for call in progress.call_args_list:
+            self.assertEqual(call.args, (batch_client.return_value, jobs))
+
     def test_driver_launch_matches_api_optional_environment_and_explicit_resume(self):
         store = Store(str(self.root / "state"))
         env = {
@@ -449,6 +546,11 @@ class WorkflowTests(unittest.TestCase):
             "import json,pathlib,sys\n"
             "p=pathlib.Path\n"
             "cmd=sys.argv[1]\n"
+            "if cmd in ('repack','reconcile'):\n"
+            " outcomes=[json.loads(p(path).read_text()) for path in "
+            "sys.argv[sys.argv.index('--outcomes')+1:]]\n"
+            " if cmd=='repack': assert outcomes\n"
+            " if cmd=='reconcile': assert not any(o['unfinished'] for o in outcomes)\n"
             "if cmd=='match':\n"
             " with p(__file__).with_suffix('.seconds').open('a') as f: "
             "f.write(sys.argv[sys.argv.index('--seconds')+1]+'\\n')\n"
@@ -459,13 +561,19 @@ class WorkflowTests(unittest.TestCase):
             "if cmd=='prepare':\n"
             " p('batches').mkdir(); p('batches/a.json').write_text('{\"ids\":[1],\"phase\":0}'); "
             "p('expected.json').write_text('{}')\n"
+            " if p(__file__).with_suffix('.multiple').exists(): "
+            "p('batches/b.json').write_text('{\"ids\":[2],\"phase\":0}')\n"
             "if cmd=='match':\n"
             " phase=json.loads(p('batch.json').read_text())['phase']\n"
-            " pending=[1] if p(__file__).with_suffix('.yield').exists() and phase<2 else []\n"
+            " ceiling=2 if p(__file__).with_suffix('.yield').exists() else "
+            "int(p(__file__).with_suffix('.recovery').exists())\n"
+            " pending=[1] if phase<ceiling else []\n"
             " p('outcome.json').write_text(json.dumps({'unfinished':pending}))\n"
             "if cmd=='repack':\n"
             " phase=2 if '--final' in sys.argv else 1\n"
-            " p('batches').mkdir(); p('batches/recovery.json').write_text(json.dumps({'ids':[1],'phase':phase}))\n"
+            " p('batches').mkdir()\n"
+            " for i,outcome in enumerate(outcomes): "
+            "p(f'batches/recovery{i}.json').write_text(json.dumps({'ids':[1],'phase':phase}))\n"
             "if cmd=='reconcile':\n"
             " p('matches').mkdir(); "
             "p('reconciled.json').write_text('{}')\n"
@@ -530,6 +638,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(list(map(int, seconds[:2])), [14280, 28680])
         with (self.root / "trace.tsv").open() as stream:
             attempts = list(csv.DictReader(stream, delimiter="\t"))
+        progress_store = Store(str(self.root / "progress-state"))
+        self.assertEqual(
+            driver.record_progress(progress_store, self.root / "trace.tsv", 0, "test"),
+            90,
+        )
         match_attempts = [
             row for row in attempts if row["name"].startswith("MATCH_BATCH")
         ]
@@ -559,7 +672,31 @@ class WorkflowTests(unittest.TestCase):
             tasks = list(csv.DictReader(stream, delimiter="\t"))
         self.assertEqual(len(tasks), 5)
         self.assertTrue(all(task["status"] == "CACHED" for task in tasks), tasks)
+        self.assertEqual(
+            driver.record_progress(progress_store, self.root / "trace.tsv", 90, "test"),
+            99,
+        )
+        fake.with_suffix(".recovery").touch()
+        recovered_state = self.root / "recovered"
+        command[command.index("-name") + 1] = "recovered"
+        command[command.index("--state_uri") + 1] = str(recovered_state)
+        result = subprocess.run(
+            command,
+            cwd=self.root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=180,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        with (self.root / "trace.tsv").open() as stream:
+            tasks = list(csv.DictReader(stream, delimiter="\t"))
+        self.assertEqual(len(tasks), 7)
+        self.assertTrue((recovered_state / "published/results.json").exists())
         fake.with_suffix(".yield").touch()
+        fake.with_suffix(".multiple").touch()
         yielded_state = self.root / "yielded"
         command[command.index("-name") + 1] = "yielded"
         command[command.index("--state_uri") + 1] = str(yielded_state)
@@ -576,7 +713,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         with (self.root / "trace.tsv").open() as stream:
             tasks = list(csv.DictReader(stream, delimiter="\t"))
-        self.assertEqual(len(tasks), 9)
+        self.assertEqual(len(tasks), 12)
         self.assertTrue((yielded_state / "published/results.json").exists())
 
 

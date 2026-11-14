@@ -42,6 +42,119 @@ including submissions made directly through the API. There is no legacy fallback
 The publishing workflow builds both images but does not configure the API's
 driver or register its job definition automatically.
 
+### Migrate the Nextflow driver to Fargate
+
+Use [migrate_nextflow_driver.py](migrate_nextflow_driver.py) to move **only the
+driver** to AWS Batch Fargate On-Demand. Extraction, matching, and summary jobs
+stay on their existing EC2 Spot/On-Demand queues. The migration does not rebuild
+images or alter scientific inputs, worker retries, S3 state, or workflow policy.
+It clones the current driver's command, roles, secrets, and workflow environment,
+resolves its image to an immutable ECR digest, and sets both AWS region variables.
+The source must be a compatible single-container job with at least 2 vCPUs /
+4 GiB; incompatible host mounts, privileged mode, and other EC2-only settings
+cause an explicit error rather than being silently dropped.
+
+Prerequisites:
+
+- Python 3.10+ with `boto3` and `requests` (already in
+  [webapp/requirements.txt](../webapp/requirements.txt)).
+- AWS credentials with Batch read/create/register/submit/terminate permissions,
+  EC2 subnet/security-group lookup, STS identity, ECR image lookup, IAM
+  `GetRole`/`GetRolePolicy`/`PutRolePolicy`, and permission to pass the source driver/execution
+  roles. Creating the Batch service-linked role may require
+  `iam:CreateServiceLinkedRole` if it does not exist.
+- An API **admin** JWT in `TRENDSEARTH_API_TOKEN`, or OAuth credentials in
+  `TRENDSEARTH_CLIENT_ID` / `TRENDSEARTH_CLIENT_SECRET` for an admin principal.
+  Tokens need `script:read` and `script:write` scopes. Select credentials for
+  the target API environment; do not put credentials in command-line arguments.
+- Existing Nextflow-enabled Script and working driver/execution IAM roles,
+  including the S3/tagging and child-job permissions in the rollout guide.
+  The existing API role must retain its Batch monitoring/cancellation permissions.
+- Explicit subnet/security-group IDs in one VPC. With `--assign-public-ip
+  DISABLED`, provide NAT or all required VPC endpoints and routes (including
+  ECR, S3, CloudWatch Logs, and Batch). Public-IP mode needs public subnet
+  routes to an internet gateway. The image may also need outbound internet
+  access for Nextflow plugins. The script does not change networking.
+
+From the repository root, preview the read-only plan (authenticate first using
+the environment variables above):
+
+```bash
+python3 deploy/migrate_nextflow_driver.py \
+  --environment staging --profile my-profile --region us-east-1 \
+  --subnets subnet-aaaaaaaa subnet-bbbbbbbb \
+  --security-groups sg-aaaaaaaa \
+  --assign-public-ip DISABLED
+```
+
+Replace the example IDs with actual networking IDs. Re-run the same command with
+`--apply --report /secure/existing-directory/staging-fargate-migration.json` to
+perform the migration. The report must be a **new file in an existing directory**.
+Choose `--environment production` and production credentials/networking to
+migrate production separately. `--max-vcpus` defaults to 16 (eight 2-vCPU drivers);
+increase it deliberately for higher workflow concurrency.
+
+If the Script currently relies on API fallback settings instead of explicit
+driver fields, supply their effective values with `--source-job-definition`
+(preferably a revision-pinned ARN) and `--source-job-queue`. Overrides cannot
+replace a different nonempty published Script field. Use `--api-role-name` if
+the API runs under a role other than `trendsearth-api-docker-swarm-role`.
+
+With `--apply`, the script:
+
+1. Creates or reuses the environment-specific
+   `ae-nextflow-driver-{environment}-fargate` compute environment and queue.
+   Existing resources with conflicting configuration are rejected, not modified.
+   The environment is `FARGATE`, never `FARGATE_SPOT`.
+2. Registers/reuses a pinned compatible driver definition with one native
+   attempt and timeout headroom for the maximum seven-day workflow budget.
+   Per-execution API timeouts still take precedence.
+3. Runs a billed canary using that image, networking, and driver role. It checks
+   Nextflow startup, AWS region configuration, task-role credentials, and child
+   queue lookup. A failure prevents cutover; a timed-out/interrupted canary is
+   terminated. Inspect its Batch/CloudWatch logs using the printed job ID.
+4. Adds an environment-specific inline policy to the API role for submitting
+   and tagging the new driver and passing its roles. Existing policies and
+   child-job roles are not replaced; a conflicting same-named inline policy
+   causes an error. IAM propagation, permission boundaries,
+   and organization-level denies can still affect the API's effective access.
+5. Saves effective old driver settings and target ARNs to the rollback report,
+   PATCHes only this Script's `batch_job_definition` / `batch_job_queue`, and
+   reads them back to verify persistence. The report is written **before**
+   attempting the API switch and contains no credentials.
+
+No API redeploy or global `NEXTFLOW_*` variable change is required: the Script
+fields take precedence. Subsequent publishing from the current
+[configuration.json](../r-analysis/configuration.json) preserves these fields
+because it does not declare them. Do not later add EC2 driver fields to that
+configuration or overwrite them manually.
+
+The canary is not an end-to-end scientific analysis or an API-role submission
+test. After cutover, run a small workflow through the target API and verify
+S3 publication, cancellation, and explicit resume before broad production use.
+Infrastructure is retained on failure for diagnosis; there is no automatic
+destructive rollback. Creation/reuse is repeatable, but each apply needs a fresh
+report path; retain the **first** report containing the old EC2 settings.
+
+To roll back the Script after a failed rollout, use a current admin JWT:
+
+```bash
+REPORT=/secure/existing-directory/staging-fargate-migration.json
+curl --fail-with-body --request PATCH \
+  "$(jq -r '.api_url' "$REPORT")/api/v1/script/$(jq -r '.script_id' "$REPORT")/config" \
+  --header "Authorization: Bearer $TRENDSEARTH_API_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data "$(jq -c '.rollback_patch' "$REPORT")"
+```
+
+Read the Script back to confirm its two driver fields match `rollback_patch`.
+This restores effective pinned settings, even if the old deployment used API
+fallbacks. Rollback affects future submissions, not drivers already submitted
+to Fargate. Likewise, migration does not terminate existing EC2 drivers.
+**Keep old queues and job-definition revisions enabled/active**: explicit
+resume uses infrastructure recorded on the original execution. Do not delete
+shared EC2 compute environments or worker queues as part of this migration.
+
 ### Valkey broker and session storage
 
 Development, staging, and production use `valkey/valkey:9.1.3-alpine`.
@@ -301,7 +414,7 @@ Resource defaults are process-specific:
 
 | Resource | Value |
 |---|---|
-| Driver | At least 2 vCPUs / 4 GiB, On-Demand, one native attempt |
+| Driver | At least 2 vCPUs / 4 GiB, On-Demand (Fargate after migration), one native attempt |
 | Matching | 30 GiB initially by default; up to 120 GiB after confirmed OOM |
 | Matching timeout | 4/8/16 hours across Nextflow retries |
 | Extraction | 128 GiB initially; up to 512 GiB after confirmed OOM |

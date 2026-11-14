@@ -27,6 +27,10 @@ across replicate blocks and publish durable sample, stratum, and replicate
 checkpoints. See the [operational contract](../../docs/matching-reliability-plan.md#8-implementation-and-operational-contract).
 Standalone commands remain available for local debugging, not API dispatch.
 
+Recovery tiers are skipped when no unfinished work remains. Reconciliation
+accepts an empty final-tier outcome list and still verifies every expected
+replicate against its durable checkpoints before summarization.
+
 ### API execution policy
 
 [configuration.json](../configuration.json) publishes the Batch execution policy
@@ -36,6 +40,15 @@ legacy stage commands or pipeline descriptors. Initial matching memory
 (up to 120 GiB) and queue preferences are validated by this workflow's driver; the driver,
 workflow code, roles, timeouts, retry policy, and resource ceilings remain
 server-controlled. Driver and workers use S3 and their job IAM roles.
+
+The driver logs a Batch task summary every 60 seconds and when Nextflow exits.
+The known remaining count includes submitted tasks in active Batch states; it
+does not estimate tasks that Nextflow has not yet submitted. Unknown Batch jobs
+are reported separately. Counts include attempts from previous resumes. Driver
+logs are available through the API's execution `batch-logs` endpoint.
+It also publishes an estimated percentage based on completed workflow
+milestones, not elapsed time or a known total task count. The API reports 100%
+only after validating successful completion and the published results.
 
 Republish this configuration to **each target API** before enabling hardened
 execution validation there. Apply the API's Batch policy database migration

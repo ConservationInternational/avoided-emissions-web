@@ -48,7 +48,7 @@ process PREPARE_RECOVERY {
     path 'batches/*.json'
     script:
     """
-    python3 '${params.worker}' repack --params analysis.json --outcomes outcomes/*.json
+    python3 '${params.worker}' repack --params analysis.json --outcomes ${outcomes}
     """
 }
 
@@ -60,7 +60,7 @@ process PREPARE_LONG {
     path 'batches/*.json'
     script:
     """
-    python3 '${params.worker}' repack --params analysis.json --final --outcomes outcomes/*.json
+    python3 '${params.worker}' repack --params analysis.json --final --outcomes ${outcomes}
     """
 }
 
@@ -74,7 +74,7 @@ process RECONCILE {
     path 'matches', emit: matches
     script:
     """
-    python3 '${params.worker}' reconcile --params analysis.json --input expected.json --outcomes outcomes/*.json
+    python3 '${params.worker}' reconcile --params analysis.json --input expected.json --outcomes ${outcomes}
     """
 }
 
