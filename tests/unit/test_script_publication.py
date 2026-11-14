@@ -2,8 +2,8 @@
 
 import json
 import runpy
-from pathlib import Path
 import sys
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -15,7 +15,9 @@ pytestmark = pytest.mark.unit
 WORKFLOW_PATH = (
     Path(__file__).resolve().parents[2] / ".github/workflows/publish-script.yml"
 )
-VERIFY_SCRIPT = Path(__file__).resolve().parents[2] / "deploy/publish_nextflow_driver.py"
+VERIFY_SCRIPT = (
+    Path(__file__).resolve().parents[2] / "deploy/publish_nextflow_driver.py"
+)
 
 
 @pytest.fixture
@@ -28,6 +30,7 @@ def publication_check(tmp_path, monkeypatch):
     )
     assert step["run"] == "python deploy/publish_nextflow_driver.py --verify"
     script = VERIFY_SCRIPT
+    monkeypatch.syspath_prepend(str(script.parent))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     expected = {
@@ -49,7 +52,16 @@ def publication_check(tmp_path, monkeypatch):
         yaml.safe_dump({"url_api": "https://api.example.test", "JWT": "test-token"})
     )
     response = Mock()
-    response.json.return_value = {"data": {**expected, "status": "SUCCESS"}}
+    response.json.return_value = {
+        "data": {
+            **expected,
+            "nextflow_driver": {
+                "job_definition": expected["batch_job_definition"],
+                "job_queue": expected["batch_job_queue"],
+            },
+            "status": "SUCCESS",
+        }
+    }
     response.status_code = 200
     api = Mock()
     api.headers = {}
