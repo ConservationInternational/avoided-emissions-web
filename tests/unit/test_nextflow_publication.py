@@ -2,6 +2,8 @@
 
 import copy
 import importlib.util
+import json
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -229,7 +231,7 @@ def test_publication_refuses_concurrent_explicit_or_default_changes(
             {"nextflow_driver": {"job_definition": SOURCE_ARN, "job_queue": QUEUE}},
             "effective driver",
         ),
-        ({"public": False}, "not published"),
+        ({"public": False}, None),
     ],
 )
 def test_verification_requires_published_script_with_selected_driver(
@@ -259,3 +261,46 @@ def test_verification_requires_published_script_with_selected_driver(
     assert request.call_args.kwargs["params"] == {
         "include": "environment,nextflow_driver"
     }
+
+
+def test_main_persists_selected_driver_for_upload_and_verifies_without_aws(
+    module, monkeypatch, tmp_path
+):
+    config = {
+        "id": "script",
+        "compute_type": "batch",
+        "batch_image": "analysis:production-latest",
+        "batch_execution_config": {"default_workflow_backend": "nextflow"},
+    }
+    selected = {**config, "batch_job_definition": TARGET_ARN, "batch_job_queue": QUEUE}
+    path = tmp_path / "configuration.json"
+    path.write_text(json.dumps(config))
+    cli = tmp_path / "cli.yml"
+    cli.write_text("url_api: https://api.example\nJWT: test-token\n")
+    args = [
+        "publish_nextflow_driver.py",
+        "--config",
+        str(path),
+        "--cli-config",
+        str(cli),
+    ]
+    session = Mock()
+    session.return_value.client.return_value.get_caller_identity.return_value = {
+        "Account": ACCOUNT
+    }
+    monkeypatch.setattr(module.boto3, "Session", session)
+    monkeypatch.setattr(module, "prepare_publication", Mock(return_value=selected))
+    monkeypatch.setattr(sys, "argv", [*args, "--image", IMAGE])
+    module.main()
+    assert json.loads(path.read_text()) == selected
+
+    published = {
+        **selected,
+        "nextflow_driver": {"job_definition": TARGET_ARN, "job_queue": QUEUE},
+    }
+    monkeypatch.setattr(module, "api_request", Mock(return_value={"data": published}))
+    session.reset_mock()
+    monkeypatch.setattr(sys, "argv", [*args, "--verify"])
+    module.main()
+    session.assert_not_called()
+    assert json.loads(path.read_text()) == selected

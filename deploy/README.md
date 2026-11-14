@@ -58,8 +58,9 @@ again, including changes made by a driver migration. Publication fails explicitl
 if discovery is unavailable or the settings change during registration.
 After `trends publish --overwrite` uploads and publishes the selected settings,
 `publish_nextflow_driver.py --verify` reads the Script back and checks its
-published flag, worker image, policy, and both stored and effective driver
-settings. A mismatch fails the workflow rather than reporting a successful rollout.
+worker image, policy, and both stored and effective driver settings. A mismatch
+fails the workflow rather than reporting a successful rollout. Publishing
+preserves the Script's existing visibility and access controls.
 
 Existing executions keep their original driver. In particular, a driver built
 before percentage reporting was added has no `progress.json`; its execution can

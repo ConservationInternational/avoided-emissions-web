@@ -83,8 +83,6 @@ def verify_publication(config, api, api_url):
     }
     if published.get("nextflow_driver") != expected_driver:
         raise RuntimeError("Published Script's effective driver settings do not match")
-    if published.get("public") is not True:
-        raise RuntimeError("Script was registered but is not published")
     print("Published Batch image, execution policy, and pinned driver verified.")
 
 
