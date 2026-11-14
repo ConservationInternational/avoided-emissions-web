@@ -50,6 +50,7 @@ class AnalysisTask(Base):
         nullable=False,
         default="pending",
     )
+    progress = Column(Float)
     extract_job_id = Column(String(255), index=True)
     match_job_id = Column(String(255))
     summarize_job_id = Column(String(255))

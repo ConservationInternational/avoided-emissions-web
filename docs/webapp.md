@@ -291,6 +291,12 @@ enforced by the trends.earth API and AWS Batch queue capacity.
 The **Tasks** page shows a live-updating table of all tasks for the current
 user (admins see all tasks). The status column reflects the latest value
 polled from the trends.earth API.
+The **Progress** column displays the API's execution percentage as a bar and
+numeric label. It refreshes with the table every 30 seconds; the background
+poller also runs every 30 seconds, so updates may take two refresh cycles to
+appear. A dash means no percentage has been reported, rather than 0% complete.
+Percentages are driver estimates, not the fraction of submitted Batch tasks
+that have finished. Resuming a failed analysis resets its cached progress.
 
 ### Status values
 

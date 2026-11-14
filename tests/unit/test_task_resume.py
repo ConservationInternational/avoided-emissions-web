@@ -23,6 +23,7 @@ def resume_context(mocker):
         submitted_by=user.id,
         name="Failed analysis",
         status="failed",
+        progress=65,
         config={"workflow_backend": "nextflow", "random_seed": 42},
         extra_metadata={
             "batch_jobs": {"nextflow": "previous-driver"},
@@ -56,6 +57,7 @@ def test_resume_preserves_execution_inputs_and_reactivates_polling(resume_contex
         None,
     )
     assert task.submit_session_id == "current-session"
+    assert task.progress == 0
     db.commit.assert_called_once()
     db.close.assert_called_once()
 
@@ -113,6 +115,7 @@ def test_cleanup_rejection_keeps_failed_state_and_error(resume_context):
     with pytest.raises(TrendsEarthAPIError, match="cleanup"):
         resume_task(str(task.id), user)
     assert task.status == "failed"
+    assert task.progress == 65
     assert task.error_message == "Previous failure"
     assert task.completed_at == "previous-completion"
     assert task.extra_metadata["batch_jobs"] == {"nextflow": "previous-driver"}

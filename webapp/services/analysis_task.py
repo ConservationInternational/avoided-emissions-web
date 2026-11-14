@@ -960,6 +960,7 @@ def resume_task(task_id, user):
         )
         client.resume_execution(task.extract_job_id[4:])
         task.status = "submitted"
+        task.progress = 0
         task.completed_at = None
         task.error_message = None
         task.submit_session_id = user.session_id
@@ -1036,6 +1037,7 @@ def get_task_list(user_id=None, limit=None):
                     AnalysisTask.id,
                     AnalysisTask.name,
                     AnalysisTask.status,
+                    AnalysisTask.progress,
                     AnalysisTask.n_sites,
                     AnalysisTask.submitted_by,
                     AnalysisTask.submitter_name,
@@ -1516,6 +1518,7 @@ def adopt_api_execution(exec_data, db):
         or f"Auto-discovered from trends.earth API execution {exec_id}",
         submitted_by=owner_id,
         status=local_status,
+        progress=exec_data.get("progress"),
         extract_job_id=f"api:{exec_id}",
         config=params,
         covariates=params.get("covariates", []),

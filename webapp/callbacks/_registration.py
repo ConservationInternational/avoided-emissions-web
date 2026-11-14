@@ -1574,6 +1574,7 @@ def register_callbacks(app, limiter=None):
                 "id": str(task.id),
                 "name": task.name,
                 "status": task.status,
+                "progress": task.progress,
                 "n_sites": task.n_sites or 0,
                 "covariates_short": ", ".join(covariates),
                 "covariates_full": ", ".join(covariates),

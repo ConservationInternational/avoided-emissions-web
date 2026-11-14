@@ -77,6 +77,7 @@ def poll_batch_tasks() -> dict:
                         exec_data = execution.get("data", {})
                         api_status = exec_data.get("status", "").upper()
                         old_status = task.status
+                        task.progress = exec_data.get("progress")
 
                         logger.info(
                             "Polling API task %s (exec %s): api_status=%s, local_status=%s",

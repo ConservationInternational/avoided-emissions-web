@@ -39,6 +39,24 @@ dagcomponentfuncs.TaskLink = function (props) {
     );
 };
 
+dagcomponentfuncs.TaskProgress = function (props) {
+    var value = props.value;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
+        return React.createElement("span", null, "\u2014");
+    }
+    return React.createElement(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: "8px", height: "100%" } },
+        React.createElement("progress", {
+            value: value,
+            max: 100,
+            "aria-label": "Analysis progress",
+            style: { flex: 1, minWidth: 0, height: "10px" },
+        }),
+        React.createElement("span", { style: { fontSize: "12px" } }, value + "%")
+    );
+};
+
 /**
  * TileLinks – renders a list of GCS tile URLs as clickable download links.
  *

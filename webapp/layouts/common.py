@@ -110,6 +110,15 @@ TASK_LIST_COLUMNS = [
         "cellRenderer": "StatusBadge",
     },
     {
+        "headerName": "Progress",
+        "field": "progress",
+        "flex": 1,
+        "minWidth": 140,
+        "filter": "agNumberColumnFilter",
+        "sortable": True,
+        "cellRenderer": "TaskProgress",
+    },
+    {
         "headerName": "Sites",
         "field": "n_sites",
         "flex": 0.6,
