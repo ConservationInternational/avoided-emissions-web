@@ -13,7 +13,7 @@ from models.covariate import (
     ReferenceLayerExport,
     ReferenceRegionPiece,
 )
-from models.preset import CovariatePreset, MatchingSettingsPreset
+from models.preset import MatchingPreset
 from models.sharing import TaskShareLink
 from models.site import UserSiteFeature, UserSiteSet, UserSiteUpload
 from models.task import AnalysisTask, TaskResult, TaskResultTotal, TaskSite
@@ -34,14 +34,13 @@ __all__ = [
     # covariate
     "Covariate",
     # preset
-    "CovariatePreset",
     "Ecoregion",
     "GeeExportMetadata",
     # vector
     "GeoBoundaryADM0",
     "GeoBoundaryADM1",
     "GeoBoundaryADM2",
-    "MatchingSettingsPreset",
+    "MatchingPreset",
     "ProtectedArea",
     "ReferenceLayerExport",
     "ReferenceRegionPiece",

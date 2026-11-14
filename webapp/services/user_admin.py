@@ -12,8 +12,7 @@ import requests
 from config import Config
 from models import (
     AnalysisTask,
-    CovariatePreset,
-    MatchingSettingsPreset,
+    MatchingPreset,
     TaskShareLink,
     UserSiteSet,
     UserSiteUpload,
@@ -156,13 +155,11 @@ def delete_user_data(user_id):
             .filter(UserSiteUpload.user_id == user_id)
             .delete(synchronize_session=False)
         )
-        n_presets = 0
-        for model in (CovariatePreset, MatchingSettingsPreset):
-            n_presets += (
-                db.query(model)
-                .filter(model.user_id == user_id)
-                .delete(synchronize_session=False)
-            )
+        n_presets = (
+            db.query(MatchingPreset)
+            .filter(MatchingPreset.user_id == user_id)
+            .delete(synchronize_session=False)
+        )
         db.commit()
         counts = {
             "tasks": n_tasks,

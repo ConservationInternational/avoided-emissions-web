@@ -11,8 +11,7 @@ Model symbols (UserSiteUpload, get_db, …) that tasks.py currently imports
 from models import (
     AnalysisTask,
     Covariate,
-    CovariatePreset,
-    MatchingSettingsPreset,
+    MatchingPreset,
     ReferenceLayerExport,
     TaskResult,
     TaskResultTotal,
@@ -57,12 +56,9 @@ from services.covariate import (
 
 # -- Presets --
 from services.preset import (
-    delete_covariate_preset,
-    delete_matching_settings_preset,
-    get_covariate_presets,
-    get_matching_settings_presets,
-    save_covariate_preset,
-    save_matching_settings_preset,
+    delete_matching_preset,
+    get_matching_presets,
+    save_matching_preset,
 )
 
 # -- Reference layers --
@@ -150,8 +146,7 @@ __all__ = [
     # user_admin
     "AppUsersError",
     "Covariate",
-    "CovariatePreset",
-    "MatchingSettingsPreset",
+    "MatchingPreset",
     "ReferenceLayerExport",
     "ResultImportError",
     "TaskResult",
@@ -175,8 +170,7 @@ __all__ = [
     "create_share_link",
     "create_user_site_upload",
     # preset
-    "delete_covariate_preset",
-    "delete_matching_settings_preset",
+    "delete_matching_preset",
     "delete_user_data",
     "delete_user_site_set",
     "delete_user_site_upload",
@@ -187,9 +181,8 @@ __all__ = [
     "force_reexport",
     "force_remerge",
     "get_covariate_inventory",
-    "get_covariate_presets",
     "get_db",
-    "get_matching_settings_presets",
+    "get_matching_presets",
     "get_ready_covariate_names",
     "get_ready_exact_match_names",
     "get_recompute_config",
@@ -218,8 +211,7 @@ __all__ = [
     "resubmit_analysis_task",
     "resume_task",
     "revoke_share_link",
-    "save_covariate_preset",
-    "save_matching_settings_preset",
+    "save_matching_preset",
     "save_user_site_set",
     "save_user_site_set_from_staged",
     "set_app_user_access",

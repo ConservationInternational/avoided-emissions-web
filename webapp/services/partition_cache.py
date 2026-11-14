@@ -176,7 +176,7 @@ WARMUP_DEFAULT_EXACT_MATCH = ("admin1", "ecoregion", "pa")
 
 def warmup_variable_sets(user_id=None) -> list[list[str]]:
     """Return polygon-variable sets to precompute: the default plus presets."""
-    from models import CovariatePreset, get_db
+    from models import MatchingPreset, get_db
 
     from services.reference_layers import split_polygon_vars
 
@@ -186,8 +186,8 @@ def warmup_variable_sets(user_id=None) -> list[list[str]]:
         try:
             candidates.extend(
                 row.exact_match_vars
-                for row in db.query(CovariatePreset.exact_match_vars)
-                .filter(CovariatePreset.user_id == user_id)
+                for row in db.query(MatchingPreset.exact_match_vars)
+                .filter(MatchingPreset.user_id == user_id)
                 .all()
                 if row.exact_match_vars
             )

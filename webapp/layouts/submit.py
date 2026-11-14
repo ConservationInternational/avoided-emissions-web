@@ -232,6 +232,79 @@ def submit_layout(user, recompute_config=None):
                                 label="2. Matching Setup",
                                 tab_id="tab-submit-matching",
                                 children=[
+                                    dbc.Card(
+                                        [
+                                            dbc.CardHeader("Matching Preset"),
+                                            dbc.CardBody(
+                                                [
+                                                    dbc.Row(
+                                                        [
+                                                            dbc.Col(
+                                                                dbc.Select(
+                                                                    id="preset-selector",
+                                                                    placeholder="Load a saved preset…",
+                                                                ),
+                                                                xs=12,
+                                                                md=5,
+                                                            ),
+                                                            dbc.Col(
+                                                                [
+                                                                    dbc.Button(
+                                                                        "Load",
+                                                                        id="load-preset-btn",
+                                                                        color="primary",
+                                                                        size="sm",
+                                                                        className="me-1",
+                                                                    ),
+                                                                    dbc.Button(
+                                                                        "Delete",
+                                                                        id="delete-preset-btn",
+                                                                        color="danger",
+                                                                        outline=True,
+                                                                        size="sm",
+                                                                    ),
+                                                                ],
+                                                                xs="auto",
+                                                                md=3,
+                                                                className="d-flex align-items-center",
+                                                            ),
+                                                            dbc.Col(
+                                                                dbc.InputGroup(
+                                                                    [
+                                                                        dbc.Input(
+                                                                            id="preset-name-input",
+                                                                            type="text",
+                                                                            placeholder="Preset name",
+                                                                            size="sm",
+                                                                        ),
+                                                                        dbc.Button(
+                                                                            "Save",
+                                                                            id="save-preset-btn",
+                                                                            color="success",
+                                                                            size="sm",
+                                                                        ),
+                                                                    ],
+                                                                    size="sm",
+                                                                ),
+                                                                xs=12,
+                                                                md=4,
+                                                            ),
+                                                        ],
+                                                        className="g-2 mb-2",
+                                                    ),
+                                                    html.Small(
+                                                        "Save or load matching covariates, exact match variables, and all other matching settings together.",
+                                                        className="text-muted",
+                                                    ),
+                                                    html.Div(
+                                                        id="preset-feedback",
+                                                        className="mt-2 small",
+                                                    ),
+                                                ]
+                                            ),
+                                        ],
+                                        className="ae-section-card mt-3",
+                                    ),
                                     html.Div(
                                         [
                                             dbc.Row(
@@ -245,72 +318,6 @@ def submit_layout(user, recompute_config=None):
                                                                     ),
                                                                     dbc.CardBody(
                                                                         [
-                                                                            dbc.Row(
-                                                                                [
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Select(
-                                                                                                id="preset-selector",
-                                                                                                placeholder="Load a saved preset…",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs=12,
-                                                                                        md=5,
-                                                                                    ),
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Button(
-                                                                                                "Load",
-                                                                                                id="load-preset-btn",
-                                                                                                color="primary",
-                                                                                                size="sm",
-                                                                                                className="me-1",
-                                                                                            ),
-                                                                                            dbc.Button(
-                                                                                                "Delete",
-                                                                                                id="delete-preset-btn",
-                                                                                                color="danger",
-                                                                                                outline=True,
-                                                                                                size="sm",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs="auto",
-                                                                                        md=3,
-                                                                                        className="d-flex align-items-center",
-                                                                                    ),
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.InputGroup(
-                                                                                                [
-                                                                                                    dbc.Input(
-                                                                                                        id="preset-name-input",
-                                                                                                        type="text",
-                                                                                                        placeholder="Preset name",
-                                                                                                        size="sm",
-                                                                                                    ),
-                                                                                                    dbc.Button(
-                                                                                                        "Save",
-                                                                                                        id="save-preset-btn",
-                                                                                                        color="success",
-                                                                                                        size="sm",
-                                                                                                    ),
-                                                                                                ],
-                                                                                                size="sm",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs=12,
-                                                                                        md=4,
-                                                                                    ),
-                                                                                ],
-                                                                                className="mb-2",
-                                                                            ),
-                                                                            html.Div(
-                                                                                id="preset-feedback",
-                                                                                className="mb-2 small",
-                                                                            ),
-                                                                            html.Hr(
-                                                                                className="my-2"
-                                                                            ),
                                                                             html.H6(
                                                                                 "Matching Covariates",
                                                                                 className="mb-2 fw-semibold",
@@ -367,72 +374,6 @@ def submit_layout(user, recompute_config=None):
                                                                     ),
                                                                     dbc.CardBody(
                                                                         [
-                                                                            dbc.Row(
-                                                                                [
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Select(
-                                                                                                id="settings-preset-selector",
-                                                                                                placeholder="Load a saved preset…",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs=12,
-                                                                                        md=5,
-                                                                                    ),
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.Button(
-                                                                                                "Load",
-                                                                                                id="load-settings-preset-btn",
-                                                                                                color="primary",
-                                                                                                size="sm",
-                                                                                                className="me-1",
-                                                                                            ),
-                                                                                            dbc.Button(
-                                                                                                "Delete",
-                                                                                                id="delete-settings-preset-btn",
-                                                                                                color="danger",
-                                                                                                outline=True,
-                                                                                                size="sm",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs="auto",
-                                                                                        md=3,
-                                                                                        className="d-flex align-items-center",
-                                                                                    ),
-                                                                                    dbc.Col(
-                                                                                        [
-                                                                                            dbc.InputGroup(
-                                                                                                [
-                                                                                                    dbc.Input(
-                                                                                                        id="settings-preset-name-input",
-                                                                                                        type="text",
-                                                                                                        placeholder="Preset name",
-                                                                                                        size="sm",
-                                                                                                    ),
-                                                                                                    dbc.Button(
-                                                                                                        "Save",
-                                                                                                        id="save-settings-preset-btn",
-                                                                                                        color="success",
-                                                                                                        size="sm",
-                                                                                                    ),
-                                                                                                ],
-                                                                                                size="sm",
-                                                                                            ),
-                                                                                        ],
-                                                                                        xs=12,
-                                                                                        md=4,
-                                                                                    ),
-                                                                                ],
-                                                                                className="mb-2",
-                                                                            ),
-                                                                            html.Div(
-                                                                                id="settings-preset-feedback",
-                                                                                className="mb-2 small",
-                                                                            ),
-                                                                            html.Hr(
-                                                                                className="my-2"
-                                                                            ),
                                                                             dbc.Row(
                                                                                 [
                                                                                     dbc.Col(
@@ -876,7 +817,7 @@ def submit_layout(user, recompute_config=None):
                                             ),
                                         ],
                                         className="pt-3",
-                                    )
+                                    ),
                                 ],
                             ),
                             dbc.Tab(
@@ -927,7 +868,6 @@ def submit_layout(user, recompute_config=None):
             # Hidden stores
             dcc.Store(id="parsed-sites-store"),
             dcc.Store(id="presets-store"),
-            dcc.Store(id="matching-settings-presets-store"),
             dcc.Store(id="site-set-refresh-store"),
             dcc.Store(id="site-upload-columns-store"),
             dcc.Store(id="submit-lock-store", data=False),

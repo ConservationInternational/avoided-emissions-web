@@ -10,12 +10,62 @@ No database connection, Redis broker, or trends.earth API call is made.
 """
 
 import uuid
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from services.analysis_task import (
     queue_analysis_task,
 )
+
+
+def _walk(component):
+    yield component
+    children = getattr(component, "children", None)
+    if isinstance(children, (list, tuple)):
+        for child in children:
+            yield from _walk(child)
+    elif children is not None:
+        yield from _walk(children)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("resolution_m", [250, 1000, None])
+def test_recompute_preserves_resolution_in_submission_form(
+    mocker, sample_task_id, sample_user_id, resolution_m
+):
+    from layouts.submit import submit_layout
+    from services.sharing import get_recompute_config
+
+    config = {} if resolution_m is None else {"resolution_m": resolution_m}
+    task = SimpleNamespace(
+        name="Original",
+        description="",
+        submitted_by=sample_user_id,
+        covariates=["elev"],
+        config=config,
+        site_set_id=None,
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = task
+    mocker.patch("services.sharing.get_db", return_value=db)
+    recompute = get_recompute_config(sample_task_id, sample_user_id)
+    expected_resolution = resolution_m if resolution_m is not None else 1000
+    assert recompute["resolution_m"] == expected_resolution
+
+    layout = submit_layout(
+        SimpleNamespace(name="User", is_admin=False), recompute_config=recompute
+    )
+    components = {
+        component.id: component
+        for component in _walk(layout)
+        if getattr(component, "id", None)
+    }
+    assert components["resolution-m"].value == str(expected_resolution)
+    assert components["recompute-config-store"].data["resolution_m"] == (
+        expected_resolution
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helpers

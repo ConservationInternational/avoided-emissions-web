@@ -207,7 +207,8 @@ def get_recompute_config(task_id, user_id, is_admin=False):
         ``control_multiplier``, ``min_site_area_ha``,
         ``min_glm_treatment_pixels``, ``caliper_width``,
         ``max_controls_per_treatment``, ``random_seed``,
-        ``match_memory_gb``, ``matching_job_queue``, ``site_set_id``.
+        ``match_memory_gb``, ``matching_job_queue``, ``site_set_id``,
+        ``resolution_m``.
 
     Raises
     ------
@@ -232,6 +233,9 @@ def get_recompute_config(task_id, user_id, is_admin=False):
             "task_name": f"{task.name} (recompute)",
             "description": task.description or "",
             "covariates": list(task.covariates or []),
+            "resolution_m": config.get(
+                "resolution_m", ANALYSIS_DEFAULTS["resolution_m"]
+            ),
             "exact_match_vars": config.get("exact_match_vars", []),
             "max_treatment_pixels": config.get("max_treatment_pixels", 1000),
             "control_multiplier": config.get("control_multiplier", 50),

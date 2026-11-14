@@ -416,12 +416,17 @@ Admins can trigger a new GEE export for any covariate from this panel.
 Exports that are already in progress show their GEE task IDs and current
 progress.
 
-Presets (saved covariate selections) can also be managed here.
+### Matching presets
 
-### Matching settings presets
+On the submission form's **Matching Setup** tab, a single preset control saves
+and loads matching covariates, exact match variables, and the other matching
+settings together. Presets are private to each user; saving with the same name
+replaces the entire preset. Loading a preset leaves the random seed unchanged.
+The unified preset migration discards the old separate covariate and
+matching-settings presets.
 
-Admins can create and name preset combinations of matching parameters to
-make it easier for users to reproduce standard analysis configurations.
+Recomputing a task pre-fills its original analysis resolution as well as its
+matching configuration, while generating a fresh random seed.
 
 ---
 
