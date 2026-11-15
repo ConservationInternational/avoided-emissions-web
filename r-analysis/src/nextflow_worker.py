@@ -18,6 +18,9 @@ from workflow_store import Store, checkpoint_key
 
 log = logging.getLogger(__name__)
 SCRIPTS = Path(os.environ.get("R_SCRIPTS_DIR", "/app/scripts"))
+# Share of a recovery task's budget filled by measured replicate costs; the
+# remainder absorbs solve-time variance and data loading.
+REPACK_BUDGET_FRACTION = 0.6
 ANALYSIS_FIELDS = {
     "task_id",
     "task_name",
@@ -353,25 +356,58 @@ def match_batch(params: dict, work: dict, seconds: int) -> None:
         )
         is None
     ]
-    write_json("outcome.json", {"work": work, "unfinished": unfinished})
+    write_json(
+        "outcome.json",
+        {"work": work, "unfinished": unfinished, "item_seconds": item_seconds(work)},
+    )
 
 
-def repack(outcomes: list[dict], final: bool) -> None:
+def item_seconds(work: dict) -> dict[str, float]:
+    """Slowest known fragment/replicate duration per fragment, in seconds."""
+    measured = {}
+    path = Path("item_seconds.json")
+    if path.exists():
+        value = json.loads(path.read_text())
+        # R serializes an empty named list as [].
+        measured = value if isinstance(value, dict) else {}
+    result = {
+        str(key): float(value) for key, value in work.get("item_seconds", {}).items()
+    }
+    for key, value in measured.items():
+        result[str(key)] = max(result.get(str(key), 0.0), float(value))
+    return {key: value for key, value in result.items() if int(key) in work["ids"]}
+
+
+def repack(outcomes: list[dict], final: bool, seconds: int = 14280) -> None:
+    """Split unfinished items into smaller tasks for the next recovery tier.
+
+    Fragments with a measured per-replicate cost get as many replicates per
+    task as fit in a fraction of the next task's budget, so expensive fragments
+    fan out across nodes; unmeasured fragments halve their replicate ranges.
+    """
     Path("batches").mkdir()
     count = 0
     for outcome in outcomes:
         work = outcome["work"]
+        costs = {**work.get("item_seconds", {}), **outcome.get("item_seconds", {})}
         by_id = {}
         for item in outcome["unfinished"]:
             by_id.setdefault(item["id"], []).append(item["replicate"])
         for id_, reps in by_id.items():
-            size = 1 if final else max(1, math.ceil(len(reps) / 2))
+            cost = costs.get(str(id_))
+            if final:
+                size = 1
+            elif cost:
+                size = max(1, math.floor(REPACK_BUDGET_FRACTION * seconds / cost))
+            else:
+                size = max(1, math.ceil(len(reps) / 2))
             for start in range(0, len(reps), size):
                 batch = {
                     **work,
                     "id": f"{work['id']}_f{id_}_p{start}",
                     "ids": [id_],
                     "replicates": reps[start : start + size],
+                    "item_seconds": {str(id_): cost} if cost else {},
                 }
                 write_json(Path("batches") / f"{batch['id']}.json", batch)
                 count += 1
@@ -504,7 +540,7 @@ def main() -> None:
     elif args.command == "match":
         match_batch(params, descriptor, args.seconds)
     elif args.command == "repack":
-        repack(outcomes, args.final)
+        repack(outcomes, args.final, args.seconds)
     elif args.command == "reconcile":
         reconcile(params, descriptor, outcomes)
     elif args.command == "summarize":

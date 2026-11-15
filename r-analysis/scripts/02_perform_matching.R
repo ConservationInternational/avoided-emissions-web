@@ -67,8 +67,17 @@ GROUP_MAPPING <- fromJSON(config$config_path, simplifyVector = FALSE)$exact_matc
 CHECKPOINT_MODE <- isTRUE(config$match_checkpoints)
 soft_deadline <- if (is.null(config$match_soft_seconds)) Inf else config$match_soft_seconds
 yield_requested <- FALSE
+# Solve times for one stratum vary by roughly +/-40% between replicates, so
+# projections reserve this multiple of the slowest observed duration.
+DEADLINE_MARGIN <- 1.5
 progress <- new.env()
 progress$last_item_seconds <- 0
+progress$items_done <- 0L
+# Slowest observed seconds per fragment/replicate, keyed by id_numeric. Seeded
+# from earlier tiers so a recovery task can guard its first replicate.
+progress$item_seconds <- unlist(config$match_work$item_seconds)
+if (is.null(progress$item_seconds)) progress$item_seconds <- numeric(0)
+progress$stratum_seconds <- numeric(0)
 
 checkpoint_publish <- function(paths) {
     if (is.null(config$checkpoint_uri)) return(invisible(NULL))
@@ -85,7 +94,21 @@ checkpoint_publish <- function(paths) {
 checkpoint_path <- function(name) file.path(config$matches_dir, name)
 item_name <- function(id, k) paste0("f", id, "_r", k)
 item_complete <- function(id, k) file.exists(checkpoint_path(paste0("mb_", item_name(id, k), ".json")))
-should_yield <- function() (proc.time() - step2_timer)["elapsed"] >= soft_deadline
+step2_elapsed <- function() unname((proc.time() - step2_timer)["elapsed"])
+should_yield <- function() step2_elapsed() >= soft_deadline
+# The first item of a task always runs: deferring it cannot make progress.
+would_overrun <- function(seconds) {
+    progress$items_done > 0 && step2_elapsed() + seconds > soft_deadline
+}
+fragment_estimate <- function(id) unname(progress$item_seconds[as.character(id)])
+record_item_seconds <- function(id, timer) {
+    seconds <- unname((proc.time() - timer)["elapsed"])
+    key <- as.character(id)
+    previous <- progress$item_seconds[key]
+    progress$item_seconds[key] <- if (is.na(previous)) seconds else max(previous, seconds)
+    progress$last_item_seconds <- seconds
+    progress$items_done <- progress$items_done + 1L
+}
 
 if (length(EXACT_MATCH_VARS) == 0) {
     stop("At least one exact-match variable is required")
@@ -313,6 +336,7 @@ match_strata <- function(d, f) {
             yield_requested <<- TRUE
             return(NULL)
         }
+        stratum_key <- paste(progress$current_id, g)
         gd <- d[d$group == g, , drop = FALSE]
         stratum_path <- if (CHECKPOINT_MODE) {
             checkpoint_path(paste0(progress$current_item, "_g", match(g, unique(d$group)), ".rds"))
@@ -326,8 +350,17 @@ match_strata <- function(d, f) {
             out <- saved$out
             assign(".Random.seed", saved$rng, envir = .GlobalEnv)
         } else {
+            est <- progress$stratum_seconds[stratum_key]
+            if (CHECKPOINT_MODE && !is.na(est) && would_overrun(DEADLINE_MARGIN * est)) {
+                message("    Yielding before stratum ", g, " (previous solve ",
+                        round(est), "s would exceed the deadline)")
+                yield_requested <<- TRUE
+                return(NULL)
+            }
             message("    Starting stratum ", g)
             out <- match_stratum(gd, f)
+            seconds <- unname((proc.time() - timer)["elapsed"])
+            progress$stratum_seconds[stratum_key] <- max(seconds, est, na.rm = TRUE)
             if (!is.null(stratum_path)) {
                 tmp <- paste0(stratum_path, ".tmp")
                 saveRDS(list(group = g, out = out, rng = .Random.seed), tmp)
@@ -499,9 +532,26 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
     for (k in replicates) {
         if (CHECKPOINT_MODE) {
             if (item_complete(this_id, k)) next
-            elapsed <- (proc.time() - step2_timer)["elapsed"]
-            if (should_yield() || elapsed + progress$last_item_seconds > soft_deadline) {
+            if (should_yield()) {
                 yield_requested <<- TRUE
+                return(invisible(NULL))
+            }
+            # Defer the rest of an expensive fragment rather than start a solve
+            # that cannot finish, or hold this task for replicates that will not
+            # fit. Cheaper fragments in the batch continue; repack spreads the
+            # deferred replicates across recovery tasks.
+            est <- fragment_estimate(this_id)
+            remaining <- sum(!vapply(replicates[replicates >= k],
+                                     function(r) item_complete(this_id, r), logical(1)))
+            # Unmeasured fragments keep the previous item's duration as a guard.
+            projected <- if (is.na(est)) {
+                progress$last_item_seconds
+            } else {
+                max(DEADLINE_MARGIN * est, est * remaining)
+            }
+            if (would_overrun(projected)) {
+                message("    Deferring ", remaining, " replicate(s) of fragment ", this_id,
+                        " (projected ", round(projected), "s)")
                 return(invisible(NULL))
             }
             begin_item(na_exclusions)
@@ -509,6 +559,7 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
         item_timer <- proc.time()
         if (!is.null(RANDOM_SEED)) set.seed(replicate_seed(this_id, k))
         progress$current_item <- item_name(this_id, k)
+        progress$current_id <- this_id
         sample_path <- checkpoint_path(paste0(progress$current_item, "_sample.rds"))
         if (CHECKPOINT_MODE && file.exists(sample_path)) {
             saved_sample <- readRDS(sample_path)
@@ -533,7 +584,7 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
             n_forest_pixels = n_forest_pixels)
             if (CHECKPOINT_MODE) {
                 commit_item(this_id, k)
-                progress$last_item_seconds <- (proc.time() - item_timer)["elapsed"]
+                record_item_seconds(this_id, item_timer)
             }
             next
         }
@@ -564,7 +615,7 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
                 sum(sampled$treatment), " sampled treatment pixels matched")
         if (CHECKPOINT_MODE) {
             commit_item(this_id, k)
-            progress$last_item_seconds <- (proc.time() - item_timer)["elapsed"]
+            record_item_seconds(this_id, item_timer)
         }
     }
 }
@@ -617,6 +668,8 @@ if (CHECKPOINT_MODE) {
         }
     }
     write_json(unfinished, file.path(config$data_dir, "unfinished.json"), auto_unbox = TRUE)
+    write_json(as.list(progress$item_seconds), file.path(config$data_dir, "item_seconds.json"),
+               auto_unbox = TRUE, digits = NA)
 }
 message("[TIMING] Step 2 total: ", round((proc.time() - step2_timer)["elapsed"], 1), "s")
 message("Step 2 complete.")

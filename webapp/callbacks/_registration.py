@@ -2074,8 +2074,9 @@ def register_callbacks(app, limiter=None):
             if (!n_clicks || !task_id) {
                 return window.dash_clientside.no_update;
             }
+            document.getElementById('recompute-task-btn').disabled = true;
             window.location.href = '/submit?recompute=' + task_id;
-            return '';
+            return 'Opening the recompute form...';
         }
         """,
         Output("recompute-result", "children"),
@@ -2165,7 +2166,14 @@ def register_callbacks(app, limiter=None):
         State("task-id-store", "data"),
         State("share-token-store", "data"),
         prevent_initial_call=True,
-        running=[(Output("resume-task-btn", "disabled"), True, False)],
+        running=[
+            (Output("resume-task-btn", "disabled"), True, False),
+            (
+                Output("resume-task-btn", "children"),
+                "Requesting resume...",
+                [html.I(className="bi bi-play-circle me-1"), "Resume"],
+            ),
+        ],
     )
     def handle_resume_task(n_clicks, task_id, share_token):
         if not n_clicks or not task_id or share_token:
@@ -2206,6 +2214,14 @@ def register_callbacks(app, limiter=None):
         Input("cancel-task-btn", "n_clicks"),
         State("task-id-store", "data"),
         prevent_initial_call=True,
+        running=[
+            (Output("cancel-task-btn", "disabled"), True, False),
+            (
+                Output("cancel-task-btn", "children"),
+                "Cancelling...",
+                [html.I(className="bi bi-x-circle me-1"), "Cancel"],
+            ),
+        ],
     )
     def handle_cancel_task(n_clicks, task_id):
         if not n_clicks or not task_id:
@@ -2218,7 +2234,7 @@ def register_callbacks(app, limiter=None):
         try:
             cancel_task(task_id, user)
             return dbc.Alert(
-                "Task cancelled successfully. RefreshingΓÇª",
+                "Task cancelled successfully. Status will refresh automatically.",
                 color="success",
                 duration=3000,
             )
@@ -2235,6 +2251,7 @@ def register_callbacks(app, limiter=None):
             Output("recompute-from-list-result", "children"),
             Output("cancel-from-list-result", "children"),
             Output("task-list-action-refresh", "data"),
+            Output("task-list-action-complete", "data"),
         ],
         Input("task-list-table", "cellRendererData"),
         prevent_initial_call=True,
@@ -2257,11 +2274,12 @@ def register_callbacks(app, limiter=None):
                 ),
                 no_update,
                 no_update,
+                str(_uuid.uuid4()),
             )
 
         if action == "resume":
             alert, refresh_event = handle_resume_task(1, task_id, None)
-            return no_update, alert, refresh_event
+            return no_update, alert, refresh_event, str(_uuid.uuid4())
 
         if action == "cancel":
             user = get_current_user()
@@ -2270,6 +2288,7 @@ def register_callbacks(app, limiter=None):
                     no_update,
                     dbc.Alert("Please log in first.", color="danger", duration=4000),
                     no_update,
+                    str(_uuid.uuid4()),
                 )
             try:
                 cancel_task(task_id, user)
@@ -2277,12 +2296,14 @@ def register_callbacks(app, limiter=None):
                     no_update,
                     dbc.Alert("Task cancelled.", color="success", duration=3000),
                     str(_uuid.uuid4()),
+                    str(_uuid.uuid4()),
                 )
             except (ValueError, PermissionError) as e:
                 return (
                     no_update,
                     dbc.Alert(str(e), color="warning", duration=4000),
                     no_update,
+                    str(_uuid.uuid4()),
                 )
             except Exception:
                 logger.exception("Error cancelling task %s from list", task_id)
@@ -2294,9 +2315,23 @@ def register_callbacks(app, limiter=None):
                         duration=4000,
                     ),
                     no_update,
+                    str(_uuid.uuid4()),
                 )
 
         raise PreventUpdate
+
+    app.clientside_callback(
+        """
+        function(completed) {
+            if (!completed) return window.dash_clientside.no_update;
+            window.taskListAction.setPending(false);
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("task-list-action-pending", "id"),
+        Input("task-list-action-complete", "data"),
+        prevent_initial_call=True,
+    )
 
     @app.callback(
         Output("task-logs-modal", "is_open"),

@@ -422,6 +422,26 @@ test_that(paste(method, "checkpoints yield, resume strata, and preserve seeded m
 })
 }
 
+test_that("expensive fragments defer replicates that cannot fit and report their cost", {
+    data_dir <- tempfile("ae_defer_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
+    config <- fromJSON(config_path, simplifyVector = FALSE)
+    config$match_checkpoints <- TRUE
+    config$checkpoint_uri <- tempfile("ae_store_")
+    config$match_soft_seconds <- 3600
+    # A prior tier measured fragment 1 far above this task's budget.
+    config$match_work <- list(ids = 1:4, replicates = 1:2, item_seconds = list("1" = 1e6))
+    write_json(config, config_path, auto_unbox = TRUE)
+    log <- run_script("02_perform_matching.R", config_path)
+    expect_true(any(grepl("Deferring 1 replicate\\(s\\) of fragment 1", log)))
+    unfinished <- fromJSON(file.path(data_dir, "unfinished.json"))
+    expect_equal(unfinished$id, 1L)
+    expect_equal(unfinished$replicate, 2L)
+    costs <- fromJSON(file.path(data_dir, "item_seconds.json"))
+    expect_equal(costs[["1"]], 1e6)
+    expect_true(all(c("2", "3") %in% names(costs)))
+})
+
 test_that("Nextflow workers stage, checkpoint, reconcile, and summarize real matches", {
     data_dir <- tempfile("ae_workers_")
     config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)

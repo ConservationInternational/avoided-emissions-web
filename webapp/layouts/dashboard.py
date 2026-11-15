@@ -85,6 +85,9 @@ def dashboard_layout(user):
                                 ],
                                 className="ae-action-bar align-items-center mb-3",
                             ),
+                            html.Div(id="task-list-action-pending", role="status"),
+                            html.Div(id="recompute-from-list-result"),
+                            html.Div(id="cancel-from-list-result"),
                             _make_ag_grid(
                                 table_id="task-list-table",
                                 column_defs=TASK_LIST_COLUMNS,
@@ -98,9 +101,8 @@ def dashboard_layout(user):
                 className="ae-section-card mb-4",
             ),
             # Stores & intervals
-            html.Div(id="recompute-from-list-result"),
-            html.Div(id="cancel-from-list-result"),
             dcc.Store(id="task-list-action-refresh"),
+            dcc.Store(id="task-list-action-complete"),
             dcc.Store(id="task-logs-task-id"),
             dcc.Interval(id="task-logs-interval", interval=30000, disabled=True),
             dbc.Modal(

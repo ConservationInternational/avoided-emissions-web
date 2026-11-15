@@ -248,7 +248,15 @@ silent success; failures beyond approved resources remain explicit and resumable
 - [Stage worker](../r-analysis/src/nextflow_worker.py) prepares shared treatment
   shards, bounds initial groups using treatment/control Parquet metadata, and
   repacks only explicitly unfinished items. Recovery first separates fragments
-  and halves replicate ranges, then isolates remaining items for the long tier.
+  and sizes replicate ranges from each fragment's measured per-replicate cost
+  (filling about 60% of a recovery task's budget, or halving ranges when no
+  cost was measured), then isolates remaining items for the long tier.
+  Within a task, the matching script reserves 1.5x the slowest observed
+  replicate/stratum solve before starting another, and defers the remaining
+  replicates of a fragment whose measured cost cannot fit, so cheaper fragments
+  continue and expensive replicates fan out across recovery tasks. The first
+  item of a task always runs; measured costs travel in `outcome.json` and
+  recovery descriptors as `item_seconds`.
   Recovery processes are skipped when there is no unfinished work; empty
   descriptors do not launch no-op matching jobs. Shared control partitions are
   not split merely because their unchanged footprint exceeds memory headroom.

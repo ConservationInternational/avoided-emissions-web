@@ -8,6 +8,20 @@
 var dagcomponentfuncs = (window.dashAgGridComponentFunctions =
     window.dashAgGridComponentFunctions || {});
 
+window.taskListAction = {
+    pending: false,
+    setPending: function (pending, message) {
+        this.pending = pending;
+        var status = document.getElementById("task-list-action-pending");
+        if (status) {
+            status.textContent = message
+                ? message + " If this takes too long, check the task status before retrying."
+                : "";
+        }
+        window.dispatchEvent(new Event("task-list-action-pending"));
+    },
+};
+
 /**
  * TaskLink – renders the task name as a clickable link to /task/{id}.
  *
@@ -403,6 +417,23 @@ dagcomponentfuncs.TaskActions = function (props) {
     var canCancel = ["pending", "submitted", "running"].indexOf(status) >= 0;
     var canResume = data.can_resume === true;
     var canViewLogs = data.has_logs === true;
+    var pendingState = React.useState(window.taskListAction.pending);
+    var pending = pendingState[0];
+    React.useEffect(function () {
+        function updatePending() {
+            pendingState[1](window.taskListAction.pending);
+        }
+        window.addEventListener("task-list-action-pending", updatePending);
+        return function () {
+            window.removeEventListener("task-list-action-pending", updatePending);
+        };
+    }, []);
+
+    function requestAction(action, message) {
+        if (window.taskListAction.pending || !data.id) return;
+        window.taskListAction.setPending(true, message);
+        props.setData({ action: action, task_id: data.id });
+    }
 
     return React.createElement(
         "div",
@@ -422,13 +453,11 @@ dagcomponentfuncs.TaskActions = function (props) {
                     color: "#664d03",
                     cursor: "pointer",
                 },
+                disabled: pending,
                 title: "Resubmit with a new random seed",
                 onClick: function (e) {
                     e.stopPropagation();
-                    props.setData({
-                        action: "recompute",
-                        task_id: data.id,
-                    });
+                    requestAction("recompute", "Opening the recompute form...");
                 },
             },
             "\u21BB Recompute"
@@ -448,17 +477,14 @@ dagcomponentfuncs.TaskActions = function (props) {
                     color: canCancel ? "#842029" : "#6c757d",
                     cursor: canCancel ? "pointer" : "not-allowed",
                 },
-                disabled: !canCancel,
+                disabled: pending || !canCancel,
                 title: canCancel
                     ? "Cancel this task"
                     : "Only pending/running tasks can be cancelled",
                 onClick: function (e) {
                     e.stopPropagation();
                     if (canCancel) {
-                        props.setData({
-                            action: "cancel",
-                            task_id: data.id,
-                        });
+                        requestAction("cancel", "Cancelling task...");
                     }
                 },
             },
@@ -479,14 +505,14 @@ dagcomponentfuncs.TaskActions = function (props) {
                     color: canResume ? "#146c43" : "#6c757d",
                     cursor: canResume ? "pointer" : "not-allowed",
                 },
-                disabled: !canResume,
+                disabled: pending || !canResume,
                 title: canResume
                     ? "Resume this failed Nextflow execution"
                     : "Only eligible failed Nextflow executions can be resumed",
                 onClick: function (e) {
                     e.stopPropagation();
                     if (canResume) {
-                        props.setData({ action: "resume", task_id: data.id });
+                        requestAction("resume", "Requesting task resume...");
                     }
                 },
             },
@@ -507,11 +533,11 @@ dagcomponentfuncs.TaskActions = function (props) {
                     color: canViewLogs ? "#084298" : "#6c757d",
                     cursor: canViewLogs ? "pointer" : "not-allowed",
                 },
-                disabled: !canViewLogs,
+                disabled: pending || !canViewLogs,
                 title: canViewLogs ? "Show task logs" : "No API execution is available",
                 onClick: function (e) {
                     e.stopPropagation();
-                    if (canViewLogs) {
+                    if (canViewLogs && !window.taskListAction.pending) {
                         props.setData({ action: "logs", task_id: data.id });
                     }
                 },

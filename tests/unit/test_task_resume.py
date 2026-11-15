@@ -294,18 +294,52 @@ def test_task_list_resume_refreshes_on_success_and_shows_api_errors(
     _, task, _, _, _ = resume_context
     resume = mocker.patch.object(registration, "resume_task")
     event = {"value": {"action": "resume", "task_id": str(task.id)}}
-    redirect, alert, refresh = callbacks["handle_task_list_actions"](event)
+    redirect, alert, refresh, complete = callbacks["handle_task_list_actions"](event)
     resume.assert_called_once_with(str(task.id), resume_context[0])
     assert redirect is no_update
     assert alert.color == "success"
     assert refresh
+    assert complete
 
     resume.side_effect = TrendsEarthAPIError("Child cleanup is still underway")
-    redirect, alert, refresh = callbacks["handle_task_list_actions"](event)
+    redirect, alert, refresh, complete = callbacks["handle_task_list_actions"](event)
     assert redirect is no_update
     assert alert.color == "warning"
     assert "cleanup" in alert.children
     assert refresh is no_update
+    assert complete
+
+
+@pytest.mark.parametrize(
+    "error", [None, ValueError("Already cancelled"), RuntimeError()]
+)
+def test_list_cancel_releases_action_on_success_and_failure(mocker, callbacks, error):
+    cancel = mocker.patch.object(registration, "cancel_task", side_effect=error)
+    event = {"value": {"action": "cancel", "task_id": "task"}}
+
+    redirect, alert, refresh, complete = callbacks["handle_task_list_actions"](event)
+
+    cancel.assert_called_once()
+    assert redirect is no_update
+    assert alert.color == (
+        "success"
+        if error is None
+        else "warning"
+        if isinstance(error, ValueError)
+        else "danger"
+    )
+    assert (refresh is not no_update) == (error is None)
+    assert complete
+
+
+def test_list_recompute_opens_submission_form_and_releases_action(callbacks):
+    redirect, alert, refresh, complete = callbacks["handle_task_list_actions"](
+        {"value": {"action": "recompute", "task_id": "task"}}
+    )
+    assert redirect.href == "/submit?recompute=task"
+    assert alert is no_update
+    assert refresh is no_update
+    assert complete
 
 
 def test_registered_list_resume_emits_refresh_event(mocker, callbacks, resume_context):
@@ -339,6 +373,7 @@ def test_registered_list_resume_emits_refresh_event(mocker, callbacks, resume_co
     )
     assert response.status_code == 200
     assert response.json["response"]["task-list-action-refresh"]["data"]
+    assert response.json["response"]["task-list-action-complete"]["data"]
     resume.assert_called_once()
 
 

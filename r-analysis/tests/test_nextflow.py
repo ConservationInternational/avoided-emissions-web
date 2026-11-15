@@ -289,6 +289,37 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 worker.reconcile(params, {"ids": [1], "n_replicates": 1}, [])
 
+    def test_repack_spreads_measured_expensive_replicates_across_tasks(self):
+        work = {
+            "id": "g1",
+            "ids": [12, 31],
+            "replicates": list(range(21, 31)),
+            "item_seconds": {"31": 2500.0},
+        }
+        with contextlib.chdir(self.root):
+            Path("item_seconds.json").write_text(json.dumps({"12": 5, "31": 2900}))
+            costs = worker.item_seconds(work)
+            self.assertEqual(costs, {"12": 5.0, "31": 2900.0})
+            outcome = {
+                "work": work,
+                "item_seconds": costs,
+                "unfinished": [{"id": 31, "replicate": r} for r in range(25, 31)]
+                + [{"id": 40, "replicate": r} for r in range(21, 31)],
+            }
+            worker.repack([outcome], final=False, seconds=14280)
+            batches = [
+                json.loads(path.read_text())
+                for path in sorted(Path("batches").glob("*.json"))
+            ]
+        expensive = [b for b in batches if b["ids"] == [31]]
+        # floor(0.6 * 14280 / 2900) = 2 replicates per task.
+        self.assertEqual(
+            [b["replicates"] for b in expensive], [[25, 26], [27, 28], [29, 30]]
+        )
+        self.assertTrue(all(b["item_seconds"] == {"31": 2900.0} for b in expensive))
+        unmeasured = [b["replicates"] for b in batches if b["ids"] == [40]]
+        self.assertEqual(unmeasured, [list(range(21, 26)), list(range(26, 31))])
+
     def test_snapshot_reuses_checkpoints_with_updated_image_and_workflow(self):
         params = {
             "sites_parquet_s3_uri": "s3://inputs/sites.parquet",
