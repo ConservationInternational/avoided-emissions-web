@@ -7,8 +7,25 @@ from unittest.mock import MagicMock
 import pytest
 from callbacks import _registration as registration
 from dash import Dash, html
+from layouts.dashboard import dashboard_layout
 from services.analysis_task import get_task_execution_logs
 from trendsearth_client import TrendsEarthAPIError, TrendsEarthClient
+
+
+def test_log_controls_remain_outside_the_scrollable_body():
+    layout = dashboard_layout(None)
+    modal = next(
+        child
+        for child in layout.children
+        if getattr(child, "id", None) == "task-logs-modal"
+    )
+    assert modal.scrollable
+    header, body = modal.children
+    assert body.id == "task-logs-body"
+    assert [button.id for button in header.children[1].children] == [
+        "task-logs-refresh",
+        "task-logs-close",
+    ]
 
 
 @pytest.mark.parametrize(

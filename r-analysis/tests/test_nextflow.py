@@ -58,6 +58,45 @@ def exercise_fixture(config_path: Path) -> None:
         with contextlib.chdir(directory):
             worker.match_batch(params, json.loads(batch.read_text()), 120)
             outcomes.append(json.loads(Path("outcome.json").read_text()))
+    upgraded = {
+        **params,
+        "_workflow": {**params["_workflow"], "group_namespace": "new-image"},
+    }
+    preparation_updated = root / "prepare-updated"
+    preparation_updated.mkdir()
+    with contextlib.chdir(preparation_updated):
+        worker.prepare(upgraded, descriptor)
+    batch = json.loads(
+        min((preparation_updated / "batches").glob("*.json")).read_text()
+    )
+    checkpoint_store = worker.artifact_store(params, "checkpoints")
+    receipt_key = checkpoint_key(
+        f"mb_f{batch['ids'][0]}_r{batch['replicates'][0]}.json"
+    )
+    before = checkpoint_store.json(receipt_key + ".receipt.json")
+    assert before is not None
+    replay = root / "match-updated"
+    replay.mkdir()
+
+    def run_matching_and_verify_reuse(script, config, seconds):
+        worker.write_json("config.json", config)
+        result = subprocess.run(
+            ["Rscript", str(worker.SCRIPTS / script), "--config", "config.json"],
+            text=True,
+            capture_output=True,
+            timeout=seconds,
+            check=True,
+        )
+        assert "  Site " not in result.stderr, result.stderr
+        return True
+
+    with (
+        contextlib.chdir(replay),
+        patch.object(worker, "run_script", side_effect=run_matching_and_verify_reuse),
+    ):
+        worker.match_batch(upgraded, batch, 120)
+        assert not json.loads(Path("outcome.json").read_text())["unfinished"]
+    assert checkpoint_store.json(receipt_key + ".receipt.json") == before
     reconciliation = root / "reconcile"
     reconciliation.mkdir()
     with contextlib.chdir(reconciliation):
@@ -190,6 +229,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(coverage), 200)
         self.assertEqual(len(set(coverage)), 200)
         self.assertEqual({rep for _, rep in coverage}, set(range(1, 101)))
+        params["_workflow"]["group_namespace"] = "new-image"
+        upgraded = self.root / "upgraded"
+        upgraded.mkdir()
+        with contextlib.chdir(upgraded):
+            worker.prepare(params, descriptor)
+        upgraded_batch = json.loads(
+            next((upgraded / "batches").glob("*.json")).read_text()
+        )
+        self.assertNotEqual(upgraded_batch["group_uri"], batches[0]["group_uri"])
+        Store(upgraded_batch["group_uri"]).restore(
+            "treatment_pixels.parquet", self.root / "upgraded-shard"
+        )
+        self.assertEqual(pq.read_table(self.root / "upgraded-shard").num_rows, 2)
+        del params["_workflow"]["group_namespace"]
         params["_workflow"].update(identity="small-memory", match_memory_mib=1)
         small = self.root / "small"
         small.mkdir()
@@ -236,7 +289,7 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 worker.reconcile(params, {"ids": [1], "n_replicates": 1}, [])
 
-    def test_snapshot_reuses_seed_and_rejects_mutated_inputs_and_images(self):
+    def test_snapshot_reuses_checkpoints_with_updated_image_and_workflow(self):
         params = {
             "sites_parquet_s3_uri": "s3://inputs/sites.parquet",
             "results_s3_uri": "s3://results/task",
@@ -255,15 +308,41 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(first["_workflow"]["match_memory_mib"], 61440)
             self.assertEqual(first["_workflow"]["initial_queue"], "ae-ondemand-gp3")
             self.assertEqual(client.copy_object.call_count, 1)
+            updated_image = image.replace("a" * 64, "b" * 64)
+            upgraded = driver.prepare(client, store, params, updated_image, True)
+            self.assertEqual(upgraded["random_seed"], first["random_seed"])
+            self.assertEqual(
+                upgraded["_workflow"]["identity"], first["_workflow"]["identity"]
+            )
+            self.assertNotEqual(upgraded, first)
+            self.assertEqual(
+                worker.artifact_store(upgraded, "checkpoints").uri,
+                worker.artifact_store(first, "checkpoints").uri,
+            )
+            self.assertEqual(store.json("snapshot.json")["image"], image)
             with self.assertRaisesRegex(ValueError, "identical"):
                 driver.prepare(
-                    client, store, params, image.replace("a" * 64, "b" * 64), True
+                    client, store, {**params, "n_replicates": 5}, updated_image, True
                 )
+            with patch.object(driver, "VERSION", "2.0.0"):
+                upgraded_version = driver.prepare(
+                    client, store, params, updated_image, True
+                )
+                self.assertEqual(
+                    upgraded_version["_workflow"]["identity"],
+                    first["_workflow"]["identity"],
+                )
+                self.assertNotEqual(
+                    upgraded_version["_workflow"]["group_namespace"],
+                    upgraded["_workflow"]["group_namespace"],
+                )
+                driver_only = driver.prepare(client, store, params, image, True)
+                self.assertIn("group_namespace", driver_only["_workflow"])
         with (
             patch.object(
                 driver, "input_manifest", return_value=[["raster", "changed"]]
             ),
-            self.assertRaisesRegex(ValueError, "inputs or workflow changed"),
+            self.assertRaisesRegex(ValueError, "inputs changed"),
         ):
             driver.prepare(client, store, params, image, True)
         with self.assertRaisesRegex(ValueError, "pinned"):
@@ -530,9 +609,7 @@ class WorkflowTests(unittest.TestCase):
             patch.object(driver.boto3, "client") as batch_client,
         ):
             driver.launch(store, analysis, env, False)
-            batch_client.assert_called_once_with(
-                "batch", region_name=env["AWS_REGION"]
-            )
+            batch_client.assert_called_once_with("batch", region_name=env["AWS_REGION"])
             command = popen.call_args.args[0]
             self.assertEqual(
                 command[command.index("-name") + 1],

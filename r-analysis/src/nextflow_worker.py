@@ -203,7 +203,10 @@ def prepare(params: dict, descriptor: dict) -> None:
     n_reps = int(params.get("n_replicates", 1))
     if cap < 1 or block_size < 1 or not 1 <= n_reps <= 1000:
         raise ValueError("Invalid fragment/replicate batching limits")
-    store = artifact_store(params, "groups")
+    group_namespace = params["_workflow"].get("group_namespace")
+    store = artifact_store(
+        params, f"groups/{group_namespace}" if group_namespace else "groups"
+    )
     memory = params["_workflow"]["match_memory_mib"] * 1024**2
     partition_var = (params.get("exact_match_vars") or [None])[0]
     controls = (

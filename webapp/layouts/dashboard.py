@@ -106,28 +106,33 @@ def dashboard_layout(user):
             dbc.Modal(
                 [
                     dbc.ModalHeader(
-                        dbc.ModalTitle(id="task-logs-title"), close_button=False
+                        [
+                            dbc.ModalTitle(id="task-logs-title"),
+                            html.Div(
+                                [
+                                    dbc.Button(
+                                        "Refresh",
+                                        id="task-logs-refresh",
+                                        color="primary",
+                                        size="sm",
+                                    ),
+                                    dbc.Button(
+                                        "Close",
+                                        id="task-logs-close",
+                                        color="secondary",
+                                        size="sm",
+                                    ),
+                                ],
+                                className="d-flex gap-2 ms-auto",
+                            ),
+                        ],
+                        close_button=False,
                     ),
                     dbc.ModalBody(id="task-logs-body"),
-                    dbc.ModalFooter(
-                        [
-                            dbc.Button(
-                                "Refresh",
-                                id="task-logs-refresh",
-                                color="primary",
-                                size="sm",
-                            ),
-                            dbc.Button(
-                                "Close",
-                                id="task-logs-close",
-                                color="secondary",
-                                size="sm",
-                            ),
-                        ]
-                    ),
                 ],
                 id="task-logs-modal",
                 size="xl",
+                scrollable=True,
                 is_open=False,
                 backdrop="static",
                 keyboard=False,

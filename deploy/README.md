@@ -62,7 +62,7 @@ worker image, policy, and both stored and effective driver settings. A mismatch
 fails the workflow rather than reporting a successful rollout. Publishing
 preserves the Script's existing visibility and access controls.
 
-Existing executions keep their original driver. In particular, a driver built
+Already-running executions keep their current driver until resumed. In particular, a driver built
 before percentage reporting was added has no `progress.json`; its execution can
 remain at 0% even while Batch task-status logs advance. Publishing a newer driver
 does not retrofit progress reporting into an already-running analysis.
@@ -518,12 +518,12 @@ role grants for the original driver and the staging/production Fargate driver
 definitions. If your driver uses custom definition or role names, provision
 equivalent narrowly scoped grants for those names instead.
 
-**Resume retains the original execution's pinned worker image and driver
-revision.** A new rollout fixes new executions, not existing failed executions;
-start a new execution to use changed workflow code. Keep old revisions active
-for reproducible resume. If `RECONCILE` still reports a literal
-`outcomes/*.json` after the fix, compare the submitted driver's image digest
-with the digest printed by the publication workflow.
+**Resume uses the currently published driver definition and worker image.**
+It retains the original inputs, session, and checkpoints, without checking
+whether old checkpoints are compatible with the new code. A resumed result
+can therefore combine work from different image versions; incompatible changes
+may cause the resume to fail or require a new execution. Deploy both the API and
+workflow changes before using this behavior.
 
 ### Variables
 

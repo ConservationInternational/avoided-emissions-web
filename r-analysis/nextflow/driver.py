@@ -132,17 +132,35 @@ def prepare(client, store: Store, params: dict, image: str, resume: bool) -> dic
     current_inputs = input_manifest(client, params)
     existing = store.json("snapshot.json")
     if existing is not None:
-        if existing["source"] != params or existing["image"] != image:
-            raise ValueError("Resume requires identical parameters and container image")
-        if existing["inputs"] != current_inputs or existing["version"] != VERSION:
-            raise ValueError(
-                "Resume rejected: raster/reference inputs or workflow changed"
-            )
+        if existing["source"] != params:
+            raise ValueError("Resume requires identical parameters")
+        if existing["inputs"] != current_inputs:
+            raise ValueError("Resume rejected: raster/reference inputs changed")
         if not resume:
             raise ValueError(
                 "Workflow already initialized; explicit resume is required"
             )
-        return existing["analysis"]
+        analysis = existing["analysis"]
+        if existing["image"] != image or existing["version"] != VERSION:
+            analysis = {
+                **analysis,
+                "_workflow": {
+                    **analysis["_workflow"],
+                    "group_namespace": hashlib.sha256(
+                        canonical({"image": image, "version": VERSION})
+                    ).hexdigest(),
+                },
+            }
+            log.warning(
+                "Resuming with worker image %s instead of %s and workflow version "
+                "%s instead of %s; reusing existing checkpoints without "
+                "compatibility checks",
+                image,
+                existing["image"],
+                VERSION,
+                existing["version"],
+            )
+        return analysis
     if resume:
         raise ValueError("Cannot resume without the original immutable input snapshot")
     sites_uri = params.get("sites_parquet_s3_uri") or params["sites_s3_uri"]

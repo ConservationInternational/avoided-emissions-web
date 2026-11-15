@@ -337,10 +337,14 @@ Use `POST /api/v1/execution/<id>/resume` with the owner's/admin's
 child-job cleanup is resumable. Original parameter objects are reused unchanged.
 
 The driver freezes the site artifact and seed in `snapshot.json`; initially
-unseeded submissions intentionally acquire a reproducible seed. Resume requires
-identical original parameters, image digest, workflow version, and raster/
-reference object metadata. The driver checks the raster/reference manifest
-before execution/resume and before publishing results, rejecting changed inputs.
+unseeded submissions intentionally acquire a reproducible seed. Resume uses the
+currently published driver definition and worker image, while retaining the
+original session and checkpoints. It requires identical original parameters and
+raster/reference object metadata, but does not check code or checkpoint
+compatibility. Results may combine checkpoints produced by different worker
+images; incompatible changes can fail or require a fresh execution. The driver
+checks the raster/reference manifest before execution/resume and before
+publishing results, rejecting changed inputs.
 Use write-once/versioned raster releases: metadata checks detect changes but do
 not make mutable raster prefixes transactionally immutable during a running read.
 
