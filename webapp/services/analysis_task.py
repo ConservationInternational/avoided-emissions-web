@@ -918,19 +918,19 @@ def _cancel_api_execution(task, user, api_exec_id):
 
 def can_resume_task(task, user):
     """Whether a failed, API-backed Nextflow task can offer a resume action."""
-    config = task.config or {}
-    jobs = (task.extra_metadata or {}).get("batch_jobs") or {}
-    nextflow = config.get("workflow_backend") == "nextflow" or (
-        "workflow_backend" not in config and bool(jobs.get("nextflow"))
-    )
-    return bool(
+    if not (
         user
         and (user.is_admin or str(task.submitted_by) == str(user.id))
         and task.status == "failed"
-        and nextflow
         and (task.extract_job_id or "").startswith("api:")
         and task.extract_job_id[4:]
-    )
+    ):
+        return False
+    config = task.config or {}
+    if "workflow_backend" in config:
+        return config["workflow_backend"] == "nextflow"
+    jobs = (task.extra_metadata or {}).get("batch_jobs") or {}
+    return bool(jobs.get("nextflow"))
 
 
 def resume_task(task_id, user):
@@ -1018,13 +1018,38 @@ def cancel_task(task_id, user):
         db.close()
 
 
+def get_task_execution_logs(task_id, user):
+    """Fetch user-visible execution logs using the acting user's credentials."""
+    import session_store
+    from trendsearth_client import TrendsEarthClient
+
+    db = get_db()
+    try:
+        task = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+        if not task:
+            raise ValueError("Task not found.")
+        if not user or (not user.is_admin and str(task.submitted_by) != str(user.id)):
+            raise PermissionError("You can only view logs for your own tasks.")
+        execution = task.extract_job_id or ""
+        if not execution.startswith("api:") or not execution[4:]:
+            raise ValueError("No API execution logs are available for this task.")
+        execution_id = execution[4:]
+    finally:
+        db.close()
+
+    client = TrendsEarthClient(
+        api_url=Config.TRENDSEARTH_API_URL,
+        access_token=session_store.get_access_token(user.session_id),
+    )
+    return client.get_execution_logs(execution_id)
+
+
 def get_task_list(user_id=None, limit=None):
     """Get analysis tasks, optionally filtered by user.
 
-    Uses ``load_only`` to skip the heavy ``extra_metadata`` JSON column
-    that the task list view never reads.  Pass ``limit`` to cap results;
-    defaults to no limit so the full history is available for
-    client-side sort/filter in the dashboard.
+    Heavy metadata is loaded only for failed legacy tasks that need it to
+    determine resume eligibility. Pass ``limit`` to cap results; by default
+    the full history is available for client-side sort/filter.
     """
     from sqlalchemy.orm import load_only
 
@@ -1048,6 +1073,7 @@ def get_task_list(user_id=None, limit=None):
                     AnalysisTask.submitted_at,
                     AnalysisTask.completed_at,
                     AnalysisTask.error_message,
+                    AnalysisTask.extract_job_id,
                 ),
             )
             .order_by(AnalysisTask.created_at.desc())
@@ -1056,7 +1082,23 @@ def get_task_list(user_id=None, limit=None):
             query = query.filter(AnalysisTask.submitted_by == user_id)
         if limit is not None:
             query = query.limit(limit)
-        return query.all()
+        tasks = query.all()
+        legacy_ids = [
+            task.id
+            for task in tasks
+            if task.status == "failed"
+            and (task.extract_job_id or "").startswith("api:")
+            and task.extract_job_id[4:]
+            and "workflow_backend" not in (task.config or {})
+        ]
+        if legacy_ids:
+            (
+                db.query(AnalysisTask)
+                .options(load_only(AnalysisTask.id, AnalysisTask.extra_metadata))
+                .filter(AnalysisTask.id.in_(legacy_ids))
+                .all()
+            )
+        return tasks
     finally:
         db.close()
 

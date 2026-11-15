@@ -8,6 +8,7 @@ import api_routes
 import pytest
 from callbacks import _registration as registration
 from callbacks._detail_builders import (
+    _build_overview,
     _build_preparation_summary,
     _build_results_content,
 )
@@ -39,6 +40,26 @@ def _walk(component):
             yield from _walk(child)
     elif children is not None:
         yield from _walk(children)
+
+
+def test_overview_displays_invalid_outcome_site_details(monkeypatch):
+    from callbacks import _detail_builders
+
+    monkeypatch.setattr(_detail_builders, "download_results_csv", lambda *a, **k: None)
+    detail = "fragment=2, replicate=2, cell=21, total_biomass_2000=-9999"
+    task = SimpleNamespace(
+        config={}, extract_job_id=None, description=None, n_sites=1, created_at=None,
+        status="succeeded", covariates=[], results_s3_uri=None, id="task",
+        error_message=None,
+        extra_metadata={"failed_sites": [{
+            "site_id": "site-a", "site_name": "Site A",
+            "reason": "invalid_outcome_inputs", "error": detail,
+        }]},
+    )
+    component = _build_overview(task, [], [])
+    text = [c for c in _walk(component) if isinstance(c, str)]
+    assert "1 site fragment(s) could not be included" in text
+    assert detail in text
 
 
 def test_upload_limits_are_visible_before_transfer_and_match_archive_validation():

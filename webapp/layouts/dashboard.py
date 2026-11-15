@@ -100,6 +100,38 @@ def dashboard_layout(user):
             # Stores & intervals
             html.Div(id="recompute-from-list-result"),
             html.Div(id="cancel-from-list-result"),
+            dcc.Store(id="task-list-action-refresh"),
+            dcc.Store(id="task-logs-task-id"),
+            dcc.Interval(id="task-logs-interval", interval=30000, disabled=True),
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(
+                        dbc.ModalTitle(id="task-logs-title"), close_button=False
+                    ),
+                    dbc.ModalBody(id="task-logs-body"),
+                    dbc.ModalFooter(
+                        [
+                            dbc.Button(
+                                "Refresh",
+                                id="task-logs-refresh",
+                                color="primary",
+                                size="sm",
+                            ),
+                            dbc.Button(
+                                "Close",
+                                id="task-logs-close",
+                                color="secondary",
+                                size="sm",
+                            ),
+                        ]
+                    ),
+                ],
+                id="task-logs-modal",
+                size="xl",
+                is_open=False,
+                backdrop="static",
+                keyboard=False,
+            ),
             dcc.Store(id="task-list-store"),
             dcc.Interval(id="refresh-interval", interval=30000, n_intervals=0),
         ],

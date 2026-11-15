@@ -5,11 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import sqlalchemy as sa
 from callbacks import _registration as registration
-from dash import Dash, no_update
+from dash import Dash, html, no_update
 from dash.exceptions import PreventUpdate
 from layouts.task_detail import task_detail_layout
-from services.analysis_task import can_resume_task, resume_task
+from services.analysis_task import can_resume_task, get_task_list, resume_task
+from sqlalchemy.orm import Session
 from trendsearth_client import TrendsEarthAPIError, TrendsEarthClient
 
 
@@ -105,6 +107,52 @@ def test_prior_nextflow_job_metadata_supports_existing_tasks(resume_context):
     assert can_resume_task(task, user)
     task.extra_metadata = {}
     assert not can_resume_task(task, user)
+
+
+def test_task_list_loads_metadata_only_for_failed_legacy_tasks(mocker):
+    engine = sa.create_engine("sqlite://")
+    owner = uuid.uuid4()
+    legacy_id, explicit_id = uuid.uuid4(), uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "CREATE TABLE analysis_tasks (id TEXT PRIMARY KEY, name TEXT, "
+                "status TEXT, progress FLOAT, n_sites INTEGER, submitted_by TEXT, "
+                "submitter_name TEXT, submitter_email TEXT, config JSON, "
+                "covariates TEXT, created_at DATETIME, submitted_at DATETIME, "
+                "completed_at DATETIME, error_message TEXT, extract_job_id TEXT, "
+                "metadata JSON)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO analysis_tasks "
+                "(id, name, status, submitted_by, config, extract_job_id, metadata) "
+                "VALUES (:id, 'task', 'failed', :owner, :config, 'api:execution', :metadata)"
+            ),
+            [
+                {
+                    "id": legacy_id.hex,
+                    "owner": owner.hex,
+                    "config": "{}",
+                    "metadata": '{"batch_jobs":{"nextflow":"driver"}}',
+                },
+                {
+                    "id": explicit_id.hex,
+                    "owner": owner.hex,
+                    "config": '{"workflow_backend":"nextflow"}',
+                    "metadata": '{"large":"not needed"}',
+                },
+            ],
+        )
+    mocker.patch("services.analysis_task.get_db", return_value=Session(engine))
+    tasks = {task.id: task for task in get_task_list()}
+    user = SimpleNamespace(id=owner, is_admin=False)
+    assert can_resume_task(tasks[legacy_id], user)
+    assert can_resume_task(tasks[explicit_id], user)
+    assert "extra_metadata" not in sa.inspect(tasks[legacy_id]).unloaded
+    assert "extra_metadata" in sa.inspect(tasks[explicit_id]).unloaded
+    engine.dispose()
 
 
 def test_cleanup_rejection_keeps_failed_state_and_error(resume_context):
@@ -209,6 +257,89 @@ def test_cleanup_message_is_visible_without_restarting_polling(mocker, callbacks
     assert "cleanup" in alert.children
     assert alert.color == "warning"
     assert event is no_update
+
+
+@pytest.mark.parametrize(
+    ("status", "backend", "owner", "admin", "expected"),
+    [
+        ("failed", "nextflow", True, False, True),
+        ("failed", "nextflow", False, False, False),
+        ("failed", "nextflow", False, True, True),
+        ("failed", "batch", True, False, False),
+        ("running", "nextflow", True, False, False),
+        ("cancelled", "nextflow", True, False, False),
+    ],
+)
+def test_task_list_resume_eligibility(
+    mocker, callbacks, resume_context, status, backend, owner, admin, expected
+):
+    user, task, _, _, _ = resume_context
+    user.is_admin = admin
+    task.submitted_by = user.id if owner else uuid.uuid4()
+    task.status = status
+    task.config["workflow_backend"] = backend
+    task.covariates = []
+    task.n_sites = 0
+    task.created_at = task.submitted_at = task.completed_at = None
+    mocker.patch.object(registration, "get_task_list", return_value=[task])
+
+    rows, _, _ = callbacks["refresh_task_list"](0, 0, False, None)
+
+    assert rows[0]["can_resume"] is expected
+
+
+def test_task_list_resume_refreshes_on_success_and_shows_api_errors(
+    mocker, callbacks, resume_context
+):
+    _, task, _, _, _ = resume_context
+    resume = mocker.patch.object(registration, "resume_task")
+    event = {"value": {"action": "resume", "task_id": str(task.id)}}
+    redirect, alert, refresh = callbacks["handle_task_list_actions"](event)
+    resume.assert_called_once_with(str(task.id), resume_context[0])
+    assert redirect is no_update
+    assert alert.color == "success"
+    assert refresh
+
+    resume.side_effect = TrendsEarthAPIError("Child cleanup is still underway")
+    redirect, alert, refresh = callbacks["handle_task_list_actions"](event)
+    assert redirect is no_update
+    assert alert.color == "warning"
+    assert "cleanup" in alert.children
+    assert refresh is no_update
+
+
+def test_registered_list_resume_emits_refresh_event(mocker, callbacks, resume_context):
+    _, task, _, _, _ = resume_context
+    resume = mocker.patch.object(registration, "resume_task")
+    app = Dash(__name__, suppress_callback_exceptions=True)
+    app.layout = html.Div()
+    registration.register_callbacks(app)
+    key = next(
+        name for name in app.callback_map if "task-list-action-refresh.data" in name
+    )
+    outputs = app.callback_map[key]["output"]
+    response = app.server.test_client().post(
+        "/_dash-update-component",
+        json={
+            "output": key,
+            "outputs": [
+                {"id": output.component_id, "property": output.component_property}
+                for output in outputs
+            ],
+            "inputs": [
+                {
+                    "id": "task-list-table",
+                    "property": "cellRendererData",
+                    "value": {"value": {"action": "resume", "task_id": str(task.id)}},
+                }
+            ],
+            "state": [],
+            "changedPropIds": ["task-list-table.cellRendererData"],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["response"]["task-list-action-refresh"]["data"]
+    resume.assert_called_once()
 
 
 def test_shared_views_never_offer_or_invoke_resume(mocker, callbacks):

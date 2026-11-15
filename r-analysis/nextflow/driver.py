@@ -290,6 +290,18 @@ def stop(process: subprocess.Popen, batch, jobs: set[str], reason: str) -> None:
         batch.terminate_job(jobId=job, reason=reason)
 
 
+def log_invalid_outcome_sites(result: dict) -> None:
+    """Expose summary worker's site-level input failures in driver logs."""
+    seen = set()
+    for failure in result.get("summary", {}).get("failed_sites", []):
+        if failure.get("reason") != "invalid_outcome_inputs":
+            continue
+        site_id = failure["site_id"]
+        if site_id not in seen:
+            log.warning("Site excluded from results: %s", failure["error"])
+            seen.add(site_id)
+
+
 def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
     Path("analysis.json").write_bytes(canonical(analysis))
     command = [
@@ -425,7 +437,7 @@ def main() -> None:
             raise FileNotFoundError(
                 "Nextflow completed without a published result payload"
             )
-        json.loads(payload)
+        result = json.loads(payload)
         client.put_object(
             Bucket=env["PARAMS_S3_BUCKET"],
             Key=f"{key}_results.json.gz",
@@ -434,6 +446,7 @@ def main() -> None:
             ContentEncoding="gzip",
         )
         store.write_json("status.json", {"phase": "succeeded", "success": True})
+        log_invalid_outcome_sites(result)
         log.info("Nextflow workflow completed successfully (100%)")
     except Exception as exc:
         phase = "cancelled" if isinstance(exc, InterruptedError) else "failed"

@@ -115,6 +115,7 @@ detail_path <- out_path("results_pixel_year_emissions.csv")
 if (file.exists(detail_path)) file.remove(detail_path)
 
 seen <- character()
+invalid_sites <- list()
 for (path in batch_paths) {
     batch <- read_parquet(path) %>%
         filter(id_numeric %in% matched_ids) %>%
@@ -127,7 +128,22 @@ for (path in batch_paths) {
         if (key %in% seen) next
         seen <- c(seen, key)
         frag <- frag_row(id)
-        outcomes <- pixel_outcomes(m, frag$start_year, FC_YEAR_MIN, FC_YEAR_MAX)
+        if (frag$site_id %in% names(invalid_sites)) next
+        outcomes <- tryCatch(
+            pixel_outcomes(m, frag$start_year, FC_YEAR_MIN, FC_YEAR_MAX),
+            invalid_pixel_outcomes = function(e) e
+        )
+        if (inherits(outcomes, "invalid_pixel_outcomes")) {
+            detail <- paste0(
+                "Invalid outcome inputs: site_id=", frag$site_id,
+                ", site_name=", frag$site_name, ", fragment=", id,
+                ", sub_site_index=", frag$sub_site_index, ", replicate=", k,
+                ", match_file=", basename(path), ": ", conditionMessage(outcomes)
+            )
+            invalid_sites[[frag$site_id]] <- detail
+            message("  ", detail, "; excluding entire site from estimates")
+            next
+        }
         ids <- tibble(id_numeric = id, site_id = frag$site_id, replicate = k)
         i <- length(stratum_rows) + 1L
         stratum_rows[[i]] <- bind_cols(ids, aggregate_outcomes(m, outcomes))
@@ -169,13 +185,11 @@ for (path in batch_paths) {
     gc()
 }
 diagnostics <- unlist(lapply(
-    Filter(function(d) d$replicate == 1L && d$id_numeric %in% matched_ids, diagnostics_by_rep),
+    Filter(function(d) d$replicate == 1L && d$id_numeric %in% matched_ids &&
+               !d$id_numeric %in% fragments$id_numeric[fragments$site_id %in% names(invalid_sites)],
+           diagnostics_by_rep),
     function(d) d$group_diagnostics
 ), recursive = FALSE)
-if (!file.exists(detail_path)) {
-    write_csv(tibble(cell = integer(), site_id = character(), year = integer()), detail_path)
-}
-
 # A stratum is included only if it was matched in every replicate, so that all
 # replicates estimate the same population.  Otherwise a stratum missing from
 # some replicates would count as zero there, biasing the mean and the range.
@@ -183,7 +197,7 @@ strata <- bind_rows(
     tibble(id_numeric = integer(), site_id = character(), replicate = integer(),
            group = character(), n_matched = integer(), n_eligible = numeric()),
     strata
-)
+) %>% filter(!site_id %in% names(invalid_sites))
 complete_strata <- strata %>%
     count(id_numeric, group) %>%
     filter(n == N_REPLICATES) %>%
@@ -192,7 +206,7 @@ n_inconsistent_strata <- nrow(distinct(strata, id_numeric, group)) - nrow(comple
 strata <- semi_join(strata, complete_strata, by = c("id_numeric", "group"))
 included_ids <- unique(complete_strata$id_numeric)
 
-if (n_inconsistent_strata > 0) {
+if (file.exists(detail_path) && (n_inconsistent_strata > 0 || length(invalid_sites) > 0)) {
     filtered_detail <- tempfile("pixel_year_", tmpdir = config$output_dir, fileext = ".csv")
     read_csv_chunked(
         detail_path,
@@ -209,6 +223,9 @@ if (n_inconsistent_strata > 0) {
         )
     )
     if (!file.rename(filtered_detail, detail_path)) stop("Could not replace filtered pixel-year output")
+}
+if (!file.exists(detail_path)) {
+    write_csv(tibble(cell = integer(), site_id = character(), year = integer()), detail_path)
 }
 
 
@@ -260,18 +277,24 @@ worker_error <- if (length(worker_failures) > 0) {
 }
 unused_fragments <- unused_fragments %>%
     mutate(
+        outcome_error = vapply(site_id, function(id) {
+            if (is.null(invalid_sites[[id]])) NA_character_ else invalid_sites[[id]]
+        }, character(1)),
         error = case_when(
+            !is.na(outcome_error) ~ outcome_error,
             unmapped ~ "Site has no exact-match region assignment and was not matched",
             !is.na(error) ~ error,
             id_numeric %in% matched_ids ~ "No exact-match stratum was matched in every replicate",
             TRUE ~ worker_error
         ),
-        status = if_else(unmapped | coalesce(reason, "") == "no_eligible_treatment",
+        reason = if_else(!is.na(outcome_error), "invalid_outcome_inputs", reason),
+        status = if_else(is.na(outcome_error) &
+                             (unmapped | coalesce(reason, "") == "no_eligible_treatment"),
                          "not_applicable", "failed")
     )
 failed_fragments <- filter(unused_fragments, status == "failed")
 write_csv(
-    select(unused_fragments, id_numeric, site_id, site_name, sub_site_index, status, error),
+    select(unused_fragments, id_numeric, site_id, site_name, sub_site_index, status, reason, error),
     out_path("results_failed_sites.csv")
 )
 n_failed_sites <- n_distinct(failed_fragments$site_id)
@@ -636,7 +659,7 @@ if (n_inconsistent_strata > 0) {
 }
 
 failed_summary <- as_records(select(failed_fragments, id_numeric, site_id, site_name,
-                                     sub_site_index, error))
+                                     sub_site_index, reason, error))
 subsampled <- sampling_by_site %>%
     filter(was_subsampled) %>%
     inner_join(select(sites, site_id, site_name), by = "site_id") %>%

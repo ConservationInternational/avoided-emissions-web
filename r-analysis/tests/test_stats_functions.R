@@ -63,6 +63,31 @@ test_that("invalid outcome inputs cannot produce emissions estimates", {
     expect_error(pixel_outcomes(m, 2020, 2014, 2016), "Missing outcome columns: total_biomass_2000")
 })
 
+test_that("outcome errors identify invalid fields, cells and values", {
+    m <- matched_pixels()
+    m$total_biomass_2000[2] <- -9999
+    m$area_ha[1] <- 0
+    m$fc_2015[2] <- 101
+    err <- tryCatch(pixel_outcomes(m, 2020, 2014, 2016),
+                    invalid_pixel_outcomes = identity)
+    expect_s3_class(err, "invalid_pixel_outcomes")
+    expect_match(conditionMessage(err), "total_biomass_2000.*cell=2.*value=-9999")
+    expect_match(conditionMessage(err), "area_ha.*cell=1.*value=0")
+    expect_match(conditionMessage(err), "fc_2015.*cell=2.*value=101")
+
+    m <- matched_pixels()
+    m$fc_2015[2] <- 95
+    m$fc_2016[2] <- 99
+    err <- tryCatch(pixel_outcomes(m, 2020, 2014, 2016),
+                    invalid_pixel_outcomes = identity)
+    expect_match(conditionMessage(err), "fc_2016.*value=99.*previous_fc_2015=95")
+
+    m$fc_2015[2] <- NA
+    err <- tryCatch(pixel_outcomes(m, 2020, 2014, 2016),
+                    invalid_pixel_outcomes = identity)
+    expect_match(conditionMessage(err), "fc_2015.*cell=2.*value=NA")
+})
+
 test_that("control weight equals treated weight in every matched set (F2)", {
     d <- tibble(
         treatment = c(TRUE, FALSE, FALSE, TRUE, TRUE, FALSE),

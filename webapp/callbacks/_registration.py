@@ -57,6 +57,7 @@ from services import (
     start_gee_export,
     update_task_info,
 )
+from services.analysis_task import get_task_execution_logs
 from session_store import SessionExpired, SessionUnavailable
 from trendsearth_client import TrendsEarthAPIError
 
@@ -1533,9 +1534,10 @@ def register_callbacks(app, limiter=None):
             Input("refresh-interval", "n_intervals"),
             Input("refresh-tasks-btn", "n_clicks"),
             Input("show-all-tasks-checkbox", "value"),
+            Input("task-list-action-refresh", "data"),
         ],
     )
-    def refresh_task_list(_n_intervals, _n_clicks, show_all):
+    def refresh_task_list(_n_intervals, _n_clicks, show_all, _action_refresh=None):
         user = get_current_user()
         if not user:
             raise PreventUpdate
@@ -1574,6 +1576,11 @@ def register_callbacks(app, limiter=None):
                 "id": str(task.id),
                 "name": task.name,
                 "status": task.status,
+                "can_resume": can_resume_task(task, user),
+                "has_logs": bool(
+                    (task.extract_job_id or "").startswith("api:")
+                    and task.extract_job_id[4:]
+                ),
                 "progress": task.progress,
                 "n_sites": task.n_sites or 0,
                 "covariates_short": ", ".join(covariates),
@@ -2221,12 +2228,13 @@ def register_callbacks(app, limiter=None):
             logger.exception("Error cancelling task %s", task_id)
             return dbc.Alert("Failed to cancel task.", color="danger", duration=4000)
 
-    # -- Task actions from task list table (recompute / cancel) ---------------
+    # -- Task actions from task list table ------------------------------------
 
     @app.callback(
         [
             Output("recompute-from-list-result", "children"),
             Output("cancel-from-list-result", "children"),
+            Output("task-list-action-refresh", "data"),
         ],
         Input("task-list-table", "cellRendererData"),
         prevent_initial_call=True,
@@ -2248,7 +2256,12 @@ def register_callbacks(app, limiter=None):
                     id="_recompute-redirect",
                 ),
                 no_update,
+                no_update,
             )
+
+        if action == "resume":
+            alert, refresh_event = handle_resume_task(1, task_id, None)
+            return no_update, alert, refresh_event
 
         if action == "cancel":
             user = get_current_user()
@@ -2256,17 +2269,20 @@ def register_callbacks(app, limiter=None):
                 return (
                     no_update,
                     dbc.Alert("Please log in first.", color="danger", duration=4000),
+                    no_update,
                 )
             try:
                 cancel_task(task_id, user)
                 return (
                     no_update,
                     dbc.Alert("Task cancelled.", color="success", duration=3000),
+                    str(_uuid.uuid4()),
                 )
             except (ValueError, PermissionError) as e:
                 return (
                     no_update,
                     dbc.Alert(str(e), color="warning", duration=4000),
+                    no_update,
                 )
             except Exception:
                 logger.exception("Error cancelling task %s from list", task_id)
@@ -2277,9 +2293,69 @@ def register_callbacks(app, limiter=None):
                         color="danger",
                         duration=4000,
                     ),
+                    no_update,
                 )
 
         raise PreventUpdate
+
+    @app.callback(
+        Output("task-logs-modal", "is_open"),
+        Output("task-logs-title", "children"),
+        Output("task-logs-body", "children"),
+        Output("task-logs-task-id", "data"),
+        Output("task-logs-interval", "disabled"),
+        Input("task-list-table", "cellRendererData"),
+        Input("task-logs-refresh", "n_clicks"),
+        Input("task-logs-interval", "n_intervals"),
+        Input("task-logs-close", "n_clicks"),
+        State("task-logs-modal", "is_open"),
+        State("task-logs-task-id", "data"),
+        prevent_initial_call=True,
+    )
+    def show_task_logs(renderer_data, _refresh, _interval, _close, is_open, task_id):
+        trigger = callback_context.triggered_id
+        if trigger == "task-logs-close":
+            return False, no_update, no_update, None, True
+        if trigger == "task-list-table":
+            value = (renderer_data or {}).get("value") or {}
+            if value.get("action") != "logs" or not value.get("task_id"):
+                raise PreventUpdate
+            task_id = value["task_id"]
+        elif not is_open or not task_id:
+            raise PreventUpdate
+
+        user = get_current_user()
+        try:
+            if not user:
+                raise PermissionError("Please log in first.")
+            logs = get_task_execution_logs(task_id, user)
+            lines = sorted(
+                logs, key=lambda log: log.get("register_date") or "", reverse=True
+            )
+            body = html.Pre(
+                "\n".join(
+                    f"{log.get('register_date', '')} - {log.get('level', '')} - {log.get('text', '')}"
+                    for log in lines
+                )
+                or "No logs found for this task.",
+                style={"whiteSpace": "pre-wrap", "fontSize": "12px"},
+            )
+        except (
+            ValueError,
+            PermissionError,
+            TrendsEarthAPIError,
+            SessionExpired,
+            SessionUnavailable,
+        ) as exc:
+            logger.warning("Could not fetch logs for task %s: %s", task_id, exc)
+            body = dbc.Alert(str(exc), color="warning")
+        except Exception:
+            logger.exception("Error fetching logs for task %s", task_id)
+            report_exception()
+            body = dbc.Alert(
+                "Failed to fetch task logs. Please try again.", color="danger"
+            )
+        return True, "Task Logs", body, task_id, False
 
     # -- Admin: Covariates (unified export + merge) ---------------------------
 

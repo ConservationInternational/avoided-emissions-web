@@ -298,6 +298,14 @@ appear. A dash means no percentage has been reported, rather than 0% complete.
 Percentages are driver estimates, not the fraction of submitted Batch tasks
 that have finished. Resuming a failed analysis resets its cached progress.
 
+The **Resume** action is enabled for failed Nextflow tasks with a tracked API
+execution that you own (or administer). It resumes the same execution using
+retained checkpoints; cancelled tasks cannot be resumed. **Recompute** starts
+a new task instead. The API may reject a resume while cleanup is still underway.
+**Logs** shows the execution's user-visible task logs, with manual refresh and
+automatic refresh every 30 seconds while the dialog is open. Logs are available
+only for tasks with a tracked API execution and require API access.
+
 ### Status values
 
 | Status | Meaning |

@@ -96,6 +96,19 @@ class WorkflowTests(unittest.TestCase):
             },
         }
 
+    def test_driver_logs_invalid_site_details_once(self):
+        failure = {
+            "site_id": "site-a",
+            "reason": "invalid_outcome_inputs",
+            "error": "fragment=4, replicate=2, cell=123, total_biomass_2000=-9999",
+        }
+        with self.assertLogs(driver.log, level="WARNING") as logs:
+            driver.log_invalid_outcome_sites(
+                {"summary": {"failed_sites": [failure, failure]}}
+            )
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn(failure["error"], logs.output[0])
+
     def test_commits_are_idempotent_conflict_checked_and_verified(self):
         store = Store(str(self.root / "store"))
         path = self.root / "item"

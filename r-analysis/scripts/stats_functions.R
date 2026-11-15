@@ -164,6 +164,26 @@ fit_propensity <- function(f, d) {
 
 # -- Emissions ---------------------------------------------------------------
 
+outcome_input_error <- function(message, m, fields, masks, references = NULL) {
+    details <- vapply(seq_along(fields), function(i) {
+        rows <- which(masks[[i]])
+        examples <- head(rows, 3L)
+        describe <- vapply(examples, function(row) {
+            paste0(
+                "cell=", if ("cell" %in% names(m)) m$cell[row] else row,
+                ", treatment=", if ("treatment" %in% names(m)) m$treatment[row] else "unknown",
+                ", value=", as.character(m[[fields[i]]][row]),
+                if (!is.null(references)) paste0(
+                    ", previous_", references[i], "=", as.character(m[[references[i]]][row])
+                ) else ""
+            )
+        }, character(1))
+        paste0(fields[i], " (", length(rows), " invalid; ", paste(describe, collapse = "; "), ")")
+    }, character(1))
+    stop(errorCondition(paste(message, paste(details, collapse = "; ")),
+                        class = "invalid_pixel_outcomes"))
+}
+
 pixel_outcomes <- function(m, start_year, fc_year_min, fc_year_max) {
     # Annual forest loss (ha) and emissions (MgCO2e) for each matched pixel.
     #
@@ -172,22 +192,44 @@ pixel_outcomes <- function(m, start_year, fc_year_min, fc_year_max) {
     #   biomass_t = density_2000 * area_ha * fc_t / fc_2000
     # and annual emissions are the biomass lost, converted to CO2e.
     years <- seq(baseline_year(start_year, fc_year_min), fc_year_max)
-    required <- c("total_biomass_2000", "fc_2000", "area_ha", paste0("fc_", years))
+    required <- unique(c("total_biomass_2000", "fc_2000", "area_ha", paste0("fc_", years)))
     missing <- setdiff(required, names(m))
-    if (length(missing) > 0) stop("Missing outcome columns: ", paste(missing, collapse = ", "))
+    if (length(missing) > 0) {
+        stop(errorCondition(paste("Missing outcome columns:", paste(missing, collapse = ", ")),
+                            class = "invalid_pixel_outcomes"))
+    }
     fc <- unname(as.matrix(m[, paste0("fc_", years), drop = FALSE]))
     if (anyNA(fc) || anyNA(m$total_biomass_2000) || anyNA(m$fc_2000) || anyNA(m$area_ha)) {
-        stop("Missing forest cover, biomass, or area for matched pixels")
+        fields <- required[vapply(m[required], anyNA, logical(1))]
+        outcome_input_error("Missing forest cover, biomass, or area for matched pixels:",
+                            m, fields, lapply(m[fields], is.na))
     }
     if (any(!is.finite(fc)) || any(!is.finite(m$total_biomass_2000)) ||
         any(!is.finite(m$fc_2000)) || any(!is.finite(m$area_ha)) ||
         any(m$total_biomass_2000 < 0) || any(m$area_ha <= 0) ||
         any(fc < 0 | fc > 100) || any(m$fc_2000 < 0 | m$fc_2000 > 100)) {
-        stop("Invalid forest cover, biomass, or area for matched pixels")
+        masks <- lapply(required, function(field) {
+            value <- m[[field]]
+            !is.finite(value) | if (field == "area_ha") {
+                value <= 0
+            } else if (field == "total_biomass_2000") {
+                value < 0
+            } else {
+                value < 0 | value > 100
+            }
+        })
+        bad <- vapply(masks, any, logical(1))
+        outcome_input_error("Invalid forest cover, biomass, or area for matched pixels:",
+                            m, required[bad], masks[bad])
     }
     cover_loss <- fc[, -ncol(fc), drop = FALSE] - fc[, -1, drop = FALSE]
     if (any(cover_loss < -1e-5) || any(fc[, 1] > m$fc_2000 + 1e-5)) {
-        stop("Forest cover must not increase in the loss-only Hansen series")
+        previous <- cbind(m$fc_2000, fc[, -ncol(fc), drop = FALSE])
+        masks <- lapply(seq_along(years), function(i) fc[, i] > previous[, i] + 1e-5)
+        bad <- vapply(masks, any, logical(1))
+        fields <- paste0("fc_", years)[bad]
+        outcome_input_error("Forest cover must not increase in the loss-only Hansen series:",
+                            m, fields, masks[bad], c("fc_2000", paste0("fc_", head(years, -1)))[bad])
     }
     biomass_per_pct <- ifelse(
         m$fc_2000 > 0, m$total_biomass_2000 * m$area_ha / m$fc_2000, 0

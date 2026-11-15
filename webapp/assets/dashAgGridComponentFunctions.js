@@ -395,18 +395,18 @@ dagcomponentfuncs.LocalDateTime = function (props) {
 /**
  * TaskActions \u2013 renders per-row action buttons for the task list grid.
  *
- * Shows a small "Recompute" button that triggers resubmission of the task
- * with a new random seed. Clicking the button fires setData which the Dash
- * cellRendererData callback reads.
+ * Clicking an action fires setData which the Dash cellRendererData callback reads.
  */
 dagcomponentfuncs.TaskActions = function (props) {
     var data = props.data || {};
     var status = (data.status || "").toLowerCase();
     var canCancel = ["pending", "submitted", "running"].indexOf(status) >= 0;
+    var canResume = data.can_resume === true;
+    var canViewLogs = data.has_logs === true;
 
     return React.createElement(
         "div",
-        { style: { display: "flex", alignItems: "center", gap: "4px" } },
+        { style: { display: "flex", alignItems: "center", gap: "4px", height: "100%" } },
         React.createElement(
             "button",
             {
@@ -414,6 +414,8 @@ dagcomponentfuncs.TaskActions = function (props) {
                     padding: "1px 6px",
                     fontSize: "10px",
                     fontWeight: 600,
+                    lineHeight: "normal",
+                    whiteSpace: "nowrap",
                     border: "1px solid #ffc107",
                     borderRadius: "3px",
                     backgroundColor: "#fff",
@@ -438,6 +440,8 @@ dagcomponentfuncs.TaskActions = function (props) {
                     padding: "1px 6px",
                     fontSize: "10px",
                     fontWeight: 600,
+                    lineHeight: "normal",
+                    whiteSpace: "nowrap",
                     border: "1px solid #dc3545",
                     borderRadius: "3px",
                     backgroundColor: canCancel ? "#fff" : "#e9ecef",
@@ -459,6 +463,60 @@ dagcomponentfuncs.TaskActions = function (props) {
                 },
             },
             "\u2715 Cancel"
+        ),
+        React.createElement(
+            "button",
+            {
+                style: {
+                    padding: "1px 6px",
+                    fontSize: "10px",
+                    fontWeight: 600,
+                    lineHeight: "normal",
+                    whiteSpace: "nowrap",
+                    border: "1px solid #198754",
+                    borderRadius: "3px",
+                    backgroundColor: canResume ? "#fff" : "#e9ecef",
+                    color: canResume ? "#146c43" : "#6c757d",
+                    cursor: canResume ? "pointer" : "not-allowed",
+                },
+                disabled: !canResume,
+                title: canResume
+                    ? "Resume this failed Nextflow execution"
+                    : "Only eligible failed Nextflow executions can be resumed",
+                onClick: function (e) {
+                    e.stopPropagation();
+                    if (canResume) {
+                        props.setData({ action: "resume", task_id: data.id });
+                    }
+                },
+            },
+            "\u25B6 Resume"
+        ),
+        React.createElement(
+            "button",
+            {
+                style: {
+                    padding: "1px 6px",
+                    fontSize: "10px",
+                    fontWeight: 600,
+                    lineHeight: "normal",
+                    whiteSpace: "nowrap",
+                    border: "1px solid #0d6efd",
+                    borderRadius: "3px",
+                    backgroundColor: canViewLogs ? "#fff" : "#e9ecef",
+                    color: canViewLogs ? "#084298" : "#6c757d",
+                    cursor: canViewLogs ? "pointer" : "not-allowed",
+                },
+                disabled: !canViewLogs,
+                title: canViewLogs ? "Show task logs" : "No API execution is available",
+                onClick: function (e) {
+                    e.stopPropagation();
+                    if (canViewLogs) {
+                        props.setData({ action: "logs", task_id: data.id });
+                    }
+                },
+            },
+            "Logs"
         )
     );
 };

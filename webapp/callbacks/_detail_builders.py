@@ -734,12 +734,11 @@ def _build_overview(task, sites, totals, quality_warnings=None):
             dbc.Alert(
                 [
                     html.H5(
-                        f"{len(failed_sites)} site(s) failed matching",
+                        f"{len(failed_sites)} site fragment(s) could not be included",
                         className="alert-heading",
                     ),
                     html.P(
-                        "The following sites could not be matched and are "
-                        "excluded from the results:",
+                        "The following site fragments are excluded from the results:",
                         className="mb-2",
                     ),
                     html.Ul(failed_items, className="mb-0"),

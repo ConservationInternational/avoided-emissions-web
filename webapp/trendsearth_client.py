@@ -382,22 +382,19 @@ class TrendsEarthClient:
         params = {}
         if last_id is not None:
             params["last-id"] = last_id
-        try:
-            resp = self._session.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                timeout=_TIMEOUT,
+        resp = self._session.get(
+            url,
+            params=params,
+            headers=self._headers(),
+            timeout=_TIMEOUT,
+        )
+        _raise_for_status(resp)
+        data = resp.json().get("data")
+        if not isinstance(data, list):
+            raise TrendsEarthAPIError(
+                "Invalid execution logs response from Trends.Earth."
             )
-            resp.raise_for_status()
-            return resp.json().get("data", [])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[TE-API] Failed to fetch logs for execution %s: %s",
-                execution_id,
-                exc,
-            )
-            return []
+        return data
 
     def list_executions(
         self, script_id=None, status=None, updated_at=None, per_page=50

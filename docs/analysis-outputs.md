@@ -202,6 +202,13 @@ All files are produced by `03_summarize_results.R` and written to
 `{results_s3_uri}`. An exact-match stratum of a site fragment is included
 only when it was matched in every replicate; site results sum their included
 strata and fragments. Pixel-level downloads use the same inclusion rule.
+If any matched pixel has invalid outcome inputs, the entire affected site is
+excluded from estimates and flagged as failed; other sites are still summarized.
+The first detected failure per site is recorded in the summary worker and driver
+logs, `results_site_status.csv`, `results_failed_sites.csv`, and
+`results_summary.json`. It identifies the fragment, replicate, match file,
+invalid field and count, and up to three example cells, treatment flags and
+values per field. For increasing forest cover it also reports previous values.
 
 Columns prefixed `extrapolated_` are scaled to all eligible treatment pixels
 (see [matching.md](matching.md#sampling-weights-and-coverage)); columns
@@ -281,7 +288,7 @@ Bounds in the other files cannot be summed.
 |---|---|---|
 | `site_id`, `display_site_id`, `site_name` | string | Site |
 | `n_site_pixels` | integer | All pixels in the site |
-| `status` | string | `estimated`, `partial`, `failed` (a fragment that should have been matched was not), or `not_applicable` (no exact-match region, or no forest at baseline) |
+| `status` | string | `estimated`, `partial`, `failed` (including invalid outcome inputs), or `not_applicable` (no exact-match region, or no forest at baseline) |
 | `n_forest_pixels`, `coverage_fraction`, `forest_coverage_fraction` | numeric | As in `results_by_site_total.csv`; empty for sites without estimates |
 | `status_reason` | string | Reasons of the fragments that were not included |
 
@@ -400,6 +407,7 @@ pixels on the Task Detail map.
 | `site_id`, `site_name` | string | Site |
 | `sub_site_index` | integer | Fragment within the site (0 for unsplit sites) |
 | `status` | string | `failed`, or `not_applicable` for fragments with no exact-match region or no forest at baseline |
+| `reason` | string | Failure category, including `invalid_outcome_inputs` for a site excluded due to invalid matched-pixel outcomes |
 | `error` | string | Reason the fragment was not included |
 
 ---

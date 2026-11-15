@@ -149,6 +149,88 @@ test_that("summary reports no estimates when all fragments fail", {
     expect_equal(nrow(read.csv(file.path(out, "results_pixel_year_emissions.csv"))), 0)
 })
 
+test_that("invalid outcomes exclude the entire site and preserve other sites", {
+    data_dir <- tempfile("ae_invalid_outcomes_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
+    out <- file.path(data_dir, "output")
+    for (id in 1:3) {
+        for (k in 1:2) {
+            m <- tibble(
+                cell = c(id * 10, id * 10 + 1), treatment = c(TRUE, FALSE),
+                group = paste0("g", id), match_group = paste0("g", id, "_1"),
+                match_weight = 1, sampling_weight = 10,
+                area_ha = 100, total_biomass_2000 = 100, fc_2000 = 100,
+                x1 = 0, pscore = 0.5, n_eligible = 10, n_sampled = 1,
+                n_control_pool = 100, n_control_sampled = 10,
+                id_numeric = id, replicate = k, n_forest_pixels = 30L
+            ) %>% bind_cols(forest_cover(2, 1))
+            if (id == 2 && k == 2) m$total_biomass_2000[2] <- -9999
+            batch <- paste0("u", id, "_b", k)
+            write_parquet(m, file.path(out, "matches", paste0("mb_", batch, ".parquet")))
+            write_json(list(batch = batch, matches_file = paste0("mb_", batch, ".parquet"),
+                            failures = list(), diagnostics = list(), na_exclusions = list()),
+                       file.path(out, "matches", paste0("mb_", batch, ".json")), auto_unbox = TRUE)
+        }
+    }
+    log <- run_script("03_summarize_results.R", config_path)
+    status <- read.csv(file.path(out, "results_site_status.csv"))
+    failed <- read.csv(file.path(out, "results_failed_sites.csv"))
+    totals <- read.csv(file.path(out, "results_by_site_total.csv"))
+    detail <- read.csv(file.path(out, "results_pixel_year_emissions.csv"))
+    covariates <- read.csv(file.path(out, "results_pixel_covariates.csv"))
+    summary <- fromJSON(file.path(out, "results_summary.json"))
+    expect_equal(status$status[status$site_id == "A"], "failed")
+    expect_equal(totals$site_id, "B")
+    expect_equal(unique(detail$site_id), "B")
+    expect_equal(unique(covariates$site_id), "B")
+    expect_equal(summary$n_failed_sites, 2)
+    expect_equal(nrow(filter(failed, site_id == "A")), 2)
+    expect_true(all(failed$reason[failed$site_id == "A"] == "invalid_outcome_inputs"))
+    expect_match(status$status_reason[status$site_id == "A"], "fragment=2.*replicate=2")
+    expect_match(status$status_reason[status$site_id == "A"], "cell=21.*value=-9999")
+    expect_true(any(grepl("site_id=A.*mb_u2_b2.parquet.*cell=21.*value=-9999", log)))
+    expect_true(any(grepl("cell=21.*value=-9999", summary$failed_sites$error)))
+})
+
+test_that("summary succeeds when the first and only matched site has invalid outcomes", {
+    data_dir <- tempfile("ae_only_invalid_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)
+    out <- file.path(data_dir, "output")
+    m <- tibble(
+        cell = 1:2, treatment = c(TRUE, FALSE), group = "g",
+        match_group = "g_1", match_weight = 1, sampling_weight = 10,
+        area_ha = 100, total_biomass_2000 = c(-1, 100), fc_2000 = 100,
+        x1 = 0, pscore = 0.5, n_eligible = 10, n_sampled = 1,
+        n_control_pool = 100, n_control_sampled = 10,
+        id_numeric = 1L, replicate = 1L, n_forest_pixels = 30L
+    ) %>% bind_cols(forest_cover(2, 1))
+    write_parquet(m, file.path(out, "matches", "mb_invalid.parquet"))
+    write_json(list(batch = "invalid", matches_file = "mb_invalid.parquet",
+                    failures = list(), diagnostics = list(), na_exclusions = list()),
+               file.path(out, "matches", "mb_invalid.json"), auto_unbox = TRUE)
+    run_script("03_summarize_results.R", config_path)
+    status <- read.csv(file.path(out, "results_site_status.csv"))
+    summary <- fromJSON(file.path(out, "results_summary.json"))
+    expect_equal(status$status[status$site_id == "A"], "failed")
+    expect_match(status$status_reason[status$site_id == "A"], "cell=1.*value=-1")
+    expect_equal(summary$n_sites, 0)
+    expect_equal(nrow(read.csv(file.path(out, "results_pixel_year_emissions.csv"))), 0)
+    code <- paste(
+        "import logging, sys",
+        "from main import _collect_results",
+        "result = _collect_results(sys.argv[1], 'test', logging.getLogger())",
+        "assert result['summary']['n_sites'] == 0",
+        "assert result['summary']['failed_sites'][0]['reason'] == 'invalid_outcome_inputs'",
+        sep = "; "
+    )
+    log <- suppressWarnings(system2(
+        Sys.getenv("AE_PYTHON", "python"),
+        c("-c", shQuote(code), shQuote(out)),
+        env = paste0("PYTHONPATH=", file.path(scripts_dir, "../src")), stdout = TRUE, stderr = TRUE
+    ))
+    expect_true(is.null(attr(log, "status")), info = paste(log, collapse = "\n"))
+})
+
 test_that("overlapping features keep independent treatment memberships and results", {
     data_dir <- tempfile("ae_overlap_")
     config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)
