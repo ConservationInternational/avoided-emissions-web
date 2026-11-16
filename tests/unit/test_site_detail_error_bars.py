@@ -26,7 +26,7 @@ def test_range_error_bars_show_the_full_asymmetric_replicate_range():
         pd.Series([11.0, 17.5]),
         pd.Series([8.0, 14.0]),
         pd.Series([13.0, 20.0]),
-        color="#2ca02c",
+        color="#0072B2",
         name="Project Site (range across matching replicates)",
     )
 
@@ -46,7 +46,7 @@ def test_range_error_bars_skip_years_without_both_bounds():
         pd.Series([10.0, 13.0]),
         pd.Series([8.0, None]),
         pd.Series([12.0, 15.0]),
-        color="#2ca02c",
+        color="#0072B2",
         name="Project Site",
     )
 
@@ -309,6 +309,18 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
     )
     aggregate_graphs = [item.figure for item in aggregate.children[-1].children]
 
+    for fig in aggregate_graphs[:3]:
+        assert [trace.line.color for trace in fig.data[:2]] == [
+            "#0072B2",
+            "#D55E00",
+        ]
+        if with_ranges:
+            bands = [trace for trace in fig.data if trace.fill == "tonexty"]
+            assert [trace.fillcolor for trace in bands] == [
+                "rgba(0,114,178,0.15)",
+                "rgba(213,94,0,0.15)",
+            ]
+
     for fig, metrics in zip(
         graphs[:3],
         [
@@ -318,11 +330,19 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
         ],
     ):
         assert [trace.type for trace in fig.data[:2]] == ["scatter", "scatter"]
+        assert [trace.line.color for trace in fig.data[:2]] == [
+            "#0072B2",
+            "#D55E00",
+        ]
         assert all(trace.mode == "lines+markers" for trace in fig.data[:2])
         assert not any(trace.error_y.visible for trace in fig.data)
         bands = [trace for trace in fig.data if trace.fill == "tonexty"]
         assert len(bands) == (2 if with_ranges else 0)
         if with_ranges:
+            assert [trace.fillcolor for trace in bands] == [
+                "rgba(0,114,178,0.15)",
+                "rgba(213,94,0,0.15)",
+            ]
             for metric, upper, lower in zip(metrics, fig.data[2::2], bands):
                 assert list(upper.y) == [row[f"{metric}_ci_upper"] for row in rows]
                 assert list(lower.y) == [row[f"{metric}_ci_lower"] for row in rows]

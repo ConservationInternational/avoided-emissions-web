@@ -92,6 +92,12 @@ from callbacks._match_quality import (
     _build_quality_warning_banner,
     _compute_quality_warnings,
 )
+from callbacks._plot_colors import (
+    CONTROL_BAND_COLOR,
+    CONTROL_COLOR,
+    PROJECT_BAND_COLOR,
+    PROJECT_COLOR,
+)
 from gee_export import gee_config
 
 logger = logging.getLogger(__name__)
@@ -3123,7 +3129,7 @@ def register_callbacks(app, limiter=None):
                 y=site_df["treatment_defor_ha"],
                 mode="lines+markers",
                 name="Project Site",
-                line={"color": "#2ca02c", "width": 2},
+                line={"color": PROJECT_COLOR, "width": 2},
                 marker={"size": 6},
             )
         )
@@ -3133,7 +3139,7 @@ def register_callbacks(app, limiter=None):
                 y=site_df["control_defor_ha"],
                 mode="lines+markers",
                 name="Matched Controls",
-                line={"color": "#d62728", "width": 2},
+                line={"color": CONTROL_COLOR, "width": 2},
                 marker={"size": 6},
             )
         )
@@ -3143,7 +3149,7 @@ def register_callbacks(app, limiter=None):
                 site_df["year"],
                 site_df["treatment_defor_ha_ci_lower"],
                 site_df["treatment_defor_ha_ci_upper"],
-                color="rgba(44,160,44,0.15)",
+                color=PROJECT_BAND_COLOR,
                 name=f"Project Site ({BOUNDS_NAME.lower()})",
             )
             _add_ci_band(
@@ -3151,7 +3157,7 @@ def register_callbacks(app, limiter=None):
                 site_df["year"],
                 site_df["control_defor_ha_ci_lower"],
                 site_df["control_defor_ha_ci_upper"],
-                color="rgba(214,39,40,0.15)",
+                color=CONTROL_BAND_COLOR,
                 name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         fig_defor.update_layout(
@@ -3210,7 +3216,7 @@ def register_callbacks(app, limiter=None):
                 y=cum_treatment,
                 mode="lines+markers",
                 name="Project Site",
-                line={"color": "#2ca02c", "width": 2},
+                line={"color": PROJECT_COLOR, "width": 2},
                 marker={"size": 6},
             )
         )
@@ -3220,7 +3226,7 @@ def register_callbacks(app, limiter=None):
                 y=cum_control,
                 mode="lines+markers",
                 name="Matched Controls",
-                line={"color": "#d62728", "width": 2},
+                line={"color": CONTROL_COLOR, "width": 2},
                 marker={"size": 6},
             )
         )
@@ -3230,7 +3236,7 @@ def register_callbacks(app, limiter=None):
                 site_sorted["year"],
                 site_sorted["cumulative_treatment_defor_ha_ci_lower"],
                 site_sorted["cumulative_treatment_defor_ha_ci_upper"],
-                color="rgba(44,160,44,0.15)",
+                color=PROJECT_BAND_COLOR,
                 name=f"Project Site ({BOUNDS_NAME.lower()})",
             )
             _add_ci_band(
@@ -3238,7 +3244,7 @@ def register_callbacks(app, limiter=None):
                 site_sorted["year"],
                 site_sorted["cumulative_control_defor_ha_ci_lower"],
                 site_sorted["cumulative_control_defor_ha_ci_upper"],
-                color="rgba(214,39,40,0.15)",
+                color=CONTROL_BAND_COLOR,
                 name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         fig_cum.update_layout(
@@ -3287,7 +3293,7 @@ def register_callbacks(app, limiter=None):
                     y=site_df["treatment_emissions_mgco2e"],
                     mode="lines+markers",
                     name="Project Site",
-                    line={"color": "#2ca02c", "width": 2},
+                    line={"color": PROJECT_COLOR, "width": 2},
                     marker={"size": 6},
                 )
             )
@@ -3297,7 +3303,7 @@ def register_callbacks(app, limiter=None):
                     y=site_df["control_emissions_mgco2e"],
                     mode="lines+markers",
                     name="Matched Controls",
-                    line={"color": "#d62728", "width": 2},
+                    line={"color": CONTROL_COLOR, "width": 2},
                     marker={"size": 6},
                 )
             )
@@ -3311,7 +3317,7 @@ def register_callbacks(app, limiter=None):
                     site_df["year"],
                     site_df["treatment_emissions_mgco2e_ci_lower"],
                     site_df["treatment_emissions_mgco2e_ci_upper"],
-                    color="rgba(44,160,44,0.15)",
+                    color=PROJECT_BAND_COLOR,
                     name=f"Project Site ({BOUNDS_NAME.lower()})",
                 )
                 _add_ci_band(
@@ -3319,7 +3325,7 @@ def register_callbacks(app, limiter=None):
                     site_df["year"],
                     site_df["control_emissions_mgco2e_ci_lower"],
                     site_df["control_emissions_mgco2e_ci_upper"],
-                    color="rgba(214,39,40,0.15)",
+                    color=CONTROL_BAND_COLOR,
                     name=f"Matched Controls ({BOUNDS_NAME.lower()})",
                 )
             fig_em.update_layout(

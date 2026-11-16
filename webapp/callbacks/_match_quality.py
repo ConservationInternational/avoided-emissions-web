@@ -12,6 +12,7 @@ from callbacks._helpers import (
     _attach_totals_to_geojson,
     _openlayers_map_component,
 )
+from callbacks._plot_colors import CONTROL_COLOR, PROJECT_COLOR
 
 logger = logging.getLogger(__name__)
 
@@ -901,7 +902,9 @@ def _build_love_plot(balance_df, cov_df, site_filter=None):
     agg = agg.sort_values("smd", key=lambda s: s.abs(), ascending=True)
 
     # Colour-code by whether SMD is within the ┬▒0.1 threshold
-    colors = ["#2ca02c" if abs(v) <= 0.1 else "#d62728" for v in agg["smd"]]
+    colors = [
+        PROJECT_COLOR if abs(v) <= 0.1 else CONTROL_COLOR for v in agg["smd"]
+    ]
 
     fig = go.Figure()
     fig.add_trace(
@@ -1173,7 +1176,7 @@ def _build_histograms_from_summary(hist_data):
                 y=t_pct,
                 name="Treatment",
                 opacity=0.6,
-                marker_color="#2ca02c",
+                marker_color=PROJECT_COLOR,
                 width=bin_width,
             )
         )
@@ -1183,7 +1186,7 @@ def _build_histograms_from_summary(hist_data):
                 y=c_pct,
                 name="Control",
                 opacity=0.6,
-                marker_color="#d62728",
+                marker_color=CONTROL_COLOR,
                 width=bin_width,
             )
         )

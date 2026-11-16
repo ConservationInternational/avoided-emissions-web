@@ -27,6 +27,12 @@ from callbacks._match_quality import (
     _build_group_diagnostics_card,
     _build_site_quality_table,
 )
+from callbacks._plot_colors import (
+    CONTROL_BAND_COLOR,
+    CONTROL_COLOR,
+    PROJECT_BAND_COLOR,
+    PROJECT_COLOR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1426,7 +1432,7 @@ def _build_plots(
                 y=agg_df["treatment_defor_ha"],
                 mode="lines+markers",
                 name="Project Sites",
-                line={"color": "#2ca02c", "width": 2},
+                line={"color": PROJECT_COLOR, "width": 2},
                 marker={"size": 6},
             )
         )
@@ -1436,7 +1442,7 @@ def _build_plots(
                 y=agg_df["control_defor_ha"],
                 mode="lines+markers",
                 name="Matched Controls",
-                line={"color": "#d62728", "width": 2},
+                line={"color": CONTROL_COLOR, "width": 2},
                 marker={"size": 6},
             )
         )
@@ -1446,7 +1452,7 @@ def _build_plots(
                 agg_df["year"],
                 agg_df["treatment_defor_ha_ci_lower"],
                 agg_df["treatment_defor_ha_ci_upper"],
-                color="rgba(44,160,44,0.15)",
+                color=PROJECT_BAND_COLOR,
                 name=f"Project Sites ({BOUNDS_NAME.lower()})",
             )
             _add_ci_band(
@@ -1454,7 +1460,7 @@ def _build_plots(
                 agg_df["year"],
                 agg_df["control_defor_ha_ci_lower"],
                 agg_df["control_defor_ha_ci_upper"],
-                color="rgba(214,39,40,0.15)",
+                color=CONTROL_BAND_COLOR,
                 name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         title_suffix = f" ({n_sites_display} sites"
@@ -1518,7 +1524,7 @@ def _build_plots(
                 y=agg_df["cum_treatment_defor_ha"],
                 mode="lines+markers",
                 name="Project Sites",
-                line={"color": "#2ca02c", "width": 2},
+                line={"color": PROJECT_COLOR, "width": 2},
                 marker={"size": 6},
             )
         )
@@ -1528,7 +1534,7 @@ def _build_plots(
                 y=agg_df["cum_control_defor_ha"],
                 mode="lines+markers",
                 name="Matched Controls",
-                line={"color": "#d62728", "width": 2},
+                line={"color": CONTROL_COLOR, "width": 2},
                 marker={"size": 6},
             )
         )
@@ -1538,7 +1544,7 @@ def _build_plots(
                 agg_df["year"],
                 agg_df["cum_treatment_defor_ha_ci_lower"],
                 agg_df["cum_treatment_defor_ha_ci_upper"],
-                color="rgba(44,160,44,0.15)",
+                color=PROJECT_BAND_COLOR,
                 name=f"Project Sites ({BOUNDS_NAME.lower()})",
             )
             _add_ci_band(
@@ -1546,7 +1552,7 @@ def _build_plots(
                 agg_df["year"],
                 agg_df["cum_control_defor_ha_ci_lower"],
                 agg_df["cum_control_defor_ha_ci_upper"],
-                color="rgba(214,39,40,0.15)",
+                color=CONTROL_BAND_COLOR,
                 name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         fig_cum.update_layout(
