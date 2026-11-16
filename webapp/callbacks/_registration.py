@@ -19,6 +19,7 @@ from layouts import (
     TASK_LIST_COLUMNS,
     _make_ag_grid,
 )
+from plot_selection import plot_selection_query
 from services import (
     ANALYSIS_DEFAULTS,
     AppUsersError,
@@ -73,6 +74,8 @@ from callbacks._detail_builders import (
     _build_plots,
     _build_raw_results,
     _build_results_content,
+    _filter_site_ids,
+    _site_filter_values,
 )
 from callbacks._helpers import (
     _authorize_task_access,
@@ -1633,9 +1636,12 @@ def register_callbacks(app, limiter=None):
         [
             State("task-id-store", "data"),
             State("share-token-store", "data"),
+            State("task-plot-selection", "data"),
         ],
     )
-    def refresh_task_detail(n, active_tab, resume_event, task_id, share_token):
+    def refresh_task_detail(
+        n, active_tab, resume_event, task_id, share_token, plot_selection=None
+    ):
         if not task_id:
             raise PreventUpdate
 
@@ -1739,6 +1745,8 @@ def register_callbacks(app, limiter=None):
                     task_id=task_id,
                     sites=sites,
                     resolution_m=task_cfg.get("resolution_m"),
+                    share_token=share_token,
+                    use_tiles=bool(getattr(task, "site_set_id", None)),
                 )
                 plots = _build_plots(
                     results,
@@ -1750,6 +1758,7 @@ def register_callbacks(app, limiter=None):
                     is_large=is_large,
                     site_map=site_map,
                     sites_geojson=detail.get("sites_geojson"),
+                    plot_selection=plot_selection,
                 )
             else:
                 plots = html.P("Results not yet available.", className="text-muted")
@@ -1851,10 +1860,12 @@ def register_callbacks(app, limiter=None):
         [
             State("share-modal", "is_open"),
             State("task-id-store", "data"),
+            State("task-plot-selection", "data"),
+            State("detail-tabs", "active_tab"),
         ],
         prevent_initial_call=True,
     )
-    def toggle_share_modal(n_clicks, is_open, task_id):
+    def toggle_share_modal(n_clicks, is_open, task_id, selection=None, active_tab=None):
         if not n_clicks:
             raise PreventUpdate
 
@@ -1868,7 +1879,7 @@ def register_callbacks(app, limiter=None):
 
         # Opening — fetch existing links
         links = list_share_links(task_id, str(user.id), is_admin=user.is_admin)
-        return True, _render_share_links_list(links, task_id)
+        return True, _render_share_links_list(links, task_id, selection, active_tab)
 
     @app.callback(
         [
@@ -1879,10 +1890,12 @@ def register_callbacks(app, limiter=None):
         [
             State("share-expiry-days", "value"),
             State("task-id-store", "data"),
+            State("task-plot-selection", "data"),
+            State("detail-tabs", "active_tab"),
         ],
         prevent_initial_call=True,
     )
-    def generate_share(n_clicks, expiry_days, task_id):
+    def generate_share(n_clicks, expiry_days, task_id, selection=None, active_tab=None):
         if not n_clicks:
             raise PreventUpdate
 
@@ -1900,7 +1913,10 @@ def register_callbacks(app, limiter=None):
             from flask import request as flask_request
 
             base_url = flask_request.host_url.rstrip("/")
-            share_url = f"{base_url}/shared/{result['token']}"
+            share_url = (
+                f"{base_url}/shared/{result['token']}"
+                + plot_selection_query(selection, active_tab)
+            )
 
             link_display = html.Div(
                 [
@@ -1942,7 +1958,9 @@ def register_callbacks(app, limiter=None):
 
             # Refresh the list
             links = list_share_links(task_id, str(user.id), is_admin=user.is_admin)
-            return link_display, _render_share_links_list(links, task_id)
+            return link_display, _render_share_links_list(
+                links, task_id, selection, active_tab
+            )
         except Exception:
             logger.exception("Failed to create share link")
             report_exception()
@@ -1955,9 +1973,11 @@ def register_callbacks(app, limiter=None):
         Output("share-links-list", "children", allow_duplicate=True),
         Input({"type": "revoke-share-link", "index": ALL}, "n_clicks"),
         State("task-id-store", "data"),
+        State("task-plot-selection", "data"),
+        State("detail-tabs", "active_tab"),
         prevent_initial_call=True,
     )
-    def revoke_share(n_clicks_list, task_id):
+    def revoke_share(n_clicks_list, task_id, selection=None, active_tab=None):
         ctx = callback_context
         if not ctx.triggered or not any(n_clicks_list):
             raise PreventUpdate
@@ -1975,7 +1995,7 @@ def register_callbacks(app, limiter=None):
         )
 
         links = list_share_links(task_id, str(user.id), is_admin=user.is_admin)
-        return _render_share_links_list(links, task_id)
+        return _render_share_links_list(links, task_id, selection, active_tab)
 
     # -- Edit task name/description -------------------------------------------
 
@@ -2103,58 +2123,85 @@ def register_callbacks(app, limiter=None):
         Input("site-defor-sort-order", "value"),
         Input("site-filtered-ids", "data"),
         State("site-defor-sort-options", "data"),
-        prevent_initial_call=True,
     )
 
     @app.callback(
         Output("site-filter-value", "options"),
-        Output("site-filter-value", "value"),
         Output("site-filter-value", "disabled"),
         Input("site-filter-field", "value"),
         State("site-filter-attributes", "data"),
     )
     def update_site_filter_values(field, attributes):
-        if not field or not attributes:
-            return [], None, True
-        values = {
-            json.dumps(properties.get(field), sort_keys=True, ensure_ascii=False)
-            for properties in attributes.values()
-        }
-        options = [
-            {
-                "label": "(missing)" if token == "null" else str(json.loads(token)),
-                "value": token,
-            }
-            for token in sorted(values)
-        ]
-        return options, None, False
+        return _site_filter_values(field, attributes), not bool(field)
 
     @app.callback(
         Output("site-filtered-ids", "data"),
-        Input("site-filter-field", "value"),
-        Input("site-filter-value", "value"),
-        State("site-filter-attributes", "data"),
+        Input("task-plot-selection", "data"),
+        Input("site-filter-attributes", "data"),
     )
-    def filter_site_ids(field, value, attributes):
-        if not field or value is None:
-            return None
-        return [
-            site_id
-            for site_id, properties in (attributes or {}).items()
-            if json.dumps(properties.get(field), sort_keys=True, ensure_ascii=False)
-            == value
-        ]
+    def filter_site_ids(selection, attributes):
+        selection = selection or {}
+        return _filter_site_ids(selection.get("field"), selection.get("value"), attributes)
 
     @app.callback(
-        Output("site-defor-selector", "value", allow_duplicate=True),
-        Input("site-filtered-ids", "data"),
-        State("site-defor-selector", "value"),
+        Output("task-plot-selection", "data"),
+        Output("site-filter-field", "value"),
+        Output("site-filter-value", "value"),
+        Output("site-defor-selector", "value"),
+        Output("site-map-selection", "value"),
+        Input("site-filter-field", "value"),
+        Input("site-filter-value", "value"),
+        Input("site-defor-selector", "value"),
+        Input("site-map-selection", "value"),
+        Input("site-map-clear", "data"),
+        State("task-plot-selection", "data"),
         prevent_initial_call=True,
     )
-    def clear_filtered_site(filtered_ids, selected_site):
-        if filtered_ids is not None and selected_site not in filtered_ids:
-            return None
-        return no_update
+    def update_plot_selection(field, value, selected_site, map_site, map_clear, selection):
+        trigger = callback_context.triggered_id
+        selection = selection or {}
+        if trigger == "site-map-clear" and map_clear:
+            return {}, None, None, None, ""
+        if trigger == "site-map-selection" and map_site:
+            return {"site": map_site}, None, None, map_site, no_update
+        if trigger == "site-defor-selector":
+            if selected_site == selection.get("site"):
+                raise PreventUpdate
+            return ({"site": selected_site} if selected_site else {}), None, None, no_update, ""
+        if trigger == "site-filter-field":
+            if field == selection.get("field"):
+                raise PreventUpdate
+            return {}, no_update, None, None, ""
+        if trigger == "site-filter-value":
+            if field == selection.get("field") and value == selection.get("value"):
+                raise PreventUpdate
+            selection = {"field": field, "value": value} if field and value is not None else {}
+            return selection, no_update, no_update, None, ""
+        raise PreventUpdate
+
+    app.clientside_callback(
+        """
+        function(selection, activeTab) {
+            if (activeTab !== "tab-plots" || (selection && selection.error)) {
+                return window.dash_clientside.no_update;
+            }
+            const url = new URL(window.location.href);
+            url.searchParams.set("tab", "plots");
+            ["site", "field", "value"].forEach(key => url.searchParams.delete(key));
+            if (selection && selection.site) {
+                url.searchParams.set("site", selection.site);
+            } else if (selection && selection.field && selection.value != null) {
+                url.searchParams.set("field", selection.field);
+                url.searchParams.set("value", selection.value);
+            }
+            window.history.replaceState(window.history.state, "", url);
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("task-plot-selection", "id"),
+        Input("task-plot-selection", "data"),
+        Input("detail-tabs", "active_tab"),
+    )
 
     app.clientside_callback(
         """
@@ -2175,19 +2222,29 @@ def register_callbacks(app, limiter=None):
     )
 
     @app.callback(
-        Output("task-aggregate-plots", "children"),
-        Input("site-filtered-ids", "data"),
+        Output("task-results-plots", "children"),
+        Input("task-plot-selection", "data"),
+        Input("site-filter-attributes", "data"),
         State("task-id-store", "data"),
         State("share-token-store", "data"),
-        State("site-filter-field", "value"),
-        State("site-filter-value", "value"),
-        prevent_initial_call=True,
+        State("site-defor-store", "data"),
     )
     def update_filtered_aggregate_plots(
-        filtered_ids, task_id, share_token, field, value
+        selection, attributes, task_id, share_token, site_store
     ):
         if not _authorize_task_access(task_id, share_token):
             return dbc.Alert("Task not found or access denied.", color="danger")
+        selection = selection or {}
+        if selection.get("error"):
+            return dbc.Alert(selection["error"], color="warning")
+        if selection.get("site"):
+            return update_site_deforestation_plot(
+                selection["site"], site_store, task_id
+            )
+        field, value = selection.get("field"), selection.get("value")
+        if field and not any(field in props for props in (attributes or {}).values()):
+            return dbc.Alert("The selected source field is not available.", color="warning")
+        filtered_ids = _filter_site_ids(field, value, attributes)
         try:
             detail = get_task_detail(task_id)
             if not detail:
@@ -2222,7 +2279,7 @@ def register_callbacks(app, limiter=None):
                 agg_yearly=agg_yearly,
                 is_large=detail["is_large"],
             )
-            graphs = content.children[0].children
+            graphs = content.children[-1].children
             if filtered_ids is not None:
                 description = "selected group"
                 if field and value is not None:
@@ -2261,32 +2318,28 @@ def register_callbacks(app, limiter=None):
 
     app.clientside_callback(
         """
-        function(selectedSite) {
+        function(selectedSite, attributes) {
             var mapEl = document.getElementById("task-sites-map");
             if (mapEl) {
-                mapEl.dispatchEvent(
-                    new CustomEvent("zoom-to-site", {
+                mapEl._selectedSiteId = selectedSite || "";
+                const zoom = function () {
+                    mapEl.dispatchEvent(new CustomEvent("zoom-to-site", {
                         detail: { siteId: selectedSite || "" },
-                    })
-                );
+                    }));
+                };
+                if (mapEl._olMap) {
+                    zoom();
+                } else {
+                    mapEl.addEventListener("ol-map-ready", zoom, { once: true });
+                }
             }
             return window.dash_clientside.no_update;
         }
         """,
         Output("site-defor-selector", "id"),
         Input("site-defor-selector", "value"),
-        prevent_initial_call=True,
+        Input("site-filter-attributes", "data"),
     )
-
-    @app.callback(
-        Output("site-defor-selector", "value"),
-        Input("site-map-selection", "value"),
-        prevent_initial_call=True,
-    )
-    def select_site_from_map(site_id):
-        if not site_id:
-            raise PreventUpdate
-        return site_id
 
     # -- Resume task (detail page) -------------------------------------------
 
@@ -2994,13 +3047,6 @@ def register_callbacks(app, limiter=None):
 
     # -- Site-level deforestation drill-down ----------------------------------
 
-    @app.callback(
-        Output("site-defor-plot-container", "children"),
-        Input("site-defor-selector", "value"),
-        State("site-defor-store", "data"),
-        State("task-id-store", "data"),
-        prevent_initial_call=True,
-    )
     def update_site_deforestation_plot(selected_site, store_data, task_id):
         """Build per-site deforestation and emissions plots with intervention
         date markers when a site is selected from the dropdown."""

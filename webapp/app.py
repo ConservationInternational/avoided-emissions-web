@@ -340,7 +340,7 @@ def display_page(pathname, search):
                 ]
             )
         return html.Div(
-            [task_detail_layout(user, task_id, shared_token=share_token), footer()]
+            [task_detail_layout(user, task_id, shared_token=share_token, search=search), footer()]
         )
 
     # All other pages require login
@@ -377,7 +377,7 @@ def display_page(pathname, search):
             _uuid.UUID(task_id)
         except (ValueError, AttributeError):
             return html.Div([not_found_layout(user), footer()])
-        page = task_detail_layout(user, task_id)
+        page = task_detail_layout(user, task_id, search=search)
     else:
         page = not_found_layout(user)
 

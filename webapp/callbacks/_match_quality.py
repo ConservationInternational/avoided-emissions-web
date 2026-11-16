@@ -1205,7 +1205,8 @@ def _build_histograms_from_summary(hist_data):
 
 
 def _build_map(
-    sites_geojson, totals, covariates=None, task_id=None, sites=None, resolution_m=None
+    sites_geojson, totals, covariates=None, task_id=None, sites=None, resolution_m=None,
+    share_token=None, use_tiles=True,
 ):
     """Build an OpenLayers map for task sites and summary values."""
     enriched_geojson = _attach_totals_to_geojson(sites_geojson, totals)
@@ -1216,7 +1217,11 @@ def _build_map(
     # MVT tiles directly (no Dash round-trip on pan/zoom).  The enriched_geojson
     # (centroid points + emissions) is still passed as data-geojson; the JS uses
     # it to build _emissionsBySiteId for colouring circles on task-scoped tiles.
-    tile_url = f"/api/task-sites-tiles/{task_id}/{{z}}/{{x}}/{{y}}" if task_id else None
+    tile_url = (
+        f"/api/task-sites-tiles/{task_id}/{{z}}/{{x}}/{{y}}"
+        if task_id and use_tiles
+        else None
+    )
     map_component = _openlayers_map_component(
         "task-sites-map",
         enriched_geojson,
@@ -1226,6 +1231,7 @@ def _build_map(
         task_id=task_id,
         resolution_m=resolution_m,
         tile_url=tile_url,
+        share_token=share_token,
     )
 
     return map_component

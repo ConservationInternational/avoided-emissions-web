@@ -24,6 +24,7 @@ from services import (
     get_site_upload_mapping_preview_from_staged,
     get_user_site_set_centroids_geojson,
     stream_stage_site_upload,
+    validate_share_token,
 )
 from sqlalchemy import text as sa_text
 
@@ -87,6 +88,25 @@ def create_api_blueprint(limiter):
         need request-rate protection.
     """
     api_bp = Blueprint("api", __name__)
+
+    def task_for_request(db, task_id):
+        try:
+            uuid.UUID(str(task_id))
+        except (ValueError, TypeError, AttributeError):
+            return None
+        token = request.headers.get("X-Task-Share-Token")
+        if token:
+            shared_task = validate_share_token(token, record_access=False)
+            if not shared_task or str(shared_task) != str(task_id):
+                return None
+            return db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+        user = flask_login.current_user
+        if not user.is_authenticated:
+            return None
+        filters = [AnalysisTask.id == task_id]
+        if not getattr(user, "is_admin", False):
+            filters.append(AnalysisTask.submitted_by == user.id)
+        return db.query(AnalysisTask).filter(*filters).first()
 
     # Health endpoint (used by Docker healthcheck to confirm app + migrations are ready)
     @api_bp.route("/health")
@@ -350,7 +370,6 @@ def create_api_blueprint(limiter):
         return jsonify({"layers": layers})
 
     @api_bp.route("/api/matched-pixels/<task_id>")
-    @flask_login.login_required
     def matched_pixels(task_id):
         """Return matched treatment/control pixel locations as GeoJSON.
 
@@ -364,6 +383,12 @@ def create_api_blueprint(limiter):
         import csv as csv_mod
         import io
 
+        db = get_db()
+        try:
+            if not task_for_request(db, task_id):
+                return jsonify({"error": "Task not found"}), 404
+        finally:
+            db.close()
         csv_text = download_results_csv(task_id, "matched_pixels")
         if not csv_text:
             return jsonify({"type": "FeatureCollection", "features": []})
@@ -475,7 +500,6 @@ def create_api_blueprint(limiter):
     @api_bp.route(
         "/api/task-site-feature/<task_id>/<feature_id>", defaults={"site_set_id": None}
     )
-    @flask_login.login_required
     @limiter.limit("120 per minute")
     def site_feature(feature_id, site_set_id=None, task_id=None):
         """Fetch one owned feature's details and exact extent, not every centroid."""
@@ -487,18 +511,13 @@ def create_api_blueprint(limiter):
         db = get_db()
         try:
             if task_id:
-                task = (
-                    db.query(AnalysisTask)
-                    .filter(
-                        AnalysisTask.id == task_id,
-                        AnalysisTask.submitted_by == flask_login.current_user.id,
-                    )
-                    .first()
-                )
+                task = task_for_request(db, task_id)
                 if not task:
                     return jsonify({"error": "Task not found"}), 404
                 site_set_id = task.site_set_id
             else:
+                if not flask_login.current_user.is_authenticated:
+                    return jsonify({"error": "Site set not found"}), 404
                 site_set = (
                     db.query(UserSiteSet)
                     .filter(
@@ -634,7 +653,6 @@ def create_api_blueprint(limiter):
         return _mvt_response(mvt_bytes)
 
     @api_bp.route("/api/task-sites-tiles/<task_id>/<int:z>/<int:x>/<int:y>")
-    @flask_login.login_required
     @limiter.limit("300 per minute")
     def task_sites_tiles(task_id, z, x, y):
         """Serve MVT tiles for a task's sites with per-site emissions properties.
@@ -646,14 +664,7 @@ def create_api_blueprint(limiter):
         """
         db = get_db()
         try:
-            task = (
-                db.query(AnalysisTask)
-                .filter(
-                    AnalysisTask.id == task_id,
-                    AnalysisTask.submitted_by == flask_login.current_user.id,
-                )
-                .first()
-            )
+            task = task_for_request(db, task_id)
             if not task:
                 return jsonify({"error": "Task not found"}), 404
             if not task.site_set_id:

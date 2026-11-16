@@ -9,8 +9,11 @@ import pytest
 from botocore.response import StreamingBody
 from callbacks import _registration as registration
 from callbacks._detail_builders import _add_range_error_bars, _build_plots
+from callbacks._helpers import _render_share_links_list
 from dash import dcc
+from flask import Flask
 from layouts.task_detail import task_detail_layout
+from plot_selection import parse_plot_selection, plot_selection_query
 from services import analysis_task
 
 
@@ -180,7 +183,7 @@ def test_site_selector_sort_modes_use_display_ids_and_matching_labels():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("years", [[2020], [2019, 2020, 2021]])
-def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years):
+def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years, monkeypatch):
     rows = [
         {
             "site_id": "site-1",
@@ -212,12 +215,13 @@ def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years):
             callback=callback, clientside_callback=lambda *args, **kwargs: None
         )
     )
-    site = callbacks["update_site_deforestation_plot"](
-        "site-1", {"results": rows}, None
+    monkeypatch.setattr(registration, "_authorize_task_access", lambda *_: True)
+    site = callbacks["update_filtered_aggregate_plots"](
+        {"site": "site-1"}, {}, "task", None, {"results": rows}
     )
     for content in (aggregate, site):
         children = (
-            content.children[0].children if content is aggregate else content.children
+            content.children[-1].children if content is aggregate else content.children
         )
         graphs = [item for item in children if isinstance(item, dcc.Graph)]
         assert len(graphs) == 4
@@ -277,8 +281,11 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
         )
     )
     monkeypatch.setattr(registration, "get_task_site_results", lambda *_: rows)
+    monkeypatch.setattr(registration, "_authorize_task_access", lambda *_: True)
     store = {"large_task": large_task, "results": rows}
-    content = callbacks["update_site_deforestation_plot"]("site-1", store, "task-1")
+    content = callbacks["update_filtered_aggregate_plots"](
+        {"site": "site-1"}, {}, "task-1", None, store
+    )
     graphs = [item.figure for item in content.children if isinstance(item, dcc.Graph)]
     aggregate_rows = []
     for row in rows:
@@ -300,7 +307,7 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
     aggregate = _build_plots(
         results=None, totals=[], is_large=True, agg_yearly=aggregate_rows
     )
-    aggregate_graphs = [item.figure for item in aggregate.children[0].children]
+    aggregate_graphs = [item.figure for item in aggregate.children[-1].children]
 
     for fig, metrics in zip(
         graphs[:3],
@@ -332,7 +339,7 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
 
 
 @pytest.mark.unit
-def test_site_map_is_placed_before_the_site_selector():
+def test_selection_controls_and_map_precede_the_single_results_plot():
     content = _build_plots(
         results=None,
         totals=[
@@ -368,7 +375,7 @@ def test_site_map_is_placed_before_the_site_selector():
     detail_heading = next(
         index
         for index, child in enumerate(children)
-        if getattr(child, "children", None) == "Site-Level Deforestation Detail"
+        if getattr(child, "children", None) == "Results selection"
     )
     assert detail_heading < component_ids.index("task-sites-map")
     assert component_ids.index("site-filter-attributes") < component_ids.index(
@@ -378,10 +385,29 @@ def test_site_map_is_placed_before_the_site_selector():
     assert attributes.data == {"site-1": {"region": "North", "count": 0}}
     filtered_ids = children[component_ids.index("site-filtered-ids")]
     assert filtered_ids.data is None
-    assert component_ids.index("task-sites-map") < component_ids.index(
-        "site-defor-selector"
-    )
+    assert component_ids.index("site-defor-selector") < component_ids.index("task-sites-map")
+    assert component_ids.index("task-sites-map") < component_ids.index("task-results-plots")
     assert "site-map-selection" in component_ids
+
+
+@pytest.mark.unit
+def test_zero_deforestation_still_has_map_and_selection_controls():
+    content = _build_plots(
+        results=None,
+        totals=[SimpleNamespace(site_id="site-1", display_site_id="1", site_name="Site One")],
+        is_large=True,
+        agg_yearly=[{
+            "year": 2020, "treatment_defor_ha": 0, "control_defor_ha": 0,
+            "cum_treatment_defor_ha": 0, "cum_control_defor_ha": 0,
+            "emissions_avoided_mgco2e": 0, "forest_loss_avoided_ha": 0,
+        }],
+        site_map=dcc.Graph(id="task-sites-map"),
+        plot_selection={"site": "site-1"},
+    )
+    components = {getattr(child, "id", None): child for child in content.children}
+    assert components["site-defor-selector"].value == "site-1"
+    assert "task-sites-map" in components
+    assert "task-results-plots" in components
 
 
 @pytest.mark.unit
@@ -405,18 +431,17 @@ def test_source_field_filter_values_and_site_selection():
         "b": {"region": "South", "flag": True},
         "c": {"region": "North"},
     }
-    values, selected, disabled = callbacks["update_site_filter_values"]("region", attrs)
+    values, disabled = callbacks["update_site_filter_values"]("region", attrs)
     assert values == [
         {"label": "North", "value": '"North"'},
         {"label": "South", "value": '"South"'},
     ]
-    assert selected is None and not disabled
-    assert callbacks["filter_site_ids"](None, None, attrs) is None
-    assert callbacks["filter_site_ids"]("region", '"North"', attrs) == ["a", "c"]
-    assert callbacks["filter_site_ids"]("flag", "false", attrs) == ["a"]
-    assert callbacks["filter_site_ids"]("flag", "null", attrs) == ["c"]
-    assert callbacks["clear_filtered_site"](["a"], "b") is None
-    assert callbacks["clear_filtered_site"](["a"], "a") is registration.no_update
+    assert not disabled
+    assert callbacks["filter_site_ids"]({}, attrs) is None
+    assert callbacks["filter_site_ids"]({"field": "region", "value": '"North"'}, attrs) == ["a", "c"]
+    assert callbacks["filter_site_ids"]({"field": "flag", "value": "false"}, attrs) == ["a"]
+    assert callbacks["filter_site_ids"]({"field": "flag", "value": "null"}, attrs) == ["c"]
+    assert callbacks["filter_site_ids"]({"field": "unknown", "value": "null"}, attrs) == []
 
 
 @pytest.mark.unit
@@ -469,7 +494,8 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
         }],
     )
     content = callbacks["update_filtered_aggregate_plots"](
-        ["a"], "task", None, "region", '"North"'
+        {"field": "region", "value": '"North"'},
+        {"a": {"region": "North"}, "b": {"region": "South"}}, "task", None, {}
     )
     aggregate.assert_called_once_with(
         "task", {"a"}, 2, results_s3_uri="s3://bucket/output"
@@ -480,9 +506,15 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
     assert list(graphs[0].figure.data[0].y) == [1]
     assert "1 sites" in graphs[0].figure.layout.title.text
     message = callbacks["update_filtered_aggregate_plots"](
-        [], "task", None, "region", '"North"'
+        {"field": "region", "value": '"North"'},
+        {"a": {"region": "South"}}, "task", None, {}
     )
     assert "No results" in message.children
+    missing = callbacks["update_filtered_aggregate_plots"](
+        {"field": "unknown", "value": "null"}, {"a": {"region": "North"}},
+        "task", None, {}
+    )
+    assert missing.children == "The selected source field is not available."
 
 
 @pytest.mark.unit
@@ -575,7 +607,7 @@ def test_source_attributes_preserve_types_and_missing_values():
 
 
 @pytest.mark.unit
-def test_map_site_selection_updates_the_site_selector():
+def test_map_site_selection_clears_group_and_selects_site(monkeypatch):
     callbacks = {}
 
     def callback(*args, **kwargs):
@@ -591,9 +623,32 @@ def test_map_site_selection_updates_the_site_selector():
         )
     )
 
-    assert callbacks["select_site_from_map"]("site-1") == "site-1"
+    monkeypatch.setattr(
+        registration, "callback_context", SimpleNamespace(triggered_id="site-map-selection")
+    )
+    group = {"field": "region", "value": '"North"'}
+    result = callbacks["update_plot_selection"]("region", '"North"', None, "site-1", 0, group)
+    assert result[:4] == ({"site": "site-1"}, None, None, "site-1")
     with pytest.raises(registration.PreventUpdate):
-        callbacks["select_site_from_map"]("")
+        callbacks["update_plot_selection"]("region", '"North"', None, "", 0, group)
+
+    monkeypatch.setattr(
+        registration, "callback_context", SimpleNamespace(triggered_id="site-filter-value")
+    )
+    result = callbacks["update_plot_selection"]("region", '"North"', "site-1", "", 0, {"site": "site-1"})
+    assert result[0] == {"field": "region", "value": '"North"'}
+    assert result[3] is None
+    monkeypatch.setattr(
+        registration, "callback_context", SimpleNamespace(triggered_id="site-filter-field")
+    )
+    with pytest.raises(registration.PreventUpdate):
+        callbacks["update_plot_selection"]("region", '"North"', None, "", 0, group)
+    monkeypatch.setattr(
+        registration, "callback_context", SimpleNamespace(triggered_id="site-map-clear")
+    )
+    assert callbacks["update_plot_selection"]("region", '"North"', None, "", 1, group) == (
+        {}, None, None, None, ""
+    )
 
 
 @pytest.mark.unit
@@ -603,3 +658,65 @@ def test_task_detail_has_no_separate_map_tab():
 
     assert "tab-plots" in {tab.tab_id for tab in tabs.children}
     assert "tab-map" not in {tab.tab_id for tab in tabs.children}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {},
+        {"site": "canonical-site / 1"},
+        {"field": "country / region", "value": '"Côte & Islands"'},
+        {"field": "active", "value": "false"},
+        {"field": "class", "value": "null"},
+    ],
+)
+def test_plot_selection_query_round_trip_and_default_tab(selection):
+    query = plot_selection_query(selection, "tab-plots")
+    assert parse_plot_selection(query) == selection
+    layout = task_detail_layout(None, "task", shared_token="share", search=query)
+    tabs = next(child for child in layout.children if isinstance(child, dbc.Tabs))
+    stored = next(child for child in layout.children if getattr(child, "id", None) == "task-plot-selection")
+    assert tabs.active_tab == "tab-plots"
+    assert stored.data == selection
+    assert plot_selection_query(selection, "tab-overview") == ""
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "query", ["?site=a&field=x&value=1", "?field=x", "?field=x&value=bad", "?site=a&site=b"]
+)
+def test_invalid_plot_selection_urls_are_reported(query):
+    assert parse_plot_selection(query).get("error")
+
+
+@pytest.mark.unit
+def test_new_and_existing_share_links_include_the_current_plot_selection(monkeypatch):
+    callbacks = {}
+
+    def callback(*args, **kwargs):
+        def capture(func):
+            callbacks[func.__name__] = func
+            return func
+        return capture
+
+    registration.register_callbacks(SimpleNamespace(
+        callback=callback, clientside_callback=lambda *args, **kwargs: None
+    ))
+    monkeypatch.setattr(registration, "get_current_user", lambda: SimpleNamespace(id="user", is_admin=False))
+    monkeypatch.setattr(registration, "_check_task_access", lambda *_: True)
+    monkeypatch.setattr(registration, "create_share_link", lambda *a, **k: {
+        "token": "new-token", "expires_at": "2030-01-01"
+    })
+    monkeypatch.setattr(registration, "list_share_links", lambda *a, **k: [])
+    selection = {"field": "region", "value": '"North & West"'}
+    query = plot_selection_query(selection, "tab-plots")
+    link = {"id": "1", "token": "existing-token", "expires_at": "2030-01-01",
+            "is_valid": True, "access_count": 0}
+    with Flask(__name__).test_request_context(base_url="https://example.test/"):
+        created, _ = callbacks["generate_share"](1, 30, "task", selection, "tab-plots")
+        input_group = created.children[0].children[3]
+        assert input_group.children[0].value == "https://example.test/shared/new-token" + query
+        existing = _render_share_links_list([link], "task", selection, "tab-plots")
+        existing_input = existing.children[0].children[0].children[1].children[0]
+        assert existing_input.value == "https://example.test/shared/existing-token" + query

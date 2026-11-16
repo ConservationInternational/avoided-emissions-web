@@ -335,7 +335,7 @@ it is assumed the Celery worker died and is marked `failed`.
 
 ## Viewing Results
 
-Clicking a completed task opens the **Task Detail** page, which has four
+Clicking a completed task opens the **Task Detail** page, which has five
 panels:
 
 ### Summary table
@@ -349,7 +349,7 @@ A per-site table showing, for each site:
 - Number of matched treatment pixels used
 - Sampling fraction (< 1 if treatment was subsampled)
 
-### Time series chart
+### Results plots
 
 Annual and cumulative deforestation comparisons use line charts for project
 sites and matched controls, with shaded ranges across matching replicates when
@@ -358,24 +358,30 @@ Avoided emissions and forest loss by year use bar charts, with replicate ranges
 shown as error bars when available.
 Year-axis tick labels use whole years without thousands separators or decimals.
 
-In **Site-Level Deforestation Detail**, **By site ID** sorts the site selector by
+The plots initially summarize all sites. Select a source field and value to show
+the corresponding group, or select an individual site to show its results.
+**By site ID** sorts the site selector by
 the original display ID and shows `SITE ID (SITE NAME)`. **Alphabetical** sorts by
 site name and shows `SITE NAME (SITE ID)`. Sites without a distinct name show only
 their ID. Switching order preserves the selected site.
 
 The optional field and value filter above the site map uses attributes from the
-uploaded source file. It filters the map, site selector, and aggregate plots;
-other results tabs are unchanged. Clearing either dropdown restores all sites.
+uploaded source file. It filters the map, site selector, and plots; other results
+tabs are unchanged. Matching sites are highlighted on the map. Selecting a site
+on the map clears the group filter and shows that site's plots. Clear the
+selection to restore all sites.
 Group ranges are calculated from the selected sites' yearly outcomes within
 each matching replicate, not by adding site-level bounds. Site sets must be
 reimported to retain source attributes, and analyses rerun to produce the
-yearly replicate outcomes needed for group ranges.
+yearly replicate outcomes needed for group ranges. Deployments must also apply
+database migration `0037a1b2c3f8` before importing site attributes.
 
 The site map appears near the top of this section. It shows the site polygons
 and, when pixel location data is available, matched treatment (green) and control
 (blue) pixel centroids. Covariate COG overlays can be toggled via the layer panel.
 Selecting a site zooms the map to it; clicking a site on the map selects it and
-loads its plots.
+loads its plots. Plot URLs retain the selected site or group and can be reloaded
+or shared.
 
 ### Match quality diagnostics
 
@@ -413,6 +419,11 @@ task detail page. Share links:
 - Expire after a configurable number of days (default 30 days, maximum 365).
 - Can be revoked at any time by the task owner.
 - Grant access to the task detail page only — not to raw S3 files.
+
+When a share link is created or copied from the **Results Plots** tab, it opens
+that tab with the current site or group selection, including for viewers who
+are not signed in. Existing share links shown in the modal also include the
+current selection when copied from that tab.
 
 Share links are stored in the `TaskShareLink` table and validated on each
 request.

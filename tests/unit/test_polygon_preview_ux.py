@@ -153,6 +153,40 @@ def test_task_feature_lookup_is_scoped_to_owned_task_set(api_client):
 
 @pytest.mark.parametrize(
     "path",
+    [
+        f"/api/task-sites-tiles/{USER_ID}/7/64/63",
+        f"/api/task-site-feature/{USER_ID}/{FEATURE_ID}",
+        f"/api/matched-pixels/{USER_ID}",
+    ],
+)
+def test_shared_map_requests_require_valid_token_for_that_task(api_client, monkeypatch, path):
+    client, db = api_client
+    monkeypatch.setattr(
+        api_routes.flask_login, "current_user", SimpleNamespace(is_authenticated=False)
+    )
+    validate = Mock(return_value=USER_ID)
+    monkeypatch.setattr(api_routes, "validate_share_token", validate)
+    db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+        site_set_id=SET_ID
+    )
+    db.execute.return_value.fetchone.return_value = SimpleNamespace(mvt=b"tile")
+    db.execute.return_value.mappings.return_value.first.return_value = {
+        "feature_id": FEATURE_ID, "display_site_id": "site", "site_name": "site",
+        "area_ha": 1, "start_date": "2020-01-01", "end_date": None,
+        "west": 0, "south": 0, "east": 1, "north": 1,
+    }
+    monkeypatch.setattr(api_routes, "download_results_csv", lambda *_: "")
+    assert client.get(path).status_code == 404
+    assert client.get(path, headers={"X-Task-Share-Token": "valid"}).status_code == 200
+    validate.assert_called_with("valid", record_access=False)
+    validate.return_value = SET_ID
+    assert client.get(path, headers={"X-Task-Share-Token": "other"}).status_code == 404
+    validate.return_value = None
+    assert client.get(path, headers={"X-Task-Share-Token": "revoked"}).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path",
     [f"/api/sites-tiles/{SET_ID}/7/64/63", f"/api/task-sites-tiles/{USER_ID}/7/64/63"],
 )
 def test_tiles_use_canonical_identity_and_preserve_display_id(api_client, path):

@@ -1,14 +1,17 @@
 """Task detail page layout."""
 
+from urllib.parse import parse_qs
+
 import dash_bootstrap_components as dbc
 from dash import dcc, html
+from plot_selection import parse_plot_selection
 
 from layouts.common import (
     navbar,
 )
 
 
-def task_detail_layout(user, task_id, shared_token=None):
+def task_detail_layout(user, task_id, shared_token=None, search=None):
     """Task detail page with status, results, plots, and map.
 
     Parameters
@@ -22,6 +25,7 @@ def task_detail_layout(user, task_id, shared_token=None):
         share button is hidden and a banner is shown instead.
     """
     is_shared = shared_token is not None
+    selection = parse_plot_selection(search)
 
     # -- Header row: title, badge, and (for authenticated users) share button -
     header_children = [
@@ -290,7 +294,11 @@ def task_detail_layout(user, task_id, shared_token=None):
             ),
         ],
         id="detail-tabs",
-        active_tab="tab-overview",
+        active_tab=(
+            "tab-plots"
+            if selection or parse_qs((search or "").lstrip("?")).get("tab") == ["plots"]
+            else "tab-overview"
+        ),
         className="ae-content-tabs",
     )
 
@@ -309,6 +317,7 @@ def task_detail_layout(user, task_id, shared_token=None):
             dcc.Store(id="task-id-store", data=task_id),
             dcc.Store(id="task-resume-refresh"),
             dcc.Store(id="share-token-store", data=shared_token),
+            dcc.Store(id="task-plot-selection", data=selection),
             dcc.Interval(id="detail-refresh-interval", interval=15000, n_intervals=0),
         ]
     )

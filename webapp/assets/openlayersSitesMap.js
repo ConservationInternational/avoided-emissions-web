@@ -24,6 +24,16 @@
         return String(value).trim();
     }
 
+    function taskRequestHeaders(mapEl, url) {
+        const token = mapEl.getAttribute("data-share-token");
+        const target = new URL(url, window.location.href);
+        if (!token || target.origin !== window.location.origin ||
+            !/^\/api\/(task-sites-tiles|task-site-feature|matched-pixels)\//.test(target.pathname)) {
+            return {};
+        }
+        return { "X-Task-Share-Token": token };
+    }
+
     function extractSiteIdFromRowEl(rowEl) {
         if (!rowEl) {
             return "";
@@ -119,10 +129,11 @@
             const generation = mapEl._requestGeneration;
             const route = collection[1] === "sites" ? "site-feature" : "task-site-feature";
             try {
-                const response = await fetch(
-                    "/api/" + route + "/" + collection[2] + "/" + encodeURIComponent(normalized),
-                    { credentials: "same-origin", signal: controller.signal }
-                );
+                const url = "/api/" + route + "/" + collection[2] + "/" + encodeURIComponent(normalized);
+                const response = await fetch(url, {
+                    credentials: "same-origin", signal: controller.signal,
+                    headers: taskRequestHeaders(mapEl, url),
+                });
                 if (controller.signal.aborted || generation !== mapEl._requestGeneration || !mapEl.isConnected) {
                     return;
                 }
@@ -349,7 +360,9 @@
             const showPolygonLabel =
                 geomType !== "Point" &&
                 (zoomBucket >= minPolygonLabelZoom || siteId === selectedSiteId);
-            const selected = Boolean(siteId && siteId === selectedSiteId);
+            const selected = Boolean(siteId && (
+                siteId === selectedSiteId || mapEl._allowedSiteIds?.has(siteId)
+            ));
             const displayId = normalizeSiteId(feature.get("display_site_id")) || siteId;
             const areaHa = feature.get("area_ha") || 0;
             const radius = Math.round(areaHa > 0 ? Math.min(12, Math.max(3, 2.25 * Math.log10(areaHa) + 3)) : 4);
@@ -359,9 +372,9 @@
                     styleCache.clear();
                 }
                 if (geomType === "Point") {
-                    styleCache.set(key, mapStylePoint(10 ** ((radius - 3) / 2.25), siteId, selectedSiteId));
+                    styleCache.set(key, mapStylePoint(10 ** ((radius - 3) / 2.25), siteId, selected ? siteId : ""));
                 } else {
-                    styleCache.set(key, mapStyle(siteId, selectedSiteId, showPolygonLabel, displayId));
+                    styleCache.set(key, mapStyle(siteId, selected ? siteId : "", showPolygonLabel, displayId));
                 }
             }
             return styleCache.get(key);
@@ -565,7 +578,10 @@
         const controller = new AbortController();
         mapEl._pixelAbort = controller;
         const generation = mapEl._requestGeneration;
-        fetch(url, { credentials: "same-origin", signal: controller.signal })
+        fetch(url, {
+            credentials: "same-origin", signal: controller.signal,
+            headers: taskRequestHeaders(mapEl, url),
+        })
             .then(function (resp) {
                 if (!resp.ok) {
                     return null;
@@ -649,6 +665,7 @@
                         try {
                             const response = await fetch(url, {
                                 credentials: "same-origin", signal: controller.signal,
+                                headers: taskRequestHeaders(el, url),
                             });
                             if (generation !== el._requestGeneration || controller.signal.aborted) {
                                 return;
@@ -746,6 +763,9 @@
         clearButton.setAttribute("aria-label", "Clear site selection and table filters");
         clearButton.addEventListener("click", function () {
             setSelectedSite(el, "");
+            if (el.id === "task-sites-map" && window.dash_clientside?.set_props) {
+                window.dash_clientside.set_props("site-map-clear", { data: Date.now() });
+            }
             const tableId = el.id === "submit-sites-map" ? "site-preview-table" : "results-totals-table";
             const api = getGridApi(tableId);
             api?.setFilterModel(null);

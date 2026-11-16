@@ -8,6 +8,7 @@ import dash_bootstrap_components as dbc
 from auth import get_current_user
 from dash import dcc, html
 from models import Covariate, get_db
+from plot_selection import plot_selection_query
 from services import get_task_detail, validate_share_token
 
 
@@ -64,7 +65,7 @@ def _authorize_task_access(task_id, share_token=None):
     return str(task_id)
 
 
-def _render_share_links_list(links, task_id):
+def _render_share_links_list(links, task_id, selection=None, active_tab=None):
     """Build the UI list of existing share links for the share modal."""
     if not links:
         return html.P("No share links yet.", className="text-muted")
@@ -78,7 +79,10 @@ def _render_share_links_list(links, task_id):
         expires = (lnk["expires_at"] or "")[:10]
         badge_color = "success" if lnk["is_valid"] else "secondary"
         badge_text = "Active" if lnk["is_valid"] else "Expired / Revoked"
-        share_url = f"{base_url}/shared/{lnk['token']}"
+        share_url = (
+            f"{base_url}/shared/{lnk['token']}"
+            + plot_selection_query(selection, active_tab)
+        )
         input_id = f"share-link-{lnk['id']}"
 
         url_display = (
@@ -194,6 +198,7 @@ def _openlayers_map_component(
     tile_url=None,
     centroids_url=None,
     bounds=None,
+    share_token=None,
 ):
     """Build an ``ol-sites-map`` div for the OpenLayers site map.
 
@@ -222,6 +227,8 @@ def _openlayers_map_component(
         attrs["data-cog-filter"] = ",".join(cog_filter_covariates)
     if task_id:
         attrs["data-task-id"] = str(task_id)
+    if share_token:
+        attrs["data-share-token"] = share_token
     if resolution_m is not None:
         attrs["data-resolution"] = str(resolution_m)
     if tile_url:

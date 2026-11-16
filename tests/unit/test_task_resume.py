@@ -432,6 +432,7 @@ def test_registered_dash_callback_restarts_polling_on_resume_event(
             "state": [
                 {"id": "task-id-store", "property": "data", "value": str(task.id)},
                 {"id": "share-token-store", "property": "data", "value": None},
+                {"id": "task-plot-selection", "property": "data", "value": {}},
             ],
             "changedPropIds": ["task-resume-refresh.data"],
         },

@@ -1279,6 +1279,35 @@ def _add_range_error_bars(fig, x, y, y_lower, y_upper, color, name):
     )
 
 
+def _site_filter_values(field, attributes):
+    if not field or not attributes or not any(field in props for props in attributes.values()):
+        return []
+    values = {
+        json.dumps(properties.get(field), sort_keys=True, ensure_ascii=False)
+        for properties in attributes.values()
+    }
+    return [
+        {
+            "label": "(missing)" if token == "null" else str(json.loads(token)),
+            "value": token,
+        }
+        for token in sorted(values)
+    ]
+
+
+def _filter_site_ids(field, value, attributes):
+    if not field or value is None:
+        return None
+    if not any(field in props for props in (attributes or {}).values()):
+        return []
+    return [
+        site_id
+        for site_id, properties in (attributes or {}).items()
+        if json.dumps(properties.get(field), sort_keys=True, ensure_ascii=False)
+        == value
+    ]
+
+
 def _build_plots(
     results,
     totals,
@@ -1289,6 +1318,7 @@ def _build_plots(
     is_large=False,
     site_map=None,
     sites_geojson=None,
+    plot_selection=None,
 ):
     """Build interactive plots for task results.
 
@@ -1656,10 +1686,11 @@ def _build_plots(
         )
         plots.append(dcc.Graph(figure=fig_site_totals))
 
-    plots = [html.Div(plots, id="task-aggregate-plots")]
+    aggregate_plots = plots
+    plots = []
 
     # --- Site-level drill-down section -------------------------------------
-    if has_defor_data:
+    if has_defor_data or site_map is not None:
         # Build site options for the dropdown.
         # For large tasks we read IDs/names from `totals` (always loaded).
         # For small tasks we read from the per-site rows.
@@ -1741,24 +1772,7 @@ def _build_plots(
         )
         site_options_by_name.sort(key=lambda o: o["label"].lower())
 
-        plots.append(html.Hr(className="my-4"))
-        plots.append(html.H5("Site-Level Deforestation Detail", className="mt-3"))
-        if is_large:
-            plots.append(
-                html.P(
-                    "Select a site to load its individual deforestation trajectory. "
-                    "Data is fetched on demand from the database.",
-                    className="text-muted",
-                )
-            )
-        else:
-            plots.append(
-                html.P(
-                    "Select a site to view its deforestation trajectory "
-                    "compared to matched controls, with intervention dates marked.",
-                    className="text-muted",
-                )
-            )
+        plots.append(html.H5("Results selection", className="mt-3"))
         features = (sites_geojson or {}).get("features", [])
         attributes = {
             str(feature["properties"]["site_id"]): feature["properties"].get(
@@ -1768,8 +1782,16 @@ def _build_plots(
             if feature.get("properties", {}).get("site_id") is not None
         }
         fields = sorted({key for values in attributes.values() for key in values})
+        selection = plot_selection or {}
+        field = selection.get("field")
+        value = selection.get("value")
         plots.append(dcc.Store(id="site-filter-attributes", data=attributes))
-        plots.append(dcc.Store(id="site-filtered-ids", data=None))
+        plots.append(
+            dcc.Store(
+                id="site-filtered-ids",
+                data=_filter_site_ids(field, value, attributes),
+            )
+        )
         plots.append(
             html.Div(
                 [
@@ -1777,18 +1799,21 @@ def _build_plots(
                     dcc.Dropdown(
                         id="site-filter-field",
                         options=[{"label": field, "value": field} for field in fields],
+                        value=field,
                         placeholder="No filter",
                         clearable=True,
                     ),
                     html.Label("Value:", htmlFor="site-filter-value", className="mt-2"),
                     dcc.Dropdown(
                         id="site-filter-value",
+                        options=_site_filter_values(field, attributes),
+                        value=value,
                         placeholder="Select a value",
                         clearable=True,
-                        disabled=True,
+                        disabled=not bool(field),
                     ),
                     html.Small(
-                        "Filtering also applies to the aggregate plots.",
+                        "Choose a group or an individual site; clear the selection to show all sites.",
                         className="text-muted",
                     ),
                 ],
@@ -1796,16 +1821,6 @@ def _build_plots(
                 style={"maxWidth": "400px"},
             )
         )
-        if site_map is not None:
-            plots.append(site_map)
-            plots.append(
-                dcc.Input(
-                    id="site-map-selection",
-                    type="text",
-                    value="",
-                    style={"display": "none"},
-                )
-            )
         plots.append(
             dcc.Store(
                 id="site-defor-sort-options",
@@ -1837,14 +1852,23 @@ def _build_plots(
             dbc.Select(
                 id="site-defor-selector",
                 options=site_options_by_name,
+                value=selection.get("site"),
                 placeholder="Select a site...",
                 className="mb-3",
                 style={"maxWidth": "400px"},
             )
         )
         plots.append(dcc.Store(id="site-defor-store", data=store_data))
-        plots.append(html.Div(id="site-defor-plot-container"))
+        if site_map is not None:
+            plots.append(site_map)
+        plots.append(
+            dcc.Input(
+                id="site-map-selection", type="text", value="", style={"display": "none"}
+            )
+        )
+        plots.append(dcc.Store(id="site-map-clear", data=0))
 
+    plots.append(html.Div(aggregate_plots, id="task-results-plots"))
     return html.Div(plots)
 
 
