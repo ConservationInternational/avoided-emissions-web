@@ -120,6 +120,7 @@ test_that("summary uses the same complete strata for estimates and pixel downloa
     detail <- read.csv(file.path(out, "results_pixel_year_emissions.csv"))
     covariates <- read.csv(file.path(out, "results_pixel_covariates.csv"))
     summary <- fromJSON(file.path(out, "results_summary.json"))
+    match_quality <- fromJSON(file.path(out, "results_match_quality_summary.json"))
     expect_equal(totals$n_sample_pixels, 1)
     expect_equal(totals$coverage_fraction, 10 / 60)
     # Fragment 2 of site A has no output, so the site is only partly estimated.
@@ -127,6 +128,10 @@ test_that("summary uses the same complete strata for estimates and pixel downloa
     expect_equal(totals$status, "partial")
     expect_equal(sort(unique(detail$cell)), sort(unique(covariates$cell)))
     expect_equal(unique(detail$cell), 1:2)
+    expect_true(all(c(
+        "site_id", "treatment", "match_weight", "pscore", "x1"
+    ) %in% names(covariates)))
+    expect_true("categorical_cols" %in% names(match_quality))
     expect_true(any(summary$methodology_warnings$code == "inconsistent_strata"))
     # Pixel-level weighted totals agree with the reported annual sample.
     by_year <- read.csv(file.path(out, "results_by_site_year.csv"))

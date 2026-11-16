@@ -1794,6 +1794,140 @@ def get_filtered_portfolio_yearly(task_id, site_ids, n_replicates, results_s3_ur
     return result.reset_index().to_dict("records")
 
 
+def get_filtered_portfolio_total(task_id, site_ids, n_replicates, results_s3_uri=None):
+    """Aggregate per-site replicate totals before computing portfolio ranges."""
+    site_ids = {str(site_id) for site_id in site_ids}
+    if not site_ids:
+        raise ValueError("At least one site is required.")
+    if n_replicates < 1:
+        raise ValueError("n_replicates must be positive.")
+
+    bucket, prefix = _resolve_results_s3(task_id, results_s3_uri)
+    key = f"{prefix}/results_by_site_replicate_total.csv"
+    body = get_s3_client().get_object(Bucket=bucket, Key=key)["Body"]
+    metrics = [
+        "extrapolated_emissions_avoided_mgco2e",
+        "extrapolated_forest_loss_avoided_ha",
+    ]
+    columns = ["site_id", "replicate", *metrics]
+    parts = []
+    try:
+        for chunk in pd.read_csv(
+            body,
+            usecols=columns,
+            dtype={"site_id": str},
+            keep_default_na=False,
+            chunksize=100_000,
+        ):
+            rows = chunk[chunk["site_id"].isin(site_ids)]
+            if rows.empty:
+                continue
+            rows = rows.copy()
+            rows["replicate"] = pd.to_numeric(rows["replicate"], errors="raise")
+            for metric in metrics:
+                rows[metric] = pd.to_numeric(rows[metric], errors="raise")
+            parts.append(rows[columns])
+    finally:
+        body.close()
+
+    if not parts:
+        raise ResultImportError("No replicate totals were found for the selected sites.")
+    rows = pd.concat(parts, ignore_index=True)
+    replicate_ids = set(range(1, n_replicates + 1))
+    if (
+        rows[columns[1:]].isna().any().any()
+        or not np.isfinite(rows[columns[1:]].to_numpy()).all()
+        or not rows["replicate"].eq(np.floor(rows["replicate"])).all()
+        or rows.duplicated(["site_id", "replicate"]).any()
+        or set(rows["site_id"]) != site_ids
+        or any(
+            set(group["replicate"]) != replicate_ids
+            for _, group in rows.groupby("site_id")
+        )
+    ):
+        raise ResultImportError(
+            "The selected sites have incomplete or invalid replicate totals."
+        )
+
+    by_replicate = rows.groupby("replicate")[metrics].sum()
+    summary = {}
+    for metric in metrics:
+        values = by_replicate[metric]
+        summary[metric.removeprefix("extrapolated_")] = float(values.mean())
+        if n_replicates > 1:
+            summary[f"{metric.removeprefix('extrapolated_')}_ci_lower"] = float(
+                values.quantile(0.025)
+            )
+            summary[f"{metric.removeprefix('extrapolated_')}_ci_upper"] = float(
+                values.quantile(0.975)
+            )
+    return summary
+
+
+def get_filtered_match_quality_pixels(task_id, site_ids, results_s3_uri=None):
+    """Load selected sites' matched pixel covariates without buffering the full CSV."""
+    site_ids = {str(site_id) for site_id in site_ids}
+    if not site_ids:
+        raise ValueError("At least one site is required.")
+
+    bucket, prefix = _resolve_results_s3(task_id, results_s3_uri)
+    s3 = get_s3_client()
+
+    def read_selected_rows(filename):
+        body = s3.get_object(Bucket=bucket, Key=f"{prefix}/{filename}")["Body"]
+        parts = []
+        try:
+            for chunk in pd.read_csv(body, dtype={"site_id": str}, chunksize=100_000):
+                if "site_id" not in chunk:
+                    raise ResultImportError(
+                        f"{filename} does not contain a site_id column."
+                    )
+                rows = chunk[chunk["site_id"].isin(site_ids)]
+                if not rows.empty:
+                    parts.append(rows)
+        finally:
+            body.close()
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+    pixels = read_selected_rows("results_pixel_covariates.csv")
+    if pixels.empty:
+        raise ResultImportError(
+            "No matched pixel covariates were found for the selected sites."
+        )
+    join_columns = ["cell", "site_id", "treatment", "match_group", "match_weight"]
+    required = set(join_columns)
+    if missing := required - set(pixels.columns):
+        raise ResultImportError(
+            "The pixel covariate output is missing required columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    if "pscore" not in pixels:
+        scores = read_selected_rows("results_propensity_scores.csv")
+        score_columns = required | {"pscore"}
+        if missing := score_columns - set(scores.columns):
+            raise ResultImportError(
+                "The propensity score output is missing required columns: "
+                + ", ".join(sorted(missing))
+            )
+        if scores.duplicated(join_columns).any():
+            raise ResultImportError(
+                "The propensity score output contains duplicate matched pixels."
+            )
+        pixels = pixels.merge(
+            scores[[*join_columns, "pscore"]],
+            on=join_columns,
+            how="left",
+            validate="one_to_one",
+        )
+        if pixels["pscore"].isna().any():
+            raise ResultImportError(
+                "Propensity scores are missing for some selected matched pixels."
+            )
+
+    return pixels
+
+
 def list_task_s3_files(task_id, results_s3_uri=None):
     """List all S3 files under a task's output directory.
 

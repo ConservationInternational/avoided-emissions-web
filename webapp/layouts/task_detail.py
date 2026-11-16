@@ -267,19 +267,6 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
                 ],
             ),
             dbc.Tab(
-                label="Match Quality",
-                tab_id="tab-match-quality",
-                children=[
-                    html.Div(
-                        dbc.Card(
-                            dbc.CardBody(html.Div(id="task-match-quality")),
-                            className="ae-section-card",
-                        ),
-                        className="p-3",
-                    ),
-                ],
-            ),
-            dbc.Tab(
                 label="Raw Results",
                 tab_id="tab-raw-results",
                 children=[

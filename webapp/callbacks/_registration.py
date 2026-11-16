@@ -60,6 +60,8 @@ from services import (
     update_task_info,
 )
 from services.analysis_task import (
+    get_filtered_match_quality_pixels,
+    get_filtered_portfolio_total,
     get_filtered_portfolio_yearly,
     get_task_execution_logs,
 )
@@ -74,6 +76,7 @@ from callbacks._detail_builders import (
     _build_plots,
     _build_raw_results,
     _build_results_content,
+    _build_selection_summary,
     _filter_site_ids,
     _site_filter_values,
 )
@@ -87,9 +90,8 @@ from callbacks._helpers import (
 )
 from callbacks._match_quality import (
     _build_map,
-    _build_match_quality,
-    _build_plots_from_summary,
     _build_quality_warning_banner,
+    _build_selected_match_quality,
     _compute_quality_warnings,
 )
 from callbacks._plot_colors import (
@@ -1628,7 +1630,6 @@ def register_callbacks(app, limiter=None):
             Output("task-overview", "children"),
             Output("task-results-content", "children"),
             Output("task-plots", "children"),
-            Output("task-match-quality", "children"),
             Output("task-raw-results", "children"),
             Output("quality-warning-banner", "children"),
             Output("detail-refresh-interval", "disabled"),
@@ -1660,7 +1661,6 @@ def register_callbacks(app, limiter=None):
                 None,
                 None,
                 None,
-                None,
                 True,
                 {"display": "none"},
             )
@@ -1671,7 +1671,6 @@ def register_callbacks(app, limiter=None):
         if not detail:
             return (
                 "Task Not Found",
-                None,
                 None,
                 None,
                 None,
@@ -1716,7 +1715,7 @@ def register_callbacks(app, limiter=None):
 
         # -----------------------------------------------------------
         # Lazy tab rendering: only build content for the *active* tab.
-        # This keeps the heavy plots/map and match quality tabs lazy.
+        # This keeps the heavy plots and map lazy.
         # Inactive tabs return ``no_update`` so Dash keeps whatever
         # was last rendered (empty on first visit, populated once the
         # user clicks the tab).
@@ -1724,7 +1723,6 @@ def register_callbacks(app, limiter=None):
         overview = no_update
         results_content = no_update
         plots = no_update
-        match_quality = no_update
         raw_results = no_update
 
         if active_tab == "tab-overview":
@@ -1768,8 +1766,6 @@ def register_callbacks(app, limiter=None):
                 )
             else:
                 plots = html.P("Results not yet available.", className="text-muted")
-        elif active_tab == "tab-match-quality":
-            match_quality = _build_match_quality(task_id, task, sites, totals)
         elif active_tab == "tab-raw-results":
             raw_results = _build_raw_results(task)
 
@@ -1779,7 +1775,6 @@ def register_callbacks(app, limiter=None):
             overview,
             results_content,
             plots,
-            match_quality,
             raw_results,
             quality_banner,
             disable_interval,
@@ -2160,20 +2155,38 @@ def register_callbacks(app, limiter=None):
         Input("site-defor-selector", "value"),
         Input("site-map-selection", "value"),
         Input("site-map-clear", "data"),
+        Input("clear-plot-selection-btn", "n_clicks"),
         State("task-plot-selection", "data"),
         prevent_initial_call=True,
     )
-    def update_plot_selection(field, value, selected_site, map_site, map_clear, selection):
+    def update_plot_selection(
+        field, value, selected_site, map_site, map_clear, clear_all, selection
+    ):
         trigger = callback_context.triggered_id
         selection = selection or {}
-        if trigger == "site-map-clear" and map_clear:
+        group_selection = (
+            {"field": field, "value": value}
+            if field and value is not None
+            else {}
+        )
+        if trigger == "clear-plot-selection-btn" and clear_all:
             return {}, None, None, None, ""
+        if trigger == "site-map-clear" and map_clear:
+            return group_selection, no_update, no_update, None, ""
         if trigger == "site-map-selection" and map_site:
-            return {"site": map_site}, None, None, map_site, no_update
+            return (
+                {**group_selection, "site": map_site},
+                no_update,
+                no_update,
+                map_site,
+                no_update,
+            )
         if trigger == "site-defor-selector":
             if selected_site == selection.get("site"):
                 raise PreventUpdate
-            return ({"site": selected_site} if selected_site else {}), None, None, no_update, ""
+            if selected_site:
+                group_selection["site"] = selected_site
+            return group_selection, no_update, no_update, no_update, ""
         if trigger == "site-filter-field":
             if field == selection.get("field"):
                 raise PreventUpdate
@@ -2196,7 +2209,8 @@ def register_callbacks(app, limiter=None):
             ["site", "field", "value"].forEach(key => url.searchParams.delete(key));
             if (selection && selection.site) {
                 url.searchParams.set("site", selection.site);
-            } else if (selection && selection.field && selection.value != null) {
+            }
+            if (selection && selection.field && selection.value != null) {
                 url.searchParams.set("field", selection.field);
                 url.searchParams.set("value", selection.value);
             }
@@ -2228,7 +2242,7 @@ def register_callbacks(app, limiter=None):
     )
 
     @app.callback(
-        Output("task-results-plots", "children"),
+        Output("task-results-graphs", "children"),
         Input("task-plot-selection", "data"),
         Input("site-filter-attributes", "data"),
         State("task-id-store", "data"),
@@ -2243,15 +2257,47 @@ def register_callbacks(app, limiter=None):
         selection = selection or {}
         if selection.get("error"):
             return dbc.Alert(selection["error"], color="warning")
-        if selection.get("site"):
-            return update_site_deforestation_plot(
-                selection["site"], site_store, task_id
-            )
         field, value = selection.get("field"), selection.get("value")
         if field and not any(field in props for props in (attributes or {}).values()):
             return dbc.Alert("The selected source field is not available.", color="warning")
         filtered_ids = _filter_site_ids(field, value, attributes)
         try:
+            if selection.get("site"):
+                site_id = str(selection["site"])
+                if filtered_ids is not None and site_id not in filtered_ids:
+                    return dbc.Alert(
+                        "The selected site is not in the selected group.",
+                        color="warning",
+                    )
+                site_totals = (site_store or {}).get("summary_totals", {})
+                site_total = site_totals.get(site_id)
+                if site_total is None:
+                    return dbc.Alert(
+                        "Summary data is unavailable for the selected site.",
+                        color="warning",
+                    )
+                replicate_summary = get_filtered_portfolio_total(
+                    task_id,
+                    {site_id},
+                    int((site_store or {}).get("n_replicates", 1)),
+                    results_s3_uri=(site_store or {}).get("results_s3_uri"),
+                )
+                site_name = site_total.get("site_name") or site_id
+                summary = _build_selection_summary(
+                    [site_total],
+                    replicate_summary,
+                    f"Selected site: {site_name}",
+                )
+                site_plots = update_site_deforestation_plot(
+                    site_id, site_store, task_id
+                )
+                plot_children = (
+                    site_plots.children
+                    if isinstance(site_plots, html.Div)
+                    else [site_plots]
+                )
+                return [summary, *plot_children]
+
             detail = get_task_detail(task_id)
             if not detail:
                 return dbc.Alert("Task not found.", color="danger")
@@ -2277,6 +2323,12 @@ def register_callbacks(app, limiter=None):
                     int(task.extra_metadata["n_replicates"]),
                     results_s3_uri=task.results_s3_uri,
                 )
+                replicate_summary = get_filtered_portfolio_total(
+                    task_id,
+                    result_ids,
+                    int(task.extra_metadata["n_replicates"]),
+                    results_s3_uri=task.results_s3_uri,
+                )
             content = _build_plots(
                 results,
                 totals,
@@ -2285,7 +2337,14 @@ def register_callbacks(app, limiter=None):
                 agg_yearly=agg_yearly,
                 is_large=detail["is_large"],
             )
-            graphs = content.children[-1].children
+            if not isinstance(content, html.Div):
+                return content
+            graph_container = next(
+                child
+                for child in content.children[-1].children
+                if getattr(child, "id", None) == "task-results-graphs"
+            )
+            graphs = graph_container.children
             if filtered_ids is not None:
                 description = "selected group"
                 if field and value is not None:
@@ -2296,29 +2355,17 @@ def register_callbacks(app, limiter=None):
                         f"Filtered to {len(totals)} sites: {description}",
                         color="info",
                     ),
+                    _build_selection_summary(
+                        totals,
+                        replicate_summary,
+                        f"Group summary: {description}",
+                    ),
                     *graphs,
                 ]
             return graphs
         except (ClientError, OSError, ValueError, KeyError) as exc:
             logger.exception("Could not build filtered results for task %s", task_id)
             return dbc.Alert(f"Could not load filtered results: {exc}", color="danger")
-
-    # -- Sort-order radio for match quality site dropdown --------------------
-
-    app.clientside_callback(
-        """
-        function(sortOrder, storedOptions) {
-            if (!storedOptions || !storedOptions[sortOrder]) {
-                return window.dash_clientside.no_update;
-            }
-            return storedOptions[sortOrder];
-        }
-        """,
-        Output("match-quality-site-selector", "options"),
-        Input("match-quality-sort-order", "value"),
-        State("match-quality-sort-options", "data"),
-        prevent_initial_call=True,
-    )
 
     # -- Site selector: zoom the map to the selected site --------------------
 
@@ -3019,37 +3066,108 @@ def register_callbacks(app, limiter=None):
             return f"/task/{task_id}"
         raise PreventUpdate
 
-    # -- Match quality site filter -------------------------------------------
+    # -- Selection-aware Match Quality plots ---------------------------------
 
     @app.callback(
         Output("match-quality-plots-container", "children"),
-        Input("match-quality-site-selector", "value"),
-        State("match-quality-data-store", "data"),
+        Input("match-quality-section", "open"),
+        Input("task-plot-selection", "data"),
+        Input("site-filter-attributes", "data"),
+        State("task-id-store", "data"),
+        State("share-token-store", "data"),
         prevent_initial_call=True,
     )
-    def update_match_quality_plots(selected_site, store_data):
-        """Rebuild all match-quality plots when site filter changes.
-
-        Renders summary stat boxes, Love plot (SMD), propensity score
-        QQ plot, and covariate distribution histograms for the selected
-        site (or aggregate across all sites).
-        """
-        if not store_data:
+    def update_match_quality_plots(
+        is_open, selection, attributes, task_id, share_token
+    ):
+        """Recompute match-quality diagnostics for the current site selection."""
+        if not is_open:
             raise PreventUpdate
+        if not _authorize_task_access(task_id, share_token):
+            return dbc.Alert("Task not found or access denied.", color="danger")
 
-        site_filter = None
-        if selected_site and selected_site != "__all__":
-            site_filter = selected_site
+        selection = selection or {}
+        if selection.get("error"):
+            return dbc.Alert(selection["error"], color="warning")
+        field, value = selection.get("field"), selection.get("value")
+        if field and not any(field in props for props in (attributes or {}).values()):
+            return dbc.Alert(
+                "The selected source field is not available.", color="warning"
+            )
 
-        quality_warnings = store_data.get("quality_warnings", [])
-        scope = site_filter if site_filter else None
-        warning_banner = _build_quality_warning_banner(
-            quality_warnings, scope_filter=scope
-        )
+        try:
+            detail = get_task_detail(task_id)
+            if not detail:
+                return dbc.Alert("Task not found.", color="danger")
+            task = detail["task"]
+            if task.status != "succeeded":
+                return html.P("Results not yet available.", className="text-muted")
 
-        return html.Div(
-            [warning_banner] + _build_plots_from_summary(store_data, site_filter)
-        )
+            available_ids = {str(total.site_id) for total in detail["totals"]}
+            filtered_ids = _filter_site_ids(field, value, attributes)
+            if selection.get("site"):
+                site_id = str(selection["site"])
+                if filtered_ids is not None and site_id not in filtered_ids:
+                    return dbc.Alert(
+                        "The selected site is not in the selected group.",
+                        color="warning",
+                    )
+                selected_ids = {site_id} & available_ids
+                selected_site_id = site_id
+            else:
+                selected_ids = (
+                    available_ids & set(filtered_ids)
+                    if filtered_ids is not None
+                    else available_ids
+                )
+                selected_site_id = None
+            if not selected_ids:
+                return dbc.Alert(
+                    "No matched sites are available for this selection.",
+                    color="info",
+                )
+
+            selected_totals = [
+                total
+                for total in detail["totals"]
+                if str(total.site_id) in selected_ids
+            ]
+            summary_raw = download_results_csv(
+                task_id,
+                "match_quality_summary",
+                results_s3_uri=task.results_s3_uri,
+            )
+            if not summary_raw:
+                return dbc.Alert(
+                    "The match quality summary is missing for this task.",
+                    color="warning",
+                )
+            summary = json.loads(summary_raw)
+            if not isinstance(summary, dict):
+                return dbc.Alert(
+                    "The match quality summary has an invalid format.",
+                    color="danger",
+                )
+            pixels = get_filtered_match_quality_pixels(
+                task_id,
+                selected_ids,
+                results_s3_uri=task.results_s3_uri,
+            )
+            return _build_selected_match_quality(
+                pixels,
+                summary,
+                selected_ids,
+                selected_totals,
+                selected_site_id,
+            )
+        except (ClientError, OSError, ValueError, KeyError) as exc:
+            logger.exception(
+                "Could not build selected match quality for task %s", task_id
+            )
+            return dbc.Alert(
+                f"Could not load match quality data: {exc}",
+                color="danger",
+            )
 
     # -- Site-level deforestation drill-down ----------------------------------
 

@@ -3,6 +3,7 @@
 import logging
 
 import dash_bootstrap_components as dbc
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
@@ -637,224 +638,248 @@ def _build_site_quality_table(warnings, totals=None):
     )
 
 
-def _build_match_quality(task_id, task, sites=None, totals=None):
-    """Build the match quality assessment section.
+def _weighted_mean(values, weights):
+    weight_total = weights.sum()
+    if weight_total <= 0:
+        return np.nan
+    return float(np.average(values, weights=weights))
 
-    Loads a pre-computed summary JSON (small, ~250 KB) produced by the
-    R summarize step instead of the full pixel-level CSVs that could be
-    hundreds of MB and cause the webapp to OOM.  For tasks that were
-    completed before the R script started writing the summary, a
-    background Celery task is kicked off to generate it from the raw
-    CSVs using chunked reads.
 
-    Produces:
+def _weighted_quantiles(values, weights, probabilities):
+    order = np.argsort(values)
+    sorted_values = values[order]
+    sorted_weights = weights[order]
+    weight_total = sorted_weights.sum()
+    if weight_total <= 0:
+        return []
+    cumulative = np.cumsum(sorted_weights) / weight_total
+    indexes = np.searchsorted(cumulative, probabilities - 1e-12, side="left")
+    return sorted_values[np.minimum(indexes, len(sorted_values) - 1)].tolist()
 
-    * **Love plot** — standardized mean differences (uses balance CSV,
-      which is always small).
-    * **Propensity score QQ plot** — from pre-computed quantiles.
-    * **Covariate histograms** — from pre-computed bin counts.
 
-    Also provides download buttons for the underlying CSVs.
-    """
-    import io
-    import json
+def _calculate_match_quality_summary(pixels, covariate_cols, categorical_cols):
+    """Recompute match-quality statistics from selected matched pixel rows."""
+    required = {"treatment", "match_weight", "pscore"}
+    if missing := required - set(pixels.columns):
+        raise ValueError(
+            "Matched pixel data is missing required columns: "
+            + ", ".join(sorted(missing))
+        )
 
-    # Always render the callback target IDs so Dash doesn't error when
-    # the callbacks reference them, even if the tab has no data yet.
-    placeholder_ids = html.Div(
-        [
-            dbc.Select(
-                id="match-quality-site-selector",
-                options=[],
-                style={"display": "none"},
+    pixels = pixels.copy()
+    if pd.api.types.is_bool_dtype(pixels["treatment"]):
+        treatment = pixels["treatment"]
+    else:
+        treatment = (
+            pixels["treatment"]
+            .astype(str)
+            .str.lower()
+            .map({"true": True, "false": False, "1": True, "0": False})
+        )
+    if treatment.isna().any():
+        raise ValueError("Matched pixel data contains invalid treatment values.")
+    pixels["treatment"] = treatment.astype(bool)
+    pixels["match_weight"] = pd.to_numeric(pixels["match_weight"], errors="raise")
+    if (
+        not np.isfinite(pixels["match_weight"]).all()
+        or pixels["match_weight"].lt(0).any()
+    ):
+        raise ValueError("Matched pixel data contains invalid match weights.")
+
+    balance_rows = []
+    for covariate in covariate_cols:
+        if covariate not in pixels:
+            raise ValueError(f"Matched pixel data is missing {covariate!r}.")
+        values = pixels[covariate]
+        weights = pixels["match_weight"]
+        valid = values.notna() & weights.notna()
+        x = values.loc[valid]
+        t = pixels.loc[valid, "treatment"]
+        w = weights.loc[valid]
+        if not t.any() or t.all():
+            continue
+
+        levels = sorted(x.unique()) if covariate in categorical_cols else [None]
+        for level in levels:
+            if level is not None:
+                x_values = x.eq(level).astype(float)
+                name = f"{covariate}={level}"
+                binary = True
+            else:
+                x_values = pd.to_numeric(x, errors="coerce")
+                numeric_valid = x_values.notna()
+                x_values = x_values.loc[numeric_valid]
+                t = t.loc[numeric_valid]
+                w = w.loc[numeric_valid]
+                if not t.any() or t.all():
+                    continue
+                name = covariate
+                binary = False
+
+            treatment_values = x_values.loc[t]
+            control_values = x_values.loc[~t]
+            treatment_weights = w.loc[t]
+            control_weights = w.loc[~t]
+            mean_treatment = _weighted_mean(treatment_values, treatment_weights)
+            mean_control = _weighted_mean(control_values, control_weights)
+            sd_treatment = (
+                float(treatment_values.std(ddof=1))
+                if len(treatment_values) > 1
+                else np.nan
+            )
+            if binary:
+                smd = mean_treatment - mean_control
+            elif sd_treatment > 0:
+                smd = (mean_treatment - mean_control) / sd_treatment
+            elif np.isclose(mean_treatment, mean_control, equal_nan=False):
+                smd = 0.0
+            else:
+                smd = np.nan
+            balance_rows.append(
+                {
+                    "covariate": name,
+                    "mean_treatment": mean_treatment,
+                    "mean_control": mean_control,
+                    "sd_treatment": sd_treatment,
+                    "smd": smd,
+                }
+            )
+
+    histograms = {}
+    numeric_covariates = [
+        column for column in covariate_cols if column not in categorical_cols
+    ]
+    for covariate in numeric_covariates:
+        values = pd.to_numeric(pixels[covariate], errors="coerce")
+        valid = values.notna()
+        x = values.loc[valid].to_numpy(dtype=float)
+        t = pixels.loc[valid, "treatment"].to_numpy(dtype=bool)
+        w = pixels.loc[valid, "match_weight"].to_numpy(dtype=float)
+        if len(x) < 2 or x.min() == x.max():
+            continue
+        treatment_counts, edges = np.histogram(
+            x[t], bins=40, range=(x.min(), x.max()), weights=w[t]
+        )
+        control_counts, _ = np.histogram(x[~t], bins=edges, weights=w[~t])
+        treatment_total = treatment_counts.sum()
+        control_total = control_counts.sum()
+        histograms[covariate] = {
+            "bin_edges": edges.tolist(),
+            "treatment_pct": (
+                treatment_counts / treatment_total * 100
+                if treatment_total > 0
+                else np.zeros(40)
+            ).tolist(),
+            "control_pct": (
+                control_counts / control_total * 100
+                if control_total > 0
+                else np.zeros(40)
+            ).tolist(),
+        }
+
+    propensity = pd.to_numeric(pixels["pscore"], errors="coerce")
+    valid = propensity.notna()
+    t = pixels.loc[valid, "treatment"]
+    w = pixels.loc[valid, "match_weight"]
+    qq = None
+    if t.sum() >= 2 and (~t).sum() >= 2:
+        probabilities = np.linspace(0, 1, 500)
+        treatment_mask = t.to_numpy(dtype=bool)
+        weights = w.to_numpy(dtype=float)
+        values = propensity.loc[valid].to_numpy(dtype=float)
+        qq = {
+            "quantiles": probabilities.tolist(),
+            "treatment_values": _weighted_quantiles(
+                values[treatment_mask], weights[treatment_mask], probabilities
             ),
-            dcc.Store(id="match-quality-data-store", data={}),
-            dcc.Store(id="match-quality-sort-options", data={}),
-            dbc.RadioItems(
-                id="match-quality-sort-order",
-                style={"display": "none"},
+            "control_values": _weighted_quantiles(
+                values[~treatment_mask], weights[~treatment_mask], probabilities
             ),
-            html.Div(id="match-quality-plots-container"),
-            dbc.Button(
-                id="download-match-covariates",
-                style={"display": "none"},
-            ),
-            dcc.Download(id="download-match-quality"),
-        ],
-        style={"display": "none"},
-    )
+        }
 
-    if task.status != "succeeded":
-        return html.Div(
-            [
-                html.P("Results not yet available.", className="text-muted"),
-                placeholder_ids,
-            ]
-        )
-
-    # Build a lookup of site_id -> area_ha from totals.
-    site_areas = {}
-    for t in totals or []:
-        sid = t.site_id if hasattr(t, "site_id") else t.get("site_id")
-        area = t.area_ha if hasattr(t, "area_ha") else t.get("area_ha")
-        if sid is not None:
-            site_areas[str(sid)] = area or 0
-
-    # Fetch balance statistics (Love plot data) — always small.
-    balance_df = None
-    balance_csv = download_results_csv(
-        task_id, "balance", results_s3_uri=task.results_s3_uri
-    )
-    if balance_csv:
-        balance_df = pd.read_csv(io.StringIO(balance_csv))
-        if balance_df.empty:
-            balance_df = None
-
-    # Run quality checks (uses balance_df + totals — both small).
-    quality_warnings = _assess_match_quality(balance_df=balance_df, totals=totals)
-
-    # ---- Try loading the pre-computed summary JSON -----------------------
-    summary = None
-    summary_raw = download_results_csv(
-        task_id,
-        "match_quality_summary",
-        results_s3_uri=task.results_s3_uri,
-    )
-    if summary_raw:
-        try:
-            summary = json.loads(summary_raw)
-        except (json.JSONDecodeError, ValueError):
-            summary = None
-
-    if not summary:
-        return html.Div(
-            [
-                dbc.Alert(
-                    "The match quality summary (results_match_quality_summary.json) "
-                    "is missing for this task. Rerun the task to generate it.",
-                    color="warning",
-                ),
-                placeholder_ids,
-            ]
-        )
-
-    covariate_cols = summary.get("covariate_cols", [])
-
-    if not covariate_cols and not summary.get("qq_quantiles"):
-        return html.Div(
-            [
-                html.P(
-                    "No covariate data available for quality assessment.",
-                    className="text-muted",
-                ),
-                placeholder_ids,
-            ]
-        )
-
-    content = []
-
-    content.append(
-        html.P(
-            "Assessment of match quality between treatment and control "
-            "pixels. The Love plot shows covariate balance (standardized "
-            "mean differences), the QQ plot compares propensity score "
-            "distributions, and the histograms show per-covariate overlap. "
-            "Use the site filter to view diagnostics for individual sites.",
-            className="text-muted mb-3",
-        )
-    )
-
-    content.append(html.H5("Match Quality Diagnostics", className="mt-4 mb-2"))
-
-    # Per-site selector — derive from summary stats keys
-    site_ids = sorted(k for k in summary.get("summary_stats", {}) if k != "__all__")
-    site_name_map = {}
-    for t in totals or []:
-        sid = t.site_id if hasattr(t, "site_id") else t.get("site_id")
-        sname = t.site_name if hasattr(t, "site_name") else t.get("site_name")
-        if sid is not None and sname and str(sname) != str(sid):
-            site_name_map[str(sid)] = sname
-    per_site_options = []
-    for sid in site_ids:
-        sname = site_name_map.get(str(sid))
-        label = f"{sname} ({sid})" if sname else str(sid)
-        per_site_options.append({"label": label, "value": sid})
-    per_site_by_name = sorted(per_site_options, key=lambda o: o["label"].lower())
-    aggregate_entry = [{"label": "All sites (aggregate)", "value": "__all__"}]
-    site_options_by_site = aggregate_entry + per_site_options
-    site_options_by_name = aggregate_entry + per_site_by_name
-
-    content.append(
-        dcc.Store(
-            id="match-quality-sort-options",
-            data={
-                "by_site": site_options_by_site,
-                "by_name": site_options_by_name,
-            },
-        )
-    )
-    content.append(
-        html.Div(
-            [
-                html.Label("Filter by site:", className="fw-bold me-2"),
-                dbc.RadioItems(
-                    id="match-quality-sort-order",
-                    options=[
-                        {"label": "By site ID", "value": "by_site"},
-                        {"label": "Alphabetical", "value": "by_name"},
-                    ],
-                    value="by_name",
-                    inline=True,
-                    className="d-inline-flex me-3",
-                ),
-                dbc.Select(
-                    id="match-quality-site-selector",
-                    options=site_options_by_name,
-                    value="__all__",
-                    style={
-                        "maxWidth": "350px",
-                        "display": "inline-block",
-                    },
-                ),
-            ],
-            className="mb-3 d-flex align-items-center",
-        )
-    )
-
-    # Store only the small summary data (not raw pixel rows)
-    store_data = {
-        "summary_stats": summary.get("summary_stats", {}),
-        "histograms": summary.get("histograms", {}),
-        "qq_quantiles": summary.get("qq_quantiles", {}),
-        "covariate_cols": covariate_cols,
-        "site_areas": site_areas,
-        "quality_warnings": quality_warnings,
+    stats = {
+        "n_treatment": int(pixels["treatment"].sum()),
+        "n_control": int((~pixels["treatment"]).sum()),
+        "n_sites": int(pixels["site_id"].nunique()) if "site_id" in pixels else 1,
     }
-    if balance_df is not None:
-        store_data["balance_rows"] = balance_df.to_dict("records")
-    content.append(dcc.Store(id="match-quality-data-store", data=store_data))
+    return {
+        "balance_rows": balance_rows,
+        "histograms": histograms,
+        "qq_quantiles": qq,
+        "summary_stats": stats,
+    }
 
-    # Render initial plots for all sites (aggregate)
-    content.append(
-        html.Div(
-            _build_plots_from_summary(store_data, site_filter=None),
-            id="match-quality-plots-container",
+
+def _build_selected_match_quality(
+    pixels, summary, selected_site_ids, selected_totals, selected_site_id=None
+):
+    """Build selected-site/group diagnostics from the matched pixel records."""
+    covariate_cols = summary.get("covariate_cols", [])
+    if "categorical_cols" not in summary:
+        return dbc.Alert(
+            "This task does not include the metadata needed to recompute "
+            "selection-specific match quality. Rerun it with the current "
+            "processing version.",
+            color="warning",
+        )
+    categorical_cols = summary.get("categorical_cols") or []
+    if isinstance(covariate_cols, str):
+        covariate_cols = [covariate_cols]
+    if isinstance(categorical_cols, str):
+        categorical_cols = [categorical_cols]
+
+    metrics = _calculate_match_quality_summary(pixels, covariate_cols, categorical_cols)
+    scope_key = str(selected_site_id) if selected_site_id else "__all__"
+    stored_site_stats = summary.get("summary_stats", {})
+    selected_stats = [
+        stored_site_stats.get(site_id, {}) for site_id in selected_site_ids
+    ]
+    stats = metrics["summary_stats"]
+    for field in ("n_treatment_total", "n_control_sampled", "n_control_pool"):
+        stats[field] = sum(site.get(field, 0) or 0 for site in selected_stats)
+
+    balance_df = pd.DataFrame(metrics["balance_rows"])
+    if not balance_df.empty:
+        balance_df["site_id"] = scope_key
+    warnings = _assess_match_quality(balance_df, selected_totals)
+    store_data = {
+        "summary_stats": {scope_key: stats},
+        "histograms": {scope_key: metrics["histograms"]},
+        "qq_quantiles": (
+            {scope_key: metrics["qq_quantiles"]} if metrics["qq_quantiles"] else {}
+        ),
+        "covariate_cols": covariate_cols,
+        "site_areas": {
+            str(total.site_id): total.area_ha or 0 for total in selected_totals
+        },
+        "quality_warnings": warnings,
+        "balance_rows": (balance_df.to_dict("records") if not balance_df.empty else []),
+    }
+    missing_sites = set(selected_site_ids) - set(pixels["site_id"].astype(str))
+    children = []
+    children.append(
+        html.P(
+            f"Based on matched pixels from {stats['n_sites']:,} selected site(s).",
+            className="text-muted",
         )
     )
-
-    # Download button
-    content.append(html.Hr(className="my-3"))
-    content.append(
-        dbc.Button(
-            "Download Match Covariates CSV",
-            id="download-match-covariates",
-            color="secondary",
-            size="sm",
+    if missing_sites:
+        children.append(
+            dbc.Alert(
+                f"Match data is available for {len(selected_site_ids) - len(missing_sites)} "
+                f"of {len(selected_site_ids)} selected sites; sites without matches "
+                "are not included in these plots.",
+                color="warning",
+            )
+        )
+    children.append(
+        _build_quality_warning_banner(
+            warnings,
+            scope_filter=str(selected_site_id) if selected_site_id else None,
         )
     )
-    content.append(dcc.Download(id="download-match-quality"))
-
-    return html.Div(content)
+    children.extend(_build_plots_from_summary(store_data, selected_site_id))
+    return html.Div(children)
 
 
 def _build_love_plot(balance_df, cov_df, site_filter=None):
@@ -941,7 +966,7 @@ def _build_love_plot(balance_df, cov_df, site_filter=None):
 
 def _build_plots_from_summary(store_data, site_filter=None):
     """Build stat boxes, Love plot, QQ plot, and histograms from the
-    pre-computed summary stored in ``store_data``.
+    summary data stored in ``store_data``.
 
     This is the memory-safe path: only small pre-aggregated data is
     used rather than the full pixel-level CSVs.

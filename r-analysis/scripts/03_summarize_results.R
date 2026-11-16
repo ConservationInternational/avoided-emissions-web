@@ -607,7 +607,7 @@ cov_data <- bind_rows(
     semi_join(complete_strata, by = c("id_numeric", "group")) %>%
     select(-id_numeric, -group)
 covariates <- intersect(COVARIATES, names(cov_data))
-write_csv(select(cov_data, -pscore), out_path("results_pixel_covariates.csv"))
+write_csv(cov_data, out_path("results_pixel_covariates.csv"))
 write_csv(
     select(cov_data, cell, site_id, treatment, match_group, match_weight, pscore),
     out_path("results_propensity_scores.csv")
@@ -649,7 +649,7 @@ scope_quality <- function(df) {
     list(histograms = hists, qq = qq)
 }
 mq <- list(summary_stats = list(), histograms = list(), qq_quantiles = list(),
-           covariate_cols = covariates)
+           covariate_cols = covariates, categorical_cols = CATEGORICAL)
 if (nrow(cov_data) > 0) {
     scopes <- c("__all__", unique(cov_data$site_id))
     for (scope in scopes) {

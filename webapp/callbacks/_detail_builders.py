@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 from collections import Counter
 
 import dash_bootstrap_components as dbc
@@ -49,6 +50,92 @@ def _display_site_columns(columns):
         else column
         for column in columns
     ]
+
+
+def _summary_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _selection_total_value(total, key):
+    if isinstance(total, dict):
+        return total.get(key)
+    return getattr(total, key, None)
+
+
+def _build_selection_summary(totals, replicate_summary, title):
+    totals = list(totals or [])
+    areas = [_summary_number(_selection_total_value(t, "area_ha")) for t in totals]
+    fractions = [
+        _summary_number(_selection_total_value(t, "sampled_fraction")) for t in totals
+    ]
+    total_area = sum(areas) if areas and all(x is not None for x in areas) else None
+    sampled_area = (
+        sum(area * fraction for area, fraction in zip(areas, fractions))
+        if areas
+        and all(x is not None for x in areas)
+        and all(x is not None for x in fractions)
+        else None
+    )
+    sampled_percent = (
+        sampled_area / total_area * 100
+        if sampled_area is not None and total_area and total_area > 0
+        else None
+    )
+
+    def metric_card(label, value, detail=None):
+        children = [
+            html.Div(label, className="text-muted small"),
+            html.Div(value, className="h5 mb-0"),
+        ]
+        if detail:
+            children.append(html.Small(detail, className="text-muted"))
+        return dbc.Col(children, md=4, xl=2)
+
+    def area_value(value):
+        return f"{value:,.1f} ha" if value is not None else "Unavailable"
+
+    metric_cards = [
+        metric_card("Sites", f"{len(totals):,}"),
+        metric_card("Total area", area_value(total_area)),
+        metric_card(
+            "Sampled area",
+            area_value(sampled_area),
+            f"{sampled_percent:.1f}% of total area"
+            if sampled_percent is not None
+            else None,
+        ),
+    ]
+    for metric, label, unit in (
+        ("emissions_avoided_mgco2e", "Avoided emissions", "MgCO₂e"),
+        ("forest_loss_avoided_ha", "Forest loss avoided", "ha"),
+    ):
+        mean = _summary_number(replicate_summary.get(metric))
+        lower = _summary_number(replicate_summary.get(f"{metric}_ci_lower"))
+        upper = _summary_number(replicate_summary.get(f"{metric}_ci_upper"))
+        detail = (
+            f"Matching-replicate range: {lower:,.1f} to {upper:,.1f} {unit}"
+            if lower is not None and upper is not None
+            else "Mean across matching replicates"
+        )
+        metric_cards.append(
+            metric_card(
+                label,
+                f"{mean:,.1f} {unit}" if mean is not None else "Unavailable",
+                detail if mean is not None else None,
+            )
+        )
+
+    return dbc.Card(
+        [
+            dbc.CardHeader(title),
+            dbc.CardBody(dbc.Row(metric_cards, className="g-3")),
+        ],
+        className="mb-3",
+    )
 
 
 def _format_preparation_value(key, value, preparation):
@@ -1119,7 +1206,9 @@ _FILE_DESCRIPTIONS = {
         "Site fragments that were not estimated, with status and reason"
     ),
     "results_match_quality_summary.json": "Match quality diagnostics per site",
-    "results_pixel_covariates.csv": "Covariate values for each matched pixel",
+    "results_pixel_covariates.csv": (
+        "Covariate values and propensity scores for each matched pixel"
+    ),
     "results_pixel_locations.csv": "Lon/lat coordinates for matched pixels (map)",
     "results_pixel_year_emissions.csv": "Per-pixel per-year forest change and emissions",
     "results_propensity_scores.csv": "Propensity scores for matched pixels (QQ plot)",
@@ -1414,6 +1503,15 @@ def _build_plots(
     subsampled_map = {
         ss.get("site_id") or ss.get("id_numeric"): ss
         for ss in _normalize_metadata_list(meta.get("subsampled_sites", []))
+    }
+    summary_totals = {
+        str(total.site_id): {
+            "site_id": str(total.site_id),
+            "site_name": getattr(total, "site_name", None),
+            "area_ha": getattr(total, "area_ha", None),
+            "sampled_fraction": getattr(total, "sampled_fraction", None),
+        }
+        for total in (totals or [])
     }
 
     has_ci = "treatment_defor_ha_ci_lower" in agg_df.columns
@@ -1725,6 +1823,9 @@ def _build_plots(
                 "large_task": True,
                 "sites": site_info_map,
                 "subsampled": {sid: sub for sid, sub in subsampled_map.items()},
+                "summary_totals": summary_totals,
+                "n_replicates": meta.get("n_replicates", 1),
+                "results_s3_uri": getattr(task, "results_s3_uri", None),
             }
         else:
             site_ids = sorted(df["site_id"].unique())
@@ -1746,6 +1847,9 @@ def _build_plots(
                 "results": df.to_dict("records"),
                 "sites": site_info_map,
                 "subsampled": {sid: sub for sid, sub in subsampled_map.items()},
+                "summary_totals": summary_totals,
+                "n_replicates": meta.get("n_replicates", 1),
+                "results_s3_uri": getattr(task, "results_s3_uri", None),
             }
 
         # Annotate dropdown labels for subsampled sites
@@ -1801,30 +1905,56 @@ def _build_plots(
         plots.append(
             html.Div(
                 [
-                    html.Label("Filter sites by source field:", htmlFor="site-filter-field"),
-                    dcc.Dropdown(
-                        id="site-filter-field",
-                        options=[{"label": field, "value": field} for field in fields],
-                        value=field,
-                        placeholder="No filter",
-                        clearable=True,
-                    ),
-                    html.Label("Value:", htmlFor="site-filter-value", className="mt-2"),
-                    dcc.Dropdown(
-                        id="site-filter-value",
-                        options=_site_filter_values(field, attributes),
-                        value=value,
-                        placeholder="Select a value",
-                        clearable=True,
-                        disabled=not bool(field),
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    html.Label(
+                                        "Filter sites by source field:",
+                                        htmlFor="site-filter-field",
+                                        className="form-label",
+                                    ),
+                                    dcc.Dropdown(
+                                        id="site-filter-field",
+                                        options=[
+                                            {"label": field, "value": field}
+                                            for field in fields
+                                        ],
+                                        value=field,
+                                        placeholder="No filter",
+                                        clearable=True,
+                                    ),
+                                ],
+                                md=6,
+                            ),
+                            dbc.Col(
+                                [
+                                    html.Label(
+                                        "Value:",
+                                        htmlFor="site-filter-value",
+                                        className="form-label",
+                                    ),
+                                    dcc.Dropdown(
+                                        id="site-filter-value",
+                                        options=_site_filter_values(field, attributes),
+                                        value=value,
+                                        placeholder="Select a value",
+                                        clearable=True,
+                                        disabled=not bool(field),
+                                    ),
+                                ],
+                                md=6,
+                            ),
+                        ],
+                        className="g-2",
                     ),
                     html.Small(
                         "Choose a group or an individual site; clear the selection to show all sites.",
-                        className="text-muted",
+                        className="form-text text-muted",
                     ),
                 ],
                 className="mb-3",
-                style={"maxWidth": "400px"},
+                style={"maxWidth": "700px"},
             )
         )
         plots.append(
@@ -1864,6 +1994,16 @@ def _build_plots(
                 style={"maxWidth": "400px"},
             )
         )
+        plots.append(
+            dbc.Button(
+                "Clear all filters and site selection",
+                id="clear-plot-selection-btn",
+                color="secondary",
+                outline=True,
+                size="sm",
+                className="mb-3",
+            )
+        )
         plots.append(dcc.Store(id="site-defor-store", data=store_data))
         if site_map is not None:
             plots.append(site_map)
@@ -1874,7 +2014,40 @@ def _build_plots(
         )
         plots.append(dcc.Store(id="site-map-clear", data=0))
 
-    plots.append(html.Div(aggregate_plots, id="task-results-plots"))
+    plots.append(
+        html.Div(
+            [
+                html.Div(aggregate_plots, id="task-results-graphs"),
+                html.Details(
+                    [
+                        html.Summary(
+                            "Match Quality",
+                            style={"cursor": "pointer", "fontWeight": "600"},
+                        ),
+                        dcc.Loading(
+                            html.Div(
+                                id="match-quality-plots-container",
+                                className="mt-3",
+                            ),
+                            type="default",
+                        ),
+                        html.Hr(className="my-3"),
+                        dbc.Button(
+                            "Download Match Covariates CSV",
+                            id="download-match-covariates",
+                            color="secondary",
+                            size="sm",
+                        ),
+                        dcc.Download(id="download-match-quality"),
+                    ],
+                    id="match-quality-section",
+                    open=False,
+                    className="mt-4",
+                ),
+            ],
+            id="task-results-plots",
+        )
+    )
     return html.Div(plots)
 
 

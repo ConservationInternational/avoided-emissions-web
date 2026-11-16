@@ -10,7 +10,8 @@ from botocore.response import StreamingBody
 from callbacks import _registration as registration
 from callbacks._detail_builders import _add_range_error_bars, _build_plots
 from callbacks._helpers import _render_share_links_list
-from dash import dcc
+from callbacks._match_quality import _calculate_match_quality_summary
+from dash import dcc, html
 from flask import Flask
 from layouts.task_detail import task_detail_layout
 from plot_selection import parse_plot_selection, plot_selection_query
@@ -216,13 +217,41 @@ def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years, monk
         )
     )
     monkeypatch.setattr(registration, "_authorize_task_access", lambda *_: True)
+    monkeypatch.setattr(
+        registration,
+        "get_filtered_portfolio_total",
+        lambda *_args, **_kwargs: {
+            "emissions_avoided_mgco2e": 10.0,
+            "forest_loss_avoided_ha": 1.0,
+        },
+    )
     site = callbacks["update_filtered_aggregate_plots"](
-        {"site": "site-1"}, {}, "task", None, {"results": rows}
+        {"site": "site-1"},
+        {},
+        "task",
+        None,
+        {
+            "results": rows,
+            "summary_totals": {
+                "site-1": {
+                    "site_id": "site-1",
+                    "area_ha": 100.0,
+                    "sampled_fraction": 0.5,
+                    "site_name": "Site 1",
+                }
+            },
+        },
     )
     for content in (aggregate, site):
-        children = (
-            content.children[-1].children if content is aggregate else content.children
-        )
+        if content is aggregate:
+            results_container = next(
+                child
+                for child in content.children
+                if getattr(child, "id", None) == "task-results-plots"
+            )
+            children = results_container.children[0].children
+        else:
+            children = content.children
         graphs = [item for item in children if isinstance(item, dcc.Graph)]
         assert len(graphs) == 4
         for graph in graphs:
@@ -282,7 +311,31 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
     )
     monkeypatch.setattr(registration, "get_task_site_results", lambda *_: rows)
     monkeypatch.setattr(registration, "_authorize_task_access", lambda *_: True)
-    store = {"large_task": large_task, "results": rows}
+    monkeypatch.setattr(
+        registration,
+        "get_filtered_portfolio_total",
+        lambda *_args, **_kwargs: {
+            "emissions_avoided_mgco2e": 10.0,
+            "emissions_avoided_mgco2e_ci_lower": 8.0,
+            "emissions_avoided_mgco2e_ci_upper": 12.0,
+            "forest_loss_avoided_ha": 2.0,
+            "forest_loss_avoided_ha_ci_lower": 1.0,
+            "forest_loss_avoided_ha_ci_upper": 3.0,
+        },
+    )
+    store = {
+        "large_task": large_task,
+        "results": rows,
+        "summary_totals": {
+            "site-1": {
+                "site_id": "site-1",
+                "area_ha": 100.0,
+                "sampled_fraction": 0.5,
+                "site_name": "Site 1",
+            }
+        },
+        "n_replicates": 2,
+    }
     content = callbacks["update_filtered_aggregate_plots"](
         {"site": "site-1"}, {}, "task-1", None, store
     )
@@ -307,7 +360,12 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
     aggregate = _build_plots(
         results=None, totals=[], is_large=True, agg_yearly=aggregate_rows
     )
-    aggregate_graphs = [item.figure for item in aggregate.children[-1].children]
+    results_container = next(
+        child
+        for child in aggregate.children
+        if getattr(child, "id", None) == "task-results-plots"
+    )
+    aggregate_graphs = [item.figure for item in results_container.children[0].children]
 
     for fig in aggregate_graphs[:3]:
         assert [trace.line.color for trace in fig.data[:2]] == [
@@ -405,8 +463,28 @@ def test_selection_controls_and_map_precede_the_single_results_plot():
     assert attributes.data == {"site-1": {"region": "North", "count": 0}}
     filtered_ids = children[component_ids.index("site-filtered-ids")]
     assert filtered_ids.data is None
+    filter_panel = next(
+        child
+        for child in children
+        if isinstance(child, html.Div)
+        and any(isinstance(item, dbc.Row) for item in child.children)
+    )
+    filter_row = filter_panel.children[0]
+    assert [column.children[1].id for column in filter_row.children] == [
+        "site-filter-field",
+        "site-filter-value",
+    ]
+    assert all(column.md == 6 for column in filter_row.children)
     assert component_ids.index("site-defor-selector") < component_ids.index("task-sites-map")
+    assert component_ids.index("clear-plot-selection-btn") < component_ids.index(
+        "task-sites-map"
+    )
     assert component_ids.index("task-sites-map") < component_ids.index("task-results-plots")
+    results_container = children[component_ids.index("task-results-plots")]
+    match_quality = results_container.children[1]
+    assert match_quality.id == "match-quality-section"
+    assert match_quality.open is False
+    assert match_quality.children[0].children == "Match Quality"
     assert "site-map-selection" in component_ids
 
 
@@ -481,7 +559,13 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
         )
     )
     totals = [
-        SimpleNamespace(site_id=site, display_site_id=site, site_name=site)
+        SimpleNamespace(
+            site_id=site,
+            display_site_id=site,
+            site_name=site,
+            area_ha=100 if site == "a" else 200,
+            sampled_fraction=0.25 if site == "a" else 0.5,
+        )
         for site in ("a", "b")
     ]
     task = SimpleNamespace(
@@ -513,6 +597,18 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
             "forest_loss_avoided_ha": 2,
         }],
     )
+    portfolio_total = mocker.patch.object(
+        registration,
+        "get_filtered_portfolio_total",
+        return_value={
+            "emissions_avoided_mgco2e": 12,
+            "emissions_avoided_mgco2e_ci_lower": 10,
+            "emissions_avoided_mgco2e_ci_upper": 14,
+            "forest_loss_avoided_ha": 3,
+            "forest_loss_avoided_ha_ci_lower": 2,
+            "forest_loss_avoided_ha_ci_upper": 4,
+        },
+    )
     content = callbacks["update_filtered_aggregate_plots"](
         {"field": "region", "value": '"North"'},
         {"a": {"region": "North"}, "b": {"region": "South"}}, "task", None, {}
@@ -520,8 +616,16 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
     aggregate.assert_called_once_with(
         "task", {"a"}, 2, results_s3_uri="s3://bucket/output"
     )
+    portfolio_total.assert_called_once_with(
+        "task", {"a"}, 2, results_s3_uri="s3://bucket/output"
+    )
     assert "region = North" in content[0].children
-    graphs = content[1:]
+    assert isinstance(content[1], dbc.Card)
+    summary_columns = content[1].children[1].children.children
+    assert summary_columns[1].children[1].children == "100.0 ha"
+    assert summary_columns[2].children[1].children == "25.0 ha"
+    assert summary_columns[2].children[2].children == "25.0% of total area"
+    graphs = content[2:]
     assert len(graphs) == 4
     assert list(graphs[0].figure.data[0].y) == [1]
     assert "1 sites" in graphs[0].figure.layout.title.text
@@ -616,6 +720,104 @@ def test_filtered_portfolio_handles_sites_spanning_stream_chunks(mocker):
 
 
 @pytest.mark.unit
+def test_filtered_portfolio_totals_sum_sites_within_each_replicate(mocker):
+    rows = []
+    for site, emissions, forest_loss in (
+        ("a", [1, 9], [2, 10]),
+        ("b", [9, 1], [8, 0]),
+        ("c", [100, 100], [100, 100]),
+    ):
+        for replicate, (emissions_value, forest_value) in enumerate(
+            zip(emissions, forest_loss), 1
+        ):
+            rows.append(
+                {
+                    "site_id": site,
+                    "replicate": replicate,
+                    "extrapolated_emissions_avoided_mgco2e": emissions_value,
+                    "extrapolated_forest_loss_avoided_ha": forest_value,
+                }
+            )
+    content = pd.DataFrame(rows).to_csv(index=False).encode()
+    s3 = mocker.MagicMock()
+    s3.get_object.return_value = {
+        "Body": StreamingBody(io.BytesIO(content), len(content))
+    }
+    mocker.patch.object(analysis_task, "get_s3_client", return_value=s3)
+
+    summary = analysis_task.get_filtered_portfolio_total(
+        "task", {"a", "b"}, 2, results_s3_uri="s3://bucket/path"
+    )
+
+    assert summary == {
+        "emissions_avoided_mgco2e": 10,
+        "emissions_avoided_mgco2e_ci_lower": 10,
+        "emissions_avoided_mgco2e_ci_upper": 10,
+        "forest_loss_avoided_ha": 10,
+        "forest_loss_avoided_ha_ci_lower": 10,
+        "forest_loss_avoided_ha_ci_upper": 10,
+    }
+    s3.get_object.assert_called_once_with(
+        Bucket="bucket", Key="path/results_by_site_replicate_total.csv"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("include_pscore", [False, True])
+def test_filtered_match_quality_pixels_loads_selected_sites_and_scores(
+    mocker, include_pscore
+):
+    rows = [
+        {
+            "cell": 1,
+            "site_id": "site-a",
+            "treatment": True,
+            "match_group": "g1",
+            "match_weight": 1.0,
+            "pscore": 0.2,
+            "elevation": 10,
+        },
+        {
+            "cell": 2,
+            "site_id": "site-b",
+            "treatment": False,
+            "match_group": "g2",
+            "match_weight": 0.5,
+            "pscore": 0.8,
+            "elevation": 20,
+        },
+    ]
+    pixels_csv = (
+        pd.DataFrame(rows)
+        .drop(columns=[] if include_pscore else ["pscore"])
+        .to_csv(index=False)
+        .encode()
+    )
+    scores_csv = (
+        pd.DataFrame(rows)[
+            ["cell", "site_id", "treatment", "match_group", "match_weight", "pscore"]
+        ]
+        .to_csv(index=False)
+        .encode()
+    )
+    bodies = [
+        {"Body": io.BytesIO(pixels_csv)},
+        {"Body": io.BytesIO(scores_csv)},
+    ]
+    s3 = mocker.MagicMock()
+    s3.get_object.side_effect = bodies
+    mocker.patch.object(analysis_task, "get_s3_client", return_value=s3)
+
+    pixels = analysis_task.get_filtered_match_quality_pixels(
+        "task", {"site-a"}, results_s3_uri="s3://bucket/path"
+    )
+
+    assert pixels["site_id"].tolist() == ["site-a"]
+    assert pixels["pscore"].tolist() == [0.2]
+    assert s3.get_object.call_count == (1 if include_pscore else 2)
+
+
+@pytest.mark.unit
 def test_source_attributes_preserve_types_and_missing_values():
     from services.site_upload import _source_attributes_json
 
@@ -627,7 +829,7 @@ def test_source_attributes_preserve_types_and_missing_values():
 
 
 @pytest.mark.unit
-def test_map_site_selection_clears_group_and_selects_site(monkeypatch):
+def test_site_selection_preserves_group_filter(monkeypatch):
     callbacks = {}
 
     def callback(*args, **kwargs):
@@ -647,28 +849,69 @@ def test_map_site_selection_clears_group_and_selects_site(monkeypatch):
         registration, "callback_context", SimpleNamespace(triggered_id="site-map-selection")
     )
     group = {"field": "region", "value": '"North"'}
-    result = callbacks["update_plot_selection"]("region", '"North"', None, "site-1", 0, group)
-    assert result[:4] == ({"site": "site-1"}, None, None, "site-1")
+    result = callbacks["update_plot_selection"](
+        "region", '"North"', None, "site-1", 0, 0, group
+    )
+    assert result[:4] == (
+        {"field": "region", "value": '"North"', "site": "site-1"},
+        registration.no_update,
+        registration.no_update,
+        "site-1",
+    )
     with pytest.raises(registration.PreventUpdate):
-        callbacks["update_plot_selection"]("region", '"North"', None, "", 0, group)
+        callbacks["update_plot_selection"](
+            "region", '"North"', None, "", 0, 0, group
+        )
+
+    monkeypatch.setattr(
+        registration, "callback_context", SimpleNamespace(triggered_id="site-defor-selector")
+    )
+    result = callbacks["update_plot_selection"](
+        "region", '"North"', "site-2", "", 0, 0, group
+    )
+    assert result[0] == {"field": "region", "value": '"North"', "site": "site-2"}
+    assert result[1:4] == (
+        registration.no_update,
+        registration.no_update,
+        registration.no_update,
+    )
 
     monkeypatch.setattr(
         registration, "callback_context", SimpleNamespace(triggered_id="site-filter-value")
     )
-    result = callbacks["update_plot_selection"]("region", '"North"', "site-1", "", 0, {"site": "site-1"})
+    result = callbacks["update_plot_selection"](
+        "region", '"North"', "site-1", "", 0, 0,
+        {"field": "region", "value": '"South"', "site": "site-1"},
+    )
     assert result[0] == {"field": "region", "value": '"North"'}
     assert result[3] is None
     monkeypatch.setattr(
         registration, "callback_context", SimpleNamespace(triggered_id="site-filter-field")
     )
     with pytest.raises(registration.PreventUpdate):
-        callbacks["update_plot_selection"]("region", '"North"', None, "", 0, group)
+        callbacks["update_plot_selection"](
+            "region", '"North"', None, "", 0, 0, group
+        )
     monkeypatch.setattr(
         registration, "callback_context", SimpleNamespace(triggered_id="site-map-clear")
     )
-    assert callbacks["update_plot_selection"]("region", '"North"', None, "", 1, group) == (
-        {}, None, None, None, ""
+    assert callbacks["update_plot_selection"](
+        "region", '"North"', None, "", 1, 0, group
+    ) == (
+        group,
+        registration.no_update,
+        registration.no_update,
+        None,
+        "",
     )
+    monkeypatch.setattr(
+        registration,
+        "callback_context",
+        SimpleNamespace(triggered_id="clear-plot-selection-btn"),
+    )
+    assert callbacks["update_plot_selection"](
+        "region", '"North"', "site-1", "site-1", 0, 1, group
+    ) == ({}, None, None, None, "")
 
 
 @pytest.mark.unit
@@ -678,6 +921,113 @@ def test_task_detail_has_no_separate_map_tab():
 
     assert "tab-plots" in {tab.tab_id for tab in tabs.children}
     assert "tab-map" not in {tab.tab_id for tab in tabs.children}
+    assert "tab-match-quality" not in {tab.tab_id for tab in tabs.children}
+
+
+@pytest.mark.unit
+def test_selected_match_quality_summary_uses_pooled_weighted_pixel_data():
+    pixels = pd.DataFrame(
+        {
+            "site_id": ["a", "a", "b", "b"],
+            "treatment": [True, False, True, False],
+            "match_weight": [1.0, 0.5, 1.0, 1.5],
+            "pscore": [0.2, 0.3, 0.8, 0.7],
+            "forest": [1, 0, 1, 0],
+            "elevation": [10.0, 12.0, 20.0, 25.0],
+        }
+    )
+
+    summary = _calculate_match_quality_summary(
+        pixels,
+        ["forest", "elevation"],
+        ["forest"],
+    )
+
+    balance = {row["covariate"]: row for row in summary["balance_rows"]}
+    assert balance["forest=0"]["smd"] == pytest.approx(-1.0)
+    assert balance["forest=1"]["smd"] == pytest.approx(1.0)
+    assert balance["elevation"]["mean_treatment"] == pytest.approx(15.0)
+    assert summary["summary_stats"] == {
+        "n_treatment": 2,
+        "n_control": 2,
+        "n_sites": 2,
+    }
+    assert len(summary["histograms"]["elevation"]["bin_edges"]) == 41
+    assert len(summary["qq_quantiles"]["treatment_values"]) == 500
+
+
+@pytest.mark.unit
+def test_match_quality_callback_uses_current_group_and_site_selection(mocker):
+    callbacks = {}
+
+    def callback(*args, **kwargs):
+        def capture(function):
+            callbacks[function.__name__] = function
+            return function
+
+        return capture
+
+    registration.register_callbacks(
+        SimpleNamespace(
+            callback=callback, clientside_callback=lambda *args, **kwargs: None
+        )
+    )
+    totals = [
+        SimpleNamespace(
+            site_id=site_id,
+            area_ha=100,
+            n_sample_pixels=1,
+            n_eligible_pixels=1,
+            sampled_fraction=1,
+        )
+        for site_id in ("a", "b")
+    ]
+    task = SimpleNamespace(status="succeeded", results_s3_uri="s3://bucket/output")
+    mocker.patch.object(registration, "_authorize_task_access", return_value=True)
+    mocker.patch.object(
+        registration,
+        "get_task_detail",
+        return_value={"task": task, "totals": totals},
+    )
+    mocker.patch.object(
+        registration,
+        "download_results_csv",
+        return_value=json.dumps({"covariate_cols": [], "categorical_cols": []}),
+    )
+    mocker.patch.object(
+        registration,
+        "get_filtered_match_quality_pixels",
+        return_value=pd.DataFrame(),
+    )
+    build = mocker.patch.object(
+        registration,
+        "_build_selected_match_quality",
+        return_value=html.Div("plots"),
+    )
+
+    result = callbacks["update_match_quality_plots"](
+        True,
+        {"field": "region", "value": '"North"', "site": "a"},
+        {"a": {"region": "North"}, "b": {"region": "South"}},
+        "task",
+        None,
+    )
+
+    assert result.children == "plots"
+    assert build.call_args.args[2] == {"a"}
+    assert [total.site_id for total in build.call_args.args[3]] == ["a"]
+    assert build.call_args.args[4] == "a"
+
+    callbacks["update_match_quality_plots"](
+        True,
+        {"field": "region", "value": '"North"'},
+        {"a": {"region": "North"}, "b": {"region": "South"}},
+        "task",
+        None,
+    )
+    assert build.call_args.args[2] == {"a"}
+    assert [total.site_id for total in build.call_args.args[3]] == ["a"]
+    assert build.call_args.args[4] is None
 
 
 @pytest.mark.unit
@@ -687,6 +1037,11 @@ def test_task_detail_has_no_separate_map_tab():
         {},
         {"site": "canonical-site / 1"},
         {"field": "country / region", "value": '"Côte & Islands"'},
+        {
+            "site": "canonical-site / 1",
+            "field": "country / region",
+            "value": '"Côte & Islands"',
+        },
         {"field": "active", "value": "false"},
         {"field": "class", "value": "null"},
     ],
@@ -704,7 +1059,7 @@ def test_plot_selection_query_round_trip_and_default_tab(selection):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "query", ["?site=a&field=x&value=1", "?field=x", "?field=x&value=bad", "?site=a&site=b"]
+    "query", ["?site=a&field=x", "?field=x", "?field=x&value=bad", "?site=a&site=b"]
 )
 def test_invalid_plot_selection_urls_are_reported(query):
     assert parse_plot_selection(query).get("error")

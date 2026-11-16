@@ -11,22 +11,21 @@ def parse_plot_selection(search):
     site = params.get("site", [""])[0]
     field = params.get("field", [""])[0]
     has_value = "value" in params
-    if site and (field or has_value):
-        return {"error": "Choose either a site or a group in the plot URL."}
-    if site:
-        return {"site": site}
     if field and has_value:
         try:
             value = json.loads(params["value"][0])
         except (ValueError, TypeError):
             return {"error": "The group value in the plot URL is invalid."}
-        return {
+        selection = {
             "field": field,
             "value": json.dumps(value, sort_keys=True, ensure_ascii=False),
         }
+        if site:
+            selection["site"] = site
+        return selection
     if field or has_value:
         return {"error": "The plot URL needs both a group field and value."}
-    return {}
+    return {"site": site} if site else {}
 
 
 def plot_selection_query(selection, active_tab):
@@ -36,7 +35,7 @@ def plot_selection_query(selection, active_tab):
     params = {"tab": "plots"}
     if selection.get("site"):
         params["site"] = selection["site"]
-    elif selection.get("field") and selection.get("value") is not None:
+    if selection.get("field") and selection.get("value") is not None:
         params["field"] = selection["field"]
         params["value"] = selection["value"]
     return "?" + urlencode(params)
