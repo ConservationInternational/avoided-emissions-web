@@ -31,7 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install R packages
 # rrelaxiv provides the RELAX-IV solver for optmatch (2-5x faster than
 # the default LEMON solver). Not on CRAN due to license restrictions.
-RUN Rscript -e "install.packages('remotes'); remotes::install_github('josherrickson/rrelaxiv')" \
+# Install via Git rather than GitHub's API, pinned to keep image builds reproducible.
+RUN Rscript -e "install.packages('remotes'); remotes::install_git('https://github.com/josherrickson/rrelaxiv.git', ref = '34eaf1206f068c1bfe05fb99be13af46348f0b40')" \
     && rm -rf /tmp/downloaded_packages
 
 RUN install2.r --error --skipinstalled --ncpus -1 \
