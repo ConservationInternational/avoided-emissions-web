@@ -137,6 +137,38 @@ test_that("summary uses the same complete strata for estimates and pixel downloa
     expect_equal(detail_totals$loss, by_year$sample_treatment_defor_ha)
 })
 
+test_that("summary preserves cell IDs across integer and integer64 match files", {
+    data_dir <- tempfile("ae_cell_types_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)
+    out <- file.path(data_dir, "output")
+    cells <- list(1:2, bit64::as.integer64(c("2316608818", "4798800599")))
+    for (id in 1:2) {
+        m <- tibble(
+            cell = cells[[id]], treatment = c(TRUE, FALSE),
+            group = paste0("g", id), match_group = paste0("g", id, "_1"),
+            match_weight = 1, sampling_weight = 10,
+            area_ha = 100, total_biomass_2000 = 100, fc_2000 = 100,
+            x1 = 0, pscore = 0.5, n_eligible = 10, n_sampled = 1,
+            n_control_pool = 100, n_control_sampled = 10,
+            id_numeric = id, replicate = 1L, n_forest_pixels = 30L
+        ) %>% bind_cols(forest_cover(2, 1))
+        batch <- paste0("cells", id)
+        write_parquet(m, file.path(out, "matches", paste0("mb_", batch, ".parquet")))
+        write_json(list(batch = batch, matches_file = paste0("mb_", batch, ".parquet"),
+                        failures = list(), diagnostics = list(), na_exclusions = list()),
+                   file.path(out, "matches", paste0("mb_", batch, ".json")), auto_unbox = TRUE)
+    }
+    run_script("03_summarize_results.R", config_path)
+    expected_cells <- c(1, 2, 2316608818, 4798800599)
+    for (name in c("pixel_year_emissions", "pixel_covariates", "propensity_scores", "pixel_locations")) {
+        pixels <- read.csv(file.path(out, paste0("results_", name, ".csv")))
+        expect_equal(sort(unique(pixels$cell)), expected_cells, info = name)
+    }
+    totals <- read.csv(file.path(out, "results_by_site_total.csv"))
+    expect_equal(totals$site_id, "A")
+    expect_equal(totals$n_sample_pixels, 2)
+})
+
 test_that("summary reports no estimates when all fragments fail", {
     data_dir <- tempfile("ae_empty_")
     config_path <- make_fixture(data_dir, "optimal", n_replicates = 1)

@@ -194,6 +194,10 @@ The `group_diagnostics` attribute lists, per stratum, the treatment and
 control counts, the number matched, the distance used, and any separation
 or matching error.
 
+When reading match files, step 3 normalizes `cell` to R numeric (double) so
+integer and 64-bit integer inputs can be combined without truncating cell IDs
+above the 32-bit integer limit.
+
 ---
 
 ## Final Result Files (Step 3)

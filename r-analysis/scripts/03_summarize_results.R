@@ -119,7 +119,8 @@ invalid_sites <- list()
 for (path in batch_paths) {
     batch <- read_parquet(path) %>%
         filter(id_numeric %in% matched_ids) %>%
-        as_tibble()
+        as_tibble() %>%
+        mutate(cell = as.numeric(cell))
     for (m in split(batch, list(batch$id_numeric, batch$replicate), drop = TRUE)) {
         id <- m$id_numeric[1]
         k <- m$replicate[1]
