@@ -449,6 +449,36 @@ def test_preparation_summary_shows_audit_and_download_links():
     assert f"/api/tasks/{USER_ID}/preparation/sites" in links
 
 
+def test_preparation_summary_formats_counts_and_area_shares():
+    task = SimpleNamespace(
+        id=USER_ID,
+        config={},
+        extra_metadata={
+            "preparation": {
+                "fragments": 1_399,
+                "input_area_ha": 100_000.6,
+                "retained_area_ha": 75_000.4,
+                "fragment_area_ha": 75_000.4,
+                "covered_area_ha": 50_000.6,
+                "uncovered_area_ha": 24_999.8,
+                "min_site_area_ha": 100,
+            }
+        },
+    )
+    visible_text = [
+        item
+        for item in _walk(_build_preparation_summary(task))
+        if isinstance(item, str)
+    ]
+
+    assert "1,399" in visible_text
+    assert "100% (100,001 ha)" in visible_text
+    assert "75% (75,000 ha)" in visible_text
+    assert "67% (50,001 ha)" in visible_text
+    assert "33% (25,000 ha)" in visible_text
+    assert "100 ha" in visible_text
+
+
 def test_results_keep_canonical_row_keys_with_duplicate_display_labels():
     totals = [
         SimpleNamespace(

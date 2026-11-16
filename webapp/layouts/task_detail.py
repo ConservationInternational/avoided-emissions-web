@@ -276,22 +276,6 @@ def task_detail_layout(user, task_id, shared_token=None):
                 ],
             ),
             dbc.Tab(
-                label="Map",
-                tab_id="tab-map",
-                children=[
-                    html.Div(
-                        dbc.Card(
-                            dbc.CardBody(
-                                html.Div(id="task-map"),
-                                className="p-0",
-                            ),
-                            className="ae-section-card ae-map-card",
-                        ),
-                        className="p-3",
-                    ),
-                ],
-            ),
-            dbc.Tab(
                 label="Raw Results",
                 tab_id="tab-raw-results",
                 children=[

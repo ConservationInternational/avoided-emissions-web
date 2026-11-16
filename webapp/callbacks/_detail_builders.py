@@ -45,6 +45,44 @@ def _display_site_columns(columns):
     ]
 
 
+def _format_preparation_value(key, value, preparation):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return (
+            json.dumps(value, ensure_ascii=False, sort_keys=True)
+            if isinstance(value, (dict, list))
+            else str(value)
+        )
+
+    formatted = f"{value:,.0f}"
+    if not key.endswith("_area_ha"):
+        return formatted
+
+    percentage_base = {
+        "input_area_ha": None,
+        "retained_area_ha": "input_area_ha",
+        "fragment_area_ha": "retained_area_ha",
+        "covered_area_ha": "fragment_area_ha",
+        "uncovered_area_ha": "fragment_area_ha",
+        "reassigned_area_ha": "fragment_area_ha",
+    }.get(key, "")
+    if percentage_base is None:
+        percentage = "100%"
+    elif percentage_base:
+        denominator = preparation.get(percentage_base)
+        percentage = (
+            f"{value / denominator:.0%}"
+            if isinstance(denominator, (int, float))
+            and not isinstance(denominator, bool)
+            and denominator > 0
+            else None
+        )
+    else:
+        percentage = None
+
+    area = f"{formatted} ha"
+    return f"{percentage} ({area})" if percentage is not None else area
+
+
 def _build_preparation_summary(task):
     """Render the stored preparation audit without recomputing any geometry."""
     preparation = (task.extra_metadata or {}).get("preparation")
@@ -57,11 +95,12 @@ def _build_preparation_summary(task):
         fields = [
             html.Div(
                 [
-                    html.Dt(key.replace("_", " ").capitalize(), className="col-sm-5"),
+                    html.Dt(
+                        key.removesuffix("_ha").replace("_", " ").capitalize(),
+                        className="col-sm-5",
+                    ),
                     html.Dd(
-                        json.dumps(value, ensure_ascii=False, sort_keys=True)
-                        if isinstance(value, (dict, list))
-                        else str(value),
+                        _format_preparation_value(key, value, preparation),
                         className="col-sm-7 text-break",
                     ),
                 ],
@@ -1245,6 +1284,7 @@ def _build_plots(
     quality_warnings=None,
     agg_yearly=None,
     is_large=False,
+    site_map=None,
 ):
     """Build interactive plots for task results.
 
@@ -1392,6 +1432,7 @@ def _build_plots(
                 "Annual Deforestation: Project Sites vs Matched Controls" + title_suffix
             ),
             xaxis_title="Year",
+            xaxis={"tickformat": "d", "dtick": 1},
             yaxis_title="Deforestation (ha)",
             legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
@@ -1480,6 +1521,7 @@ def _build_plots(
                 + title_suffix
             ),
             xaxis_title="Year",
+            xaxis={"tickformat": "d", "dtick": 1},
             yaxis_title="Cumulative Deforestation (ha)",
             legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
@@ -1547,6 +1589,7 @@ def _build_plots(
                 title=f"{title} (all {n_sites_display:,} sites)",
                 labels={metric: label, "year": "Year"},
             )
+        fig.update_xaxes(tickformat="d", dtick=1)
         if has_ci:
             _add_range_error_bars(
                 fig,
@@ -1664,6 +1707,7 @@ def _build_plots(
 
         # Annotate dropdown labels for subsampled sites
         site_options = []
+        site_options_by_name = []
         display_id_counts = Counter(display_id_map.values())
         for sid in site_ids:
             sname = (
@@ -1673,17 +1717,23 @@ def _build_plots(
             )
             display_id = display_id_map.get(str(sid), str(sid))
             if sname and str(sname) != display_id:
-                label = f"{sname} ({display_id})"
+                label = f"{display_id} ({sname})"
+                name_label = f"{sname} ({display_id})"
             else:
-                label = display_id
+                label = name_label = display_id
+            suffix = ""
             # Duplicate labels remain separate selectable canonical features.
             if display_id_counts[display_id] > 1:
-                label += f" [{str(sid)[:8]}]"
+                suffix += f" [{str(sid)[:8]}]"
             if sid in subsampled_map:
                 pct = subsampled_map[sid].get("sampled_percent", 100)
-                label += f" (subsampled {pct:.0f}%)"
-            site_options.append({"label": label, "value": sid})
-        site_options_by_name = sorted(site_options, key=lambda o: o["label"].lower())
+                suffix += f" (subsampled {pct:.0f}%)"
+            site_options.append({"label": label + suffix, "value": sid})
+            site_options_by_name.append({"label": name_label + suffix, "value": sid})
+        site_options.sort(
+            key=lambda o: display_id_map.get(str(o["value"]), str(o["value"])).lower()
+        )
+        site_options_by_name.sort(key=lambda o: o["label"].lower())
 
         plots.append(html.Hr(className="my-4"))
         plots.append(html.H5("Site-Level Deforestation Detail", className="mt-3"))
@@ -1701,6 +1751,16 @@ def _build_plots(
                     "Select a site to view its deforestation trajectory "
                     "compared to matched controls, with intervention dates marked.",
                     className="text-muted",
+                )
+            )
+        if site_map is not None:
+            plots.append(site_map)
+            plots.append(
+                dcc.Input(
+                    id="site-map-selection",
+                    type="text",
+                    value="",
+                    style={"display": "none"},
                 )
             )
         plots.append(

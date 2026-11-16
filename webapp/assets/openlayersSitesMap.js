@@ -171,6 +171,36 @@
         }
     }
 
+    function selectPlotSiteFromMap(mapEl, siteId) {
+        if (mapEl.id !== "task-sites-map") {
+            return;
+        }
+        const input = document.getElementById("site-map-selection");
+        if (!input) {
+            return;
+        }
+        if (
+            window.dash_clientside &&
+            typeof window.dash_clientside.set_props === "function"
+        ) {
+            window.dash_clientside.set_props("site-map-selection", {
+                value: siteId,
+            });
+            return;
+        }
+        const setter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype,
+            "value",
+        )?.set;
+        if (setter) {
+            setter.call(input, siteId);
+        } else {
+            input.value = siteId;
+        }
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
     function bindMapTableSync(mapEl, map, config) {
         if (!config || !config.mapId || !config.tableId || !config.boundFlag) {
             return;
@@ -193,6 +223,7 @@
                 return;
             }
             setSelectedSite(mapEl, siteId);
+            selectPlotSiteFromMap(mapEl, siteId);
             focusTableRow(config.tableId, siteId, mapEl);
             zoomToFeature(mapEl, map, siteId);
         });

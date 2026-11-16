@@ -1615,7 +1615,6 @@ def register_callbacks(app, limiter=None):
             Output("task-results-content", "children"),
             Output("task-plots", "children"),
             Output("task-match-quality", "children"),
-            Output("task-map", "children"),
             Output("task-raw-results", "children"),
             Output("quality-warning-banner", "children"),
             Output("detail-refresh-interval", "disabled"),
@@ -1645,7 +1644,6 @@ def register_callbacks(app, limiter=None):
                 None,
                 None,
                 None,
-                None,
                 True,
                 {"display": "none"},
             )
@@ -1656,7 +1654,6 @@ def register_callbacks(app, limiter=None):
         if not detail:
             return (
                 "Task Not Found",
-                None,
                 None,
                 None,
                 None,
@@ -1702,8 +1699,7 @@ def register_callbacks(app, limiter=None):
 
         # -----------------------------------------------------------
         # Lazy tab rendering: only build content for the *active* tab.
-        # This dramatically reduces peak memory because heavy tabs
-        # (plots, match quality, map) are only built when viewed.
+        # This keeps the heavy plots/map and match quality tabs lazy.
         # Inactive tabs return ``no_update`` so Dash keeps whatever
         # was last rendered (empty on first visit, populated once the
         # user clicks the tab).
@@ -1712,7 +1708,6 @@ def register_callbacks(app, limiter=None):
         results_content = no_update
         plots = no_update
         match_quality = no_update
-        map_content = no_update
         raw_results = no_update
 
         if active_tab == "tab-overview":
@@ -1730,8 +1725,17 @@ def register_callbacks(app, limiter=None):
                 n_sites=task.n_sites or 0,
             )
         elif active_tab == "tab-plots":
-            plots = (
-                _build_plots(
+            if results or agg_yearly:
+                task_cfg = task.config or {}
+                site_map = _build_map(
+                    detail.get("sites_geojson"),
+                    totals,
+                    covariates=task.covariates,
+                    task_id=task_id,
+                    sites=sites,
+                    resolution_m=task_cfg.get("resolution_m"),
+                )
+                plots = _build_plots(
                     results,
                     totals,
                     sites,
@@ -1739,22 +1743,12 @@ def register_callbacks(app, limiter=None):
                     quality_warnings=quality_warnings,
                     agg_yearly=agg_yearly,
                     is_large=is_large,
+                    site_map=site_map,
                 )
-                if (results or agg_yearly)
-                else html.P("Results not yet available.", className="text-muted")
-            )
+            else:
+                plots = html.P("Results not yet available.", className="text-muted")
         elif active_tab == "tab-match-quality":
             match_quality = _build_match_quality(task_id, task, sites, totals)
-        elif active_tab == "tab-map":
-            task_cfg = task.config or {}
-            map_content = _build_map(
-                detail.get("sites_geojson"),
-                totals,
-                covariates=task.covariates,
-                task_id=task_id,
-                sites=sites,
-                resolution_m=task_cfg.get("resolution_m"),
-            )
         elif active_tab == "tab-raw-results":
             raw_results = _build_raw_results(task)
 
@@ -1765,7 +1759,6 @@ def register_callbacks(app, limiter=None):
             results_content,
             plots,
             match_quality,
-            map_content,
             raw_results,
             quality_banner,
             disable_interval,
@@ -2119,24 +2112,7 @@ def register_callbacks(app, limiter=None):
         prevent_initial_call=True,
     )
 
-    # -- Sort-order radio for map site dropdown ------------------------------
-
-    app.clientside_callback(
-        """
-        function(sortOrder, storedOptions) {
-            if (!storedOptions || !storedOptions[sortOrder]) {
-                return window.dash_clientside.no_update;
-            }
-            return storedOptions[sortOrder];
-        }
-        """,
-        Output("map-site-selector", "options"),
-        Input("map-site-sort-order", "value"),
-        State("map-site-sort-options", "data"),
-        prevent_initial_call=True,
-    )
-
-    # -- Map site selector: zoom to site and filter pixels -------------------
+    # -- Site selector: zoom the map to the selected site --------------------
 
     app.clientside_callback(
         """
@@ -2152,10 +2128,20 @@ def register_callbacks(app, limiter=None):
             return window.dash_clientside.no_update;
         }
         """,
-        Output("map-site-selector", "id"),
-        Input("map-site-selector", "value"),
+        Output("site-defor-selector", "id"),
+        Input("site-defor-selector", "value"),
         prevent_initial_call=True,
     )
+
+    @app.callback(
+        Output("site-defor-selector", "value"),
+        Input("site-map-selection", "value"),
+        prevent_initial_call=True,
+    )
+    def select_site_from_map(site_id):
+        if not site_id:
+            raise PreventUpdate
+        return site_id
 
     # -- Resume task (detail page) -------------------------------------------
 
@@ -2980,6 +2966,7 @@ def register_callbacks(app, limiter=None):
         fig_defor.update_layout(
             title=f"Annual Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
+            xaxis={"tickformat": "d", "dtick": 1},
             yaxis_title="Deforestation (ha)",
             legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
@@ -3068,6 +3055,7 @@ def register_callbacks(app, limiter=None):
         fig_cum.update_layout(
             title=f"Cumulative Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
+            xaxis={"tickformat": "d", "dtick": 1},
             yaxis_title="Cumulative Deforestation (ha)",
             legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
@@ -3150,6 +3138,7 @@ def register_callbacks(app, limiter=None):
             fig_em.update_layout(
                 title=f"Annual Emissions: {site_name}{sub_note}",
                 xaxis_title="Year",
+                xaxis={"tickformat": "d", "dtick": 1},
                 yaxis_title="Emissions (MgCOΓéée)",
                 legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
                 hovermode="x unified",
@@ -3205,6 +3194,7 @@ def register_callbacks(app, limiter=None):
         fig_avoided.update_layout(
             title=f"Forest Loss Avoided by Year: {site_name}{sub_note}",
             xaxis_title="Year",
+            xaxis={"tickformat": "d", "dtick": 1},
             yaxis_title="Forest Loss Avoided (ha)",
             hovermode="x unified",
         )

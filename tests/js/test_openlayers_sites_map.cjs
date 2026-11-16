@@ -6,10 +6,12 @@ const vm = require("node:vm");
 
 function harness(fetch) {
     const controls = [];
+    const elements = {};
     const document = {
         readyState: "loading",
         addEventListener() {},
         removeEventListener() {},
+        getElementById: id => elements[id] || null,
         querySelectorAll: () => [],
         createElement: () => ({
             style: {},
@@ -35,11 +37,11 @@ function harness(fetch) {
         path.join(__dirname, "../../webapp/assets/openlayersSitesMap.js"), "utf8"
     ).replace(/\}\)\(\);\s*$/, `
         globalThis.subject = { makeMvtTileLoadFunction, zoomToFeature, renderElement,
-            renderAll, mountedMaps, focusTableRow, featureStyle };
+            renderAll, mountedMaps, focusTableRow, featureStyle, selectPlotSiteFromMap };
     })();`);
     context.window.ol = context.ol;
     vm.runInNewContext(source, context);
-    return { ...context, controls };
+    return { ...context, controls, elements };
 }
 
 function mapElement() {
@@ -182,6 +184,21 @@ test("unloaded map selections use server filtering by canonical feature identity
     env.subject.focusTableRow("site-preview-table", "canonical-feature");
     assert.equal(filter.feature_id.filter, "canonical-feature");
     assert.equal(filter.feature_id.type, "equals");
+});
+
+test("plot-map clicks publish the selected site to the plot selector", () => {
+    const env = harness();
+    const updates = [];
+    env.elements["site-map-selection"] = {};
+    env.window.dash_clientside = {
+        set_props: (id, properties) => updates.push({ id, properties }),
+    };
+
+    env.subject.selectPlotSiteFromMap({ id: "task-sites-map" }, "canonical-site");
+
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].id, "site-map-selection");
+    assert.equal(updates[0].properties.value, "canonical-site");
 });
 
 test("unmount cancels pending requests, removes listeners and disposes the map", () => {

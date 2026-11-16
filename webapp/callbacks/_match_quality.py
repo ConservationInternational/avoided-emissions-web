@@ -1,6 +1,5 @@
 """Match quality assessment helpers and plot builders."""
 
-import json
 import logging
 
 import dash_bootstrap_components as dbc
@@ -1213,31 +1212,6 @@ def _build_map(
     if not enriched_geojson:
         return html.P("No site geometries available.", className="text-muted")
 
-    # Build site dropdown options for zoom-to-site control
-    site_name_map = {}
-    if totals:
-        for t in totals:
-            if t.site_name and str(t.site_name) != str(t.site_id):
-                site_name_map[str(t.site_id)] = t.site_name
-    if sites:
-        for s in sites:
-            sid = str(s.site_id)
-            if s.site_name and s.site_name != sid and sid not in site_name_map:
-                site_name_map[sid] = s.site_name
-
-    # Extract site IDs from GeoJSON features
-    fc = json.loads(enriched_geojson)
-    site_ids = sorted(
-        {str(f["properties"].get("site_id", "")) for f in fc.get("features", [])} - {""}
-    )
-
-    site_options = []
-    for sid in site_ids:
-        sname = site_name_map.get(sid)
-        label = f"{sname} ({sid})" if sname else sid
-        site_options.append({"label": label, "value": sid})
-    site_options_by_name = sorted(site_options, key=lambda o: o["label"].lower())
-
     # Build tile URL when task_id is available so the rendering layer fetches
     # MVT tiles directly (no Dash round-trip on pan/zoom).  The enriched_geojson
     # (centroid points + emissions) is still passed as data-geojson; the JS uses
@@ -1254,35 +1228,4 @@ def _build_map(
         tile_url=tile_url,
     )
 
-    controls = html.Div(
-        [
-            dcc.Store(
-                id="map-site-sort-options",
-                data={
-                    "by_site": [{"label": "All sites", "value": ""}] + site_options,
-                    "by_name": [{"label": "All sites", "value": ""}]
-                    + site_options_by_name,
-                },
-            ),
-            html.Label("Zoom to site:", className="fw-bold me-2"),
-            dbc.RadioItems(
-                id="map-site-sort-order",
-                options=[
-                    {"label": "By site ID", "value": "by_site"},
-                    {"label": "Alphabetical", "value": "by_name"},
-                ],
-                value="by_name",
-                inline=True,
-                className="d-inline-flex me-3",
-            ),
-            dbc.Select(
-                id="map-site-selector",
-                options=[{"label": "All sites", "value": ""}] + site_options_by_name,
-                value="",
-                style={"maxWidth": "350px", "display": "inline-block"},
-            ),
-        ],
-        className="mb-3 d-flex align-items-center",
-    )
-
-    return html.Div([controls, map_component])
+    return map_component

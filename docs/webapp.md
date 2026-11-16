@@ -354,6 +354,18 @@ A per-site table showing, for each site:
 An interactive Plotly line chart of annual avoided emissions (MgCO₂e) per
 site, including the pre-intervention baseline period. Ranges across matching
 replicates are shown as a shaded ribbon when available.
+Year-axis tick labels use whole years without thousands separators or decimals.
+
+In **Site-Level Deforestation Detail**, **By site ID** sorts the site selector by
+the original display ID and shows `SITE ID (SITE NAME)`. **Alphabetical** sorts by
+site name and shows `SITE NAME (SITE ID)`. Sites without a distinct name show only
+their ID. Switching order preserves the selected site.
+
+The site map appears near the top of this section. It shows the site polygons
+and, when pixel location data is available, matched treatment (green) and control
+(blue) pixel centroids. Covariate COG overlays can be toggled via the layer panel.
+Selecting a site zooms the map to it; clicking a site on the map selects it and
+loads its plots.
 
 ### Match quality diagnostics
 
@@ -373,13 +385,6 @@ line indicates identical distributions.
 
 Both plots can be filtered to show aggregate statistics across all sites or
 a single selected site.
-
-### Map
-
-An OpenLayers map showing the site polygon(s) and, when pixel location data
-is available, the matched treatment (green) and control (blue) pixel
-centroids. Covariate COG overlays can be toggled on and off via the layer
-panel.
 
 ### Downloads
 
