@@ -58,7 +58,7 @@ jobs:
     name: Publish to trends.earth API
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [determine-environment, build-ranalysis]
+    needs: [determine-environment, build-ranalysis, build-nextflow-driver]
     environment: ${{ needs.determine-environment.outputs.environment }}
 
     steps:
@@ -149,7 +149,7 @@ jobs:
 
       - name: Register and select the pinned Nextflow driver
         env:
-          DRIVER_IMAGE: ${{ needs.build-ranalysis.outputs.driver-image }}
+          DRIVER_IMAGE: ${{ needs.build-nextflow-driver.outputs.driver-image }}
         run: python deploy/publish_nextflow_driver.py --image "$DRIVER_IMAGE"
 
       - name: Publish script
@@ -168,9 +168,6 @@ jobs:
     timeout-minutes: 30
     needs: determine-environment
     environment: ${{ needs.determine-environment.outputs.environment }}
-    outputs:
-      driver-image: ${{ steps.driver-image.outputs.image }}
-
     steps:
     - name: Checkout code
       uses: actions/checkout@v7
@@ -237,6 +234,37 @@ jobs:
           r-analysis/
 
         echo "::notice::Pushed R analysis image: $IMAGE_URI"
+
+  build-nextflow-driver:
+    name: Build & Push Nextflow Driver Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: determine-environment
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    outputs:
+      driver-image: ${{ steps.driver-image.outputs.image }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+        role-session-name: GitHubActionsNextflowDriver
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+        aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+        echo "registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
 
     - name: Build and push pinned Nextflow driver
       id: driver-image
