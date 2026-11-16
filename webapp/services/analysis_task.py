@@ -1224,6 +1224,16 @@ def get_task_site_results(task_id, site_id):
                 or 0,
                 "control_emissions_mgco2e": r.extrapolated_control_emissions_mgco2e
                 or 0,
+                "treatment_emissions_mgco2e_ci_lower": r.extrapolated_treatment_emissions_mgco2e_ci_lower,
+                "treatment_emissions_mgco2e_ci_upper": r.extrapolated_treatment_emissions_mgco2e_ci_upper,
+                "control_emissions_mgco2e_ci_lower": r.extrapolated_control_emissions_mgco2e_ci_lower,
+                "control_emissions_mgco2e_ci_upper": r.extrapolated_control_emissions_mgco2e_ci_upper,
+                "cumulative_treatment_defor_ha": r.extrapolated_cumulative_treatment_defor_ha,
+                "cumulative_control_defor_ha": r.extrapolated_cumulative_control_defor_ha,
+                "cumulative_treatment_defor_ha_ci_lower": r.extrapolated_cumulative_treatment_defor_ha_ci_lower,
+                "cumulative_treatment_defor_ha_ci_upper": r.extrapolated_cumulative_treatment_defor_ha_ci_upper,
+                "cumulative_control_defor_ha_ci_lower": r.extrapolated_cumulative_control_defor_ha_ci_lower,
+                "cumulative_control_defor_ha_ci_upper": r.extrapolated_cumulative_control_defor_ha_ci_upper,
                 "is_pre_intervention": bool(r.is_pre_intervention),
                 "is_post_intervention": bool(r.is_post_intervention),
                 "treatment_defor_ha_ci_lower": r.extrapolated_treatment_defor_ha_ci_lower,
@@ -1343,6 +1353,10 @@ _YEAR_METRICS = (
     "extrapolated_treatment_emissions_mgco2e",
     "extrapolated_control_emissions_mgco2e",
 )
+_CUMULATIVE_YEAR_METRICS = (
+    "extrapolated_cumulative_treatment_defor_ha",
+    "extrapolated_cumulative_control_defor_ha",
+)
 _TOTAL_METRICS = (
     "extrapolated_forest_loss_avoided_ha",
     "extrapolated_emissions_avoided_mgco2e",
@@ -1384,12 +1398,19 @@ def _parse_results_payload(task_id, payload):
         year_rows = []
         for ts in payload.get("time_series") or []:
             meta = ts["metadata"]
+            values = ts["values"]
+            cumulative_metrics = (
+                _CUMULATIVE_YEAR_METRICS
+                if _CUMULATIVE_YEAR_METRICS[0] in values
+                else ()
+            )
             year_rows.append(
                 {
                     "task_id": task_id,
                     "site_id": ts["entity_id"],
                     "year": int(ts["year"]),
                     **_metric_columns(ts["values"], _YEAR_METRICS, n_replicates),
+                    **_metric_columns(values, cumulative_metrics, n_replicates),
                     "is_pre_intervention": bool(meta["is_pre_intervention"]),
                     "is_post_intervention": bool(meta["is_post_intervention"]),
                     "n_sample_pixels": meta["n_sample_pixels"],

@@ -29,6 +29,10 @@ TOTAL_METRICS = [
     "extrapolated_forest_loss_avoided_ha",
     "extrapolated_emissions_avoided_mgco2e",
 ]
+CUMULATIVE_METRICS = [
+    "extrapolated_cumulative_treatment_defor_ha",
+    "extrapolated_cumulative_control_defor_ha",
+]
 
 
 def _number(row, key):
@@ -98,11 +102,14 @@ def _collect_results(output_dir, task_id, log):
     time_series = []
     with open(os.path.join(output_dir, "results_by_site_year.csv"), newline="") as f:
         for row in csv.DictReader(f):
+            values = _metric_values(row, YEAR_METRICS, n_replicates)
+            if CUMULATIVE_METRICS[0] in row:
+                values.update(_metric_values(row, CUMULATIVE_METRICS, n_replicates))
             time_series.append(
                 AnalysisTimeStep(
                     entity_id=row["site_id"],
                     year=int(row["year"]),
-                    values=_metric_values(row, YEAR_METRICS, n_replicates),
+                    values=values,
                     entity_name=row["site_name"] or None,
                     metadata={
                         "n_sample_pixels": int(_number(row, "n_sample_pixels")),

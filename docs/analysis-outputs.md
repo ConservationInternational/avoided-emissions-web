@@ -236,6 +236,8 @@ pre-intervention years
 | `is_post_intervention` | boolean | `year > end_year` |
 | `{prefix}_treatment_defor_ha` | numeric | Treatment forest loss (ha) |
 | `{prefix}_control_defor_ha` | numeric | Counterfactual (matched control) forest loss (ha) |
+| `{prefix}_cumulative_treatment_defor_ha` | numeric | Cumulative treatment forest loss through this year (ha), summed within each replicate |
+| `{prefix}_cumulative_control_defor_ha` | numeric | Cumulative matched-control forest loss through this year (ha), summed within each replicate |
 | `{prefix}_forest_loss_avoided_ha` | numeric | Control − treatment forest loss (ha) |
 | `{prefix}_treatment_emissions_mgco2e` | numeric | Treatment emissions (MgCO₂e) |
 | `{prefix}_control_emissions_mgco2e` | numeric | Counterfactual emissions (MgCO₂e) |

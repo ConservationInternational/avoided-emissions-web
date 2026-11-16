@@ -76,6 +76,10 @@ def _make_task_result_row(site_id, year, is_pre=False, is_post=False):
     r.extrapolated_forest_loss_avoided_ha = 145.2
     r.extrapolated_treatment_emissions_mgco2e = 0.41
     r.extrapolated_control_emissions_mgco2e = 5.21
+    r.extrapolated_treatment_emissions_mgco2e_ci_lower = 0.3
+    r.extrapolated_treatment_emissions_mgco2e_ci_upper = 0.5
+    r.extrapolated_control_emissions_mgco2e_ci_lower = 4.8
+    r.extrapolated_control_emissions_mgco2e_ci_upper = 5.6
     r.extrapolated_treatment_defor_ha_ci_lower = 10.0
     r.extrapolated_treatment_defor_ha_ci_upper = 14.6
     r.extrapolated_control_defor_ha_ci_lower = 139.0
@@ -84,6 +88,12 @@ def _make_task_result_row(site_id, year, is_pre=False, is_post=False):
     r.extrapolated_forest_loss_avoided_ha_ci_upper = 161.4
     r.extrapolated_emissions_avoided_mgco2e_ci_lower = 3.9
     r.extrapolated_emissions_avoided_mgco2e_ci_upper = 5.7
+    r.extrapolated_cumulative_treatment_defor_ha = 12.3
+    r.extrapolated_cumulative_control_defor_ha = 157.5
+    r.extrapolated_cumulative_treatment_defor_ha_ci_lower = 10.0
+    r.extrapolated_cumulative_treatment_defor_ha_ci_upper = 14.6
+    r.extrapolated_cumulative_control_defor_ha_ci_lower = 139.0
+    r.extrapolated_cumulative_control_defor_ha_ci_upper = 176.0
     return r
 
 
@@ -224,6 +234,16 @@ class TestGetTaskSiteResults:
         "emissions_avoided_mgco2e_ci_upper",
         "forest_loss_avoided_ha_ci_lower",
         "forest_loss_avoided_ha_ci_upper",
+        "treatment_emissions_mgco2e_ci_lower",
+        "treatment_emissions_mgco2e_ci_upper",
+        "control_emissions_mgco2e_ci_lower",
+        "control_emissions_mgco2e_ci_upper",
+        "cumulative_treatment_defor_ha",
+        "cumulative_control_defor_ha",
+        "cumulative_treatment_defor_ha_ci_lower",
+        "cumulative_treatment_defor_ha_ci_upper",
+        "cumulative_control_defor_ha_ci_lower",
+        "cumulative_control_defor_ha_ci_upper",
     }
 
     def _call(self, mocker, rows):
@@ -265,6 +285,8 @@ class TestGetTaskSiteResults:
         item = result[0]
         assert item["emissions_avoided_mgco2e_ci_lower"] == pytest.approx(3.9)
         assert item["emissions_avoided_mgco2e_ci_upper"] == pytest.approx(5.7)
+        assert item["cumulative_treatment_defor_ha_ci_lower"] == pytest.approx(10.0)
+        assert item["treatment_emissions_mgco2e_ci_upper"] == pytest.approx(0.5)
 
     def test_results_in_year_order(self, mocker):
         """The ORM .order_by(TaskResult.year) determines sort order."""

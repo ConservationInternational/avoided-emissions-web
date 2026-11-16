@@ -66,6 +66,25 @@ class TestImportExecutionResultsRows:
         assert first["is_post_intervention"] is False
         assert "sub_site_index" not in first
 
+    def test_imports_cumulative_replicate_bounds(self, sample_results_payload, sample_task_id):
+        payload = copy.deepcopy(sample_results_payload)
+        values = payload["time_series"][0]["values"]
+        values.update(
+            extrapolated_cumulative_treatment_defor_ha=12.0,
+            extrapolated_cumulative_control_defor_ha=100.0,
+            extrapolated_cumulative_treatment_defor_ha_ci_lower=10.0,
+            extrapolated_cumulative_treatment_defor_ha_ci_upper=14.0,
+            extrapolated_cumulative_control_defor_ha_ci_lower=90.0,
+            extrapolated_cumulative_control_defor_ha_ci_upper=110.0,
+        )
+        mock_db, _ = _import(sample_task_id, payload)
+        first = _inserted_rows(mock_db, TaskResult)[0]
+        assert first["extrapolated_cumulative_treatment_defor_ha"] == 12.0
+        assert (
+            first["extrapolated_cumulative_treatment_defor_ha_ci_lower"] == 10.0
+        )
+        assert first["extrapolated_cumulative_control_defor_ha_ci_upper"] == 110.0
+
     def test_site_total_values(self, sample_results_payload, sample_task_id):
         mock_db, _ = _import(sample_task_id, sample_results_payload)
         total = next(

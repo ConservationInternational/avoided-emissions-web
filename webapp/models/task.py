@@ -156,6 +156,12 @@ class TaskResult(Base):
     extrapolated_control_emissions_mgco2e_ci_upper = Column(Float)
     extrapolated_emissions_avoided_mgco2e_ci_lower = Column(Float)
     extrapolated_emissions_avoided_mgco2e_ci_upper = Column(Float)
+    extrapolated_cumulative_treatment_defor_ha = Column(Float)
+    extrapolated_cumulative_control_defor_ha = Column(Float)
+    extrapolated_cumulative_treatment_defor_ha_ci_lower = Column(Float)
+    extrapolated_cumulative_treatment_defor_ha_ci_upper = Column(Float)
+    extrapolated_cumulative_control_defor_ha_ci_lower = Column(Float)
+    extrapolated_cumulative_control_defor_ha_ci_upper = Column(Float)
 
     task = relationship("AnalysisTask", back_populates="results")
 

@@ -63,7 +63,7 @@ from trendsearth_client import TrendsEarthAPIError
 
 from callbacks._detail_builders import (
     BOUNDS_NAME,
-    _add_ci_band,
+    _add_range_error_bars,
     _build_overview,
     _build_plots,
     _build_raw_results,
@@ -2905,6 +2905,10 @@ def register_callbacks(app, limiter=None):
             "treatment_defor_ha_ci_lower" in site_df.columns
             and site_df["treatment_defor_ha_ci_lower"].notna().any()
         )
+        has_cumulative_ci = (
+            "cumulative_treatment_defor_ha_ci_lower" in site_df.columns
+            and site_df["cumulative_treatment_defor_ha_ci_lower"].notna().any()
+        )
 
         # Check if this site was subsampled
         sub_info = subsampled_data.get(selected_site)
@@ -2955,20 +2959,22 @@ def register_callbacks(app, limiter=None):
             )
         )
         if site_has_ci:
-            _add_ci_band(
+            _add_range_error_bars(
                 fig_defor,
                 site_df["year"],
+                site_df["treatment_defor_ha"],
                 site_df["treatment_defor_ha_ci_lower"],
                 site_df["treatment_defor_ha_ci_upper"],
-                color="rgba(44,160,44,0.15)",
+                color="#2ca02c",
                 name=f"Project Site ({BOUNDS_NAME.lower()})",
             )
-            _add_ci_band(
+            _add_range_error_bars(
                 fig_defor,
                 site_df["year"],
+                site_df["control_defor_ha"],
                 site_df["control_defor_ha_ci_lower"],
                 site_df["control_defor_ha_ci_upper"],
-                color="rgba(214,39,40,0.15)",
+                color="#d62728",
                 name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         fig_defor.update_layout(
@@ -3005,8 +3011,20 @@ def register_callbacks(app, limiter=None):
 
         # --- Cumulative deforestation plot ---
         site_sorted = site_df.sort_values("year")
-        cum_treatment = site_sorted["treatment_defor_ha"].cumsum()
-        cum_control = site_sorted["control_defor_ha"].cumsum()
+        has_cumulative_values = (
+            "cumulative_treatment_defor_ha" in site_sorted.columns
+            and site_sorted["cumulative_treatment_defor_ha"].notna().any()
+        )
+        cum_treatment = (
+            site_sorted["cumulative_treatment_defor_ha"]
+            if has_cumulative_values
+            else site_sorted["treatment_defor_ha"].cumsum()
+        )
+        cum_control = (
+            site_sorted["cumulative_control_defor_ha"]
+            if has_cumulative_values
+            else site_sorted["control_defor_ha"].cumsum()
+        )
         fig_cum = go.Figure()
         fig_cum.add_trace(
             go.Scatter(
@@ -3028,8 +3046,25 @@ def register_callbacks(app, limiter=None):
                 marker={"size": 6},
             )
         )
-        # No replicate band here: cumulative bounds cannot be derived from
-        # yearly bounds.
+        if has_cumulative_ci:
+            _add_range_error_bars(
+                fig_cum,
+                site_sorted["year"],
+                cum_treatment,
+                site_sorted["cumulative_treatment_defor_ha_ci_lower"],
+                site_sorted["cumulative_treatment_defor_ha_ci_upper"],
+                color="#2ca02c",
+                name=f"Project Site ({BOUNDS_NAME.lower()})",
+            )
+            _add_range_error_bars(
+                fig_cum,
+                site_sorted["year"],
+                cum_control,
+                site_sorted["cumulative_control_defor_ha_ci_lower"],
+                site_sorted["cumulative_control_defor_ha_ci_upper"],
+                color="#d62728",
+                name=f"Matched Controls ({BOUNDS_NAME.lower()})",
+            )
         fig_cum.update_layout(
             title=f"Cumulative Deforestation: {site_name}{sub_note}",
             xaxis_title="Year",
@@ -3089,21 +3124,27 @@ def register_callbacks(app, limiter=None):
                     marker={"size": 6},
                 )
             )
-            if site_has_ci and "treatment_emissions_mgco2e_ci_lower" in site_df.columns:
-                _add_ci_band(
+            has_emissions_ci = (
+                "treatment_emissions_mgco2e_ci_lower" in site_df.columns
+                and site_df["treatment_emissions_mgco2e_ci_lower"].notna().any()
+            )
+            if has_emissions_ci:
+                _add_range_error_bars(
                     fig_em,
                     site_df["year"],
+                    site_df["treatment_emissions_mgco2e"],
                     site_df["treatment_emissions_mgco2e_ci_lower"],
                     site_df["treatment_emissions_mgco2e_ci_upper"],
-                    color="rgba(44,160,44,0.15)",
+                    color="#2ca02c",
                     name=f"Project Site ({BOUNDS_NAME.lower()})",
                 )
-                _add_ci_band(
+                _add_range_error_bars(
                     fig_em,
                     site_df["year"],
+                    site_df["control_emissions_mgco2e"],
                     site_df["control_emissions_mgco2e_ci_lower"],
                     site_df["control_emissions_mgco2e_ci_upper"],
-                    color="rgba(214,39,40,0.15)",
+                    color="#d62728",
                     name=f"Matched Controls ({BOUNDS_NAME.lower()})",
                 )
             fig_em.update_layout(
@@ -3148,6 +3189,19 @@ def register_callbacks(app, limiter=None):
                 marker_color="#17a2b8",
             )
         )
+        if (
+            "forest_loss_avoided_ha_ci_lower" in site_df.columns
+            and site_df["forest_loss_avoided_ha_ci_lower"].notna().any()
+        ):
+            _add_range_error_bars(
+                fig_avoided,
+                site_df["year"],
+                site_df["forest_loss_avoided_ha"],
+                site_df["forest_loss_avoided_ha_ci_lower"],
+                site_df["forest_loss_avoided_ha_ci_upper"],
+                color="#17a2b8",
+                name=BOUNDS_NAME,
+            )
         fig_avoided.update_layout(
             title=f"Forest Loss Avoided by Year: {site_name}{sub_note}",
             xaxis_title="Year",

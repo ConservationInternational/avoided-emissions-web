@@ -130,6 +130,14 @@ test_that("summary uses the same complete strata for estimates and pixel downloa
     expect_true(any(summary$methodology_warnings$code == "inconsistent_strata"))
     # Pixel-level weighted totals agree with the reported annual sample.
     by_year <- read.csv(file.path(out, "results_by_site_year.csv"))
+    expect_true(all(c(
+        "extrapolated_cumulative_treatment_defor_ha",
+        "extrapolated_cumulative_control_defor_ha",
+        "extrapolated_cumulative_treatment_defor_ha_ci_lower",
+        "extrapolated_cumulative_treatment_defor_ha_ci_upper",
+        "extrapolated_cumulative_control_defor_ha_ci_lower",
+        "extrapolated_cumulative_control_defor_ha_ci_upper"
+    ) %in% names(by_year)))
     detail_totals <- detail %>%
         filter(treatment) %>%
         group_by(year) %>%

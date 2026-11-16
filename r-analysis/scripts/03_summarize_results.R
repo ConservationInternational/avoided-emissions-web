@@ -482,6 +482,31 @@ results_by_year <- (if (nrow(site_year_rep) > 0) {
 } else {
     tibble(site_id = character(), year = integer())
 }) %>%
+    left_join(
+        (if (nrow(site_year_rep) > 0) {
+            cumulative_site_year_rep <- site_year_rep %>%
+                arrange(replicate, site_id, year) %>%
+                group_by(replicate, site_id) %>%
+                mutate(
+                    extrapolated_cumulative_treatment_defor_ha =
+                        cumsum(extrapolated_treatment_defor_ha),
+                    extrapolated_cumulative_control_defor_ha =
+                        cumsum(extrapolated_control_defor_ha)
+                ) %>%
+                ungroup()
+            summarise_replicates(
+                cumulative_site_year_rep,
+                c("site_id", "year"),
+                c(
+                    "extrapolated_cumulative_treatment_defor_ha",
+                    "extrapolated_cumulative_control_defor_ha"
+                )
+            )
+        } else {
+            tibble(site_id = character(), year = integer())
+        }),
+        by = c("site_id", "year")
+    ) %>%
     inner_join(select(sites, site_id, site_name, start_year, end_year), by = "site_id") %>%
     left_join(select(site_counts, site_id, n_sample_pixels, sampled_fraction), by = "site_id") %>%
     mutate(

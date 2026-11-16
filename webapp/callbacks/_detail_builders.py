@@ -1204,6 +1204,39 @@ def _add_ci_band(fig, x, y_lower, y_upper, color, name):
     )
 
 
+def _add_range_error_bars(fig, x, y, y_lower, y_upper, color, name):
+    """Draw asymmetric error bars from the estimate to its replicate range."""
+    estimate = pd.to_numeric(y, errors="coerce")
+    lower = pd.to_numeric(y_lower, errors="coerce")
+    upper = pd.to_numeric(y_upper, errors="coerce")
+    valid = estimate.notna() & lower.notna() & upper.notna()
+    if not valid.any():
+        return
+    estimate = estimate[valid]
+    lower = lower[valid]
+    upper = upper[valid]
+    fig.add_trace(
+        go.Scatter(
+            x=x[valid],
+            y=estimate,
+            mode="markers",
+            marker={"size": 0, "opacity": 0},
+            error_y={
+                "type": "data",
+                "symmetric": False,
+                "array": (upper.clip(lower=estimate) - estimate).tolist(),
+                "arrayminus": (estimate - lower.clip(upper=estimate)).tolist(),
+                "visible": True,
+                "color": color,
+                "thickness": 1.5,
+                "width": 4,
+            },
+            name=name,
+            hoverinfo="skip",
+        )
+    )
+
+
 def _build_plots(
     results,
     totals,
@@ -1277,6 +1310,16 @@ def _build_plots(
                     "forest_loss_avoided_ha_ci_upper": r.extrapolated_forest_loss_avoided_ha_ci_upper,
                     "emissions_avoided_mgco2e_ci_lower": r.extrapolated_emissions_avoided_mgco2e_ci_lower,
                     "emissions_avoided_mgco2e_ci_upper": r.extrapolated_emissions_avoided_mgco2e_ci_upper,
+                    "cumulative_treatment_defor_ha": r.extrapolated_cumulative_treatment_defor_ha,
+                    "cumulative_control_defor_ha": r.extrapolated_cumulative_control_defor_ha,
+                    "cumulative_treatment_defor_ha_ci_lower": r.extrapolated_cumulative_treatment_defor_ha_ci_lower,
+                    "cumulative_treatment_defor_ha_ci_upper": r.extrapolated_cumulative_treatment_defor_ha_ci_upper,
+                    "cumulative_control_defor_ha_ci_lower": r.extrapolated_cumulative_control_defor_ha_ci_lower,
+                    "cumulative_control_defor_ha_ci_upper": r.extrapolated_cumulative_control_defor_ha_ci_upper,
+                    "treatment_emissions_mgco2e_ci_lower": r.extrapolated_treatment_emissions_mgco2e_ci_lower,
+                    "treatment_emissions_mgco2e_ci_upper": r.extrapolated_treatment_emissions_mgco2e_ci_upper,
+                    "control_emissions_mgco2e_ci_lower": r.extrapolated_control_emissions_mgco2e_ci_lower,
+                    "control_emissions_mgco2e_ci_upper": r.extrapolated_control_emissions_mgco2e_ci_upper,
                 }
                 for r in results
             ]
@@ -1505,24 +1548,14 @@ def _build_plots(
                 labels={metric: label, "year": "Year"},
             )
         if has_ci:
-            fig.add_trace(
-                go.Scatter(
-                    x=agg_df["year"],
-                    y=agg_df[metric],
-                    mode="markers",
-                    marker={"size": 0, "opacity": 0},
-                    error_y={
-                        "type": "data",
-                        "symmetric": False,
-                        "array": agg_df[f"{metric}_ci_upper"] - agg_df[metric],
-                        "arrayminus": agg_df[metric] - agg_df[f"{metric}_ci_lower"],
-                        "color": "rgba(0,0,0,0.4)",
-                        "thickness": 1.5,
-                        "width": 4,
-                    },
-                    name=BOUNDS_NAME,
-                    showlegend=True,
-                )
+            _add_range_error_bars(
+                fig,
+                agg_df["year"],
+                agg_df[metric],
+                agg_df[f"{metric}_ci_lower"],
+                agg_df[f"{metric}_ci_upper"],
+                color="rgba(0,0,0,0.4)",
+                name=BOUNDS_NAME,
             )
         plots.append(dcc.Graph(figure=fig))
 
@@ -1537,6 +1570,8 @@ def _build_plots(
                     "site_name": t.site_name or _display_site_id(t),
                     "emissions_avoided_mgco2e": t.extrapolated_emissions_avoided_mgco2e
                     or 0,
+                    "emissions_avoided_mgco2e_ci_lower": t.extrapolated_emissions_avoided_mgco2e_ci_lower,
+                    "emissions_avoided_mgco2e_ci_upper": t.extrapolated_emissions_avoided_mgco2e_ci_upper,
                     "forest_loss_avoided_ha": t.extrapolated_forest_loss_avoided_ha
                     or 0,
                 }
@@ -1554,6 +1589,16 @@ def _build_plots(
                 "site_id": "Site",
             },
         )
+        if df_totals["emissions_avoided_mgco2e_ci_lower"].notna().any():
+            _add_range_error_bars(
+                fig_site_totals,
+                df_totals["site_id"],
+                df_totals["emissions_avoided_mgco2e"],
+                df_totals["emissions_avoided_mgco2e_ci_lower"],
+                df_totals["emissions_avoided_mgco2e_ci_upper"],
+                color="rgba(0,0,0,0.5)",
+                name=BOUNDS_NAME,
+            )
         fig_site_totals.update_xaxes(
             tickmode="array",
             tickvals=df_totals["site_id"].tolist(),
