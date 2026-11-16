@@ -86,7 +86,7 @@ def test_avoided_emissions_aggregate_plots_show_replicate_ranges():
         totals=[total],
         agg_yearly=[aggregate_year],
     )
-    graphs = content.children[0].children
+    graphs = content.children[0].children[0].children
     yearly = next(
         graph.figure
         for graph in graphs
@@ -251,7 +251,7 @@ def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years, monk
             )
             children = results_container.children[0].children
         else:
-            children = content.children
+            children = content
         graphs = [item for item in children if isinstance(item, dcc.Graph)]
         assert len(graphs) == 4
         for graph in graphs:
@@ -339,7 +339,7 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
     content = callbacks["update_filtered_aggregate_plots"](
         {"site": "site-1"}, {}, "task-1", None, store
     )
-    graphs = [item.figure for item in content.children if isinstance(item, dcc.Graph)]
+    graphs = [item.figure for item in content if isinstance(item, dcc.Graph)]
     aggregate_rows = []
     for row in rows:
         aggregate_row = {
