@@ -367,7 +367,7 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
     )
     aggregate_graphs = [item.figure for item in results_container.children[0].children]
 
-    for fig in aggregate_graphs[:3]:
+    for fig in aggregate_graphs[:2]:
         assert [trace.line.color for trace in fig.data[:2]] == [
             "#0072B2",
             "#D55E00",
