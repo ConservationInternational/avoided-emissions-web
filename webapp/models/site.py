@@ -69,6 +69,7 @@ class UserSiteFeature(Base):
     start_date = Column(Date, nullable=False)
     end_date = Column(Date)
     area_ha = Column(Float)
+    source_attributes = Column(JSON, nullable=False, default=dict)
     geom = Column(
         Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
     )

@@ -1103,6 +1103,9 @@ _FILE_DESCRIPTIONS = {
     "results_by_site_replicate_total.csv": (
         "Avoided emissions totals per site and matching replicate"
     ),
+    "results_by_site_replicate_year.csv": (
+        "Yearly outcomes per site and matching replicate"
+    ),
     "results_site_status.csv": "Estimation status of every site",
     "results_by_site_year.csv": "Avoided emissions per site per year",
     "results_covariate_balance.csv": "Covariate balance SMD statistics (Love plot)",
@@ -1217,7 +1220,7 @@ BOUNDS_NAME = "Range across matching replicates"
 
 
 def _add_ci_band(fig, x, y_lower, y_upper, color, name):
-    """Add a shaded confidence-interval band to a Plotly figure."""
+    """Add a shaded replicate-range band to a Plotly figure."""
     fig.add_trace(
         go.Scatter(
             x=x,
@@ -1285,6 +1288,7 @@ def _build_plots(
     agg_yearly=None,
     is_large=False,
     site_map=None,
+    sites_geojson=None,
 ):
     """Build interactive plots for task results.
 
@@ -1652,6 +1656,8 @@ def _build_plots(
         )
         plots.append(dcc.Graph(figure=fig_site_totals))
 
+    plots = [html.Div(plots, id="task-aggregate-plots")]
+
     # --- Site-level drill-down section -------------------------------------
     if has_defor_data:
         # Build site options for the dropdown.
@@ -1753,6 +1759,43 @@ def _build_plots(
                     className="text-muted",
                 )
             )
+        features = (sites_geojson or {}).get("features", [])
+        attributes = {
+            str(feature["properties"]["site_id"]): feature["properties"].get(
+                "source_attributes", {}
+            )
+            for feature in features
+            if feature.get("properties", {}).get("site_id") is not None
+        }
+        fields = sorted({key for values in attributes.values() for key in values})
+        plots.append(dcc.Store(id="site-filter-attributes", data=attributes))
+        plots.append(dcc.Store(id="site-filtered-ids", data=None))
+        plots.append(
+            html.Div(
+                [
+                    html.Label("Filter sites by source field:", htmlFor="site-filter-field"),
+                    dcc.Dropdown(
+                        id="site-filter-field",
+                        options=[{"label": field, "value": field} for field in fields],
+                        placeholder="No filter",
+                        clearable=True,
+                    ),
+                    html.Label("Value:", htmlFor="site-filter-value", className="mt-2"),
+                    dcc.Dropdown(
+                        id="site-filter-value",
+                        placeholder="Select a value",
+                        clearable=True,
+                        disabled=True,
+                    ),
+                    html.Small(
+                        "Filtering also applies to the aggregate plots.",
+                        className="text-muted",
+                    ),
+                ],
+                className="mb-3",
+                style={"maxWidth": "400px"},
+            )
+        )
         if site_map is not None:
             plots.append(site_map)
             plots.append(

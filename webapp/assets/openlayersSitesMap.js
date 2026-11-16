@@ -219,7 +219,7 @@
             }
 
             const siteId = normalizeSiteId(feature.get("site_id"));
-            if (!siteId) {
+            if (!siteId || (mapEl._allowedSiteIds && !mapEl._allowedSiteIds.has(siteId))) {
                 return;
             }
             setSelectedSite(mapEl, siteId);
@@ -340,6 +340,9 @@
         return function (feature) {
             const geomType = feature.getGeometry()?.getType();
             const siteId = normalizeSiteId(feature.get("site_id"));
+            if (mapEl._allowedSiteIds && !mapEl._allowedSiteIds.has(siteId)) {
+                return null;
+            }
             const selectedSiteId = normalizeSiteId(mapEl._selectedSiteId);
             const zoom = mapEl._olMap?.getView()?.getZoom() || 0;
             const zoomBucket = Math.floor(zoom);
@@ -600,14 +603,12 @@
         var normalized = normalizeSiteId(siteId);
         mapEl._pixelFilterSiteId = normalized;
         source.clear();
-        if (!normalized) {
-            source.addFeatures(allFeatures);
-        } else {
-            var filtered = allFeatures.filter(function (f) {
-                return normalizeSiteId(f.get("site_id")) === normalized;
-            });
-            source.addFeatures(filtered);
-        }
+        var filtered = allFeatures.filter(function (f) {
+            const id = normalizeSiteId(f.get("site_id"));
+            return (!normalized || id === normalized) &&
+                (!mapEl._allowedSiteIds || mapEl._allowedSiteIds.has(id));
+        });
+        source.addFeatures(filtered);
     }
 
     // Custom tileLoadFunction so that session cookies are always forwarded
@@ -770,6 +771,19 @@
         };
         el.addEventListener("zoom-to-site", zoomToSite);
         el._cleanup.push(function () { el.removeEventListener("zoom-to-site", zoomToSite); });
+
+        const filterSites = function (evt) {
+            const ids = evt.detail?.siteIds;
+            el._allowedSiteIds = Array.isArray(ids) ? new Set(ids.map(normalizeSiteId)) : null;
+            if (el._allowedSiteIds && !el._allowedSiteIds.has(el._selectedSiteId)) {
+                setSelectedSite(el, "");
+            }
+            el._olSource.changed();
+            el._olVtLayer?.changed();
+            filterPixelsBySite(el, el._selectedSiteId || "");
+        };
+        el.addEventListener("filter-sites", filterSites);
+        el._cleanup.push(function () { el.removeEventListener("filter-sites", filterSites); });
 
         // Notify other scripts (e.g. COG layer control) that a map is ready.
         el.dispatchEvent(

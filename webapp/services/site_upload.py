@@ -66,6 +66,29 @@ class _SiteUploadCancelled(Exception):
     """Raised when a user cancels an active import."""
 
 
+def _source_attributes_json(attributes):
+    """Serialize source properties, preserving scalar values and missing data."""
+
+    def normalize(value):
+        if isinstance(value, dict):
+            return {str(key): normalize(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize(item) for item in value]
+        if pd.api.types.is_scalar(value) and pd.isna(value):
+            return None
+        if isinstance(value, datetime):
+            if value.time().isoformat() == "00:00:00" and value.tzinfo is None:
+                return value.date().isoformat()
+            return value.isoformat()
+        if hasattr(value, "item"):
+            return normalize(value.item())
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    return json.dumps(normalize(attributes), allow_nan=False)
+
+
 def _site_upload_stage_paths(upload_token):
     token = str(upload_token or "").strip()
     if not token or not all(ch in "0123456789abcdef" for ch in token.lower()):
@@ -1790,6 +1813,10 @@ def save_user_site_set(user_id, filename, file_content, column_mapping=None):
     if gdf is None or gdf.empty:
         raise ValueError("No features were found in the uploaded file.")
 
+    source_attributes = [
+        _source_attributes_json(row.drop(labels=[gdf.geometry.name]).to_dict())
+        for _, row in gdf.iterrows()
+    ]
     mapping_to_apply = _normalize_site_mapping(column_mapping)
     if any(mapping_to_apply.values()):
         gdf, mapping_errors, _mapping_warnings = apply_site_column_mapping(
@@ -1830,7 +1857,8 @@ def save_user_site_set(user_id, filename, file_content, column_mapping=None):
         insert_sql = text(
             """
             INSERT INTO user_site_features (
-                id, site_set_id, site_id, site_name, start_date, end_date, area_ha, geom
+                id, site_set_id, site_id, site_name, start_date, end_date, area_ha, geom,
+                source_attributes
             )
             VALUES (
                 uuid_generate_v4(),
@@ -1849,12 +1877,13 @@ def save_user_site_set(user_id, filename, file_content, column_mapping=None):
                         ),
                         3
                     )
-                )
+                ),
+                CAST(:source_attributes AS json)
             )
             """
         )
 
-        for _, row in gdf.iterrows():
+        for (_, row), attributes in zip(gdf.iterrows(), source_attributes):
             start_date = pd.to_datetime(row["start_date"]).date()
             end_date = (
                 pd.to_datetime(row["end_date"]).date()
@@ -1871,6 +1900,7 @@ def save_user_site_set(user_id, filename, file_content, column_mapping=None):
                     "start_date": start_date,
                     "end_date": end_date,
                     "geom_geojson": json.dumps(row.geometry.__geo_interface__),
+                    "source_attributes": attributes,
                 },
             )
 
@@ -2015,7 +2045,8 @@ def save_user_site_set_from_staged(
             insert_sql = text(
                 """
                 INSERT INTO user_site_features (
-                    id, site_set_id, site_id, site_name, start_date, end_date, area_ha, geom
+                    id, site_set_id, site_id, site_name, start_date, end_date, area_ha, geom,
+                    source_attributes
                 )
                 VALUES (
                     uuid_generate_v4(),
@@ -2034,7 +2065,8 @@ def save_user_site_set_from_staged(
                             ),
                             3
                         )
-                    )
+                    ),
+                    CAST(:source_attributes AS json)
                 )
                 """
             )
@@ -2363,6 +2395,7 @@ def save_user_site_set_from_staged(
                             "start_date": start_date,
                             "end_date": end_date,
                             "geom_geojson": json.dumps(geom.__geo_interface__),
+                            "source_attributes": _source_attributes_json(props),
                         }
                         batch_rows.append(batch_row)
                         n_sites += 1

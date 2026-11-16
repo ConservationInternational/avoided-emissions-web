@@ -14,7 +14,8 @@
 #
 # Output (in {output_dir}):
 #   results_by_site_year.csv, results_by_site_total.csv,
-#   results_by_site_replicate_total.csv, results_site_status.csv,
+#   results_by_site_replicate_year.csv, results_by_site_replicate_total.csv,
+#   results_site_status.csv,
 #   results_summary.json,
 #   results_pixel_year_emissions.csv (replicate 1), results_pixel_covariates.csv,
 #   results_covariate_balance.csv, results_propensity_scores.csv,
@@ -405,6 +406,13 @@ site_year_rep <- bind_rows(
     group_by(replicate, site_id, year) %>%
     summarise(across(any_of(metric_cols), sum), .groups = "drop") %>%
     add_avoided()
+
+write_csv(
+    site_year_rep %>%
+        select(site_id, replicate, year, starts_with("extrapolated_")) %>%
+        arrange(site_id, replicate, year),
+    out_path("results_by_site_replicate_year.csv")
+)
 
 site_counts <- bind_rows(
     tibble(id_numeric = integer(), site_id = character(), replicate = integer(),

@@ -1,13 +1,17 @@
+import io
+import json
 from types import SimpleNamespace
 
 import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
 import pytest
+from botocore.response import StreamingBody
 from callbacks import _registration as registration
 from callbacks._detail_builders import _add_range_error_bars, _build_plots
 from dash import dcc
 from layouts.task_detail import task_detail_layout
+from services import analysis_task
 
 
 @pytest.mark.unit
@@ -78,13 +82,15 @@ def test_avoided_emissions_aggregate_plots_show_replicate_ranges():
         totals=[total],
         agg_yearly=[aggregate_year],
     )
-    graphs = [item for item in content.children if isinstance(item, dcc.Graph)]
+    graphs = content.children[0].children
     yearly = next(
-        graph.figure for graph in graphs
+        graph.figure
+        for graph in graphs
         if graph.figure.layout.title.text.startswith("Avoided Emissions by Year")
     )
     per_site = next(
-        graph.figure for graph in graphs
+        graph.figure
+        for graph in graphs
         if graph.figure.layout.title.text == "Total Avoided Emissions by Site"
     )
 
@@ -115,23 +121,24 @@ def test_site_selector_sort_modes_use_display_ids_and_matching_labels():
         is_large=True,
         task=SimpleNamespace(
             extra_metadata={
-                "subsampled_sites": [
-                    {"site_id": "canonical-a", "sampled_percent": 25}
-                ]
+                "subsampled_sites": [{"site_id": "canonical-a", "sampled_percent": 25}]
             }
         ),
-        agg_yearly=[{
-            "year": 2020,
-            "treatment_defor_ha": 1.0,
-            "control_defor_ha": 2.0,
-            "cum_treatment_defor_ha": 1.0,
-            "cum_control_defor_ha": 2.0,
-            "emissions_avoided_mgco2e": 10.0,
-            "forest_loss_avoided_ha": 1.0,
-        }],
+        agg_yearly=[
+            {
+                "year": 2020,
+                "treatment_defor_ha": 1.0,
+                "control_defor_ha": 2.0,
+                "cum_treatment_defor_ha": 1.0,
+                "cum_control_defor_ha": 2.0,
+                "emissions_avoided_mgco2e": 10.0,
+                "forest_loss_avoided_ha": 1.0,
+            }
+        ],
     )
     store = next(
-        item for item in content.children
+        item
+        for item in content.children
         if getattr(item, "id", None) == "site-defor-sort-options"
     )
     assert store.data["by_site"] == [
@@ -151,18 +158,21 @@ def test_site_selector_sort_modes_use_display_ids_and_matching_labels():
         {"label": "Zulu (A)", "value": "canonical-b"},
     ]
     controls = next(
-        item for item in content.children
+        item
+        for item in content.children
         if any(
             getattr(child, "id", None) == "site-defor-sort-order"
             for child in (getattr(item, "children", None) or [])
         )
     )
     radio = next(
-        child for child in controls.children
+        child
+        for child in controls.children
         if getattr(child, "id", None) == "site-defor-sort-order"
     )
     selector = next(
-        item for item in content.children
+        item
+        for item in content.children
         if getattr(item, "id", None) == "site-defor-selector"
     )
     assert selector.options == store.data[radio.value]
@@ -187,9 +197,7 @@ def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years):
         }
         for year in years
     ]
-    aggregate = _build_plots(
-        results=None, totals=[], is_large=True, agg_yearly=rows
-    )
+    aggregate = _build_plots(results=None, totals=[], is_large=True, agg_yearly=rows)
     callbacks = {}
 
     def callback(*args, **kwargs):
@@ -208,7 +216,10 @@ def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years):
         "site-1", {"results": rows}, None
     )
     for content in (aggregate, site):
-        graphs = [item for item in content.children if isinstance(item, dcc.Graph)]
+        children = (
+            content.children[0].children if content is aggregate else content.children
+        )
+        graphs = [item for item in children if isinstance(item, dcc.Graph)]
         assert len(graphs) == 4
         for graph in graphs:
             axis = graph.figure.layout.xaxis
@@ -218,13 +229,114 @@ def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("large_task", [False, True])
+@pytest.mark.parametrize("with_ranges", [False, True])
+def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
+    monkeypatch, large_task, with_ranges
+):
+    rows = []
+    for year, multiplier in [(2020, 1), (2021, 2)]:
+        row = {
+            "site_id": "site-1",
+            "year": year,
+            "is_pre_intervention": year == 2020,
+            "treatment_defor_ha": 2 * multiplier,
+            "control_defor_ha": 4 * multiplier,
+            "cumulative_treatment_defor_ha": 3 * multiplier,
+            "cumulative_control_defor_ha": 6 * multiplier,
+            "treatment_emissions_mgco2e": 10 * multiplier,
+            "control_emissions_mgco2e": 20 * multiplier,
+            "forest_loss_avoided_ha": 2 * multiplier,
+        }
+        if with_ranges:
+            for metric in (
+                "treatment_defor_ha",
+                "control_defor_ha",
+                "cumulative_treatment_defor_ha",
+                "cumulative_control_defor_ha",
+                "treatment_emissions_mgco2e",
+                "control_emissions_mgco2e",
+                "forest_loss_avoided_ha",
+            ):
+                row[f"{metric}_ci_lower"] = row[metric] - 1
+                row[f"{metric}_ci_upper"] = row[metric] + 2
+        rows.append(row)
+
+    callbacks = {}
+
+    def callback(*args, **kwargs):
+        def capture(function):
+            callbacks[function.__name__] = function
+            return function
+
+        return capture
+
+    registration.register_callbacks(
+        SimpleNamespace(
+            callback=callback, clientside_callback=lambda *args, **kwargs: None
+        )
+    )
+    monkeypatch.setattr(registration, "get_task_site_results", lambda *_: rows)
+    store = {"large_task": large_task, "results": rows}
+    content = callbacks["update_site_deforestation_plot"]("site-1", store, "task-1")
+    graphs = [item.figure for item in content.children if isinstance(item, dcc.Graph)]
+    aggregate_rows = []
+    for row in rows:
+        aggregate_row = {
+            **row,
+            "cum_treatment_defor_ha": row["cumulative_treatment_defor_ha"],
+            "cum_control_defor_ha": row["cumulative_control_defor_ha"],
+            "emissions_avoided_mgco2e": 10,
+        }
+        if with_ranges:
+            for kind in ("treatment", "control"):
+                for bound in ("lower", "upper"):
+                    aggregate_row[f"cum_{kind}_defor_ha_ci_{bound}"] = row[
+                        f"cumulative_{kind}_defor_ha_ci_{bound}"
+                    ]
+            aggregate_row["emissions_avoided_mgco2e_ci_lower"] = 8
+            aggregate_row["emissions_avoided_mgco2e_ci_upper"] = 12
+        aggregate_rows.append(aggregate_row)
+    aggregate = _build_plots(
+        results=None, totals=[], is_large=True, agg_yearly=aggregate_rows
+    )
+    aggregate_graphs = [item.figure for item in aggregate.children[0].children]
+
+    for fig, metrics in zip(
+        graphs[:3],
+        [
+            ("treatment_defor_ha", "control_defor_ha"),
+            ("cumulative_treatment_defor_ha", "cumulative_control_defor_ha"),
+            ("treatment_emissions_mgco2e", "control_emissions_mgco2e"),
+        ],
+    ):
+        assert [trace.type for trace in fig.data[:2]] == ["scatter", "scatter"]
+        assert all(trace.mode == "lines+markers" for trace in fig.data[:2])
+        assert not any(trace.error_y.visible for trace in fig.data)
+        bands = [trace for trace in fig.data if trace.fill == "tonexty"]
+        assert len(bands) == (2 if with_ranges else 0)
+        if with_ranges:
+            for metric, upper, lower in zip(metrics, fig.data[2::2], bands):
+                assert list(upper.y) == [row[f"{metric}_ci_upper"] for row in rows]
+                assert list(lower.y) == [row[f"{metric}_ci_lower"] for row in rows]
+        assert len(fig.layout.shapes) == 1
+
+    avoided = graphs[3]
+    assert avoided.data[0].type == "bar"
+    assert any(trace.error_y.visible for trace in avoided.data[1:]) == with_ranges
+    for site_fig, aggregate_fig in zip(
+        (graphs[0], graphs[1], avoided),
+        (aggregate_graphs[0], aggregate_graphs[1], aggregate_graphs[3]),
+    ):
+        assert site_fig.data[0].type == aggregate_fig.data[0].type
+
+
+@pytest.mark.unit
 def test_site_map_is_placed_before_the_site_selector():
     content = _build_plots(
         results=None,
         totals=[
-            SimpleNamespace(
-                site_id="site-1", display_site_id="1", site_name="Site One"
-            )
+            SimpleNamespace(site_id="site-1", display_site_id="1", site_name="Site One")
         ],
         is_large=True,
         agg_yearly=[
@@ -239,6 +351,16 @@ def test_site_map_is_placed_before_the_site_selector():
             }
         ],
         site_map=dcc.Graph(id="task-sites-map"),
+        sites_geojson={
+            "features": [
+                {
+                    "properties": {
+                        "site_id": "site-1",
+                        "source_attributes": {"region": "North", "count": 0},
+                    }
+                }
+            ]
+        },
     )
 
     children = content.children
@@ -249,10 +371,207 @@ def test_site_map_is_placed_before_the_site_selector():
         if getattr(child, "children", None) == "Site-Level Deforestation Detail"
     )
     assert detail_heading < component_ids.index("task-sites-map")
+    assert component_ids.index("site-filter-attributes") < component_ids.index(
+        "task-sites-map"
+    )
+    attributes = children[component_ids.index("site-filter-attributes")]
+    assert attributes.data == {"site-1": {"region": "North", "count": 0}}
+    filtered_ids = children[component_ids.index("site-filtered-ids")]
+    assert filtered_ids.data is None
     assert component_ids.index("task-sites-map") < component_ids.index(
         "site-defor-selector"
     )
     assert "site-map-selection" in component_ids
+
+
+@pytest.mark.unit
+def test_source_field_filter_values_and_site_selection():
+    callbacks = {}
+
+    def callback(*args, **kwargs):
+        def capture(function):
+            callbacks[function.__name__] = function
+            return function
+
+        return capture
+
+    registration.register_callbacks(
+        SimpleNamespace(
+            callback=callback, clientside_callback=lambda *args, **kwargs: None
+        )
+    )
+    attrs = {
+        "a": {"region": "North", "flag": False},
+        "b": {"region": "South", "flag": True},
+        "c": {"region": "North"},
+    }
+    values, selected, disabled = callbacks["update_site_filter_values"]("region", attrs)
+    assert values == [
+        {"label": "North", "value": '"North"'},
+        {"label": "South", "value": '"South"'},
+    ]
+    assert selected is None and not disabled
+    assert callbacks["filter_site_ids"](None, None, attrs) is None
+    assert callbacks["filter_site_ids"]("region", '"North"', attrs) == ["a", "c"]
+    assert callbacks["filter_site_ids"]("flag", "false", attrs) == ["a"]
+    assert callbacks["filter_site_ids"]("flag", "null", attrs) == ["c"]
+    assert callbacks["clear_filtered_site"](["a"], "b") is None
+    assert callbacks["clear_filtered_site"](["a"], "a") is registration.no_update
+
+
+@pytest.mark.unit
+def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
+    callbacks = {}
+
+    def callback(*args, **kwargs):
+        def capture(function):
+            callbacks[function.__name__] = function
+            return function
+
+        return capture
+
+    registration.register_callbacks(
+        SimpleNamespace(
+            callback=callback, clientside_callback=lambda *args, **kwargs: None
+        )
+    )
+    totals = [
+        SimpleNamespace(site_id=site, display_site_id=site, site_name=site)
+        for site in ("a", "b")
+    ]
+    task = SimpleNamespace(
+        extra_metadata={"n_replicates": 2}, results_s3_uri="s3://bucket/output"
+    )
+    mocker.patch.object(registration, "_authorize_task_access", return_value=True)
+    mocker.patch.object(
+        registration,
+        "get_task_detail",
+        return_value={
+            "task": task,
+            "totals": totals,
+            "results": None,
+            "sites": [],
+            "agg_yearly": [],
+            "is_large": True,
+        },
+    )
+    aggregate = mocker.patch.object(
+        registration,
+        "get_filtered_portfolio_yearly",
+        return_value=[{
+            "year": 2020,
+            "treatment_defor_ha": 1,
+            "control_defor_ha": 3,
+            "cum_treatment_defor_ha": 1,
+            "cum_control_defor_ha": 3,
+            "emissions_avoided_mgco2e": 2,
+            "forest_loss_avoided_ha": 2,
+        }],
+    )
+    content = callbacks["update_filtered_aggregate_plots"](
+        ["a"], "task", None, "region", '"North"'
+    )
+    aggregate.assert_called_once_with(
+        "task", {"a"}, 2, results_s3_uri="s3://bucket/output"
+    )
+    assert "region = North" in content[0].children
+    graphs = content[1:]
+    assert len(graphs) == 4
+    assert list(graphs[0].figure.data[0].y) == [1]
+    assert "1 sites" in graphs[0].figure.layout.title.text
+    message = callbacks["update_filtered_aggregate_plots"](
+        [], "task", None, "region", '"North"'
+    )
+    assert "No results" in message.children
+
+
+@pytest.mark.unit
+def test_filtered_portfolio_aggregates_each_replicate_before_quantiles(mocker):
+    rows = []
+    for site, values in (("a", [1, 9]), ("b", [9, 1]), ("c", [100, 100])):
+        for replicate, value in enumerate(values, 1):
+            for year in (2020, 2021):
+                row = {"site_id": site, "year": year, "replicate": replicate}
+                row.update({name: value for name in analysis_task._YEAR_METRICS})
+                rows.append(row)
+    content = pd.DataFrame(rows).to_csv(index=False).encode()
+    s3 = mocker.MagicMock()
+    s3.get_object.return_value = {"Body": StreamingBody(io.BytesIO(content), len(content))}
+    mocker.patch.object(analysis_task, "get_s3_client", return_value=s3)
+    output = analysis_task.get_filtered_portfolio_yearly(
+        "task", {"a", "b"}, 2, results_s3_uri="s3://bucket/path"
+    )
+    assert output[0]["treatment_defor_ha"] == 10
+    assert output[0]["treatment_defor_ha_ci_lower"] == 10
+    assert output[0]["treatment_defor_ha_ci_upper"] == 10
+    assert output[1]["cum_treatment_defor_ha_ci_lower"] == 20
+    assert output[1]["cum_treatment_defor_ha_ci_upper"] == 20
+    s3.get_object.assert_called_once_with(
+        Bucket="bucket", Key="path/results_by_site_replicate_year.csv"
+    )
+    s3.get_object.return_value = {"Body": io.BytesIO(content)}
+    single_site = analysis_task.get_filtered_portfolio_yearly(
+        "task", {"a"}, 2, results_s3_uri="s3://bucket/path"
+    )
+    assert single_site[0]["treatment_defor_ha_ci_lower"] == pytest.approx(1.2)
+    assert single_site[0]["treatment_defor_ha_ci_upper"] == pytest.approx(8.8)
+    assert single_site[1]["cum_treatment_defor_ha_ci_lower"] == pytest.approx(2.4)
+    assert single_site[1]["cum_treatment_defor_ha_ci_upper"] == pytest.approx(17.6)
+    s3.get_object.return_value = {"Body": io.BytesIO(content)}
+    with pytest.raises(analysis_task.ResultImportError, match="missing"):
+        analysis_task.get_filtered_portfolio_yearly(
+            "task", {"a", "absent"}, 2, results_s3_uri="s3://bucket/path"
+        )
+    incomplete = pd.DataFrame(rows).drop(index=0).to_csv(index=False).encode()
+    s3.get_object.return_value = {"Body": io.BytesIO(incomplete)}
+    with pytest.raises(analysis_task.ResultImportError, match="incomplete"):
+        analysis_task.get_filtered_portfolio_yearly(
+            "task", {"a"}, 2, results_s3_uri="s3://bucket/path"
+        )
+    one_rep = pd.DataFrame(rows).query("replicate == 1").to_csv(index=False).encode()
+    s3.get_object.return_value = {"Body": io.BytesIO(one_rep)}
+    output = analysis_task.get_filtered_portfolio_yearly(
+        "task", {"a", "b"}, 1, results_s3_uri="s3://bucket/path"
+    )
+    assert output[0]["treatment_defor_ha"] == 10
+    assert "treatment_defor_ha_ci_lower" not in output[0]
+
+
+@pytest.mark.unit
+def test_filtered_portfolio_handles_sites_spanning_stream_chunks(mocker):
+    rows = []
+    for site in ("a", "b"):
+        for replicate in (1, 2):
+            for year in (2020, 2021):
+                row = {"site_id": site, "year": year, "replicate": replicate}
+                row.update({name: 1 for name in analysis_task._YEAR_METRICS})
+                rows.append(row)
+    content = pd.DataFrame(rows).to_csv(index=False).encode()
+    s3 = mocker.MagicMock()
+    s3.get_object.return_value = {"Body": io.BytesIO(content)}
+    mocker.patch.object(analysis_task, "get_s3_client", return_value=s3)
+    read_csv = pd.read_csv
+
+    def small_chunks(*args, **kwargs):
+        kwargs["chunksize"] = 3
+        return read_csv(*args, **kwargs)
+
+    mocker.patch.object(analysis_task.pd, "read_csv", side_effect=small_chunks)
+    output = analysis_task.get_filtered_portfolio_yearly(
+        "task", {"a", "b"}, 2, results_s3_uri="s3://bucket/path"
+    )
+    assert [row["cum_treatment_defor_ha"] for row in output] == [2, 4]
+
+
+@pytest.mark.unit
+def test_source_attributes_preserve_types_and_missing_values():
+    from services.site_upload import _source_attributes_json
+
+    assert json.loads(
+        _source_attributes_json(
+            {"group": "East", "flag": False, "count": 0, "missing": float("nan")}
+        )
+    ) == {"group": "East", "flag": False, "count": 0, "missing": None}
 
 
 @pytest.mark.unit

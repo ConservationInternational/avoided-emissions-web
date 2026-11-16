@@ -142,3 +142,58 @@ def test_cancel_before_publication_rolls_back_real_import_and_retains_source(
         db.query(UserSiteUpload).filter(UserSiteUpload.id == upload_id).delete()
         db.commit()
         db.close()
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_import_retains_source_attributes_for_both_results_map_paths(
+    mocker, tmp_path, staged
+):
+    from services import site_set, site_upload
+
+    user_id = uuid.uuid4()
+    blob = json.dumps(
+        {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "properties": {
+                    "start": "2000-01-01",
+                    "region": "North",
+                    "category": 0,
+                },
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+                },
+            }],
+        }
+    ).encode()
+    mapping = {"start_date": "start"}
+    mocker.patch.object(site_upload.Config, "S3_BUCKET", "")
+    mocker.patch.object(site_upload, "SITE_UPLOAD_STAGE_DIR", tmp_path)
+    if staged:
+        token = site_upload.stage_site_upload(blob, "filter.geojson", user_id)
+        result = site_upload.save_user_site_set_from_staged(
+            user_id, token, mapping, consume=False
+        )
+    else:
+        result = site_upload.save_user_site_set(
+            user_id, "filter.geojson", blob, column_mapping=mapping
+        )
+
+    try:
+        for get_geojson in (
+            site_set.get_user_site_set_geojson,
+            site_set.get_user_site_set_centroids_geojson,
+        ):
+            props = get_geojson(result["id"])["features"][0]["properties"]
+            assert props["source_attributes"] == {
+                "start": "2000-01-01", "region": "North", "category": 0
+            }
+    finally:
+        db = get_db()
+        try:
+            db.query(UserSiteSet).filter(UserSiteSet.id == result["id"]).delete()
+            db.commit()
+        finally:
+            db.close()

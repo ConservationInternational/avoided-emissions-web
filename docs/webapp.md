@@ -351,15 +351,25 @@ A per-site table showing, for each site:
 
 ### Time series chart
 
-An interactive Plotly line chart of annual avoided emissions (MgCO₂e) per
-site, including the pre-intervention baseline period. Ranges across matching
-replicates are shown as a shaded ribbon when available.
+Annual and cumulative deforestation comparisons use line charts for project
+sites and matched controls, with shaded ranges across matching replicates when
+available. The site-level annual emissions comparison uses the same style.
+Avoided emissions and forest loss by year use bar charts, with replicate ranges
+shown as error bars when available.
 Year-axis tick labels use whole years without thousands separators or decimals.
 
 In **Site-Level Deforestation Detail**, **By site ID** sorts the site selector by
 the original display ID and shows `SITE ID (SITE NAME)`. **Alphabetical** sorts by
 site name and shows `SITE NAME (SITE ID)`. Sites without a distinct name show only
 their ID. Switching order preserves the selected site.
+
+The optional field and value filter above the site map uses attributes from the
+uploaded source file. It filters the map, site selector, and aggregate plots;
+other results tabs are unchanged. Clearing either dropdown restores all sites.
+Group ranges are calculated from the selected sites' yearly outcomes within
+each matching replicate, not by adding site-level bounds. Site sets must be
+reimported to retain source attributes, and analyses rerun to produce the
+yearly replicate outcomes needed for group ranges.
 
 The site map appears near the top of this section. It shows the site polygons
 and, when pixel location data is available, matched treatment (green) and control

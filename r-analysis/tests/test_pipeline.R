@@ -384,6 +384,15 @@ for (method in c("optimal", "nearest")) {
         rep_means <- tapply(reps$extrapolated_emissions_avoided_mgco2e, reps$site_id, mean)
         expect_equal(as.vector(rep_means[totals$site_id]),
                      totals$extrapolated_emissions_avoided_mgco2e)
+        yearly_reps <- read.csv(file.path(out, "results_by_site_replicate_year.csv"))
+        expect_equal(nrow(yearly_reps), 3 * nrow(by_year))
+        annual_means <- yearly_reps %>%
+            group_by(site_id, year) %>%
+            summarise(value = mean(extrapolated_treatment_defor_ha), .groups = "drop")
+        expect_equal(
+            arrange(annual_means, site_id, year)$value,
+            arrange(by_year, site_id, year)$extrapolated_treatment_defor_ha
+        )
         expect_equal(summary$n_failed_sites, 1)
         expect_equal(summary$biomass_reference_year, 2000)
         expect_false("sub_site_index" %in% names(by_year))

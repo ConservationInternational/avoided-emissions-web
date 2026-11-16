@@ -82,6 +82,7 @@ def get_user_site_set_geojson(site_set_id):
                         ELSE to_char(f.end_date, 'YYYY-MM-DD')
                     END AS end_date,
                     f.area_ha,
+                    f.source_attributes,
                     ST_AsGeoJSON(f.geom) AS geom_json
                 FROM user_site_features f
                 WHERE f.site_set_id = :site_set_id
@@ -105,6 +106,7 @@ def get_user_site_set_geojson(site_set_id):
                     "start_date": r.start_date,
                     "end_date": r.end_date,
                     "area_ha": r.area_ha,
+                    "source_attributes": r.source_attributes,
                 },
             }
             for r in rows
@@ -134,6 +136,7 @@ def get_user_site_set_centroids_geojson(site_set_id):
                     f.id::text AS site_id,
                     f.site_id AS display_site_id,
                     f.area_ha,
+                    f.source_attributes,
                     ST_AsGeoJSON(ST_Centroid(f.geom)) AS centroid_json
                 FROM user_site_features f
                 WHERE f.site_set_id = :site_set_id
@@ -150,6 +153,7 @@ def get_user_site_set_centroids_geojson(site_set_id):
                     "site_id": r.site_id,
                     "display_site_id": r.display_site_id,
                     "area_ha": r.area_ha,
+                    "source_attributes": r.source_attributes,
                     "_is_centroid": True,
                 },
             }

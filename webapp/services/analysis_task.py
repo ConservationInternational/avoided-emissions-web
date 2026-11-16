@@ -1702,6 +1702,98 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         return None
 
 
+def get_filtered_portfolio_yearly(task_id, site_ids, n_replicates, results_s3_uri=None):
+    """Aggregate site-year replicate outcomes before computing group ranges."""
+    bucket, prefix = _resolve_results_s3(task_id, results_s3_uri)
+    key = f"{prefix}/results_by_site_replicate_year.csv"
+    body = get_s3_client().get_object(Bucket=bucket, Key=key)["Body"]
+    names = {
+        "extrapolated_treatment_defor_ha": "treatment_defor_ha",
+        "extrapolated_control_defor_ha": "control_defor_ha",
+        "extrapolated_treatment_emissions_mgco2e": "treatment_emissions_mgco2e",
+        "extrapolated_control_emissions_mgco2e": "control_emissions_mgco2e",
+        "extrapolated_forest_loss_avoided_ha": "forest_loss_avoided_ha",
+        "extrapolated_emissions_avoided_mgco2e": "emissions_avoided_mgco2e",
+    }
+    columns = ["site_id", "year", "replicate", *names]
+    parts = []
+    seen_sites = set()
+    pending = None
+
+    def consume(rows):
+        if rows.empty:
+            return
+        sites = set(rows["site_id"])
+        if seen_sites.intersection(sites):
+            raise ResultImportError("Replicate outcomes are not ordered by site.")
+        seen_sites.update(sites)
+        rows = rows.copy()
+        for column in columns[1:]:
+            rows[column] = pd.to_numeric(rows[column], errors="raise")
+        coverage = rows.groupby(["site_id", "year"])["replicate"].agg(
+            ["size", "nunique", "min", "max"]
+        )
+        if (
+            rows[columns].isna().any().any()
+            or not np.isfinite(rows[columns[1:]].to_numpy()).all()
+            or not coverage["size"].eq(n_replicates).all()
+            or not coverage["nunique"].eq(n_replicates).all()
+            or not coverage["min"].eq(1).all()
+            or not coverage["max"].eq(n_replicates).all()
+        ):
+            raise ResultImportError(
+                "The selected sites have incomplete or invalid replicate outcomes."
+            )
+        parts.append(
+            rows.groupby(["replicate", "year"], as_index=False)[list(names)].sum()
+        )
+
+    try:
+        for chunk in pd.read_csv(
+            body,
+            usecols=columns,
+            dtype={"site_id": str},
+            keep_default_na=False,
+            chunksize=100_000,
+        ):
+            part = chunk[chunk["site_id"].isin(site_ids)]
+            if pending is not None:
+                part = pd.concat([pending, part], ignore_index=True)
+            if part.empty:
+                continue
+            last_site = part["site_id"].iloc[-1]
+            pending = part[part["site_id"] == last_site]
+            consume(part[part["site_id"] != last_site])
+        if pending is not None:
+            consume(pending)
+    finally:
+        body.close()
+    if not parts:
+        raise ResultImportError(
+            "No replicate outcomes were found for the selected sites."
+        )
+    if seen_sites != set(site_ids):
+        raise ResultImportError(
+            "Replicate outcomes are missing for some selected sites."
+        )
+    yearly = pd.concat(parts).groupby(["replicate", "year"], as_index=False)[
+        list(names)
+    ].sum()
+    yearly = yearly.rename(columns=names).sort_values(["replicate", "year"])
+    for kind in ("treatment", "control"):
+        yearly[f"cum_{kind}_defor_ha"] = yearly.groupby("replicate")[
+            f"{kind}_defor_ha"
+        ].cumsum()
+    metrics = [*names.values(), "cum_treatment_defor_ha", "cum_control_defor_ha"]
+    grouped = yearly.groupby("year")[metrics]
+    result = grouped.mean()
+    if n_replicates > 1:
+        for bound, quantile in (("lower", 0.025), ("upper", 0.975)):
+            bounds = grouped.quantile(quantile).add_suffix(f"_ci_{bound}")
+            result = result.join(bounds)
+    return result.reset_index().to_dict("records")
+
+
 def list_task_s3_files(task_id, results_s3_uri=None):
     """List all S3 files under a task's output directory.
 

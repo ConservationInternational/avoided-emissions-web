@@ -10,6 +10,7 @@ import flask_login
 import pandas as pd
 import plotly.graph_objects as go
 from auth import get_current_user
+from botocore.exceptions import ClientError
 from config import report_exception
 from dash import ALL, Input, Output, State, callback_context, dcc, html, no_update
 from dash.exceptions import PreventUpdate
@@ -57,12 +58,16 @@ from services import (
     start_gee_export,
     update_task_info,
 )
-from services.analysis_task import get_task_execution_logs
+from services.analysis_task import (
+    get_filtered_portfolio_yearly,
+    get_task_execution_logs,
+)
 from session_store import SessionExpired, SessionUnavailable
 from trendsearth_client import TrendsEarthAPIError
 
 from callbacks._detail_builders import (
     BOUNDS_NAME,
+    _add_ci_band,
     _add_range_error_bars,
     _build_overview,
     _build_plots,
@@ -1744,6 +1749,7 @@ def register_callbacks(app, limiter=None):
                     agg_yearly=agg_yearly,
                     is_large=is_large,
                     site_map=site_map,
+                    sites_geojson=detail.get("sites_geojson"),
                 )
             else:
                 plots = html.P("Results not yet available.", className="text-muted")
@@ -2082,18 +2088,157 @@ def register_callbacks(app, limiter=None):
 
     app.clientside_callback(
         """
-        function(sortOrder, storedOptions) {
+        function(sortOrder, filteredIds, storedOptions) {
             if (!storedOptions || !storedOptions[sortOrder]) {
                 return window.dash_clientside.no_update;
             }
-            return storedOptions[sortOrder];
+            if (filteredIds === null || filteredIds === undefined) {
+                return storedOptions[sortOrder];
+            }
+            const allowed = new Set(filteredIds);
+            return storedOptions[sortOrder].filter(option => allowed.has(option.value));
         }
         """,
         Output("site-defor-selector", "options"),
         Input("site-defor-sort-order", "value"),
+        Input("site-filtered-ids", "data"),
         State("site-defor-sort-options", "data"),
         prevent_initial_call=True,
     )
+
+    @app.callback(
+        Output("site-filter-value", "options"),
+        Output("site-filter-value", "value"),
+        Output("site-filter-value", "disabled"),
+        Input("site-filter-field", "value"),
+        State("site-filter-attributes", "data"),
+    )
+    def update_site_filter_values(field, attributes):
+        if not field or not attributes:
+            return [], None, True
+        values = {
+            json.dumps(properties.get(field), sort_keys=True, ensure_ascii=False)
+            for properties in attributes.values()
+        }
+        options = [
+            {
+                "label": "(missing)" if token == "null" else str(json.loads(token)),
+                "value": token,
+            }
+            for token in sorted(values)
+        ]
+        return options, None, False
+
+    @app.callback(
+        Output("site-filtered-ids", "data"),
+        Input("site-filter-field", "value"),
+        Input("site-filter-value", "value"),
+        State("site-filter-attributes", "data"),
+    )
+    def filter_site_ids(field, value, attributes):
+        if not field or value is None:
+            return None
+        return [
+            site_id
+            for site_id, properties in (attributes or {}).items()
+            if json.dumps(properties.get(field), sort_keys=True, ensure_ascii=False)
+            == value
+        ]
+
+    @app.callback(
+        Output("site-defor-selector", "value", allow_duplicate=True),
+        Input("site-filtered-ids", "data"),
+        State("site-defor-selector", "value"),
+        prevent_initial_call=True,
+    )
+    def clear_filtered_site(filtered_ids, selected_site):
+        if filtered_ids is not None and selected_site not in filtered_ids:
+            return None
+        return no_update
+
+    app.clientside_callback(
+        """
+        function(filteredIds) {
+            const el = document.getElementById("task-sites-map");
+            if (el) {
+                el._allowedSiteIds = Array.isArray(filteredIds)
+                    ? new Set(filteredIds.map(String)) : null;
+                el.dispatchEvent(new CustomEvent("filter-sites", {
+                    detail: { siteIds: filteredIds }
+                }));
+            }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("site-filtered-ids", "id"),
+        Input("site-filtered-ids", "data"),
+    )
+
+    @app.callback(
+        Output("task-aggregate-plots", "children"),
+        Input("site-filtered-ids", "data"),
+        State("task-id-store", "data"),
+        State("share-token-store", "data"),
+        State("site-filter-field", "value"),
+        State("site-filter-value", "value"),
+        prevent_initial_call=True,
+    )
+    def update_filtered_aggregate_plots(
+        filtered_ids, task_id, share_token, field, value
+    ):
+        if not _authorize_task_access(task_id, share_token):
+            return dbc.Alert("Task not found or access denied.", color="danger")
+        try:
+            detail = get_task_detail(task_id)
+            if not detail:
+                return dbc.Alert("Task not found.", color="danger")
+            task = detail["task"]
+            totals = detail["totals"]
+            results = detail["results"]
+            sites = detail["sites"]
+            agg_yearly = detail["agg_yearly"]
+            if filtered_ids is not None:
+                allowed = set(filtered_ids)
+                totals = [total for total in totals if str(total.site_id) in allowed]
+                result_ids = {str(total.site_id) for total in totals}
+                if not result_ids:
+                    return dbc.Alert(
+                        "No results for the selected group of sites.", color="info"
+                    )
+                if results is not None:
+                    results = [row for row in results if str(row.site_id) in result_ids]
+                sites = [site for site in sites if str(site.site_id) in result_ids]
+                agg_yearly = get_filtered_portfolio_yearly(
+                    task_id,
+                    result_ids,
+                    int(task.extra_metadata["n_replicates"]),
+                    results_s3_uri=task.results_s3_uri,
+                )
+            content = _build_plots(
+                results,
+                totals,
+                sites,
+                task=task if filtered_ids is None else None,
+                agg_yearly=agg_yearly,
+                is_large=detail["is_large"],
+            )
+            graphs = content.children[0].children
+            if filtered_ids is not None:
+                description = "selected group"
+                if field and value is not None:
+                    label = "(missing)" if value == "null" else str(json.loads(value))
+                    description = f"{field} = {label}"
+                return [
+                    dbc.Alert(
+                        f"Filtered to {len(totals)} sites: {description}",
+                        color="info",
+                    ),
+                    *graphs,
+                ]
+            return graphs
+        except (ClientError, OSError, ValueError, KeyError) as exc:
+            logger.exception("Could not build filtered results for task %s", task_id)
+            return dbc.Alert(f"Could not load filtered results: {exc}", color="danger")
 
     # -- Sort-order radio for match quality site dropdown --------------------
 
@@ -2859,7 +3004,9 @@ def register_callbacks(app, limiter=None):
     def update_site_deforestation_plot(selected_site, store_data, task_id):
         """Build per-site deforestation and emissions plots with intervention
         date markers when a site is selected from the dropdown."""
-        if not selected_site or not store_data:
+        if not selected_site:
+            return html.P("Select a site to view its results.", className="text-muted")
+        if not store_data:
             raise PreventUpdate
 
         sites_data = store_data.get("sites", {})
@@ -2945,22 +3092,20 @@ def register_callbacks(app, limiter=None):
             )
         )
         if site_has_ci:
-            _add_range_error_bars(
+            _add_ci_band(
                 fig_defor,
                 site_df["year"],
-                site_df["treatment_defor_ha"],
                 site_df["treatment_defor_ha_ci_lower"],
                 site_df["treatment_defor_ha_ci_upper"],
-                color="#2ca02c",
+                color="rgba(44,160,44,0.15)",
                 name=f"Project Site ({BOUNDS_NAME.lower()})",
             )
-            _add_range_error_bars(
+            _add_ci_band(
                 fig_defor,
                 site_df["year"],
-                site_df["control_defor_ha"],
                 site_df["control_defor_ha_ci_lower"],
                 site_df["control_defor_ha_ci_upper"],
-                color="#d62728",
+                color="rgba(214,39,40,0.15)",
                 name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         fig_defor.update_layout(
@@ -3034,22 +3179,20 @@ def register_callbacks(app, limiter=None):
             )
         )
         if has_cumulative_ci:
-            _add_range_error_bars(
+            _add_ci_band(
                 fig_cum,
                 site_sorted["year"],
-                cum_treatment,
                 site_sorted["cumulative_treatment_defor_ha_ci_lower"],
                 site_sorted["cumulative_treatment_defor_ha_ci_upper"],
-                color="#2ca02c",
+                color="rgba(44,160,44,0.15)",
                 name=f"Project Site ({BOUNDS_NAME.lower()})",
             )
-            _add_range_error_bars(
+            _add_ci_band(
                 fig_cum,
                 site_sorted["year"],
-                cum_control,
                 site_sorted["cumulative_control_defor_ha_ci_lower"],
                 site_sorted["cumulative_control_defor_ha_ci_upper"],
-                color="#d62728",
+                color="rgba(214,39,40,0.15)",
                 name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
         fig_cum.update_layout(
@@ -3117,22 +3260,20 @@ def register_callbacks(app, limiter=None):
                 and site_df["treatment_emissions_mgco2e_ci_lower"].notna().any()
             )
             if has_emissions_ci:
-                _add_range_error_bars(
+                _add_ci_band(
                     fig_em,
                     site_df["year"],
-                    site_df["treatment_emissions_mgco2e"],
                     site_df["treatment_emissions_mgco2e_ci_lower"],
                     site_df["treatment_emissions_mgco2e_ci_upper"],
-                    color="#2ca02c",
+                    color="rgba(44,160,44,0.15)",
                     name=f"Project Site ({BOUNDS_NAME.lower()})",
                 )
-                _add_range_error_bars(
+                _add_ci_band(
                     fig_em,
                     site_df["year"],
-                    site_df["control_emissions_mgco2e"],
                     site_df["control_emissions_mgco2e_ci_lower"],
                     site_df["control_emissions_mgco2e_ci_upper"],
-                    color="#d62728",
+                    color="rgba(214,39,40,0.15)",
                     name=f"Matched Controls ({BOUNDS_NAME.lower()})",
                 )
             fig_em.update_layout(
