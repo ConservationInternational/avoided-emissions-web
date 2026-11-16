@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -115,6 +116,32 @@ def exercise_fixture(config_path: Path) -> None:
     assert payload["summary"]["n_replicates"] == 2, payload["summary"]
     assert len(list((reconciliation / "matches").glob("mb_*.json"))) == 8
     assert (root / "results/results_by_site_total.csv").exists()
+
+    partitioning = root / "reconcile-partitioning"
+    partitioning.mkdir()
+    with contextlib.chdir(partitioning):
+        worker.prepare_reconcile(expected, outcomes)
+    archives = []
+    for batch in sorted((partitioning / "reconcile_batches").glob("*.json")):
+        shard = root / f"reconcile-{batch.stem}"
+        shard.mkdir()
+        with contextlib.chdir(shard):
+            worker.reconcile(params, json.loads(batch.read_text()), [])
+            worker.archive_matches()
+        archives.append(str(shard / "matches.tar"))
+    parallel_summary = root / "parallel-summary"
+    parallel_summary.mkdir()
+    with contextlib.chdir(parallel_summary):
+        worker.restore_archives(archives, Path("matches"))
+        worker.summarize(
+            params,
+            {"expected": expected},
+            Path("matches"),
+            120,
+            workers=2,
+            validated_matches=True,
+        )
+        assert json.loads(Path("results.json").read_text()) == payload
 
 
 class WorkflowTests(unittest.TestCase):
@@ -445,6 +472,76 @@ class WorkflowTests(unittest.TestCase):
         ):
             worker.reconcile(params, {"ids": [1], "n_replicates": 2}, [])
 
+    def test_reconciliation_batches_and_archives_cover_work_once(self):
+        params = self.params()
+        expected = {"ids": list(range(1, 28)), "n_replicates": 1}
+        store = worker.artifact_store(params, "checkpoints")
+        for id_ in expected["ids"]:
+            sidecar = self.root / f"mb_f{id_}_r1.json"
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "matches_file": None,
+                        "failures": [
+                            {"id_numeric": id_, "replicate": 1, "reason": "no_overlap"}
+                        ],
+                    }
+                )
+            )
+            store.commit(sidecar, checkpoint_key(sidecar.name))
+        prepare = self.root / "reconcile-prepare"
+        prepare.mkdir()
+        with contextlib.chdir(prepare):
+            worker.prepare_reconcile(expected, [])
+        batches = sorted((prepare / "reconcile_batches").glob("*.json"))
+        self.assertEqual(len(batches), 2)
+        archives = []
+        for index, batch in enumerate(batches):
+            directory = self.root / f"reconcile-{index}"
+            directory.mkdir()
+            with contextlib.chdir(directory):
+                worker.reconcile(params, json.loads(batch.read_text()), [])
+                worker.archive_matches()
+            archives.append(str(directory / "matches.tar"))
+        with contextlib.chdir(self.root):
+            worker.restore_archives(archives, Path("restored"))
+            self.assertEqual(
+                {p.name for p in Path("restored").iterdir()},
+                {f"mb_f{id_}_r1.json" for id_ in expected["ids"]},
+            )
+            with self.assertRaisesRegex(ValueError, "Duplicate"):
+                worker.restore_archives([archives[0], archives[0]], Path("duplicate"))
+        with (
+            contextlib.chdir(self.root),
+            self.assertRaisesRegex(RuntimeError, "exhausted"),
+        ):
+            worker.prepare_reconcile(expected, [{"unfinished": [{"id": 1}]}])
+
+    def test_empty_reconciliation_and_unsafe_archive(self):
+        empty = self.root / "empty"
+        empty.mkdir()
+        with contextlib.chdir(empty):
+            worker.prepare_reconcile({"ids": [], "n_replicates": 1}, [])
+            batch = json.loads(
+                next(Path("reconcile_batches").glob("*.json")).read_text()
+            )
+            self.assertEqual(batch["ids"], [])
+            worker.reconcile(self.params(), batch, [])
+            worker.archive_matches()
+        with contextlib.chdir(self.root):
+            worker.restore_archives([str(empty / "matches.tar")], Path("restored"))
+            self.assertEqual(list(Path("restored").iterdir()), [])
+        unsafe = self.root / "unsafe.tar"
+        with tarfile.open(unsafe, "w") as archive:
+            member = tarfile.TarInfo("../mb_f1_r1.json")
+            member.size = 0
+            archive.addfile(member)
+        with (
+            contextlib.chdir(self.root),
+            self.assertRaisesRegex(ValueError, "Invalid match archive member"),
+        ):
+            worker.restore_archives([str(unsafe)], Path("unsafe"))
+
     def test_internal_timeout_is_not_reported_as_success(self):
         script = self.root / "slow.py"
         script.write_text("import time; time.sleep(60)\n")
@@ -669,11 +766,11 @@ class WorkflowTests(unittest.TestCase):
             "import json,pathlib,sys\n"
             "p=pathlib.Path\n"
             "cmd=sys.argv[1]\n"
-            "if cmd in ('repack','reconcile'):\n"
+            "if cmd in ('repack','prepare-reconcile'):\n"
             " outcomes=[json.loads(p(path).read_text()) for path in "
             "sys.argv[sys.argv.index('--outcomes')+1:]]\n"
             " if cmd=='repack': assert outcomes\n"
-            " if cmd=='reconcile': assert not any(o['unfinished'] for o in outcomes)\n"
+            " if cmd=='prepare-reconcile': assert not any(o['unfinished'] for o in outcomes)\n"
             "if cmd=='match':\n"
             " with p(__file__).with_suffix('.seconds').open('a') as f: "
             "f.write(sys.argv[sys.argv.index('--seconds')+1]+'\\n')\n"
@@ -697,10 +794,17 @@ class WorkflowTests(unittest.TestCase):
             " p('batches').mkdir()\n"
             " for i,outcome in enumerate(outcomes): "
             "p(f'batches/recovery{i}.json').write_text(json.dumps({'ids':[1],'phase':phase}))\n"
-            "if cmd=='reconcile':\n"
-            " p('matches').mkdir(); "
-            "p('reconciled.json').write_text('{}')\n"
-            "if cmd=='summarize': p('results.json').write_text('{\"ok\":true}')\n"
+            "if cmd=='prepare-reconcile':\n"
+            " p('reconcile_batches').mkdir(); "
+            "p('reconcile_batches/a.json').write_text('{}')\n"
+            " if p(__file__).with_suffix('.multiple').exists(): "
+            "p('reconcile_batches/b.json').write_text('{}')\n"
+            "if cmd=='reconcile': p('matches.tar').write_text('archive')\n"
+            "if cmd=='summarize':\n"
+            " archives=sys.argv[sys.argv.index('--archives')+1:sys.argv.index('--workers')]\n"
+            " assert len(archives)==(2 if p(__file__).with_suffix('.multiple').exists() else 1)\n"
+            " assert all(p(x).is_file() for x in archives)\n"
+            " p('results.json').write_text('{\"ok\":true}')\n"
         )
         (self.root / "analysis.json").write_text("{}")
         local_config = self.root / "local.config"
@@ -709,6 +813,7 @@ class WorkflowTests(unittest.TestCase):
             "PREPARE_MATCH_BATCHES",
             "PREPARE_RECOVERY",
             "PREPARE_LONG",
+            "PREPARE_RECONCILE",
             "RECONCILE",
             "SUMMARIZE",
         )
@@ -793,7 +898,7 @@ class WorkflowTests(unittest.TestCase):
         )
         with (self.root / "trace.tsv").open() as stream:
             tasks = list(csv.DictReader(stream, delimiter="\t"))
-        self.assertEqual(len(tasks), 5)
+        self.assertEqual(len(tasks), 6)
         self.assertTrue(all(task["status"] == "CACHED" for task in tasks), tasks)
         self.assertEqual(
             driver.record_progress(progress_store, self.root / "trace.tsv", 90, "test"),
@@ -816,7 +921,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         with (self.root / "trace.tsv").open() as stream:
             tasks = list(csv.DictReader(stream, delimiter="\t"))
-        self.assertEqual(len(tasks), 7)
+        self.assertEqual(len(tasks), 8)
         self.assertTrue((recovered_state / "published/results.json").exists())
         fake.with_suffix(".yield").touch()
         fake.with_suffix(".multiple").touch()
@@ -836,7 +941,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         with (self.root / "trace.tsv").open() as stream:
             tasks = list(csv.DictReader(stream, delimiter="\t"))
-        self.assertEqual(len(tasks), 12)
+        self.assertEqual(len(tasks), 14)
         self.assertTrue((yielded_state / "published/results.json").exists())
 
 

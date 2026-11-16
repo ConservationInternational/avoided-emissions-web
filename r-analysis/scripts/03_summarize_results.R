@@ -85,10 +85,29 @@ sidecars <- lapply(
 )
 batch_files <- unlist(lapply(sidecars, function(x) x$matches_file))
 batch_paths <- file.path(config$matches_dir, batch_files)
+if (isTRUE(config$validated_match_files) && any(!file.exists(batch_paths))) {
+    stop("Missing validated match file")
+}
 batch_paths <- batch_paths[file.exists(batch_paths)]
 
 # A fragment is used only when every replicate was matched.
-matched_reps <- if (length(batch_paths) > 0) {
+read_timer <- proc.time()
+matched_reps <- if (length(batch_paths) > 0 && isTRUE(config$validated_match_files)) {
+    parts <- regmatches(
+        basename(batch_paths),
+        regexec("^mb_f([0-9]+)_r([0-9]+)\\.parquet$", basename(batch_paths))
+    )
+    if (any(lengths(parts) != 3L)) stop("Invalid validated match filename")
+    ids <- as.numeric(vapply(parts, `[[`, character(1), 2L))
+    replicates <- as.numeric(vapply(parts, `[[`, character(1), 3L))
+    if (any(!is.finite(ids) | ids >= 2^53) || any(!is.finite(replicates))) {
+        stop("Invalid validated match identifier")
+    }
+    tibble(
+        id_numeric = ids,
+        replicate = replicates
+    )
+} else if (length(batch_paths) > 0) {
     open_dataset(batch_paths) %>%
         distinct(id_numeric, replicate) %>%
         collect()
@@ -100,8 +119,12 @@ matched_ids <- matched_reps %>%
     filter(n_distinct(replicate) == N_REPLICATES) %>%
     pull(id_numeric) %>%
     unique()
+if (isTRUE(config$validated_match_files) && length(batch_paths) > 0) {
+    batch_paths <- batch_paths[matched_reps$id_numeric %in% matched_ids]
+}
 frag_row <- function(id) fragments[match(id, fragments$id_numeric), ]
 diagnostics_by_rep <- unlist(lapply(sidecars, function(x) x$diagnostics), recursive = FALSE)
+message("[TIMING] Match index: ", round((proc.time() - read_timer)["elapsed"], 1), "s")
 
 
 # -- Read each batch once ----------------------------------------------------
@@ -114,58 +137,26 @@ diagnostics <- list()
 detail_path <- out_path("results_pixel_year_emissions.csv")
 if (file.exists(detail_path)) file.remove(detail_path)
 
-seen <- character()
-invalid_sites <- list()
-for (path in batch_paths) {
+summarize_batch <- function(path) {
     batch <- read_parquet(path) %>%
         filter(id_numeric %in% matched_ids) %>%
         as_tibble() %>%
         mutate(cell = as.numeric(cell))
-    for (m in split(batch, list(batch$id_numeric, batch$replicate), drop = TRUE)) {
+    lapply(split(batch, list(batch$id_numeric, batch$replicate), drop = TRUE), function(m) {
         id <- m$id_numeric[1]
         k <- m$replicate[1]
-        # A retried batch can repeat a fragment-replicate; use it once.
-        key <- paste(id, k)
-        if (key %in% seen) next
-        seen <- c(seen, key)
         frag <- frag_row(id)
-        if (frag$site_id %in% names(invalid_sites)) next
-        outcomes <- tryCatch(
-            pixel_outcomes(m, frag$start_year, FC_YEAR_MIN, FC_YEAR_MAX),
-            invalid_pixel_outcomes = function(e) e
-        )
-        if (inherits(outcomes, "invalid_pixel_outcomes")) {
-            detail <- paste0(
-                "Invalid outcome inputs: site_id=", frag$site_id,
-                ", site_name=", frag$site_name, ", fragment=", id,
-                ", sub_site_index=", frag$sub_site_index, ", replicate=", k,
-                ", match_file=", basename(path), ": ", conditionMessage(outcomes)
-            )
-            invalid_sites[[frag$site_id]] <- detail
-            message("  ", detail, "; excluding entire site from estimates")
-            next
-        }
-        ids <- tibble(id_numeric = id, site_id = frag$site_id, replicate = k)
-        i <- length(stratum_rows) + 1L
-        stratum_rows[[i]] <- bind_cols(ids, aggregate_outcomes(m, outcomes))
-        # Eligible pixels per matched stratum (sampling_weight = n_eligible / n_matched).
-        strata[[i]] <- bind_cols(ids, m %>%
-            filter(treatment) %>%
-            group_by(group) %>%
-            summarise(n_matched = n(), n_eligible = sampling_weight[1] * n(), .groups = "drop"))
-        count_rows[[i]] <- bind_cols(ids, tibble(
-            n_eligible = m$n_eligible[1], n_sampled = m$n_sampled[1],
-            n_forest_pixels = m$n_forest_pixels[1],
-            n_control_pool = m$n_control_pool[1], n_control_sampled = m$n_control_sampled[1]
-        ))
-        if (k == 1L) {
-            n_years <- length(outcomes$years)
-            write_csv(
-                tibble(
-                    cell = rep(m$cell, times = n_years),
-                    id_numeric = id,
-                    site_id = frag$site_id,
-                    group = rep(m$group, times = n_years),
+        # Delay errors until the ordered merge can skip duplicate or invalid sites.
+        result <- tryCatch({
+            outcomes <- pixel_outcomes(m, frag$start_year, FC_YEAR_MIN, FC_YEAR_MAX)
+            ids <- tibble(id_numeric = id, site_id = frag$site_id, replicate = k)
+            detail <- NULL
+            covariates <- NULL
+            if (k == 1L) {
+                n_years <- length(outcomes$years)
+                detail <- tibble(
+                    cell = rep(m$cell, times = n_years), id_numeric = id,
+                    site_id = frag$site_id, group = rep(m$group, times = n_years),
                     year = rep(outcomes$years, each = nrow(m)),
                     treatment = rep(m$treatment, times = n_years),
                     match_group = rep(m$match_group, times = n_years),
@@ -173,18 +164,105 @@ for (path in batch_paths) {
                     sampling_weight = rep(m$sampling_weight, times = n_years),
                     forest_loss_ha = as.vector(outcomes$loss_ha),
                     emissions_mgco2e = as.vector(outcomes$emissions)
-                ),
-                detail_path, append = file.exists(detail_path)
+                )
+                covariates <- m %>%
+                    select(cell, group, treatment, match_group, match_weight, pscore,
+                           any_of(COVARIATES)) %>%
+                    mutate(id_numeric = id, site_id = frag$site_id, .before = 1)
+            }
+            list(
+                stratum = bind_cols(ids, aggregate_outcomes(m, outcomes)),
+                strata = bind_cols(ids, m %>%
+                    filter(treatment) %>%
+                    group_by(group) %>%
+                    summarise(n_matched = n(), n_eligible = sampling_weight[1] * n(),
+                              .groups = "drop")),
+                counts = bind_cols(ids, tibble(
+                    n_eligible = m$n_eligible[1], n_sampled = m$n_sampled[1],
+                    n_forest_pixels = m$n_forest_pixels[1],
+                    n_control_pool = m$n_control_pool[1], n_control_sampled = m$n_control_sampled[1]
+                )),
+                detail = detail, covariates = covariates
             )
-            cov_rows[[length(cov_rows) + 1]] <- m %>%
-                select(cell, group, treatment, match_group, match_weight, pscore,
-                       any_of(COVARIATES)) %>%
-                mutate(id_numeric = id, site_id = frag$site_id, .before = 1)
+        }, error = function(e) e)
+        list(id = id, replicate = k, fragment = frag, path = path, result = result)
+    })
+}
+
+process_batches <- function(paths) {
+    workers <- if (is.null(config$summary_workers)) 1L else as.integer(config$summary_workers)
+    if (is.na(workers) || workers < 1L) stop("Invalid summary worker count")
+    cluster <- NULL
+    if (workers > 1L && length(paths) > 0L) {
+        cluster <- parallel::makePSOCKcluster(workers)
+        on.exit(parallel::stopCluster(cluster), add = TRUE)
+        parallel::clusterExport(
+            cluster, c("summarize_batch", "matched_ids", "fragments", "frag_row",
+                       "FC_YEAR_MIN", "FC_YEAR_MAX", "COVARIATES", "scripts_dir"),
+            envir = environment()
+        )
+        parallel::clusterEvalQ(cluster, {
+            library(arrow, warn.conflicts = FALSE)
+            arrow::set_cpu_count(1L)
+            library(tidyverse)
+            source(file.path(scripts_dir, "stats_functions.R"))
+            NULL
+        })
+    }
+    seen <- new.env(hash = TRUE, parent = emptyenv())
+    invalid_sites <- list()
+    stratum_rows <- list()
+    strata <- list()
+    count_rows <- list()
+    cov_rows <- list()
+    for (start in if (length(paths)) seq.int(1L, length(paths), by = workers * 2L) else integer()) {
+        chunk <- paths[start:min(length(paths), start + workers * 2L - 1L)]
+        results <- if (is.null(cluster)) lapply(chunk, summarize_batch) else
+            parallel::parLapply(cluster, chunk, summarize_batch)
+        for (batch in results) for (entry in batch) {
+            id <- entry$id
+            k <- entry$replicate
+            frag <- entry$fragment
+            key <- paste(id, k)
+            if (exists(key, envir = seen, inherits = FALSE)) next
+            assign(key, TRUE, envir = seen)
+            if (frag$site_id %in% names(invalid_sites)) next
+            result <- entry$result
+            if (inherits(result, "invalid_pixel_outcomes")) {
+                detail <- paste0(
+                    "Invalid outcome inputs: site_id=", frag$site_id,
+                    ", site_name=", frag$site_name, ", fragment=", id,
+                    ", sub_site_index=", frag$sub_site_index, ", replicate=", k,
+                    ", match_file=", basename(entry$path), ": ", conditionMessage(result)
+                )
+                invalid_sites[[frag$site_id]] <- detail
+                message("  ", detail, "; excluding entire site from estimates")
+                next
+            }
+            if (inherits(result, "error")) stop(result)
+            i <- length(stratum_rows) + 1L
+            stratum_rows[[i]] <- result$stratum
+            strata[[i]] <- result$strata
+            count_rows[[i]] <- result$counts
+            if (!is.null(result$detail)) {
+                write_csv(result$detail, detail_path, append = file.exists(detail_path))
+                cov_rows[[length(cov_rows) + 1L]] <- result$covariates
+            }
         }
     }
-    rm(batch)
-    gc()
+    list(stratum_rows = stratum_rows, strata = strata, count_rows = count_rows,
+         cov_rows = cov_rows, invalid_sites = invalid_sites)
 }
+aggregate_timer <- proc.time()
+processed <- process_batches(batch_paths)
+message("[TIMING] Match aggregation: ", round((proc.time() - aggregate_timer)["elapsed"], 1),
+        "s across ", length(batch_paths), " files")
+stratum_rows <- processed$stratum_rows
+strata <- processed$strata
+count_rows <- processed$count_rows
+cov_rows <- processed$cov_rows
+invalid_sites <- processed$invalid_sites
+rm(processed)
 diagnostics <- unlist(lapply(
     Filter(function(d) d$replicate == 1L && d$id_numeric %in% matched_ids &&
                !d$id_numeric %in% fragments$id_numeric[fragments$site_id %in% names(invalid_sites)],

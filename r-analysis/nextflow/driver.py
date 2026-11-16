@@ -23,7 +23,7 @@ from workflow_store import Store
 
 log = logging.getLogger(__name__)
 WORKFLOW = Path(__file__).with_name("main.nf")
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 JOB_ID = re.compile(r"submitted > job=([0-9a-f-]{36});")
 ACTIVE_JOB_STATUSES = {"SUBMITTED", "PENDING", "RUNNABLE", "STARTING", "RUNNING"}
 PROGRESS_INTERVAL_SECONDS = 60

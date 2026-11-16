@@ -172,6 +172,10 @@ test_that("summary preserves cell IDs across integer and integer64 match files",
 test_that("summary reports no estimates when all fragments fail", {
     data_dir <- tempfile("ae_empty_")
     config_path <- make_fixture(data_dir, "optimal", n_replicates = 1)
+    config <- fromJSON(config_path, simplifyVector = FALSE)
+    config$summary_workers <- 2L
+    config$validated_match_files <- TRUE
+    write_json(config, config_path, auto_unbox = TRUE)
     run_script("03_summarize_results.R", config_path)
     out <- file.path(data_dir, "output")
     summary <- fromJSON(file.path(out, "results_summary.json"))
@@ -205,6 +209,18 @@ test_that("invalid outcomes exclude the entire site and preserve other sites", {
         }
     }
     log <- run_script("03_summarize_results.R", config_path)
+    result_files <- list.files(out, "^results_.*\\.(csv|json)$", full.names = TRUE)
+    baseline <- lapply(result_files, function(path) {
+        if (grepl("\\.json$", path)) fromJSON(path, simplifyVector = FALSE) else read.csv(path)
+    })
+    config <- fromJSON(config_path, simplifyVector = FALSE)
+    config$summary_workers <- 2L
+    write_json(config, config_path, auto_unbox = TRUE)
+    run_script("03_summarize_results.R", config_path)
+    parallel_results <- lapply(result_files, function(path) {
+        if (grepl("\\.json$", path)) fromJSON(path, simplifyVector = FALSE) else read.csv(path)
+    })
+    expect_equal(parallel_results, baseline)
     status <- read.csv(file.path(out, "results_site_status.csv"))
     failed <- read.csv(file.path(out, "results_failed_sites.csv"))
     totals <- read.csv(file.path(out, "results_by_site_total.csv"))

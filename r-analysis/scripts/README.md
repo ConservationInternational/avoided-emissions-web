@@ -88,6 +88,23 @@ For each site fragment:
    Summary includes only strata matched in every replicate, including in
    the pixel-level downloads and balance diagnostics.
 
+## Reconciliation and summary
+
+After matching, Nextflow validates checkpoints in parallel batches of up to
+25 fragments. Each batch produces one uncompressed archive, avoiding a separate
+Nextflow staging operation for every sidecar and Parquet file. Missing,
+corrupt, incomplete, or incompatible checkpoints fail reconciliation.
+
+The summary processes validated match files in bounded parallel batches, then
+merges them in input order. It retains the existing whole-site invalidation,
+complete-stratum, per-replicate, and portfolio aggregation rules. The Batch
+summary task requests four CPUs; the local profile uses one. Logs report match
+index and aggregation timings.
+
+Resuming a previous workflow still requires the original snapshot, inputs, and
+checkpoints. A changed image or workflow version reuses checkpoints without
+automatic compatibility verification; check compatibility before resuming.
+
 ## Tests
 
 ```bash

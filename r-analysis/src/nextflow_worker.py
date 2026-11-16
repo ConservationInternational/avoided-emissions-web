@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
 import time
 import uuid
 from pathlib import Path
@@ -415,7 +416,23 @@ def repack(outcomes: list[dict], final: bool, seconds: int = 14280) -> None:
         write_json("batches/empty.json", {"id": "empty", "ids": [], "replicates": []})
 
 
+def prepare_reconcile(expected: dict, outcomes: list[dict]) -> None:
+    unfinished = [item for outcome in outcomes for item in outcome["unfinished"]]
+    if unfinished:
+        raise RuntimeError(
+            f"Matching resource budget exhausted: {unfinished[:20]} ({len(unfinished)} items)"
+        )
+    Path("reconcile_batches").mkdir()
+    ids = expected["ids"]
+    for start in range(0, max(1, len(ids)), 25):
+        write_json(
+            Path("reconcile_batches") / f"batch{start // 25:06d}.json",
+            {**expected, "ids": ids[start : start + 25]},
+        )
+
+
 def reconcile(params: dict, expected: dict, outcomes: list[dict]) -> None:
+    started = time.monotonic()
     unfinished = [item for outcome in outcomes for item in outcome["unfinished"]]
     if unfinished:
         raise RuntimeError(
@@ -438,7 +455,7 @@ def reconcile(params: dict, expected: dict, outcomes: list[dict]) -> None:
             if match_name:
                 import pyarrow.parquet as pq
 
-                if Path(match_name).name != match_name:
+                if match_name != f"mb_f{id_}_r{replicate}.parquet":
                     raise ValueError("Invalid match sidecar")
                 store.restore(checkpoint_key(match_name), Path("matches") / match_name)
                 pairs = pq.read_table(
@@ -459,14 +476,62 @@ def reconcile(params: dict, expected: dict, outcomes: list[dict]) -> None:
             ):
                 raise ValueError(f"Unrecognized analytical failure: {name}")
     write_json("reconciled.json", {"expected": expected})
+    log.info(
+        "[TIMING] Reconciled %d fragments x %d replicates in %.2fs",
+        len(expected["ids"]),
+        expected["n_replicates"],
+        time.monotonic() - started,
+    )
 
 
-def summarize(params: dict, reconciled: dict, matches: Path, seconds: int) -> None:
+def archive_matches() -> None:
+    with tarfile.open("matches.tar", "w") as archive:
+        for path in sorted(Path("matches").iterdir()):
+            archive.add(path, arcname=path.name, recursive=False)
+
+
+def restore_archives(archives: list[str], matches: Path) -> None:
+    import shutil
+
+    matches.mkdir()
+    for filename in archives:
+        with tarfile.open(filename, "r") as archive:
+            for member in archive:
+                if (
+                    not member.isfile()
+                    or Path(member.name).name != member.name
+                    or Path(member.name).suffix not in (".json", ".parquet")
+                ):
+                    raise ValueError(f"Invalid match archive member: {member.name}")
+                checkpoint_key(member.name)
+                target = matches / member.name
+                if target.exists():
+                    raise ValueError(f"Duplicate match archive member: {member.name}")
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError(f"Cannot read match archive member: {member.name}")
+                with source, target.open("xb") as destination:
+                    shutil.copyfileobj(source, destination)
+
+
+def summarize(
+    params: dict,
+    reconciled: dict,
+    matches: Path,
+    seconds: int,
+    *,
+    workers: int = 1,
+    validated_matches: bool = False,
+) -> None:
     import shutil
 
     from main import _collect_results
 
     config = configuration(params)
+    if workers < 1:
+        raise ValueError("Summary worker count must be positive")
+    config["summary_workers"] = workers
+    config["validated_match_files"] = validated_matches
     restore_extract(reconciled["expected"]["extract"], Path("output"))
     for path in matches.iterdir():
         shutil.copyfile(path, Path(config["matches_dir"]) / path.name)
@@ -510,6 +575,7 @@ def main() -> None:
             "prepare",
             "match",
             "repack",
+            "prepare-reconcile",
             "reconcile",
             "summarize",
             "commit",
@@ -519,6 +585,9 @@ def main() -> None:
     parser.add_argument("--input")
     parser.add_argument("--outcomes", nargs="*", default=[])
     parser.add_argument("--matches")
+    parser.add_argument("--archives", nargs="*")
+    parser.add_argument("--archive", action="store_true")
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--seconds", type=int, default=14280)
     parser.add_argument("--final", action="store_true")
     parser.add_argument("--config")
@@ -541,10 +610,31 @@ def main() -> None:
         match_batch(params, descriptor, args.seconds)
     elif args.command == "repack":
         repack(outcomes, args.final, args.seconds)
+    elif args.command == "prepare-reconcile":
+        prepare_reconcile(descriptor, outcomes)
     elif args.command == "reconcile":
         reconcile(params, descriptor, outcomes)
+        if args.archive:
+            archive_matches()
     elif args.command == "summarize":
-        summarize(params, descriptor, Path(args.matches), args.seconds)
+        if args.archives is not None:
+            restore_archives(args.archives, Path("matches"))
+            summarize(
+                params,
+                {"expected": descriptor},
+                Path("matches"),
+                args.seconds,
+                workers=args.workers,
+                validated_matches=True,
+            )
+        else:
+            summarize(
+                params,
+                descriptor,
+                Path(args.matches),
+                args.seconds,
+                workers=args.workers,
+            )
 
 
 if __name__ == "__main__":

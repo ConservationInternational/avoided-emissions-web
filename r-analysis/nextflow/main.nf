@@ -64,17 +64,28 @@ process PREPARE_LONG {
     """
 }
 
-process RECONCILE {
+process PREPARE_RECONCILE {
     input:
     path analysis, stageAs: 'analysis.json'
     path expected, stageAs: 'expected.json'
     path outcomes, stageAs: 'outcomes/outcome??.json'
     output:
-    path 'reconciled.json', emit: descriptor
-    path 'matches', emit: matches
+    path 'reconcile_batches/*.json'
     script:
     """
-    python3 '${params.worker}' reconcile --params analysis.json --input expected.json --outcomes ${outcomes}
+    python3 '${params.worker}' prepare-reconcile --params analysis.json --input expected.json --outcomes ${outcomes}
+    """
+}
+
+process RECONCILE {
+    input:
+    path analysis, stageAs: 'analysis.json'
+    path batch, stageAs: 'batch.json'
+    output:
+    path 'matches.tar'
+    script:
+    """
+    python3 '${params.worker}' reconcile --params analysis.json --input batch.json --archive
     """
 }
 
@@ -83,13 +94,13 @@ process SUMMARIZE {
 
     input:
     path analysis, stageAs: 'analysis.json'
-    path reconciled, stageAs: 'reconciled.json'
-    path matches, stageAs: 'matches'
+    path expected, stageAs: 'expected.json'
+    path archives, stageAs: 'archives/archive??.tar'
     output:
     path 'results.json'
     script:
     """
-    python3 '${params.worker}' summarize --params analysis.json --input reconciled.json --matches matches --seconds ${task.time.toSeconds() - 120}
+    python3 '${params.worker}' summarize --params analysis.json --input expected.json --archives ${archives} --workers ${task.cpus} --seconds ${task.time.toSeconds() - 120}
     """
 }
 
@@ -101,7 +112,7 @@ workflow {
     target.parent.mkdirs()
     target.text = groovy.json.JsonOutput.toJson([
         session_id: workflow.sessionId.toString(),
-        workflow_version: '1.0.0'
+        workflow_version: '1.2.0'
     ])
     analysis = Channel.value(file(params.analysis_file, checkIfExists: true))
     EXTRACT(analysis)
@@ -111,6 +122,7 @@ workflow {
     MATCH_RECOVERY(analysis, PREPARE_RECOVERY.out.flatten().filter { batch -> hasWork(batch) })
     PREPARE_LONG(analysis, MATCH_RECOVERY.out.toList().filter { outcomes -> needsRecovery(outcomes) })
     MATCH_LONG(analysis, PREPARE_LONG.out.flatten().filter { batch -> hasWork(batch) })
-    RECONCILE(analysis, PREPARE_MATCH_BATCHES.out.expected, MATCH_LONG.out.toList())
-    SUMMARIZE(analysis, RECONCILE.out.descriptor, RECONCILE.out.matches)
+    PREPARE_RECONCILE(analysis, PREPARE_MATCH_BATCHES.out.expected, MATCH_LONG.out.toList())
+    RECONCILE(analysis, PREPARE_RECONCILE.out.flatten())
+    SUMMARIZE(analysis, PREPARE_MATCH_BATCHES.out.expected, RECONCILE.out.toList())
 }
