@@ -1108,7 +1108,7 @@ def _build_plots_from_summary(store_data, site_filter=None):
             html.P(
                 "Empirical quantile-quantile plot comparing the propensity "
                 "score distributions of matched treatment and control "
-                "pixels. Points close to the 45┬░ line indicate similar "
+                "pixels. Points close to the 45\u00b0 line indicate similar "
                 "distributions.",
                 className="text-muted mb-2",
             )
@@ -1143,7 +1143,7 @@ def _build_qq_from_summary(qq_data):
             y=[q_min, q_max],
             mode="lines",
             line={"color": "gray", "dash": "dash"},
-            name="45┬░ line",
+            name="45\u00b0 line",
             hoverinfo="skip",
         )
     )

@@ -19,7 +19,7 @@ from models import (
     TaskSite,
     get_db,
 )
-from sqlalchemy import func
+from sqlalchemy import case, func
 
 from gee_export import gee_config
 from services.covariate import get_ready_covariate_names
@@ -1196,10 +1196,11 @@ def update_task_info(task_id, name=None, description=None, user_id=None):
 # results/plots view instead of loading every per-site-year row into Python.
 # This prevents OOM and serialization timeouts in the Dash process.
 LARGE_TASK_THRESHOLD = 200
+SITE_RANKING_YEAR = 2025
 
 
 def get_task_top_site_yearly(task_id, site_ids):
-    """Load only the yearly contributions of the top five sites per metric."""
+    """Load 2025 leaders and signed yearly remainders without loading all sites."""
     db = get_db()
     try:
         metrics = (
@@ -1210,17 +1211,50 @@ def get_task_top_site_yearly(task_id, site_ids):
             TaskResult.task_id == task_id,
             TaskResult.site_id.in_(site_ids),
         )
-        top_sites = [
-            db.query(TaskResult.site_id)
-            .filter(*filters)
-            .group_by(TaskResult.site_id)
-            .order_by(func.sum(metric).desc(), TaskResult.site_id)
-            .limit(5)
-            .subquery()
-            for metric in metrics
-        ]
+        top_sites = []
+        signed_yearly = {}
+        for metric in metrics:
+            ranking = (
+                db.query(TaskResult.site_id)
+                .filter(*filters, TaskResult.year == SITE_RANKING_YEAR)
+                .group_by(TaskResult.site_id)
+            )
+            total = func.sum(metric)
+            positive = (
+                ranking.having(total > 0)
+                .order_by(total.desc(), TaskResult.site_id)
+                .limit(3)
+                .subquery()
+            )
+            negative = (
+                ranking.having(total < 0)
+                .order_by(total.asc(), TaskResult.site_id)
+                .limit(3)
+                .subquery()
+            )
+            selected = db.query(positive.c.site_id).union(db.query(negative.c.site_id))
+            top_sites.extend((positive, negative))
+            remainder = (
+                db.query(
+                    TaskResult.year,
+                    func.sum(case((metric > 0, metric), else_=0)).label("positive"),
+                    func.sum(case((metric < 0, metric), else_=0)).label("negative"),
+                )
+                .filter(*filters, TaskResult.site_id.not_in(selected))
+                .group_by(TaskResult.year)
+                .order_by(TaskResult.year)
+                .all()
+            )
+            signed_yearly[metric.key.removeprefix("extrapolated_")] = [
+                {
+                    "year": row.year,
+                    "positive": row.positive,
+                    "negative": row.negative,
+                }
+                for row in remainder
+            ]
         selected = db.query(top_sites[0].c.site_id).union(
-            db.query(top_sites[1].c.site_id)
+            *(db.query(sites.c.site_id) for sites in top_sites[1:])
         )
         rows = (
             db.query(TaskResult.site_id, TaskResult.year, *metrics)
@@ -1228,15 +1262,18 @@ def get_task_top_site_yearly(task_id, site_ids):
             .order_by(TaskResult.site_id, TaskResult.year)
             .all()
         )
-        return [
-            {
-                "site_id": row.site_id,
-                "year": row.year,
-                "emissions_avoided_mgco2e": row.extrapolated_emissions_avoided_mgco2e,
-                "forest_loss_avoided_ha": row.extrapolated_forest_loss_avoided_ha,
-            }
-            for row in rows
-        ]
+        return {
+            "site_yearly": [
+                {
+                    "site_id": row.site_id,
+                    "year": row.year,
+                    "emissions_avoided_mgco2e": row.extrapolated_emissions_avoided_mgco2e,
+                    "forest_loss_avoided_ha": row.extrapolated_forest_loss_avoided_ha,
+                }
+                for row in rows
+            ],
+            "signed_yearly": signed_yearly,
+        }
     finally:
         db.close()
 

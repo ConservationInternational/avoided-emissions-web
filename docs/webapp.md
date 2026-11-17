@@ -355,14 +355,21 @@ Annual and cumulative deforestation comparisons use line charts for project
 sites and matched controls, with shaded ranges across matching replicates when
 available. The site-level annual emissions comparison uses the same style.
 Avoided emissions and forest loss by year use bar charts, with replicate ranges
-shown as error bars when available. Each chart highlights the five sites with
-the largest total contribution across the displayed years for that metric,
-identified by site ID in an Okabe-Ito color-blind-friendly qualitative palette.
-Remaining sites are combined into a gray **All other sites** category. With five
-or fewer sites, each site is shown separately. Group filters recalculate the
-ranking within the selected group; error bars retain the overall replicate range.
+shown as error bars when available. Each chart independently highlights the three
+largest positive and three most negative sites using that metric's **2025**
+values. Separate site-ID legends identify these groups, with six distinct colors
+from Paul Tol's color-blind-friendly muted qualitative palette. These site colors
+stay fixed across years, even when a site's contribution changes sign.
+All remaining sites are combined into **All other sites (positive)** in blue and
+**All other sites (negative)** in orange, splitting contributions by their sign
+in each plotted year rather than netting them together. Group filters recalculate
+the ranking within the selected group; error bars retain the overall replicate
+range. If no nonzero 2025 site data exists, the charts show only the signed remainder
+groups and explain why there are no individually highlighted sites.
+Forest-loss error bars use dark charcoal to keep both limits visible against the bars.
 Click a site's legend entry or bar to select it and zoom the map to that site.
-The **All other sites** legend entry retains the usual show/hide behavior.
+The **All other sites** legend entries retain the usual show/hide behavior.
+Individual-site bars show both the site ID and site name on hover.
 
 After the yearly emissions chart, two bar charts show up to 20 sites with the
 largest positive total avoided emissions and the 20 with the most negative

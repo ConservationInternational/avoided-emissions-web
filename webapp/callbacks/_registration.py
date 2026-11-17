@@ -1774,7 +1774,7 @@ def register_callbacks(app, limiter=None):
                     site_map=site_map,
                     sites_geojson=detail.get("sites_geojson"),
                     plot_selection=plot_selection,
-                    bar_site_yearly=(
+                    bar_site_data=(
                         get_task_top_site_yearly(task_id, [t.site_id for t in totals])
                         if is_large
                         else None
@@ -2393,7 +2393,7 @@ def register_callbacks(app, limiter=None):
                 task=task if filtered_ids is None else None,
                 agg_yearly=agg_yearly,
                 is_large=detail["is_large"],
-                bar_site_yearly=(
+                bar_site_data=(
                     get_task_top_site_yearly(task_id, [t.site_id for t in totals])
                     if detail["is_large"]
                     else None
@@ -3543,7 +3543,7 @@ def register_callbacks(app, limiter=None):
                 site_df["forest_loss_avoided_ha"],
                 site_df["forest_loss_avoided_ha_ci_lower"],
                 site_df["forest_loss_avoided_ha_ci_upper"],
-                color="#17a2b8",
+                color="#333333",
                 name=BOUNDS_NAME,
             )
         fig_avoided.update_layout(

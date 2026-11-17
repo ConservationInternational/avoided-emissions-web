@@ -19,6 +19,7 @@ from services import (
     download_results_csv,
     list_task_s3_files,
 )
+from services.analysis_task import SITE_RANKING_YEAR
 
 from callbacks._helpers import (
     _fmt_dt,
@@ -31,7 +32,6 @@ from callbacks._match_quality import (
 from callbacks._plot_colors import (
     CONTROL_BAND_COLOR,
     CONTROL_COLOR,
-    OTHER_SITES_COLOR,
     PROJECT_BAND_COLOR,
     PROJECT_COLOR,
     TOP_SITE_COLORS,
@@ -1438,7 +1438,7 @@ def _build_plots(
     site_map=None,
     sites_geojson=None,
     plot_selection=None,
-    bar_site_yearly=None,
+    bar_site_data=None,
 ):
     """Build interactive plots for task results.
 
@@ -1463,8 +1463,8 @@ def _build_plots(
         Pre-aggregated yearly data (from ``_get_task_results_aggregated``).
     is_large : bool
         When True, ``results`` is None; use ``agg_yearly`` instead.
-    bar_site_yearly : list[dict], optional
-        Bounded per-site yearly contributions for large-task bar charts.
+    bar_site_data : dict, optional
+        Bounded leader contributions and signed yearly remainders for large tasks.
     """
     if not agg_yearly:
         return html.P("No results to plot.", className="text-muted")
@@ -1484,6 +1484,16 @@ def _build_plots(
             if label_counts[label] > 1 or label == "All other sites"
             else label
         )
+        for site_id, label in display_labels.items()
+    }
+    site_names = {
+        str(site.site_id): site.site_name
+        for site in [*(sites or []), *(totals or [])]
+        if getattr(site, "site_name", None)
+    }
+    hover_labels = {
+        site_id: f"Site ID: {label}<br>"
+        f"Site name: {site_names.get(site_id, 'Not available')}"
         for site_id, label in display_labels.items()
     }
     # Per-site rows (small tasks only) for stacked bars and the site drill-down.
@@ -1723,9 +1733,19 @@ def _build_plots(
         plots.append(dcc.Graph(figure=fig_cum))
 
     # --- Emissions / forest-loss bar charts ---------------------------------
-    # Rank by the sum of the years actually plotted, independently per metric.
-    # Large tasks load only the union of each metric's top five sites.
-    bar_df = pd.DataFrame(bar_site_yearly) if bar_site_yearly else df
+    bar_df = (
+        pd.DataFrame(
+            bar_site_data["site_yearly"],
+            columns=[
+                "site_id",
+                "year",
+                "emissions_avoided_mgco2e",
+                "forest_loss_avoided_ha",
+            ],
+        )
+        if bar_site_data is not None
+        else df
+    )
     for metric, title, label in (
         (
             "emissions_avoided_mgco2e",
@@ -1738,49 +1758,107 @@ def _build_plots(
             "Forest Loss Avoided (ha)",
         ),
     ):
-        if bar_df is not None and not bar_df.empty:
+        if bar_df is not None:
             contributions = bar_df.groupby(["site_id", "year"])[metric].sum()
             ranking = (
-                contributions.groupby(level="site_id")
+                contributions[
+                    contributions.index.get_level_values("year") == SITE_RANKING_YEAR
+                ]
+                .groupby(level="site_id")
                 .sum()
                 .sort_values(ascending=False, kind="stable")
             )
-            top_ids = ranking.head(5).index
+            positive_ids = ranking[ranking > 0].head(3).index
+            negative_ids = (
+                ranking[ranking < 0]
+                .sort_values(ascending=True, kind="stable")
+                .head(3)
+                .index
+            )
+            top_ids = [*positive_ids, *negative_ids]
             fig = go.Figure()
-            top_sum = pd.Series(0.0, index=agg_df["year"])
-            for site_id, color in zip(top_ids, TOP_SITE_COLORS):
-                values = contributions.loc[site_id].reindex(
-                    agg_df["year"], fill_value=0
+            for ids, colors, legend in (
+                (positive_ids, TOP_SITE_COLORS[:3], "legend"),
+                (negative_ids, TOP_SITE_COLORS[3:], "legend2"),
+            ):
+                for site_id, color in zip(ids, colors):
+                    fig.add_bar(
+                        x=agg_df["year"],
+                        y=contributions.loc[site_id].reindex(
+                            agg_df["year"], fill_value=0
+                        ),
+                        name=display_labels.get(str(site_id), str(site_id)),
+                        marker_color=color,
+                        meta={"site_id": str(site_id)},
+                        legend=legend,
+                        hovertext=hover_labels.get(str(site_id), f"Site ID: {site_id}"),
+                        hovertemplate="%{hovertext}<br>Year: %{x}<br>"
+                        + label
+                        + ": %{y:,.2f}<extra></extra>",
+                    )
+            if bar_site_data is not None:
+                remainder = (
+                    pd.DataFrame(
+                        bar_site_data["signed_yearly"][metric],
+                        columns=["year", "positive", "negative"],
+                    )
+                    .set_index("year")
+                    .reindex(agg_df["year"], fill_value=0)
                 )
-                top_sum += values
-                fig.add_bar(
-                    x=agg_df["year"],
-                    y=values,
-                    name=display_labels.get(str(site_id), str(site_id)),
-                    marker_color=color,
-                    meta={"site_id": str(site_id)},
-                    hovertemplate="%{fullData.name}<br>Year: %{x}<br>"
-                    + label
-                    + ": %{y:,.2f}<extra></extra>",
-                )
-            if n_sites_display > len(top_ids):
-                # Use the portfolio mean, never sums of site-level bounds.
-                fig.add_bar(
-                    x=agg_df["year"],
-                    y=agg_df.set_index("year")[metric] - top_sum,
-                    name="All other sites",
-                    marker_color=OTHER_SITES_COLOR,
-                    hovertemplate="All other sites<br>Year: %{x}<br>"
-                    + label
-                    + ": %{y:,.2f}<extra></extra>",
+            else:
+                remaining = contributions[
+                    ~contributions.index.get_level_values("site_id").isin(top_ids)
+                ]
+                remainder = pd.DataFrame(
+                    {
+                        "positive": remaining.clip(lower=0).groupby(level="year").sum(),
+                        "negative": remaining.clip(upper=0).groupby(level="year").sum(),
+                    }
+                ).reindex(agg_df["year"], fill_value=0)
+            for sign, color in (
+                ("positive", PROJECT_COLOR),
+                ("negative", CONTROL_COLOR),
+            ):
+                if remainder[sign].ne(0).any():
+                    fig.add_bar(
+                        x=agg_df["year"],
+                        y=remainder[sign],
+                        name=f"All other sites ({sign})",
+                        marker_color=color,
+                        legend="legend3",
+                        hovertemplate=f"All other sites ({sign})<br>Year: %{{x}}<br>"
+                        + label
+                        + ": %{y:,.2f}<extra></extra>",
+                    )
+            if not top_ids:
+                fig.add_annotation(
+                    text=f"No nonzero {SITE_RANKING_YEAR} site results available for ranking.",
+                    xref="paper",
+                    yref="paper",
+                    x=0,
+                    y=1.08,
+                    showarrow=False,
                 )
             fig.update_layout(
                 title=title,
                 barmode="relative",
                 xaxis_title="Year",
                 yaxis_title=label,
-                legend_title_text="Site ID",
+                legend={
+                    "title": f"Site ID: top positive ({SITE_RANKING_YEAR})",
+                    "x": 1.02,
+                    "y": 1,
+                    "yanchor": "top",
+                },
+                legend2={
+                    "title": f"Site ID: top negative ({SITE_RANKING_YEAR})",
+                    "x": 1.02,
+                    "y": 0.6,
+                    "yanchor": "top",
+                },
+                legend3={"x": 1.02, "y": 0.2, "yanchor": "top"},
                 showlegend=True,
+                height=550,
             )
         else:
             fig = px.bar(
@@ -1798,9 +1876,13 @@ def _build_plots(
                 agg_df[metric],
                 agg_df[f"{metric}_ci_lower"],
                 agg_df[f"{metric}_ci_upper"],
-                color="rgba(0,0,0,0.4)",
+                color="#333333"
+                if metric == "forest_loss_avoided_ha"
+                else "rgba(0,0,0,0.4)",
                 name=BOUNDS_NAME,
             )
+            if fig.layout.barmode == "relative":
+                fig.update_traces(legend="legend3", selector={"name": BOUNDS_NAME})
         plots.append(dcc.Graph(figure=fig, className="site-selectable-plot"))
 
         if metric == "emissions_avoided_mgco2e" and n_sites_display > 1:
@@ -1838,8 +1920,10 @@ def _build_plots(
                         y=ranked["emissions"],
                         customdata=site_ids,
                         marker_color=color,
-                        hovertext=[display_labels.get(sid, sid) for sid in site_ids],
-                        hovertemplate="Site ID: %{hovertext}<br>"
+                        hovertext=[
+                            hover_labels.get(sid, f"Site ID: {sid}") for sid in site_ids
+                        ],
+                        hovertemplate="%{hovertext}<br>"
                         "Emissions Avoided (MgCO₂e): %{y:,.2f}<extra></extra>",
                     )
                 )

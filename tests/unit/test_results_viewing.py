@@ -32,9 +32,10 @@ _GET_GEOJSON = "services.analysis_task.get_user_site_set_geojson"
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("allowed_count", [3, 12])
-def test_top_site_yearly_query_ranks_sums_per_metric_and_limits_loaded_sites(
-    mocker, allowed_count
+@pytest.mark.parametrize("allowed_count", [0, 3, 12, 24])
+@pytest.mark.parametrize("has_2025", [False, True])
+def test_top_site_yearly_query_ranks_2025_and_preserves_signed_remainders(
+    mocker, allowed_count, has_2025
 ):
     task_id = UUID("00000000-0000-0000-0000-000000000001")
     other_task = UUID("00000000-0000-0000-0000-000000000002")
@@ -58,12 +59,19 @@ def test_top_site_yearly_query_ranks_sums_per_metric_and_limits_loaded_sites(
             "task_id": owner,
             "site_id": f"site-{index:02d}",
             "year": year,
-            "extrapolated_emissions_avoided_mgco2e": index * multiplier,
-            "extrapolated_forest_loss_avoided_ha": (13 - index) * multiplier,
+            "extrapolated_emissions_avoided_mgco2e": index
+            * (1 if index % 2 else -1)
+            * multiplier
+            * (1 if owner == task_id else 1000),
+            "extrapolated_forest_loss_avoided_ha": (25 - index)
+            * (-1 if index % 2 else 1)
+            * multiplier
+            * (1 if owner == task_id else 1000),
         }
         for owner in (task_id, other_task)
-        for index in range(1, 13)
-        for year, multiplier in ((2020, 1), (2021, 2))
+        for index in range(1, 25)
+        for year, multiplier in ((2024, -2), (2025, 1), (2026, -0.5))
+        if has_2025 or year != 2025
     ]
     with engine.begin() as connection:
         connection.execute(table.insert(), rows)
@@ -73,14 +81,68 @@ def test_top_site_yearly_query_ranks_sums_per_metric_and_limits_loaded_sites(
     allowed = [f"site-{index:02d}" for index in range(1, allowed_count + 1)]
     try:
         result = get_task_top_site_yearly(task_id, allowed)
-        expected = set(allowed[:5]) | set(allowed[-5:])
-        assert {row["site_id"] for row in result} == expected
-        assert len(result) == len(expected) * 2
-        for row in result:
+        emissions_top = (
+            {
+                0: [],
+                3: [1, 2, 3],
+                12: [7, 9, 11, 8, 10, 12],
+                24: [19, 21, 23, 20, 22, 24],
+            }[allowed_count]
+            if has_2025
+            else []
+        )
+        forest_top = (
+            {
+                0: [],
+                3: [1, 2, 3],
+                12: [1, 3, 5, 2, 4, 6],
+                24: [1, 3, 5, 2, 4, 6],
+            }[allowed_count]
+            if has_2025
+            else []
+        )
+        expected = {f"site-{index:02d}" for index in emissions_top + forest_top}
+        assert {row["site_id"] for row in result["site_yearly"]} == expected
+        assert len(result["site_yearly"]) == len(expected) * (3 if has_2025 else 2)
+        assert len(expected) <= 12
+        for row in result["site_yearly"]:
             index = int(row["site_id"].split("-")[1])
-            multiplier = 1 if row["year"] == 2020 else 2
-            assert row["emissions_avoided_mgco2e"] == index * multiplier
-            assert row["forest_loss_avoided_ha"] == (13 - index) * multiplier
+            multiplier = {2024: -2, 2025: 1, 2026: -0.5}[row["year"]]
+            assert (
+                row["emissions_avoided_mgco2e"]
+                == index * (1 if index % 2 else -1) * multiplier
+            )
+            assert (
+                row["forest_loss_avoided_ha"]
+                == (25 - index) * (-1 if index % 2 else 1) * multiplier
+            )
+        for metric, excluded in (
+            ("emissions_avoided_mgco2e", emissions_top),
+            ("forest_loss_avoided_ha", forest_top),
+        ):
+            remaining = [
+                row
+                for row in rows
+                if row["task_id"] == task_id
+                and row["site_id"] in allowed
+                and int(row["site_id"].split("-")[1]) not in excluded
+            ]
+            expected_years = sorted({row["year"] for row in remaining})
+            assert [
+                row["year"] for row in result["signed_yearly"][metric]
+            ] == expected_years
+            for aggregate in result["signed_yearly"][metric]:
+                values = [
+                    row[f"extrapolated_{metric}"]
+                    for row in remaining
+                    if row["year"] == aggregate["year"]
+                ]
+                assert aggregate["positive"] == sum(
+                    value for value in values if value > 0
+                )
+                assert aggregate["negative"] == sum(
+                    value for value in values if value < 0
+                )
         close.assert_called_once()
     finally:
         session.close()
