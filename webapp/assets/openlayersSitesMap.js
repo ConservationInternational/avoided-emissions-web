@@ -212,6 +212,36 @@
         input.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
+    function bindPlotSiteSelection() {
+        document.querySelectorAll(".site-selectable-plot .js-plotly-plot").forEach(plot => {
+            if (plot._siteSelectionBound || typeof plot.on !== "function") {
+                return;
+            }
+            plot._siteSelectionBound = true;
+            const selectSite = siteId => {
+                if (typeof siteId === "string" && siteId) {
+                    selectPlotSiteFromMap({ id: "task-sites-map" }, siteId);
+                }
+            };
+            plot.on("plotly_legendclick", event => {
+                const siteId = plot.data[event.curveNumber]?.meta?.site_id;
+                if (siteId) {
+                    selectSite(siteId);
+                    return false;
+                }
+            });
+            plot.on("plotly_legenddoubleclick", event => {
+                if (plot.data[event.curveNumber]?.meta?.site_id) {
+                    return false;
+                }
+            });
+            plot.on("plotly_click", event => {
+                const point = event.points?.[0];
+                selectSite(point?.customdata || point?.data?.meta?.site_id);
+            });
+        });
+    }
+
     function bindMapTableSync(mapEl, map, config) {
         if (!config || !config.mapId || !config.tableId || !config.boundFlag) {
             return;
@@ -977,6 +1007,9 @@
     }
 
     const observer = new MutationObserver(function (mutations) {
+        if (mutations.some(mutation => mutation.addedNodes?.length > 0)) {
+            bindPlotSiteSelection();
+        }
         let shouldRender = false;
         for (const mutation of mutations) {
             if (mutation.type === "childList" && mutation.removedNodes.length > 0) {
@@ -1017,6 +1050,7 @@
 
     function boot() {
         renderAll();
+        bindPlotSiteSelection();
         observer.observe(document.body, {
             childList: true,
             subtree: true,

@@ -355,7 +355,21 @@ Annual and cumulative deforestation comparisons use line charts for project
 sites and matched controls, with shaded ranges across matching replicates when
 available. The site-level annual emissions comparison uses the same style.
 Avoided emissions and forest loss by year use bar charts, with replicate ranges
-shown as error bars when available.
+shown as error bars when available. Each chart highlights the five sites with
+the largest total contribution across the displayed years for that metric,
+identified by site ID in an Okabe-Ito color-blind-friendly qualitative palette.
+Remaining sites are combined into a gray **All other sites** category. With five
+or fewer sites, each site is shown separately. Group filters recalculate the
+ranking within the selected group; error bars retain the overall replicate range.
+Click a site's legend entry or bar to select it and zoom the map to that site.
+The **All other sites** legend entry retains the usual show/hide behavior.
+
+After the yearly emissions chart, two bar charts show up to 20 sites with the
+largest positive total avoided emissions and the 20 with the most negative
+totals. These use blue and vermillion respectively, with site IDs on the X axis
+and emissions avoided (MgCO₂e) on the Y axis. Click a bar to select and zoom to
+that site. Rankings respect the selected group; these two charts are omitted
+when only one site is selected.
 Year-axis tick labels use whole years without thousands separators or decimals.
 
 The plots initially summarize all sites. Select a source field and value to show

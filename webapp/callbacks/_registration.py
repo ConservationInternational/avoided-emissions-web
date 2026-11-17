@@ -64,6 +64,7 @@ from services.analysis_task import (
     get_filtered_portfolio_total,
     get_filtered_portfolio_yearly,
     get_task_execution_logs,
+    get_task_top_site_yearly,
 )
 from session_store import SessionExpired, SessionUnavailable
 from trendsearth_client import TrendsEarthAPIError
@@ -1763,6 +1764,11 @@ def register_callbacks(app, limiter=None):
                     site_map=site_map,
                     sites_geojson=detail.get("sites_geojson"),
                     plot_selection=plot_selection,
+                    bar_site_yearly=(
+                        get_task_top_site_yearly(task_id, [t.site_id for t in totals])
+                        if is_large
+                        else None
+                    ),
                 )
             else:
                 plots = html.P("Results not yet available.", className="text-muted")
@@ -2336,6 +2342,11 @@ def register_callbacks(app, limiter=None):
                 task=task if filtered_ids is None else None,
                 agg_yearly=agg_yearly,
                 is_large=detail["is_large"],
+                bar_site_yearly=(
+                    get_task_top_site_yearly(task_id, [t.site_id for t in totals])
+                    if detail["is_large"]
+                    else None
+                ),
             )
             if not isinstance(content, html.Div):
                 return content

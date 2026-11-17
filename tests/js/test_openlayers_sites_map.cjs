@@ -37,7 +37,8 @@ function harness(fetch) {
         path.join(__dirname, "../../webapp/assets/openlayersSitesMap.js"), "utf8"
     ).replace(/\}\)\(\);\s*$/, `
         globalThis.subject = { makeMvtTileLoadFunction, zoomToFeature, renderElement,
-            renderAll, mountedMaps, focusTableRow, featureStyle, selectPlotSiteFromMap };
+            renderAll, mountedMaps, focusTableRow, featureStyle, selectPlotSiteFromMap,
+            bindPlotSiteSelection };
     })();`);
     context.window.ol = context.ol;
     vm.runInNewContext(source, context);
@@ -199,6 +200,57 @@ test("plot-map clicks publish the selected site to the plot selector", () => {
     assert.equal(updates.length, 1);
     assert.equal(updates[0].id, "site-map-selection");
     assert.equal(updates[0].properties.value, "canonical-site");
+});
+
+test("site legend clicks select canonical identities without hiding traces", () => {
+    const env = harness();
+    const updates = [];
+    const handlers = {};
+    let bindings = 0;
+    const plot = {
+        data: [{ meta: { site_id: "canonical-site" } }, { name: "All other sites" }],
+        on(name, handler) { handlers[name] = handler; bindings++; },
+    };
+    env.document.querySelectorAll = () => [plot];
+    env.elements["site-map-selection"] = {};
+    env.window.dash_clientside = {
+        set_props: (id, properties) => updates.push({ id, properties }),
+    };
+    env.subject.bindPlotSiteSelection();
+    env.subject.bindPlotSiteSelection();
+    assert.equal(bindings, 3);
+    assert.equal(handlers.plotly_legendclick({ curveNumber: 0 }), false);
+    assert.equal(updates[0].id, "site-map-selection");
+    assert.equal(updates[0].properties.value, "canonical-site");
+    assert.equal(handlers.plotly_legenddoubleclick({ curveNumber: 0 }), false);
+    assert.equal(handlers.plotly_legendclick({ curveNumber: 1 }), undefined);
+    assert.equal(updates.length, 1);
+    plot.data[0].meta.site_id = "filtered-site";
+    handlers.plotly_legendclick({ curveNumber: 0 });
+    assert.equal(updates[1].properties.value, "filtered-site");
+});
+
+test("ranked bar clicks select canonical IDs, not display labels", () => {
+    const env = harness();
+    const selections = [];
+    const handlers = {};
+    env.document.querySelectorAll = () => [{
+        on(name, handler) { handlers[name] = handler; },
+    }];
+    env.elements["site-map-selection"] = {};
+    env.window.dash_clientside = {
+        set_props: (_id, properties) => selections.push(properties.value),
+    };
+    env.subject.bindPlotSiteSelection();
+    handlers.plotly_click({
+        points: [{ x: "duplicate", customdata: "canonical-a" }],
+    });
+    handlers.plotly_click({
+        points: [{ x: 2020, data: { meta: { site_id: "canonical-b" } } }],
+    });
+    handlers.plotly_click({ points: [{ x: 2020, data: { name: "All other sites" } }] });
+    handlers.plotly_click({ points: [] });
+    assert.deepEqual(selections, ["canonical-a", "canonical-b"]);
 });
 
 test("unmount cancels pending requests, removes listeners and disposes the map", () => {

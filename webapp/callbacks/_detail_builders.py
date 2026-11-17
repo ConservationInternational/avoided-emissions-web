@@ -31,8 +31,10 @@ from callbacks._match_quality import (
 from callbacks._plot_colors import (
     CONTROL_BAND_COLOR,
     CONTROL_COLOR,
+    OTHER_SITES_COLOR,
     PROJECT_BAND_COLOR,
     PROJECT_COLOR,
+    TOP_SITE_COLORS,
 )
 
 logger = logging.getLogger(__name__)
@@ -1436,6 +1438,7 @@ def _build_plots(
     site_map=None,
     sites_geojson=None,
     plot_selection=None,
+    bar_site_yearly=None,
 ):
     """Build interactive plots for task results.
 
@@ -1460,6 +1463,8 @@ def _build_plots(
         Pre-aggregated yearly data (from ``_get_task_results_aggregated``).
     is_large : bool
         When True, ``results`` is None; use ``agg_yearly`` instead.
+    bar_site_yearly : list[dict], optional
+        Bounded per-site yearly contributions for large-task bar charts.
     """
     if not agg_yearly:
         return html.P("No results to plot.", className="text-muted")
@@ -1474,7 +1479,11 @@ def _build_plots(
     }
     label_counts = Counter(display_labels.values())
     display_labels = {
-        site_id: f"{label} [{site_id[:8]}]" if label_counts[label] > 1 else label
+        site_id: (
+            f"{label} [{site_id[:8]}]"
+            if label_counts[label] > 1 or label == "All other sites"
+            else label
+        )
         for site_id, label in display_labels.items()
     }
     # Per-site rows (small tasks only) for stacked bars and the site drill-down.
@@ -1714,9 +1723,9 @@ def _build_plots(
         plots.append(dcc.Graph(figure=fig_cum))
 
     # --- Emissions / forest-loss bar charts ---------------------------------
-    # Small tasks: bars stacked by site.  Large tasks: one all-site bar per
-    # year (1000 legend entries would be unreadable).  Replicate ranges always
-    # come from the all-site series.
+    # Rank by the sum of the years actually plotted, independently per metric.
+    # Large tasks load only the union of each metric's top five sites.
+    bar_df = pd.DataFrame(bar_site_yearly) if bar_site_yearly else df
     for metric, title, label in (
         (
             "emissions_avoided_mgco2e",
@@ -1729,18 +1738,50 @@ def _build_plots(
             "Forest Loss Avoided (ha)",
         ),
     ):
-        if df is not None:
-            fig = px.bar(
-                df,
-                x="year",
-                y=metric,
-                color="site_id",
-                title=title,
-                labels={metric: label, "year": "Year", "site_id": "Site"},
+        if bar_df is not None and not bar_df.empty:
+            contributions = bar_df.groupby(["site_id", "year"])[metric].sum()
+            ranking = (
+                contributions.groupby(level="site_id")
+                .sum()
+                .sort_values(ascending=False, kind="stable")
             )
-            fig.update_layout(barmode="stack")
-            for trace in fig.data:
-                trace.name = display_labels.get(str(trace.name), trace.name)
+            top_ids = ranking.head(5).index
+            fig = go.Figure()
+            top_sum = pd.Series(0.0, index=agg_df["year"])
+            for site_id, color in zip(top_ids, TOP_SITE_COLORS):
+                values = contributions.loc[site_id].reindex(
+                    agg_df["year"], fill_value=0
+                )
+                top_sum += values
+                fig.add_bar(
+                    x=agg_df["year"],
+                    y=values,
+                    name=display_labels.get(str(site_id), str(site_id)),
+                    marker_color=color,
+                    meta={"site_id": str(site_id)},
+                    hovertemplate="%{fullData.name}<br>Year: %{x}<br>"
+                    + label
+                    + ": %{y:,.2f}<extra></extra>",
+                )
+            if n_sites_display > len(top_ids):
+                # Use the portfolio mean, never sums of site-level bounds.
+                fig.add_bar(
+                    x=agg_df["year"],
+                    y=agg_df.set_index("year")[metric] - top_sum,
+                    name="All other sites",
+                    marker_color=OTHER_SITES_COLOR,
+                    hovertemplate="All other sites<br>Year: %{x}<br>"
+                    + label
+                    + ": %{y:,.2f}<extra></extra>",
+                )
+            fig.update_layout(
+                title=title,
+                barmode="relative",
+                xaxis_title="Year",
+                yaxis_title=label,
+                legend_title_text="Site ID",
+                showlegend=True,
+            )
         else:
             fig = px.bar(
                 agg_df,
@@ -1760,7 +1801,81 @@ def _build_plots(
                 color="rgba(0,0,0,0.4)",
                 name=BOUNDS_NAME,
             )
-        plots.append(dcc.Graph(figure=fig))
+        plots.append(dcc.Graph(figure=fig, className="site-selectable-plot"))
+
+        if metric == "emissions_avoided_mgco2e" and n_sites_display > 1:
+            site_emissions = pd.DataFrame(
+                [
+                    {
+                        "site_id": str(total.site_id),
+                        "emissions": _summary_number(
+                            getattr(
+                                total, "extrapolated_emissions_avoided_mgco2e", None
+                            )
+                        ),
+                    }
+                    for total in totals
+                ]
+            ).dropna(subset=["emissions"])
+            for positive, color in ((True, PROJECT_COLOR), (False, CONTROL_COLOR)):
+                sign = "Positive" if positive else "Negative"
+                ranked = (
+                    site_emissions[
+                        site_emissions["emissions"] > 0
+                        if positive
+                        else site_emissions["emissions"] < 0
+                    ]
+                    .sort_values(
+                        ["emissions", "site_id"],
+                        ascending=[not positive, True],
+                    )
+                    .head(20)
+                )
+                site_ids = ranked["site_id"].tolist()
+                fig_ranked = go.Figure(
+                    go.Bar(
+                        x=site_ids,
+                        y=ranked["emissions"],
+                        customdata=site_ids,
+                        marker_color=color,
+                        hovertext=[display_labels.get(sid, sid) for sid in site_ids],
+                        hovertemplate="Site ID: %{hovertext}<br>"
+                        "Emissions Avoided (MgCO₂e): %{y:,.2f}<extra></extra>",
+                    )
+                )
+                fig_ranked.update_layout(
+                    title=f"Top 20 Sites with {sign} Avoided Emissions",
+                    xaxis={
+                        "title": "Site ID",
+                        "type": "category",
+                        "tickmode": "array",
+                        "tickvals": site_ids,
+                        "ticktext": [display_labels.get(sid, sid) for sid in site_ids],
+                        "tickangle": -45,
+                        "automargin": True,
+                        "categoryorder": "array",
+                        "categoryarray": site_ids,
+                    },
+                    yaxis_title="Emissions Avoided (MgCO₂e)",
+                    showlegend=False,
+                    height=450,
+                    clickmode="event",
+                )
+                if ranked.empty:
+                    fig_ranked.add_annotation(
+                        text=f"No sites with {sign.lower()} avoided emissions.",
+                        x=0.5,
+                        y=0.5,
+                        xref="paper",
+                        yref="paper",
+                        showarrow=False,
+                    )
+                plots.append(
+                    dcc.Graph(
+                        figure=fig_ranked,
+                        className="site-selectable-plot",
+                    )
+                )
 
     # --- Per-site totals bar chart ------------------------------------------
     # Only shown for small tasks (large tasks would render 1000 bars which is

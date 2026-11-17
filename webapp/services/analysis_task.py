@@ -19,6 +19,7 @@ from models import (
     TaskSite,
     get_db,
 )
+from sqlalchemy import func
 
 from gee_export import gee_config
 from services.covariate import get_ready_covariate_names
@@ -1195,6 +1196,49 @@ def update_task_info(task_id, name=None, description=None, user_id=None):
 # results/plots view instead of loading every per-site-year row into Python.
 # This prevents OOM and serialization timeouts in the Dash process.
 LARGE_TASK_THRESHOLD = 200
+
+
+def get_task_top_site_yearly(task_id, site_ids):
+    """Load only the yearly contributions of the top five sites per metric."""
+    db = get_db()
+    try:
+        metrics = (
+            TaskResult.extrapolated_emissions_avoided_mgco2e,
+            TaskResult.extrapolated_forest_loss_avoided_ha,
+        )
+        filters = (
+            TaskResult.task_id == task_id,
+            TaskResult.site_id.in_(site_ids),
+        )
+        top_sites = [
+            db.query(TaskResult.site_id)
+            .filter(*filters)
+            .group_by(TaskResult.site_id)
+            .order_by(func.sum(metric).desc(), TaskResult.site_id)
+            .limit(5)
+            .subquery()
+            for metric in metrics
+        ]
+        selected = db.query(top_sites[0].c.site_id).union(
+            db.query(top_sites[1].c.site_id)
+        )
+        rows = (
+            db.query(TaskResult.site_id, TaskResult.year, *metrics)
+            .filter(*filters, TaskResult.site_id.in_(selected))
+            .order_by(TaskResult.site_id, TaskResult.year)
+            .all()
+        )
+        return [
+            {
+                "site_id": row.site_id,
+                "year": row.year,
+                "emissions_avoided_mgco2e": row.extrapolated_emissions_avoided_mgco2e,
+                "forest_loss_avoided_ha": row.extrapolated_forest_loss_avoided_ha,
+            }
+            for row in rows
+        ]
+    finally:
+        db.close()
 
 
 def get_task_site_results(task_id, site_id):

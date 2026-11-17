@@ -10,6 +10,7 @@ No DB connection or S3 access is made during these tests.
 
 from typing import ClassVar
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 from models import AnalysisTask, TaskResult, TaskResultTotal, TaskSite
@@ -17,7 +18,10 @@ from services.analysis_task import (
     LARGE_TASK_THRESHOLD,
     get_task_detail,
     get_task_site_results,
+    get_task_top_site_yearly,
 )
+from sqlalchemy import Column, MetaData, Table, create_engine
+from sqlalchemy.orm import Session
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,6 +29,62 @@ from services.analysis_task import (
 
 _GET_DB = "services.analysis_task.get_db"
 _GET_GEOJSON = "services.analysis_task.get_user_site_set_geojson"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("allowed_count", [3, 12])
+def test_top_site_yearly_query_ranks_sums_per_metric_and_limits_loaded_sites(
+    mocker, allowed_count
+):
+    task_id = UUID("00000000-0000-0000-0000-000000000001")
+    other_task = UUID("00000000-0000-0000-0000-000000000002")
+    columns = (
+        "task_id",
+        "site_id",
+        "year",
+        "extrapolated_emissions_avoided_mgco2e",
+        "extrapolated_forest_loss_avoided_ha",
+    )
+    metadata = MetaData()
+    table = Table(
+        "task_results",
+        metadata,
+        *(Column(name, TaskResult.__table__.c[name].type) for name in columns),
+    )
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    rows = [
+        {
+            "task_id": owner,
+            "site_id": f"site-{index:02d}",
+            "year": year,
+            "extrapolated_emissions_avoided_mgco2e": index * multiplier,
+            "extrapolated_forest_loss_avoided_ha": (13 - index) * multiplier,
+        }
+        for owner in (task_id, other_task)
+        for index in range(1, 13)
+        for year, multiplier in ((2020, 1), (2021, 2))
+    ]
+    with engine.begin() as connection:
+        connection.execute(table.insert(), rows)
+    session = Session(engine)
+    mocker.patch(_GET_DB, return_value=session)
+    close = mocker.spy(session, "close")
+    allowed = [f"site-{index:02d}" for index in range(1, allowed_count + 1)]
+    try:
+        result = get_task_top_site_yearly(task_id, allowed)
+        expected = set(allowed[:5]) | set(allowed[-5:])
+        assert {row["site_id"] for row in result} == expected
+        assert len(result) == len(expected) * 2
+        for row in result:
+            index = int(row["site_id"].split("-")[1])
+            multiplier = 1 if row["year"] == 2020 else 2
+            assert row["emissions_avoided_mgco2e"] == index * multiplier
+            assert row["forest_loss_avoided_ha"] == (13 - index) * multiplier
+        close.assert_called_once()
+    finally:
+        session.close()
+        engine.dispose()
 
 
 def _make_mock_task(n_sites=5, task_id="test-task-id"):

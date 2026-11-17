@@ -11,11 +11,223 @@ from callbacks import _registration as registration
 from callbacks._detail_builders import _add_range_error_bars, _build_plots
 from callbacks._helpers import _render_share_links_list
 from callbacks._match_quality import _calculate_match_quality_summary
+from callbacks._plot_colors import OTHER_SITES_COLOR, TOP_SITE_COLORS
 from dash import Dash, dcc, html
 from flask import Flask
 from layouts.task_detail import task_detail_layout
 from plot_selection import parse_plot_selection, plot_selection_query
 from services import analysis_task
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("large_task", [False, True])
+@pytest.mark.parametrize("n_sites", [1, 5, 7, 12])
+def test_yearly_bars_rank_each_metric_and_combine_remaining_sites(large_task, n_sites):
+    rows = []
+    for index in range(1, n_sites + 1):
+        for year, multiplier in ((2020, 1), (2021, 2)):
+            if index == 7 and year == 2020:
+                continue
+            rows.append(
+                {
+                    "site_id": f"site-{index:03d}",
+                    "year": year,
+                    "emissions_avoided_mgco2e": (-10 if index == 1 else index * 10)
+                    * multiplier,
+                    "forest_loss_avoided_ha": (8 - index) * 10 * multiplier,
+                    "treatment_defor_ha": 0,
+                    "control_defor_ha": 0,
+                }
+            )
+    agg_yearly = []
+    for year in (2020, 2021):
+        aggregate = {"year": year, "treatment_defor_ha": 0, "control_defor_ha": 0}
+        for metric in ("emissions_avoided_mgco2e", "forest_loss_avoided_ha"):
+            aggregate[metric] = sum(row[metric] for row in rows if row["year"] == year)
+            aggregate[f"{metric}_ci_lower"] = aggregate[metric] - 3
+            aggregate[f"{metric}_ci_upper"] = aggregate[metric] + 4
+        aggregate["treatment_defor_ha_ci_lower"] = 0
+        agg_yearly.append(aggregate)
+    totals = [
+        SimpleNamespace(
+            site_id=f"site-{index:03d}",
+            display_site_id="duplicate" if index in (5, 6) else f"ID-{index}",
+            site_name=None,
+            area_ha=1000 / index,
+            extrapolated_emissions_avoided_mgco2e=0,
+            extrapolated_emissions_avoided_mgco2e_ci_lower=None,
+            extrapolated_emissions_avoided_mgco2e_ci_upper=None,
+            extrapolated_forest_loss_avoided_ha=0,
+        )
+        for index in range(1, n_sites + 1)
+    ]
+    results = []
+    if not large_task:
+        for row in rows:
+            values = {
+                column.name: row.get(column.name.removeprefix("extrapolated_"))
+                for column in analysis_task.TaskResult.__table__.columns
+            }
+            results.append(SimpleNamespace(**values))
+    content = _build_plots(
+        results=results if not large_task else None,
+        totals=totals,
+        agg_yearly=agg_yearly,
+        is_large=large_task,
+        bar_site_yearly=(
+            [
+                row
+                for row in rows
+                if n_sites != 12 or int(row["site_id"][-3:]) not in (6, 7)
+            ]
+            if large_task
+            else None
+        ),
+    )
+    container = next(
+        child
+        for child in content.children
+        if getattr(child, "id", None) == "task-results-plots"
+    )
+    figures = [
+        graph.figure
+        for graph in container.children[0].children
+        if graph.figure.layout.title.text
+        in ("Avoided Emissions by Year", "Forest Loss Avoided by Year")
+    ]
+    for metric, figure in zip(
+        ("emissions_avoided_mgco2e", "forest_loss_avoided_ha"), figures
+    ):
+        order = (
+            {
+                1: [1],
+                5: [5, 4, 3, 2, 1],
+                7: [6, 5, 7, 4, 3],
+                12: [12, 11, 10, 9, 8],
+            }[n_sites]
+            if metric == "emissions_avoided_mgco2e"
+            else list(range(1, min(n_sites, 5) + 1))
+        )
+        top_ids = [f"site-{index:03d}" for index in order]
+        labels = {
+            total.site_id: (
+                f"duplicate [{total.site_id}]"
+                if total.display_site_id == "duplicate" and n_sites > 5
+                else total.display_site_id
+            )
+            for total in totals
+        }
+        bars = [trace for trace in figure.data if trace.type == "bar"]
+        assert [trace.name for trace in bars[:5]] == [
+            labels[site_id] for site_id in top_ids
+        ]
+        assert [trace.marker.color for trace in bars[:5]] == list(
+            TOP_SITE_COLORS[: min(n_sites, 5)]
+        )
+        assert len(bars) == min(n_sites, 5) + (n_sites > 5)
+        if n_sites > 5:
+            assert bars[-1].name == "All other sites"
+            assert bars[-1].marker.color == OTHER_SITES_COLOR
+            assert list(bars[-1].y) == [
+                sum(
+                    row[metric]
+                    for row in rows
+                    if row["site_id"] not in top_ids and row["year"] == year
+                )
+                for year in (2020, 2021)
+            ]
+        assert len({trace.name for trace in bars}) == len(bars)
+        for trace, site_id in zip(bars, top_ids):
+            assert trace.meta == {"site_id": site_id}
+            assert list(trace.y) == [
+                sum(
+                    row[metric]
+                    for row in rows
+                    if row["site_id"] == site_id and row["year"] == year
+                )
+                for year in (2020, 2021)
+            ]
+        assert [sum(trace.y[i] for trace in bars) for i in range(2)] == pytest.approx(
+            [row[metric] for row in agg_yearly]
+        )
+        assert figure.layout.barmode == "relative"
+        error = next(trace for trace in figure.data if trace.error_y.visible)
+        assert list(error.y) == [row[metric] for row in agg_yearly]
+        assert list(error.error_y.array) == [4, 4]
+        assert list(error.error_y.arrayminus) == [3, 3]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("selection", ["all", "group", "single", "positive_only"])
+def test_ranked_emissions_charts_limit_sort_and_link_sites(selection):
+    totals = [
+        SimpleNamespace(
+            site_id=f"canonical-{index:+04d}",
+            display_site_id=f"ID {index}",
+            site_name=None,
+            extrapolated_emissions_avoided_mgco2e=float(index),
+        )
+        for index in range(-25, 26)
+    ]
+    if selection == "group":
+        totals = [
+            total
+            for total in totals
+            if abs(total.extrapolated_emissions_avoided_mgco2e) < 3
+        ]
+    elif selection == "single":
+        totals = totals[-1:]
+    elif selection == "positive_only":
+        totals = totals[-2:]
+    content = _build_plots(
+        results=None,
+        totals=totals,
+        is_large=True,
+        agg_yearly=[
+            {
+                "year": 2020,
+                "treatment_defor_ha": 0,
+                "control_defor_ha": 0,
+                "emissions_avoided_mgco2e": 0,
+                "forest_loss_avoided_ha": 0,
+            }
+        ],
+    )
+    container = next(
+        child
+        for child in content.children
+        if getattr(child, "id", None) == "task-results-plots"
+    )
+    graphs = container.children[0].children
+    ranked = [
+        graph
+        for graph in graphs
+        if graph.figure.layout.title.text.startswith("Top 20 Sites")
+    ]
+    if selection == "single":
+        assert not ranked
+        return
+    assert graphs[1:3] == ranked
+    expected_values = {
+        "all": [list(range(25, 5, -1)), list(range(-25, -5))],
+        "group": [[2, 1], [-2, -1]],
+        "positive_only": [[25, 24], []],
+    }[selection]
+    for graph, values, color in zip(ranked, expected_values, ("#0072B2", "#D55E00")):
+        figure = graph.figure
+        trace = figure.data[0]
+        assert list(trace.y) == values
+        assert trace.marker.color == color
+        assert list(trace.customdata) == [f"canonical-{value:+04d}" for value in values]
+        assert list(figure.layout.xaxis.ticktext) == [f"ID {value}" for value in values]
+        assert list(figure.layout.xaxis.tickvals) == list(trace.customdata)
+        assert figure.layout.yaxis.title.text == "Emissions Avoided (MgCO₂e)"
+        assert graph.className == "site-selectable-plot"
+        if not values:
+            assert (
+                figure.layout.annotations[0].text
+                == "No sites with negative avoided emissions."
+            )
 
 
 @pytest.mark.unit
@@ -612,9 +824,24 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
             "forest_loss_avoided_ha_ci_upper": 4,
         },
     )
+    top_sites = mocker.patch.object(
+        registration,
+        "get_task_top_site_yearly",
+        return_value=[
+            {
+                "site_id": "a",
+                "year": 2020,
+                "emissions_avoided_mgco2e": 2,
+                "forest_loss_avoided_ha": 2,
+            }
+        ],
+    )
     content = callbacks["update_filtered_aggregate_plots"](
         {"field": "region", "value": '"North"'},
-        {"a": {"region": "North"}, "b": {"region": "South"}}, "task", None, {}
+        {"a": {"region": "North"}, "b": {"region": "South"}},
+        "task",
+        None,
+        {},
     )
     aggregate.assert_called_once_with(
         "task", {"a"}, 2, results_s3_uri="s3://bucket/output"
@@ -622,6 +849,7 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
     portfolio_total.assert_called_once_with(
         "task", {"a"}, 2, results_s3_uri="s3://bucket/output"
     )
+    top_sites.assert_called_once_with("task", ["a"])
     assert "region = North" in content[0].children
     assert isinstance(content[1], dbc.Card)
     summary_columns = content[1].children[1].children.children
@@ -632,6 +860,7 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
     assert len(graphs) == 4
     assert list(graphs[0].figure.data[0].y) == [1]
     assert "1 sites" in graphs[0].figure.layout.title.text
+    assert graphs[2].figure.data[0].name == "a"
     message = callbacks["update_filtered_aggregate_plots"](
         {"field": "region", "value": '"North"'},
         {"a": {"region": "South"}}, "task", None, {}
