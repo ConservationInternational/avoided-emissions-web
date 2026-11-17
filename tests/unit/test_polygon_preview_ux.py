@@ -81,6 +81,7 @@ def test_overview_shows_forest_loss_avoided_range_and_correct_co2_label(monkeypa
     )
     totals = [
         SimpleNamespace(
+            site_id="site-1",
             extrapolated_emissions_avoided_mgco2e=100,
             extrapolated_forest_loss_avoided_ha=10,
             extrapolated_forest_loss_avoided_ha_ci_lower=8,
@@ -88,6 +89,7 @@ def test_overview_shows_forest_loss_avoided_range_and_correct_co2_label(monkeypa
             area_ha=100,
         ),
         SimpleNamespace(
+            site_id="site-2",
             extrapolated_emissions_avoided_mgco2e=40,
             extrapolated_forest_loss_avoided_ha=4,
             extrapolated_forest_loss_avoided_ha_ci_lower=2,
