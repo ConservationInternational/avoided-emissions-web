@@ -485,6 +485,27 @@ def _build_overview(task, sites, totals, quality_warnings=None):
             t.extrapolated_emissions_avoided_mgco2e or 0 for t in totals
         )
         total_forest = sum(t.extrapolated_forest_loss_avoided_ha or 0 for t in totals)
+        forest_lower = [
+            _summary_number(
+                getattr(t, "extrapolated_forest_loss_avoided_ha_ci_lower", None)
+            )
+            for t in totals
+        ]
+        forest_upper = [
+            _summary_number(
+                getattr(t, "extrapolated_forest_loss_avoided_ha_ci_upper", None)
+            )
+            for t in totals
+        ]
+        forest_range = (
+            html.Small(
+                f"Range across matching replicates: "
+                f"{sum(forest_lower):,.0f} to {sum(forest_upper):,.0f} ha",
+                className="text-muted",
+            )
+            if all(value is not None for value in forest_lower + forest_upper)
+            else None
+        )
         total_area = sum(t.area_ha or 0 for t in totals)
 
         cards.append(
@@ -500,7 +521,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                             className="text-success",
                                         ),
                                         html.P(
-                                            "Total Avoided Emissions (MgCOΓéée)",
+                                            "Total Avoided Emissions (MgCO₂e)",
                                             className="text-muted mb-0",
                                         ),
                                     ]
@@ -523,6 +544,7 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                                             "Forest Loss Avoided (ha)",
                                             className="text-muted mb-0",
                                         ),
+                                        forest_range,
                                     ]
                                 ),
                             ],
@@ -2018,30 +2040,33 @@ def _build_plots(
         html.Div(
             [
                 html.Div(aggregate_plots, id="task-results-graphs"),
-                html.Details(
+                dbc.Accordion(
                     [
-                        html.Summary(
-                            "Match Quality",
-                            style={"cursor": "pointer", "fontWeight": "600"},
+                        dbc.AccordionItem(
+                            [
+                                dcc.Loading(
+                                    html.Div(
+                                        id="match-quality-plots-container",
+                                        className="mt-3",
+                                    ),
+                                    type="default",
+                                ),
+                                html.Hr(className="my-3"),
+                                dbc.Button(
+                                    "Download Match Covariates CSV",
+                                    id="download-match-covariates",
+                                    color="secondary",
+                                    size="sm",
+                                ),
+                                dcc.Download(id="download-match-quality"),
+                            ],
+                            title="Match Quality",
+                            item_id="match-quality",
                         ),
-                        dcc.Loading(
-                            html.Div(
-                                id="match-quality-plots-container",
-                                className="mt-3",
-                            ),
-                            type="default",
-                        ),
-                        html.Hr(className="my-3"),
-                        dbc.Button(
-                            "Download Match Covariates CSV",
-                            id="download-match-covariates",
-                            color="secondary",
-                            size="sm",
-                        ),
-                        dcc.Download(id="download-match-quality"),
                     ],
                     id="match-quality-section",
-                    open=False,
+                    start_collapsed=True,
+                    active_item=None,
                     className="mt-4",
                 ),
             ],

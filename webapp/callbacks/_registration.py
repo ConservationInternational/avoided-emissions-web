@@ -3070,7 +3070,7 @@ def register_callbacks(app, limiter=None):
 
     @app.callback(
         Output("match-quality-plots-container", "children"),
-        Input("match-quality-section", "open"),
+        Input("match-quality-section", "active_item"),
         Input("task-plot-selection", "data"),
         Input("site-filter-attributes", "data"),
         State("task-id-store", "data"),
@@ -3078,10 +3078,10 @@ def register_callbacks(app, limiter=None):
         prevent_initial_call=True,
     )
     def update_match_quality_plots(
-        is_open, selection, attributes, task_id, share_token
+        active_item, selection, attributes, task_id, share_token
     ):
         """Recompute match-quality diagnostics for the current site selection."""
-        if not is_open:
+        if active_item != "match-quality":
             raise PreventUpdate
         if not _authorize_task_access(task_id, share_token):
             return dbc.Alert("Task not found or access denied.", color="danger")

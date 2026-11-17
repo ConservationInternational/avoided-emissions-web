@@ -11,7 +11,7 @@ from callbacks import _registration as registration
 from callbacks._detail_builders import _add_range_error_bars, _build_plots
 from callbacks._helpers import _render_share_links_list
 from callbacks._match_quality import _calculate_match_quality_summary
-from dash import dcc, html
+from dash import Dash, dcc, html
 from flask import Flask
 from layouts.task_detail import task_detail_layout
 from plot_selection import parse_plot_selection, plot_selection_query
@@ -483,8 +483,11 @@ def test_selection_controls_and_map_precede_the_single_results_plot():
     results_container = children[component_ids.index("task-results-plots")]
     match_quality = results_container.children[1]
     assert match_quality.id == "match-quality-section"
-    assert match_quality.open is False
-    assert match_quality.children[0].children == "Match Quality"
+    assert isinstance(match_quality, dbc.Accordion)
+    assert match_quality.start_collapsed is True
+    assert match_quality.active_item is None
+    assert match_quality.children[0].title == "Match Quality"
+    assert match_quality.children[0].item_id == "match-quality"
     assert "site-map-selection" in component_ids
 
 
@@ -958,20 +961,16 @@ def test_selected_match_quality_summary_uses_pooled_weighted_pixel_data():
 
 @pytest.mark.unit
 def test_match_quality_callback_uses_current_group_and_site_selection(mocker):
-    callbacks = {}
-
-    def callback(*args, **kwargs):
-        def capture(function):
-            callbacks[function.__name__] = function
-            return function
-
-        return capture
-
-    registration.register_callbacks(
-        SimpleNamespace(
-            callback=callback, clientside_callback=lambda *args, **kwargs: None
-        )
-    )
+    app = Dash(__name__, suppress_callback_exceptions=True)
+    app.layout = html.Div()
+    registration.register_callbacks(app)
+    callback_key = "match-quality-plots-container.children"
+    registered = app.callback_map[callback_key]
+    update_match_quality = registered["callback"].__wrapped__
+    assert registered["inputs"][0] == {
+        "id": "match-quality-section",
+        "property": "active_item",
+    }
     totals = [
         SimpleNamespace(
             site_id=site_id,
@@ -1005,8 +1004,12 @@ def test_match_quality_callback_uses_current_group_and_site_selection(mocker):
         return_value=html.Div("plots"),
     )
 
-    result = callbacks["update_match_quality_plots"](
-        True,
+    with pytest.raises(registration.PreventUpdate):
+        update_match_quality(None, {}, {}, "task", None)
+    build.assert_not_called()
+
+    result = update_match_quality(
+        "match-quality",
         {"field": "region", "value": '"North"', "site": "a"},
         {"a": {"region": "North"}, "b": {"region": "South"}},
         "task",
@@ -1018,8 +1021,8 @@ def test_match_quality_callback_uses_current_group_and_site_selection(mocker):
     assert [total.site_id for total in build.call_args.args[3]] == ["a"]
     assert build.call_args.args[4] == "a"
 
-    callbacks["update_match_quality_plots"](
-        True,
+    update_match_quality(
+        "match-quality",
         {"field": "region", "value": '"North"'},
         {"a": {"region": "North"}, "b": {"region": "South"}},
         "task",
@@ -1028,6 +1031,36 @@ def test_match_quality_callback_uses_current_group_and_site_selection(mocker):
     assert build.call_args.args[2] == {"a"}
     assert [total.site_id for total in build.call_args.args[3]] == ["a"]
     assert build.call_args.args[4] is None
+
+    response = app.server.test_client().post(
+        "/_dash-update-component",
+        json={
+            "output": callback_key,
+            "outputs": {
+                "id": "match-quality-plots-container",
+                "property": "children",
+            },
+            "inputs": [
+                {
+                    "id": "match-quality-section",
+                    "property": "active_item",
+                    "value": "match-quality",
+                },
+                {"id": "task-plot-selection", "property": "data", "value": {}},
+                {"id": "site-filter-attributes", "property": "data", "value": {}},
+            ],
+            "state": [
+                {"id": "task-id-store", "property": "data", "value": "task"},
+                {"id": "share-token-store", "property": "data", "value": None},
+            ],
+            "changedPropIds": ["match-quality-section.active_item"],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["response"]["match-quality-plots-container"]["children"][
+        "props"
+    ]["children"] == "plots"
+    assert build.call_args.args[2] == {"a", "b"}
 
 
 @pytest.mark.unit

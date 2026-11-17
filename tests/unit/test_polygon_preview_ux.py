@@ -62,6 +62,38 @@ def test_overview_displays_invalid_outcome_site_details(monkeypatch):
     assert detail in text
 
 
+def test_overview_shows_forest_loss_avoided_range_and_correct_co2_label(monkeypatch):
+    from callbacks import _detail_builders
+
+    monkeypatch.setattr(_detail_builders, "download_results_csv", lambda *a, **k: None)
+    task = SimpleNamespace(
+        config={},
+        extract_job_id=None,
+        description=None,
+        n_sites=1,
+        created_at=None,
+        status="succeeded",
+        covariates=[],
+        results_s3_uri=None,
+        id="task",
+        error_message=None,
+        extra_metadata={},
+    )
+    total = SimpleNamespace(
+        extrapolated_emissions_avoided_mgco2e=100,
+        extrapolated_forest_loss_avoided_ha=10,
+        extrapolated_forest_loss_avoided_ha_ci_lower=8,
+        extrapolated_forest_loss_avoided_ha_ci_upper=12,
+        area_ha=100,
+    )
+
+    component = _build_overview(task, [], [total])
+    text = [c for c in _walk(component) if isinstance(c, str)]
+
+    assert "Total Avoided Emissions (MgCO₂e)" in text
+    assert "Range across matching replicates: 8 to 12 ha" in text
+
+
 def test_upload_limits_are_visible_before_transfer_and_match_archive_validation():
     from services import site_upload
 
