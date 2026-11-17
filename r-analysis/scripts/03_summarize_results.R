@@ -15,6 +15,7 @@
 # Output (in {output_dir}):
 #   results_by_site_year.csv, results_by_site_total.csv,
 #   results_by_site_replicate_year.csv, results_by_site_replicate_total.csv,
+#   results_by_atom_replicate_year.csv, results_atom_status.csv (atom inputs),
 #   results_site_status.csv,
 #   results_summary.json,
 #   results_pixel_year_emissions.csv (replicate 1), results_pixel_covariates.csv,
@@ -55,11 +56,44 @@ COVARIATES <- c(setdiff(all.vars(f), "treatment"), "defor_pre_intervention")
 fragments <- read_parquet(
     out_path("sites_processed.parquet"),
     col_select = any_of(c("site_id", "display_site_id", "site_name", "id_numeric", "sub_site_index",
-                         "start_year", "end_year", "area_ha"))
+                         "start_year", "end_year", "area_ha", "ae_atoms"))
 ) %>%
     as_tibble() %>%
     mutate(site_id = as.character(site_id))
 if (!"display_site_id" %in% names(fragments)) fragments$display_site_id <- fragments$site_id
+atom_metadata <- NULL
+atom_declarations <- tibble(
+    run_id = character(), atomic_id = character(), site_id = character()
+)
+if ("ae_atoms" %in% names(fragments) && any(!is.na(fragments$ae_atoms))) {
+    if (any(is.na(fragments$ae_atoms))) {
+        stop("Atom-enabled sites_processed.parquet must declare ae_atoms for every parent.")
+    }
+    parent_metadata <- fragments %>%
+        distinct(site_id, ae_atoms) %>%
+        arrange(site_id)
+    parsed_metadata <- lapply(parent_metadata$ae_atoms, function(value) {
+        jsonlite::parse_json(value, simplifyVector = FALSE, bigint_as_char = TRUE)
+    })
+    run_ids <- vapply(parsed_metadata, function(value) value$run_id, character(1))
+    if (length(unique(run_ids)) != 1L) {
+        stop("Atom-enabled input rows must use one consistent ae_atoms run_id.")
+    }
+    atom_declarations <- bind_rows(lapply(seq_along(parsed_metadata), function(i) {
+        atoms <- parsed_metadata[[i]]$atoms
+        if (length(atoms) == 0L) stop("Atom-enabled parent has no declared atoms.")
+        tibble(
+            run_id = run_ids[i],
+            atomic_id = vapply(atoms, function(atom) as.character(atom$atomic_id), character(1)),
+            site_id = parent_metadata$site_id[i]
+        )
+    }))
+    if (anyDuplicated(atom_declarations$atomic_id)) {
+        stop("Atom IDs must be globally unique.")
+    }
+    atom_metadata <- list(run_id = run_ids[1])
+}
+atom_enabled <- !is.null(atom_metadata)
 site_pixels <- read_parquet(out_path("treatment_cell_key.parquet")) %>%
     count(id_numeric, name = "n_site_pixels")
 fragments <- fragments %>%
@@ -173,6 +207,24 @@ summarize_batch <- function(path) {
             }
             list(
                 stratum = bind_cols(ids, aggregate_outcomes(m, outcomes)),
+                atom_stratum = if (atom_enabled) {
+                    bind_cols(ids, aggregate_atom_outcomes(m, outcomes))
+                } else {
+                    NULL
+                },
+                atom_coverage = if (atom_enabled) {
+                    m %>%
+                        filter(treatment) %>%
+                        group_by(atomic_id, group) %>%
+                        summarise(
+                            n_matched = n(),
+                            n_represented = sum(sampling_weight),
+                            .groups = "drop"
+                        ) %>%
+                        mutate(id_numeric = id, site_id = frag$site_id, replicate = k)
+                } else {
+                    NULL
+                },
                 strata = bind_cols(ids, m %>%
                     filter(treatment) %>%
                     group_by(group) %>%
@@ -199,7 +251,8 @@ process_batches <- function(paths) {
         on.exit(parallel::stopCluster(cluster), add = TRUE)
         parallel::clusterExport(
             cluster, c("summarize_batch", "matched_ids", "fragments", "frag_row",
-                       "FC_YEAR_MIN", "FC_YEAR_MAX", "COVARIATES", "scripts_dir"),
+                       "FC_YEAR_MIN", "FC_YEAR_MAX", "COVARIATES", "scripts_dir",
+                       "atom_enabled"),
             envir = environment()
         )
         parallel::clusterEvalQ(cluster, {
@@ -216,6 +269,8 @@ process_batches <- function(paths) {
     strata <- list()
     count_rows <- list()
     cov_rows <- list()
+    atom_rows <- list()
+    atom_coverage_rows <- list()
     for (start in if (length(paths)) seq.int(1L, length(paths), by = workers * 2L) else integer()) {
         chunk <- paths[start:min(length(paths), start + workers * 2L - 1L)]
         results <- if (is.null(cluster)) lapply(chunk, summarize_batch) else
@@ -245,6 +300,10 @@ process_batches <- function(paths) {
             stratum_rows[[i]] <- result$stratum
             strata[[i]] <- result$strata
             count_rows[[i]] <- result$counts
+            if (atom_enabled) {
+                atom_rows[[length(atom_rows) + 1L]] <- result$atom_stratum
+                atom_coverage_rows[[length(atom_coverage_rows) + 1L]] <- result$atom_coverage
+            }
             if (!is.null(result$detail)) {
                 write_csv(result$detail, detail_path, append = file.exists(detail_path))
                 cov_rows[[length(cov_rows) + 1L]] <- result$covariates
@@ -252,7 +311,8 @@ process_batches <- function(paths) {
         }
     }
     list(stratum_rows = stratum_rows, strata = strata, count_rows = count_rows,
-         cov_rows = cov_rows, invalid_sites = invalid_sites)
+         cov_rows = cov_rows, atom_rows = atom_rows,
+         atom_coverage_rows = atom_coverage_rows, invalid_sites = invalid_sites)
 }
 aggregate_timer <- proc.time()
 processed <- process_batches(batch_paths)
@@ -262,6 +322,8 @@ stratum_rows <- processed$stratum_rows
 strata <- processed$strata
 count_rows <- processed$count_rows
 cov_rows <- processed$cov_rows
+atom_rows <- processed$atom_rows
+atom_coverage_rows <- processed$atom_coverage_rows
 invalid_sites <- processed$invalid_sites
 rm(processed)
 diagnostics <- unlist(lapply(
@@ -395,17 +457,176 @@ metric_cols <- c(
     "extrapolated_forest_loss_avoided_ha", "extrapolated_emissions_avoided_mgco2e"
 )
 
+complete_atom_ids <- tibble(site_id = character(), atomic_id = character())
+atom_status <- NULL
+atom_matched_stats <- tibble(
+    site_id = character(), atomic_id = character(), n_sample_pixels = numeric()
+)
+if (atom_enabled) {
+    atom_counts <- if (file.exists(out_path("ae_atom_counts.parquet"))) {
+        read_parquet(out_path("ae_atom_counts.parquet")) %>%
+            group_by(site_id, atomic_id) %>%
+            summarise(
+                n_site_pixels = sum(n_site_pixels),
+                n_forest_pixels = sum(n_forest_pixels),
+                .groups = "drop"
+            ) %>%
+            mutate(atomic_id = as.character(atomic_id))
+    } else {
+        tibble(
+            site_id = character(), atomic_id = character(),
+            n_site_pixels = numeric(), n_forest_pixels = numeric()
+        )
+    }
+    atom_counts <- atom_declarations %>%
+        select(run_id, atomic_id, site_id) %>%
+        left_join(atom_counts, by = c("site_id", "atomic_id")) %>%
+        mutate(
+            n_site_pixels = coalesce(n_site_pixels, 0),
+            n_forest_pixels = coalesce(n_forest_pixels, 0)
+        )
+    atom_stratum <- if (length(atom_rows) > 0) {
+        bind_rows(atom_rows)
+    } else {
+        bind_cols(
+            tibble(
+                id_numeric = integer(), site_id = character(),
+                replicate = integer(), atomic_id = character(),
+                group = character(), year = integer()
+            ),
+            as_tibble(setNames(rep(list(numeric()), 8), metric_cols[1:8]))
+        )
+    } %>%
+        mutate(atomic_id = as.character(atomic_id)) %>%
+        semi_join(complete_strata, by = c("id_numeric", "group"))
+    atom_year_rep_all <- atom_stratum %>%
+        group_by(site_id, atomic_id, replicate, year) %>%
+        summarise(across(all_of(metric_cols[1:8]), sum), .groups = "drop") %>%
+        add_avoided()
+
+    group_consistency <- atom_stratum %>%
+        distinct(site_id, atomic_id, replicate, group) %>%
+        count(site_id, atomic_id, group, name = "n_replicates") %>%
+        group_by(site_id, atomic_id) %>%
+        summarise(groups_consistent = all(n_replicates == N_REPLICATES), .groups = "drop")
+    year_consistency <- atom_year_rep_all %>%
+        group_by(site_id, atomic_id) %>%
+        summarise(
+            replicates_complete = n_distinct(replicate) == N_REPLICATES,
+            years_complete = {
+                start <- sites$start_year[match(first(site_id), sites$site_id)]
+                expected_years <- seq(
+                    baseline_year(start, FC_YEAR_MIN) + 1L, FC_YEAR_MAX
+                )
+                years_by_replicate <- split(year, replicate)
+                length(years_by_replicate) == N_REPLICATES &&
+                    all(vapply(
+                        years_by_replicate,
+                    function(value) setequal(unique(value), expected_years),
+                        logical(1)
+                    ))
+            },
+            .groups = "drop"
+        )
+    complete_atom_ids <- year_consistency %>%
+        inner_join(group_consistency, by = c("site_id", "atomic_id")) %>%
+        filter(replicates_complete, years_complete, groups_consistent) %>%
+        select(site_id, atomic_id)
+    atom_year_rep <- atom_year_rep_all %>%
+        semi_join(complete_atom_ids, by = c("site_id", "atomic_id"))
+    atom_metrics <- atom_year_rep %>%
+        select(starts_with("extrapolated_"))
+    if (nrow(atom_metrics) > 0 &&
+        any(!vapply(atom_metrics, function(value) all(is.finite(value)), logical(1)))) {
+        stop("Atom annual results contain non-finite additive metrics.")
+    }
+    atom_replicates <- atom_year_rep %>%
+        inner_join(select(sites, site_id, start_year, end_year), by = "site_id") %>%
+        transmute(
+            run_id = atom_metadata$run_id,
+            atomic_id, site_id, replicate, year,
+            is_intervention_period = year >= start_year & year <= end_year,
+            across(starts_with("extrapolated_"))
+        ) %>%
+        arrange(run_id, atomic_id, replicate, year)
+    write_csv(atom_replicates, out_path("results_by_atom_replicate_year.csv"))
+
+    atom_coverage <- (if (length(atom_coverage_rows) > 0) {
+        bind_rows(atom_coverage_rows)
+    } else {
+        tibble(
+            id_numeric = integer(), site_id = character(),
+            replicate = integer(), atomic_id = character(),
+            group = character(), n_matched = numeric(),
+            n_represented = numeric()
+        )
+    }) %>%
+        mutate(atomic_id = as.character(atomic_id)) %>%
+        semi_join(complete_strata, by = c("id_numeric", "group")) %>%
+        semi_join(complete_atom_ids, by = c("site_id", "atomic_id")) %>%
+        group_by(site_id, atomic_id, replicate) %>%
+        summarise(n_matched = sum(n_matched), .groups = "drop") %>%
+        group_by(site_id, atomic_id) %>%
+        summarise(n_sample_pixels = mean(n_matched), .groups = "drop")
+    atom_matched_stats <- atom_coverage
+
+    atom_status <- atom_counts %>%
+        left_join(complete_atom_ids %>% mutate(consistent = TRUE),
+                  by = c("site_id", "atomic_id")) %>%
+        mutate(consistent = coalesce(consistent, FALSE)) %>%
+        left_join(select(sites, site_id, start_year, end_year), by = "site_id") %>%
+        left_join(
+            atom_year_rep %>%
+                group_by(site_id, atomic_id) %>%
+                summarise(
+                    first_year = min(year), last_year = max(year),
+                    .groups = "drop"
+                ),
+            by = c("site_id", "atomic_id")
+        ) %>%
+        mutate(
+            forest_coverage_fraction = if_else(consistent, 1, 0),
+            status = case_when(
+                n_site_pixels == 0 ~ "not_applicable",
+                n_forest_pixels == 0 ~ "not_applicable",
+                consistent ~ "estimated",
+                TRUE ~ "failed"
+            ),
+            status_reason = case_when(
+                n_site_pixels == 0 ~ "No atom pixels fall on the analysis grid.",
+                n_forest_pixels == 0 ~ "No forest pixels at the parent baseline year.",
+                consistent ~ NA_character_,
+                TRUE ~ paste(
+                    "Atom lacks consistent treatment representation across",
+                    "all configured replicates, matching strata, and annual years."
+                )
+            )
+        ) %>%
+        select(
+            run_id, atomic_id, site_id, status, status_reason,
+            n_site_pixels, n_forest_pixels, forest_coverage_fraction,
+            first_year, last_year, start_year, end_year
+        )
+    write_csv(atom_status, out_path("results_atom_status.csv"))
+}
+
 # Strata and fragments are summed to sites within each replicate.
 empty_metrics <- as_tibble(setNames(rep(list(numeric()), 8), metric_cols[1:8]))
-site_year_rep <- bind_rows(
-    tibble(id_numeric = integer(), group = character(), replicate = integer(),
-           site_id = character(), year = integer()),
-    empty_metrics, stratum_rows
-) %>%
-    semi_join(complete_strata, by = c("id_numeric", "group")) %>%
-    group_by(replicate, site_id, year) %>%
-    summarise(across(any_of(metric_cols), sum), .groups = "drop") %>%
-    add_avoided()
+if (atom_enabled) {
+    site_year_rep <- atom_year_rep %>%
+        group_by(replicate, site_id, year) %>%
+        summarise(across(all_of(metric_cols), sum), .groups = "drop")
+} else {
+    site_year_rep <- bind_rows(
+        tibble(id_numeric = integer(), group = character(), replicate = integer(),
+               site_id = character(), year = integer()),
+        empty_metrics, stratum_rows
+    ) %>%
+        semi_join(complete_strata, by = c("id_numeric", "group")) %>%
+        group_by(replicate, site_id, year) %>%
+        summarise(across(any_of(metric_cols), sum), .groups = "drop") %>%
+        add_avoided()
+}
 
 write_csv(
     site_year_rep %>%
@@ -461,6 +682,60 @@ site_counts <- bind_rows(
     ) %>%
     select(-n_failed_forest, -n_failed_fragments)
 
+if (atom_enabled) {
+    prior_counts <- site_counts %>%
+        select(site_id, n_control_pool, n_control_sampled, match_rate)
+    atom_site_counts <- atom_status %>%
+        group_by(site_id) %>%
+        summarise(
+            n_atom_site_pixels = sum(n_site_pixels),
+            n_atom_forest_pixels = sum(n_forest_pixels),
+            n_modeled_site_pixels = sum(n_site_pixels[status == "estimated"]),
+            n_modeled_forest_pixels = sum(n_forest_pixels[status == "estimated"]),
+            .groups = "drop"
+        ) %>%
+        left_join(
+            atom_matched_stats %>%
+                group_by(site_id) %>%
+                summarise(n_sample_pixels = sum(n_sample_pixels), .groups = "drop"),
+            by = "site_id"
+        )
+    site_counts <- sites %>%
+        select(site_id, n_site_pixels) %>%
+        left_join(atom_site_counts, by = "site_id") %>%
+        left_join(prior_counts, by = "site_id") %>%
+        mutate(
+            n_sample_pixels = coalesce(n_sample_pixels, 0),
+            n_eligible_pixels = coalesce(n_modeled_forest_pixels, 0),
+            n_represented_pixels = coalesce(n_modeled_forest_pixels, 0),
+            n_forest_pixels = coalesce(n_atom_forest_pixels, 0),
+            n_control_pool = coalesce(n_control_pool, 0),
+            n_control_sampled = coalesce(n_control_sampled, 0),
+            sampled_fraction = if_else(
+                n_eligible_pixels > 0, n_sample_pixels / n_eligible_pixels, 0
+            ),
+            match_rate = coalesce(match_rate, 0),
+            coverage_fraction = if_else(
+                n_site_pixels > 0, n_modeled_site_pixels / n_site_pixels, 0
+            ),
+            forest_coverage_fraction = if_else(
+                n_forest_pixels > 0, n_represented_pixels / n_forest_pixels, 0
+            ),
+            status = case_when(
+                n_site_pixels == 0 | n_forest_pixels == 0 ~ "not_applicable",
+                n_represented_pixels == 0 ~ "failed",
+                forest_coverage_fraction < LOW_COVERAGE ~ "partial",
+                TRUE ~ "estimated"
+            )
+        ) %>%
+        select(
+            site_id, n_sample_pixels, n_eligible_pixels, n_represented_pixels,
+            n_forest_pixels, sampled_fraction, match_rate, n_control_pool,
+            n_control_sampled, n_site_pixels, coverage_fraction,
+            forest_coverage_fraction, status
+        )
+}
+
 # Status of every site with pixels: estimated / partial from site_counts,
 # otherwise failed if any fragment failed, else not applicable.
 site_status <- sites %>%
@@ -483,6 +758,7 @@ site_status <- sites %>%
         status_reason = if_else(status == "estimated", NA_character_, status_reason)
     ) %>%
     select(-any_failed)
+if (atom_enabled) n_failed_sites <- sum(site_status$status == "failed")
 write_csv(site_status, out_path("results_site_status.csv"))
 
 results_by_year <- (if (nrow(site_year_rep) > 0) {
@@ -814,6 +1090,10 @@ summary_data <- list(
         total = portfolio_total
     )
 )
+if (atom_enabled) {
+    summary_data$atom_results_schema_version <- 1L
+    summary_data$atom_run_id <- atom_metadata$run_id
+}
 write_json(summary_data, out_path("results_summary.json"), auto_unbox = TRUE,
            pretty = TRUE, null = "null", na = "null", digits = NA)
 

@@ -131,6 +131,41 @@ test_that("outcomes are aggregated per stratum and year", {
     expect_equal(agg$extrapolated_control_defor_ha, c(0, 20, 50, 20))
 })
 
+test_that("atom controls follow treatment atoms and reconcile to parent totals", {
+    m <- tibble(
+        cell = 1:3,
+        treatment = c(TRUE, TRUE, FALSE),
+        atomic_id = c("101", "102", NA_character_),
+        id_numeric = 1L,
+        site_id = "site",
+        replicate = 1L,
+        group = "g",
+        match_group = "g_set",
+        sampling_weight = 5,
+        area_ha = 100,
+        total_biomass_2000 = 100,
+        fc_2000 = 100,
+        fc_2014 = 100,
+        fc_2015 = c(90, 80, 50),
+        fc_2016 = c(70, 60, 20)
+    ) %>% set_match_weights()
+    outcomes <- pixel_outcomes(m, 2020, 2014, 2016)
+    parent <- add_avoided(aggregate_outcomes(m, outcomes))
+    atoms <- add_avoided(aggregate_atom_outcomes(m, outcomes))
+    atom_totals <- atoms %>%
+        group_by(year) %>%
+        summarise(across(all_of(names(parent)[-(1:2)]), sum), .groups = "drop")
+    expect_equal(atom_totals, parent %>% select(-group))
+    expect_equal(
+        atoms %>% filter(atomic_id == "101") %>% pull(extrapolated_control_defor_ha),
+        c(250, 150)
+    )
+    expect_equal(
+        atoms %>% filter(atomic_id == "102") %>% pull(extrapolated_control_defor_ha),
+        c(250, 150)
+    )
+})
+
 test_that("replicate bounds are computed after summing (F3, F8)", {
     df <- tibble(
         replicate = c(1, 2, 1, 2), site_id = c("A", "A", "B", "B"),

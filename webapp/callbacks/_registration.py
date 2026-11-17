@@ -3494,7 +3494,7 @@ def register_callbacks(app, limiter=None):
                 title=f"Annual Emissions: {site_name}{sub_note}",
                 xaxis_title="Year",
                 xaxis={"tickformat": "d", "dtick": 1},
-                yaxis_title="Emissions (MgCOΓéée)",
+                yaxis_title="Emissions (MgCO₂e)",
                 legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
                 hovermode="x unified",
             )

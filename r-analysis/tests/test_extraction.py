@@ -108,6 +108,66 @@ class ExtractionTests(unittest.TestCase):
                 metadata = json.load(source)
             self.assertEqual((metadata["width"], metadata["height"]), (width, height))
 
+    def test_atom_contract_accepts_parent_fragments_and_rejects_bad_partitions(self):
+        atom_1 = {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]}
+        atom_2 = {"type": "Polygon", "coordinates": [[[1, 0], [2, 0], [2, 1], [1, 1], [1, 0]]]}
+        metadata = json.dumps(
+            {"run_id": "job-1", "atoms": [
+                {"atomic_id": 11, "geometry": atom_1},
+                {"atomic_id": 12, "geometry": atom_2},
+            ]}
+        )
+        sites = gpd.GeoDataFrame(
+            {
+                "site_id": ["parent", "parent"],
+                "ae_atoms": [metadata, metadata],
+            },
+            geometry=[box(0, 0, 1, 1), box(1, 0, 2, 1)],
+            crs=4326,
+        )
+        self.assertEqual(
+            extract._validate_atom_contract(sites)["atomic_ids"], {11, 12}
+        )
+
+        invalid = sites.copy()
+        invalid.loc[1, "ae_atoms"] = json.dumps(
+            {"run_id": "job-2", "atoms": [
+                {"atomic_id": 11, "geometry": atom_1},
+                {"atomic_id": 12, "geometry": atom_2},
+            ]}
+        )
+        with self.assertRaisesRegex(ValueError, "Inconsistent ae_atoms"):
+            extract._validate_atom_contract(invalid)
+
+    def test_atom_rasterization_assigns_exact_parent_cell_memberships(self):
+        atom_metadata = json.dumps(
+            {"run_id": "job-1", "atoms": [
+                {"atomic_id": 11, "geometry": mapping(box(0, 0, 1, 1))},
+                {"atomic_id": 12, "geometry": mapping(box(1, 0, 2, 1))},
+            ]}
+        )
+        sites = gpd.GeoDataFrame(
+            {
+                "site_id": ["parent"],
+                "id_numeric": [1],
+                "ae_atoms": [atom_metadata],
+            },
+            geometry=[box(0, 0, 2, 1)],
+            crs=4326,
+        )
+        treatment_key = pd.DataFrame(
+            {
+                "cell": [0, 1],
+                "id_numeric": [1, 1],
+                "site_id": ["parent", "parent"],
+                "area_ha": [1.0, 1.0],
+            }
+        )
+        assigned = extract._atom_memberships(
+            treatment_key, sites, from_origin(0, 1, 1, 1), 2, 1
+        )
+        self.assertEqual(assigned.atomic_id.tolist(), [11, 12])
+
     def test_tiled_extraction_preserves_pixels_memberships_and_global_grid(self):
         with tempfile.TemporaryDirectory() as output:
             root = Path(output)

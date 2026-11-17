@@ -204,7 +204,7 @@ load_worker_pixels <- function(site_rows) {
     ids <- site_rows$id_numeric
     tk <- treatment_key_dataset %>%
         filter(id_numeric %in% ids) %>%
-        select(cell, id_numeric) %>%
+        select(cell, id_numeric, any_of("atomic_id")) %>%
         collect()
     cells <- unique(tk$cell)
     # The extract step encodes missing partition values as -1.
@@ -525,7 +525,7 @@ process_site <- function(site, pixels, n_site_pixels, replicates) {
         count(group, name = "n_eligible") %>%
         mutate(group = as.character(group))
     keep_cols <- unique(c(
-        "cell", "treatment", "group", "match_group", "match_weight", "pscore",
+        "cell", "atomic_id", "treatment", "group", "match_group", "match_weight", "pscore",
         "area_ha", "total_biomass_2000", FC_COLS, setdiff(all.vars(this_f), "treatment")
     ))
 

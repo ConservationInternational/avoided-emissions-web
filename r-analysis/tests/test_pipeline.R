@@ -150,6 +150,135 @@ test_that("summary uses the same complete strata for estimates and pixel downloa
     expect_equal(detail_totals$loss, by_year$sample_treatment_defor_ha)
 })
 
+test_that("atom outputs require complete replicate domains and reconcile parent results", {
+    data_dir <- tempfile("ae_atoms_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
+    out <- file.path(data_dir, "output")
+    atoms <- list(
+        A = list(
+            list(atomic_id = 101, geometry = list(type = "Polygon", coordinates = list())),
+            list(atomic_id = 102, geometry = list(type = "Polygon", coordinates = list()))
+        ),
+        B = list(
+            list(atomic_id = 201, geometry = list(type = "Polygon", coordinates = list()))
+        ),
+        C = list(
+            list(atomic_id = 301, geometry = list(type = "Polygon", coordinates = list()))
+        )
+    )
+    sites <- read_parquet(file.path(out, "sites_processed.parquet"))
+    sites$ae_atoms <- vapply(sites$site_id, function(site_id) {
+        toJSON(
+            list(run_id = "kpi-job-42", atoms = atoms[[site_id]]),
+            auto_unbox = TRUE, null = "null"
+        )
+    }, character(1))
+    write_parquet(sites, file.path(out, "sites_processed.parquet"))
+
+    keys <- bind_rows(lapply(1:3, function(id) {
+        tibble(
+            cell = seq_len(10) + id * 100,
+            id_numeric = id,
+            site_id = c("A", "A", "B")[id],
+            atomic_id = c("101", "102", "201")[id]
+        )
+    }))
+    write_parquet(keys, file.path(out, "treatment_cell_key.parquet"))
+    write_parquet(
+        tibble(
+            site_id = c("A", "A", "B", "C"),
+            atomic_id = c(101, 102, 201, 301),
+            n_site_pixels = c(10, 10, 10, 0),
+            n_forest_pixels = c(10, 10, 8, 0)
+        ),
+        file.path(out, "ae_atom_counts.parquet")
+    )
+
+    for (id in 1:3) {
+        for (replicate in if (id == 2) 1 else 1:2) {
+            treatment <- tibble(
+                cell = c(id * 10, id * 10 + 1),
+                treatment = c(TRUE, FALSE),
+                atomic_id = c(c("101", "102", "201")[id], NA_character_),
+                group = paste0("group", id),
+                match_group = paste0("group", id, "_set"),
+                match_weight = 1,
+                sampling_weight = 5,
+                area_ha = 100,
+                total_biomass_2000 = 100,
+                fc_2000 = 100,
+                x1 = 0,
+                pscore = 0.5,
+                n_eligible = 10,
+                n_sampled = 1,
+                n_control_pool = 100,
+                n_control_sampled = 5,
+                id_numeric = id,
+                replicate = replicate,
+                n_forest_pixels = 10
+            ) %>% bind_cols(forest_cover(2, 1))
+            batch <- paste0("atoms", id, "_", replicate)
+            write_parquet(
+                treatment,
+                file.path(out, "matches", paste0("mb_", batch, ".parquet"))
+            )
+            write_json(
+                list(
+                    batch = batch,
+                    matches_file = paste0("mb_", batch, ".parquet"),
+                    failures = list(), diagnostics = list(), na_exclusions = list()
+                ),
+                file.path(out, "matches", paste0("mb_", batch, ".json")),
+                auto_unbox = TRUE
+            )
+        }
+    }
+
+    run_script("03_summarize_results.R", config_path)
+    atom_status <- read.csv(file.path(out, "results_atom_status.csv"))
+    atom_reps <- read.csv(file.path(out, "results_by_atom_replicate_year.csv"))
+    parent_reps <- read.csv(file.path(out, "results_by_site_replicate_year.csv"))
+    summary <- fromJSON(file.path(out, "results_summary.json"))
+    expect_equal(summary$atom_results_schema_version, 1)
+    expect_equal(summary$atom_run_id, "kpi-job-42")
+    expect_true(is.integer(summary$n_replicates))
+    expect_type(atom_reps$is_intervention_period, "logical")
+    expect_equal(
+        atom_status$first_year[match(c("101", "201"), atom_status$atomic_id)],
+        c(2009, 2009)
+    )
+    expect_equal(
+        atom_status$last_year[match(c("101", "201"), atom_status$atomic_id)],
+        c(2016, 2016)
+    )
+    expect_equal(
+        setNames(atom_status$status, atom_status$atomic_id),
+        c("101" = "estimated", "102" = "failed", "201" = "estimated", "301" = "not_applicable")
+    )
+    expect_false(any(atom_reps$atomic_id == 102))
+    expect_true(all(c("run_id", "atomic_id", "site_id", "replicate", "year",
+                      "is_intervention_period",
+                      "extrapolated_emissions_avoided_mgco2e",
+                      "extrapolated_forest_loss_avoided_ha",
+                      "extrapolated_control_emissions_mgco2e") %in% names(atom_reps)))
+    expect_equal(sort(unique(atom_reps$year)), 2009:2016)
+    expect_equal(
+        sort(unique(atom_reps$year[atom_reps$is_intervention_period])),
+        2014:2016
+    )
+    parent_from_atoms <- atom_reps %>%
+        group_by(site_id, replicate, year) %>%
+        summarise(
+            across(starts_with("extrapolated_"), sum),
+            .groups = "drop"
+        ) %>%
+        arrange(site_id, replicate, year)
+    expect_equal(
+        as.data.frame(parent_from_atoms),
+        parent_reps %>% arrange(site_id, replicate, year)
+    )
+})
+
 test_that("summary preserves cell IDs across integer and integer64 match files", {
     data_dir <- tempfile("ae_cell_types_")
     config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)

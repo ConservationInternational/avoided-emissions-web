@@ -1791,7 +1791,10 @@ def _build_plots(
                         marker_color=color,
                         meta={"site_id": str(site_id)},
                         legend=legend,
-                        hovertext=hover_labels.get(str(site_id), f"Site ID: {site_id}"),
+                        hovertext=[
+                            hover_labels.get(str(site_id), f"Site ID: {site_id}")
+                        ]
+                        * len(agg_df),
                         hovertemplate="%{hovertext}<br>Year: %{x}<br>"
                         + label
                         + ": %{y:,.2f}<extra></extra>",

@@ -199,6 +199,46 @@ features remain independent reports. Portfolio totals sum these reports; they
 are not a unique-area union of overlapping source features. The results'
 **Site ID / label mapping** CSV maps canonical IDs to original labels and names.
 
+### Atom-level KPI inputs and results
+
+KPI exports may add an `ae_atoms` text property to each parent site's source
+feature. Its JSON value is
+`{"run_id":"<KPI job id>","atoms":[{"atomic_id":123,"geometry":<GeoJSON Polygon or MultiPolygon>}]}`.
+Every parent row in an atom-enabled input must declare the same non-empty
+`run_id`; atom IDs must be globally unique positive integers. Within each
+parent, atom geometries must be valid, disjoint, and exactly partition the
+parent polygon. Upload/import preserves this property in source attributes,
+and preparation carries it through exact-match fragment splitting. A declared
+atom parent cannot be silently removed by the minimum-site-area filter; such
+submissions fail with the excluded parent IDs.
+
+Atom-enabled results include:
+
+- `results_by_atom_replicate_year.csv`: one row per consistently represented
+  `(run_id, atomic_id, replicate, year)`, with the parent `site_id`, the
+  inclusive intervention-period flag, and the six additive extrapolated
+  treatment/control/avoided loss and emissions metrics. It includes all
+  available annual result years, including pre-intervention years.
+- `results_atom_status.csv`: one row for every declared atom, including atoms
+  with no grid pixels. It reports `estimated`, `partial`, `failed`, or
+  `not_applicable`, a reason, pixel and forest counts, forest coverage, and
+  supported result-year and parent intervention-year bounds.
+- `results_summary.json`: `atom_results_schema_version: 1` and
+  `atom_run_id: <run_id>`.
+
+Atom treatment contributions retain matching and stratum-sampling weights.
+When a matched set contains multiple treatment atoms, each control's outcome
+is assigned across those atoms in proportion to the treatment-unit matching
+weights; no parent total is apportioned by polygon area. Atoms missing any
+configured replicate, modeled year, or matching stratum are not emitted as
+annual zeroes. For atom-enabled analyses, parent site and portfolio estimates
+are rebuilt from consistently represented atoms, so their replicate-year
+totals equal the sum of the corresponding atom rows over the same domain.
+Incomplete atoms remain explicit in the atom status file and their omitted
+coverage is reflected in parent/site coverage and status. Both atom CSVs are
+available from the normal task results prefix and via the `atom_replicates`
+and `atom_status` result-download types.
+
 The read-only audit command can inventory historical jobs and references or
 validate downloaded artifacts. Run from the repository root with the application's
 dependencies and database configuration:

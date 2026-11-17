@@ -502,6 +502,12 @@ def _complete_analysis_task_submission(task_id, user_id):
             raise ValueError("Analysis inputs must declare EPSG:4326.")
         if gdf["site_id"].isna().any() or gdf["site_id"].duplicated().any():
             raise ValueError("Analysis inputs require unique immutable feature keys.")
+        atom_values = _atom_metadata_values(gdf)
+        if atom_values.notna().any():
+            if atom_values.isna().any():
+                raise ValueError("Atom-enabled inputs must declare ae_atoms for every parent site.")
+            gdf = gdf.copy()
+            gdf["ae_atoms"] = atom_values
         repaired_count = int((~shapely.is_valid(gdf.geometry.to_numpy())).sum())
         gdf = gdf.copy()
         gdf["geometry"] = [polygonal(geom) for geom in gdf.geometry]
@@ -521,6 +527,17 @@ def _complete_analysis_task_submission(task_id, user_id):
         # The partition cache covers the whole site set so any minimum-area
         # setting reuses the same entry.
         all_sites = gdf[["site_id", "geometry"]]
+        if "ae_atoms" in gdf.columns and gdf["ae_atoms"].notna().any():
+            excluded_atoms = gdf.loc[
+                gdf["area_ha"] < min_site_area_ha, "site_id"
+            ].astype(str).tolist()
+            if excluded_atoms:
+                raise ValueError(
+                    "Atom-enabled analyses cannot filter declared parent sites by "
+                    "minimum site area. Increase the minimum site area or submit "
+                    "all atom parents; excluded site IDs: "
+                    + ", ".join(excluded_atoms[:10])
+                )
         gdf = gdf[gdf["area_ha"] >= min_site_area_ha].reset_index(drop=True)
         preparation = {
             "version": "authoritative-conservative-v1",
@@ -562,6 +579,9 @@ def _complete_analysis_task_submission(task_id, user_id):
                 _time.perf_counter() - _split_t0,
             )
             gdf_for_db = split_gdf
+            if "ae_atoms" in gdf.columns:
+                atoms_by_site = gdf.set_index("site_id")["ae_atoms"]
+                gdf_for_db["ae_atoms"] = gdf_for_db["site_id"].map(atoms_by_site)
         else:
             gdf_for_db = gdf.assign(
                 sub_site_index=0, is_sub_site=False, original_area_ha=None
@@ -1707,6 +1727,24 @@ def _parse_iso_datetime(value):
         return None
 
 
+def _atom_metadata_values(gdf):
+    """Expose the preserved ae_atoms source property on submitted sites."""
+    if "ae_atoms" in gdf.columns:
+        return gdf["ae_atoms"]
+    if "source_attributes" not in gdf.columns:
+        return pd.Series([None] * len(gdf), index=gdf.index)
+
+    def get_value(value):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("Invalid source_attributes JSON.") from exc
+        return value.get("ae_atoms") if isinstance(value, dict) else None
+
+    return gdf["source_attributes"].map(get_value)
+
+
 def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=None):
     """Download result CSV from S3 for a completed task.
 
@@ -1738,6 +1776,8 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         "matched_pixels": "results_pixel_locations.csv",
         "summary": "results_summary.json",
         "site_identity": "site_identity.csv",
+        "atom_replicates": "results_by_atom_replicate_year.csv",
+        "atom_status": "results_atom_status.csv",
     }
     filename = filename_map.get(result_type)
     if not filename:

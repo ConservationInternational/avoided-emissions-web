@@ -275,6 +275,72 @@ aggregate_outcomes <- function(m, outcomes) {
 }
 
 
+aggregate_atom_outcomes <- function(m, outcomes) {
+    # Attribute treated pixels to their source atom.  A matched control set
+    # can contain several treatment atoms, so allocate each control's matching
+    # weight in proportion to the treatment-unit weights in that set.
+    if (!"atomic_id" %in% names(m) || anyNA(m$atomic_id[m$treatment])) {
+        stop("Atom aggregation requires atomic_id for every matched treatment pixel.")
+    }
+    indexed <- m %>% mutate(.row = row_number())
+    treated <- indexed %>% filter(treatment)
+    if (nrow(treated) == 0) return(tibble())
+    atom_shares <- treated %>%
+        group_by(match_group, atomic_id) %>%
+        summarise(atom_share_weight = sum(match_weight), .groups = "drop") %>%
+        group_by(match_group) %>%
+        mutate(atom_share = atom_share_weight / sum(atom_share_weight)) %>%
+        ungroup() %>%
+        select(match_group, atomic_id, atom_share)
+    controls <- indexed %>%
+        filter(!treatment) %>%
+        select(-atomic_id) %>%
+        inner_join(atom_shares, by = "match_group")
+    if (nrow(controls) == 0 && any(!m$treatment)) {
+        stop("Matched controls could not be attributed to treatment atoms.")
+    }
+    expanded <- bind_rows(
+        treated %>% mutate(atom_share = 1),
+        controls
+    ) %>%
+        mutate(
+            sample_weight = match_weight * atom_share,
+            extrapolation_weight = sample_weight * sampling_weight
+        )
+
+    bind_rows(lapply(seq_along(outcomes$years), function(i) {
+        loss <- outcomes$loss_ha[expanded$.row, i]
+        emissions <- outcomes$emissions[expanded$.row, i]
+        expanded %>%
+            mutate(
+                year = outcomes$years[i],
+                .loss = loss,
+                .emissions = emissions
+            ) %>%
+            group_by(atomic_id, group, year) %>%
+            summarise(
+                sample_treatment_defor_ha =
+                    sum(if_else(treatment, .loss * sample_weight, 0)),
+                sample_control_defor_ha =
+                    sum(if_else(!treatment, .loss * sample_weight, 0)),
+                sample_treatment_emissions_mgco2e =
+                    sum(if_else(treatment, .emissions * sample_weight, 0)),
+                sample_control_emissions_mgco2e =
+                    sum(if_else(!treatment, .emissions * sample_weight, 0)),
+                extrapolated_treatment_defor_ha =
+                    sum(if_else(treatment, .loss * extrapolation_weight, 0)),
+                extrapolated_control_defor_ha =
+                    sum(if_else(!treatment, .loss * extrapolation_weight, 0)),
+                extrapolated_treatment_emissions_mgco2e =
+                    sum(if_else(treatment, .emissions * extrapolation_weight, 0)),
+                extrapolated_control_emissions_mgco2e =
+                    sum(if_else(!treatment, .emissions * extrapolation_weight, 0)),
+                .groups = "drop"
+            )
+    }))
+}
+
+
 add_avoided <- function(df) {
     # Avoided = counterfactual (control) minus observed (treatment).
     df %>% mutate(

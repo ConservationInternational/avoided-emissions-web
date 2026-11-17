@@ -187,10 +187,12 @@ def test_yearly_bars_rank_2025_and_split_remaining_sites_by_yearly_sign(
         for trace, site_id in zip(named, top_ids):
             assert trace.meta == {"site_id": site_id}
             total = next(total for total in totals if total.site_id == site_id)
-            assert trace.hovertext == (
-                f"Site ID: {labels[site_id]}<br>"
-                f"Site name: {total.site_name or 'Not available'}"
-            )
+            assert list(trace.hovertext) == [
+                (
+                    f"Site ID: {labels[site_id]}<br>"
+                    f"Site name: {total.site_name or 'Not available'}"
+                )
+            ] * len(years)
             assert "%{hovertext}" in trace.hovertemplate
             assert list(trace.y) == [
                 sum(

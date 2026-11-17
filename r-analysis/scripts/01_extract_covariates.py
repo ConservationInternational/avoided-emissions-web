@@ -166,6 +166,17 @@ def load_sites(sites_path: str) -> gpd.GeoDataFrame:
     else:
         sites = gpd.read_file(sites_path)
 
+    if "ae_atoms" not in sites.columns and "source_attributes" in sites.columns:
+        def source_atom_value(value):
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    return None
+            return value.get("ae_atoms") if isinstance(value, dict) else None
+
+        sites["ae_atoms"] = sites["source_attributes"].map(source_atom_value)
+
     required = {"site_id", "site_name", "start_date"}
     missing = required - set(sites.columns)
     if missing:
@@ -201,6 +212,13 @@ def load_sites(sites_path: str) -> gpd.GeoDataFrame:
         sites["sub_site_index"] = 0
     if sites.duplicated(["site_id", "sub_site_index"]).any():
         raise ValueError("Duplicate immutable site/fragment identities.")
+    if "ae_atoms" in sites.columns:
+        sites["ae_atoms"] = sites["ae_atoms"].map(_decode_atom_json)
+        atom_metadata = _validate_atom_contract(sites)
+        if atom_metadata is not None:
+            sites["ae_atoms"] = sites["ae_atoms"].map(
+                lambda value: json.dumps(value, separators=(",", ":"), allow_nan=False)
+            )
 
     # Numeric IDs (1-based)
     sites["id_numeric"] = range(1, len(sites) + 1)
@@ -209,6 +227,101 @@ def load_sites(sites_path: str) -> gpd.GeoDataFrame:
     log.info("Sites: %d loaded", len(sites))
 
     return sites.reset_index(drop=True)
+
+
+def _decode_atom_json(value):
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Invalid ae_atoms JSON.") from exc
+    return value
+
+
+def _validate_atom_contract(sites: gpd.GeoDataFrame) -> dict | None:
+    """Validate the declared parent-to-atom partition before rasterization."""
+    values = sites["ae_atoms"].tolist()
+    declared = [value for value in values if value is not None]
+    if not declared:
+        return None
+    if len(declared) != len(sites):
+        raise ValueError("Atom-enabled inputs must declare ae_atoms for every parent site.")
+
+    parent_atoms = {}
+    run_ids = set()
+    atomic_owners = {}
+    for row in sites.itertuples():
+        value = row.ae_atoms
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid ae_atoms JSON for site {row.site_id}.") from exc
+        if not isinstance(value, dict) or set(value) != {"run_id", "atoms"}:
+            raise ValueError(f"Invalid ae_atoms mapping for site {row.site_id}.")
+        run_id = value.get("run_id")
+        atoms = value.get("atoms")
+        if not isinstance(run_id, str) or not run_id.strip() or not isinstance(atoms, list) or not atoms:
+            raise ValueError(f"Invalid ae_atoms run_id or atoms for site {row.site_id}.")
+        run_ids.add(run_id)
+        parsed_atoms = {}
+        for atom in atoms:
+            if not isinstance(atom, dict) or set(atom) != {"atomic_id", "geometry"}:
+                raise ValueError(f"Invalid atom entry for site {row.site_id}.")
+            atomic_id = atom["atomic_id"]
+            if (
+                isinstance(atomic_id, bool)
+                or not isinstance(atomic_id, int)
+                or atomic_id <= 0
+                or atomic_id > np.iinfo(np.int64).max
+                or (
+                    atomic_id in atomic_owners
+                    and atomic_owners[atomic_id] != row.site_id
+                )
+            ):
+                raise ValueError(f"Atom IDs must be globally unique positive int64 values (site {row.site_id}).")
+            geom_json = atom["geometry"]
+            if not isinstance(geom_json, dict) or geom_json.get("type") not in {
+                "Polygon",
+                "MultiPolygon",
+            }:
+                raise ValueError(f"Atom {atomic_id} must have Polygon or MultiPolygon geometry.")
+            geom = shape(geom_json)
+            if geom.is_empty or not geom.is_valid or geom.geom_type not in {
+                "Polygon",
+                "MultiPolygon",
+            }:
+                raise ValueError(f"Atom {atomic_id} has invalid polygon geometry.")
+            atomic_owners[atomic_id] = row.site_id
+            parsed_atoms[atomic_id] = (geom, geom_json)
+
+        if row.site_id not in parent_atoms:
+            parent_atoms[row.site_id] = (run_id, parsed_atoms)
+        else:
+            previous_run, previous_atoms = parent_atoms[row.site_id]
+            if previous_run != run_id or set(previous_atoms) != set(parsed_atoms) or any(
+                not previous_atoms[atom_id][0].equals(parsed_atoms[atom_id][0])
+                for atom_id in parsed_atoms
+            ):
+                raise ValueError(f"Inconsistent ae_atoms mapping across fragments of site {row.site_id}.")
+
+    if len(run_ids) != 1:
+        raise ValueError("Atom-enabled input rows must use one consistent ae_atoms run_id.")
+
+    for site_id, (_, atoms) in parent_atoms.items():
+        atom_geometries = [item[0] for item in atoms.values()]
+        for index, geom in enumerate(atom_geometries):
+            if any(not geom.intersection(other).is_empty and geom.intersection(other).area > 0
+                   for other in atom_geometries[index + 1 :]):
+                raise ValueError(f"Atom polygons overlap within site {site_id}.")
+        parent_geom = unary_union(sites.loc[sites.site_id == site_id].geometry.to_list())
+        atom_union = unary_union(atom_geometries)
+        if not parent_geom.equals(atom_union):
+            raise ValueError(f"Atom polygons do not exactly partition site {site_id}.")
+
+    return {"run_id": next(iter(run_ids)), "atomic_ids": set(atomic_owners)}
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +653,48 @@ def _treatment_memberships(sites, transform, width, height, ys, xres, yres):
     )
 
 
+def _atom_memberships(treatment_key, sites, transform, width, height):
+    """Assign each parent treatment-cell membership to its declared atom."""
+    if "ae_atoms" not in sites.columns or not sites["ae_atoms"].notna().any():
+        return treatment_key
+
+    assigned = np.zeros(len(treatment_key), dtype=np.int64)
+    positions_by_site = {
+        str(site_id): positions
+        for site_id, positions in treatment_key.groupby("site_id", sort=False).indices.items()
+    }
+    for row in sites.drop_duplicates("site_id").itertuples():
+        positions = positions_by_site.get(str(row.site_id))
+        if positions is None or not len(positions):
+            continue
+        atom_data = _decode_atom_json(row.ae_atoms)
+        shapes = [
+            (shape(atom["geometry"]), int(atom["atomic_id"]))
+            for atom in atom_data["atoms"]
+        ]
+        atom_grid = rasterize(
+            shapes,
+            out_shape=(height, width),
+            transform=transform,
+            fill=0,
+            dtype="int64",
+            all_touched=False,
+        ).ravel()
+        cells = treatment_key.cell.to_numpy(dtype=np.int64)[positions]
+        assigned[positions] = atom_grid[cells]
+        del atom_grid
+
+    if np.any(assigned == 0):
+        examples = treatment_key.loc[assigned == 0, ["site_id", "cell"]].head(5)
+        raise ValueError(
+            "Declared atoms do not cover rasterized parent treatment pixels: "
+            + examples.to_dict(orient="records").__repr__()
+        )
+    result = treatment_key.copy()
+    result["atomic_id"] = assigned
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Core extraction logic (GDAL + xarray)
 # ---------------------------------------------------------------------------
@@ -774,12 +929,22 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         len(tasks),
         workers,
     )
-    key_schema = pa.schema(
+    atoms_enabled = "ae_atoms" in sites.columns and sites["ae_atoms"].notna().any()
+    key_fields = [
+        ("cell", pa.int64()),
+        ("id_numeric", pa.int64()),
+        ("site_id", pa.string()),
+        ("area_ha", pa.float64()),
+    ]
+    if atoms_enabled:
+        key_fields.append(("atomic_id", pa.int64()))
+    key_schema = pa.schema(key_fields)
+    atom_count_schema = pa.schema(
         [
-            ("cell", pa.int64()),
-            ("id_numeric", pa.int64()),
             ("site_id", pa.string()),
-            ("area_ha", pa.float64()),
+            ("atomic_id", pa.int64()),
+            ("n_site_pixels", pa.int64()),
+            ("n_forest_pixels", pa.int64()),
         ]
     )
     empty_control_schema = None
@@ -795,6 +960,17 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
         ExitStack() as task_cleanup,
     ):
         treatment_writer = None
+        atom_count_writer = (
+            pq.ParquetWriter(
+                output / "ae_atom_counts.parquet",
+                atom_count_schema,
+                compression="zstd",
+            )
+            if atoms_enabled
+            else None
+        )
+        if atom_count_writer is not None:
+            task_cleanup.callback(atom_count_writer.close)
         try:
             started = time.monotonic()
             results = _tile_results(
@@ -819,6 +995,14 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
                             pa.Table.from_batches([batch]).cast(key_schema)
                         )
                 key_path.unlink()
+                if atom_count_writer is not None:
+                    atom_count_path = tile_dir / "ae_atom_counts.parquet"
+                    with pq.ParquetFile(atom_count_path) as source:
+                        for batch in source.iter_batches(batch_size=65536):
+                            atom_count_writer.write_batch(
+                                batch.cast(atom_count_schema)
+                            )
+                    atom_count_path.unlink()
                 treatment_path = tile_dir / "treatment_pixels.parquet"
                 with pq.ParquetFile(treatment_path) as source:
                     if treatment_writer is None:
@@ -898,6 +1082,9 @@ def _extract_tile(
     # fragments that are not matched (e.g. no exact-match region).
     treatment_key = _treatment_memberships(
         sites, transform, width, height, ys, xres, yres
+    )
+    treatment_key = _atom_memberships(
+        treatment_key, sites, transform, width, height
     )
     site_mask = np.zeros(height * width, dtype=bool)
     site_mask[treatment_key["cell"].to_numpy(dtype=np.int64)] = True
@@ -1057,6 +1244,38 @@ def _extract_tile(
 
     # --- 8. save outputs ---
     output_dir = config["output_dir"]
+
+    if "atomic_id" in treatment_key.columns:
+        key_cells = treatment_key["cell"].to_numpy(dtype=np.int64)
+        candidate_cells = data["cell"].astype(np.int64, copy=False)
+        candidate_positions = np.searchsorted(candidate_cells, key_cells)
+        if np.any(candidate_positions >= len(candidate_cells)) or np.any(
+            candidate_cells[np.minimum(candidate_positions, len(candidate_cells) - 1)]
+            != key_cells
+        ):
+            raise RuntimeError("Atom treatment cells are missing extracted covariates.")
+        atom_start_years = sites.set_index("id_numeric")["start_year"].to_dict()
+        forest_counts = np.zeros(len(treatment_key), dtype=bool)
+        fc_year_min = min(config["fc_years"])
+        for id_numeric, positions in treatment_key.groupby("id_numeric", sort=False).indices.items():
+            baseline = max(fc_year_min, int(atom_start_years[id_numeric]) - 6)
+            forest_column = f"fc_{baseline}"
+            if forest_column not in data:
+                raise ValueError(f"Missing atom baseline forest-cover layer {forest_column}.")
+            forest_counts[positions] = (
+                np.nan_to_num(data[forest_column][candidate_positions[positions]], nan=0.0) > 0
+            )
+        atom_count_rows = treatment_key.assign(
+            n_forest_pixels=forest_counts.astype(np.int64)
+        ).groupby(["site_id", "atomic_id"], as_index=False).agg(
+            n_site_pixels=("cell", "size"),
+            n_forest_pixels=("n_forest_pixels", "sum"),
+        )
+        atom_count_rows.to_parquet(
+            os.path.join(output_dir, "ae_atom_counts.parquet"),
+            index=False,
+            compression="zstd",
+        )
 
     # Selection above uses tile-local cells; downstream consumers require the
     # same IDs as an untiled read of the complete clipped reference grid.

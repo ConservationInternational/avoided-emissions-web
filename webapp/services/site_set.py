@@ -558,6 +558,7 @@ def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
                     ELSE to_char(f.end_date, 'YYYY-MM-DD')
                 END AS end_date,
                 f.area_ha,
+                f.source_attributes->>'ae_atoms' AS ae_atoms,
                 ST_AsBinary(f.geom) AS geom_wkb
             FROM user_site_features f
             WHERE f.site_set_id = :site_set_id
@@ -575,6 +576,7 @@ def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
             ("start_date", pa.string()),
             ("end_date", pa.string()),
             ("area_ha", pa.float64()),
+            ("ae_atoms", pa.string()),
             ("geometry", pa.binary()),
         ],
         metadata={
@@ -610,6 +612,7 @@ def _stream_site_set_to_parquet_buf(site_set_id, db, batch_size=500):
                             "start_date": row.start_date,
                             "end_date": row.end_date,
                             "area_ha": row.area_ha,
+                            "ae_atoms": getattr(row, "ae_atoms", None),
                             "geometry": bytes(row.geom_wkb),
                         }
                     )
@@ -652,6 +655,7 @@ def get_user_site_set_gdf(site_set_id, user_id=None):
                         ELSE to_char(f.end_date, 'YYYY-MM-DD')
                     END AS end_date,
                     f.area_ha,
+                    f.source_attributes->>'ae_atoms' AS ae_atoms,
                     ST_AsBinary(f.geom) AS geom_wkb
                 FROM user_site_features f
                 WHERE f.site_set_id = :site_set_id
@@ -669,6 +673,7 @@ def get_user_site_set_gdf(site_set_id, user_id=None):
                 "start_date": row.start_date,
                 "end_date": row.end_date,
                 "area_ha": row.area_ha,
+                "ae_atoms": getattr(row, "ae_atoms", None),
                 "geometry": wkb.loads(bytes(row.geom_wkb)),
             }
             for row in rows
