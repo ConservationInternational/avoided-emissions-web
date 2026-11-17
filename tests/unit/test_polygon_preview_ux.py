@@ -79,19 +79,28 @@ def test_overview_shows_forest_loss_avoided_range_and_correct_co2_label(monkeypa
         error_message=None,
         extra_metadata={},
     )
-    total = SimpleNamespace(
-        extrapolated_emissions_avoided_mgco2e=100,
-        extrapolated_forest_loss_avoided_ha=10,
-        extrapolated_forest_loss_avoided_ha_ci_lower=8,
-        extrapolated_forest_loss_avoided_ha_ci_upper=12,
-        area_ha=100,
-    )
+    totals = [
+        SimpleNamespace(
+            extrapolated_emissions_avoided_mgco2e=100,
+            extrapolated_forest_loss_avoided_ha=10,
+            extrapolated_forest_loss_avoided_ha_ci_lower=8,
+            extrapolated_forest_loss_avoided_ha_ci_upper=12,
+            area_ha=100,
+        ),
+        SimpleNamespace(
+            extrapolated_emissions_avoided_mgco2e=40,
+            extrapolated_forest_loss_avoided_ha=4,
+            extrapolated_forest_loss_avoided_ha_ci_lower=2,
+            extrapolated_forest_loss_avoided_ha_ci_upper=6,
+            area_ha=50,
+        ),
+    ]
 
-    component = _build_overview(task, [], [total])
+    component = _build_overview(task, [], totals)
     text = [c for c in _walk(component) if isinstance(c, str)]
 
     assert "Total Avoided Emissions (MgCO₂e)" in text
-    assert "Range across matching replicates: 8 to 12 ha" in text
+    assert "Range across matching replicates: 10 to 18 ha" in text
 
 
 def test_upload_limits_are_visible_before_transfer_and_match_archive_validation():
