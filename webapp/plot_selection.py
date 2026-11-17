@@ -3,6 +3,22 @@
 import json
 from urllib.parse import parse_qs, urlencode
 
+TASK_TABS = {
+    "overview": "tab-overview",
+    "results": "tab-results",
+    "plots": "tab-plots",
+    "raw-results": "tab-raw-results",
+}
+
+
+def parse_task_tab(search):
+    """Honor explicit tabs while preserving legacy selection-only links."""
+    params = parse_qs((search or "").lstrip("?"))
+    tab = params.get("tab", [""])[0]
+    return TASK_TABS.get(
+        tab, "tab-plots" if parse_plot_selection(search) else "tab-overview"
+    )
+
 
 def parse_plot_selection(search):
     params = parse_qs((search or "").lstrip("?"), keep_blank_values=True)

@@ -173,6 +173,9 @@
 
     function setSelectedSite(mapEl, siteId) {
         const normalized = normalizeSiteId(siteId);
+        if (mapEl.id === "task-sites-map" && normalized !== (mapEl._selectedSiteId || "")) {
+            window.dash_clientside?.taskViewHistory?.beforeMapChange(normalized);
+        }
         mapEl._selectedSiteId = normalized || "";
         if (mapEl?._olSource && typeof mapEl._olSource.changed === "function") {
             mapEl._olSource.changed();
@@ -811,8 +814,15 @@
         // Listen for zoom-to-site events from the Dash dropdown.
         const zoomToSite = function (evt) {
             var siteId = (evt.detail && evt.detail.siteId) || "";
+            el._lookupAbort?.abort();
+            map.getView().cancelAnimations();
             setSelectedSite(el, siteId);
-            if (siteId) {
+            const viewport = evt.detail?.viewport;
+            if (viewport) {
+                map.getView().setCenter(viewport.center);
+                map.getView().setZoom(viewport.zoom);
+                map.getView().setRotation(viewport.rotation);
+            } else if (siteId) {
                 zoomToFeature(el, map, siteId);
             } else {
                 fitToAllSites(el, map);

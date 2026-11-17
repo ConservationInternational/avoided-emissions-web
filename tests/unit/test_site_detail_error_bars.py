@@ -15,7 +15,7 @@ from callbacks._plot_colors import OTHER_SITES_COLOR, TOP_SITE_COLORS
 from dash import Dash, dcc, html
 from flask import Flask
 from layouts.task_detail import task_detail_layout
-from plot_selection import parse_plot_selection, plot_selection_query
+from plot_selection import parse_plot_selection, parse_task_tab, plot_selection_query
 from services import analysis_task
 
 
@@ -1078,7 +1078,9 @@ def test_site_selection_preserves_group_filter(monkeypatch):
     )
 
     monkeypatch.setattr(
-        registration, "callback_context", SimpleNamespace(triggered_id="site-map-selection")
+        registration,
+        "callback_context",
+        SimpleNamespace(triggered_id="site-map-selection"),
     )
     group = {"field": "region", "value": '"North"'}
     result = callbacks["update_plot_selection"](
@@ -1091,12 +1093,12 @@ def test_site_selection_preserves_group_filter(monkeypatch):
         "site-1",
     )
     with pytest.raises(registration.PreventUpdate):
-        callbacks["update_plot_selection"](
-            "region", '"North"', None, "", 0, 0, group
-        )
+        callbacks["update_plot_selection"]("region", '"North"', None, "", 0, 0, group)
 
     monkeypatch.setattr(
-        registration, "callback_context", SimpleNamespace(triggered_id="site-defor-selector")
+        registration,
+        "callback_context",
+        SimpleNamespace(triggered_id="site-defor-selector"),
     )
     result = callbacks["update_plot_selection"](
         "region", '"North"', "site-2", "", 0, 0, group
@@ -1109,21 +1111,30 @@ def test_site_selection_preserves_group_filter(monkeypatch):
     )
 
     monkeypatch.setattr(
-        registration, "callback_context", SimpleNamespace(triggered_id="site-filter-value")
+        registration,
+        "callback_context",
+        SimpleNamespace(triggered_id="site-filter-value"),
     )
     result = callbacks["update_plot_selection"](
-        "region", '"North"', "site-1", "", 0, 0,
+        "region",
+        '"North"',
+        "site-1",
+        "",
+        0,
+        0,
         {"field": "region", "value": '"South"', "site": "site-1"},
     )
     assert result[0] == {"field": "region", "value": '"North"'}
     assert result[3] is None
     monkeypatch.setattr(
-        registration, "callback_context", SimpleNamespace(triggered_id="site-filter-field")
+        registration,
+        "callback_context",
+        SimpleNamespace(triggered_id="site-filter-field"),
     )
+    pending = callbacks["update_plot_selection"]("country", None, None, "", 0, 0, group)
+    assert pending[0] == {"field": "country"}
     with pytest.raises(registration.PreventUpdate):
-        callbacks["update_plot_selection"](
-            "region", '"North"', None, "", 0, 0, group
-        )
+        callbacks["update_plot_selection"]("region", '"North"', None, "", 0, 0, group)
     monkeypatch.setattr(
         registration, "callback_context", SimpleNamespace(triggered_id="site-map-clear")
     )
@@ -1135,6 +1146,8 @@ def test_site_selection_preserves_group_filter(monkeypatch):
         registration.no_update,
         None,
         "",
+        registration.no_update,
+        registration.no_update,
     )
     monkeypatch.setattr(
         registration,
@@ -1143,7 +1156,7 @@ def test_site_selection_preserves_group_filter(monkeypatch):
     )
     assert callbacks["update_plot_selection"](
         "region", '"North"', "site-1", "site-1", 0, 1, group
-    ) == ({}, None, None, None, "")
+    ) == ({}, None, None, None, "", registration.no_update, registration.no_update)
 
 
 @pytest.mark.unit
@@ -1154,6 +1167,88 @@ def test_task_detail_has_no_separate_map_tab():
     assert "tab-plots" in {tab.tab_id for tab in tabs.children}
     assert "tab-map" not in {tab.tab_id for tab in tabs.children}
     assert "tab-match-quality" not in {tab.tab_id for tab in tabs.children}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("search", "tab"),
+    [
+        ("", "tab-overview"),
+        ("?site=a", "tab-plots"),
+        ("?tab=plots", "tab-plots"),
+        ("?tab=overview&site=a", "tab-overview"),
+        ("?tab=results&site=a", "tab-results"),
+        ("?tab=raw-results", "tab-raw-results"),
+    ],
+)
+def test_task_history_urls_restore_tabs_without_losing_selection(search, tab):
+    layout = task_detail_layout(None, "task", shared_token="share", search=search)
+    tabs = next(child for child in layout.children if isinstance(child, dbc.Tabs))
+    assert tabs.active_tab == parse_task_tab(search) == tab
+    assert any(
+        getattr(child, "id", None) == "task-view-navigation"
+        for child in layout.children
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "search",
+    [
+        "?tab=plots",
+        "?tab=results&site=a",
+        "?tab=plots&field=region&value=%22North%22&site=a",
+    ],
+)
+def test_history_navigation_restores_controls_and_selection_together(
+    monkeypatch, search
+):
+    callbacks = {}
+
+    def callback(*args, **kwargs):
+        def capture(function):
+            callbacks[function.__name__] = function
+            return function
+
+        return capture
+
+    registration.register_callbacks(
+        SimpleNamespace(
+            callback=callback, clientside_callback=lambda *args, **kwargs: None
+        )
+    )
+    navigation = {"task_id": "task", "search": search, "sequence": 1}
+    expected = parse_plot_selection(search)
+    assert callbacks["restore_task_view"](navigation, "task") == (
+        expected,
+        parse_task_tab(search),
+    )
+    with pytest.raises(registration.PreventUpdate):
+        callbacks["restore_task_view"](navigation, "another-task")
+    monkeypatch.setattr(
+        registration,
+        "callback_context",
+        SimpleNamespace(triggered_id="task-view-navigation"),
+    )
+    assert callbacks["update_plot_selection"](
+        "old",
+        '"Old"',
+        "old-site",
+        "old-site",
+        0,
+        0,
+        {},
+        navigation,
+        {"a": {"region": "North"}},
+    ) == (
+        expected,
+        expected.get("field"),
+        expected.get("value"),
+        expected.get("site"),
+        "",
+        [{"label": "North", "value": '"North"'}] if expected.get("field") else [],
+        not bool(expected.get("field")),
+    )
 
 
 @pytest.mark.unit

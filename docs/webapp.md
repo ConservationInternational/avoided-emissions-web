@@ -384,6 +384,11 @@ uploaded source file. It filters the map, site selector, and plots; other result
 tabs are unchanged. Matching sites are highlighted on the map. Selecting a site
 on the map clears the group filter and shows that site's plots. Clear the
 selection to restore all sites.
+Browser **Back** and **Forward** restore previous site selections, completed
+group filters, and results tabs without reloading the whole page. The map also
+returns to its saved center, zoom, and rotation. Panning and zooming alone do not
+add history entries. Map positions stay in browser history, not in shared URLs;
+opening a direct or shared link still fits the selected site or the full map.
 Group ranges are calculated from the selected sites' yearly outcomes within
 each matching replicate, not by adding site-level bounds. Site sets must be
 reimported to retain source attributes, and analyses rerun to produce the

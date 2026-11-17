@@ -1,10 +1,8 @@
 """Task detail page layout."""
 
-from urllib.parse import parse_qs
-
 import dash_bootstrap_components as dbc
 from dash import dcc, html
-from plot_selection import parse_plot_selection
+from plot_selection import parse_plot_selection, parse_task_tab
 
 from layouts.common import (
     navbar,
@@ -281,11 +279,7 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
             ),
         ],
         id="detail-tabs",
-        active_tab=(
-            "tab-plots"
-            if selection or parse_qs((search or "").lstrip("?")).get("tab") == ["plots"]
-            else "tab-overview"
-        ),
+        active_tab=parse_task_tab(search),
         className="ae-content-tabs",
     )
 
@@ -305,6 +299,7 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
             dcc.Store(id="task-resume-refresh"),
             dcc.Store(id="share-token-store", data=shared_token),
             dcc.Store(id="task-plot-selection", data=selection),
+            dcc.Store(id="task-view-navigation"),
             dcc.Interval(id="detail-refresh-interval", interval=15000, n_intervals=0),
         ]
     )

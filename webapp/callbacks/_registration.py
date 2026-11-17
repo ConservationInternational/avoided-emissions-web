@@ -12,14 +12,24 @@ import plotly.graph_objects as go
 from auth import get_current_user
 from botocore.exceptions import ClientError
 from config import report_exception
-from dash import ALL, Input, Output, State, callback_context, dcc, html, no_update
+from dash import (
+    ALL,
+    ClientsideFunction,
+    Input,
+    Output,
+    State,
+    callback_context,
+    dcc,
+    html,
+    no_update,
+)
 from dash.exceptions import PreventUpdate
 from layouts import (
     EXACT_MATCH_OPTIONS,
     TASK_LIST_COLUMNS,
     _make_ag_grid,
 )
-from plot_selection import plot_selection_query
+from plot_selection import parse_plot_selection, parse_task_tab, plot_selection_query
 from services import (
     ANALYSIS_DEFAULTS,
     AppUsersError,
@@ -2148,7 +2158,22 @@ def register_callbacks(app, limiter=None):
     )
     def filter_site_ids(selection, attributes):
         selection = selection or {}
-        return _filter_site_ids(selection.get("field"), selection.get("value"), attributes)
+        return _filter_site_ids(
+            selection.get("field"), selection.get("value"), attributes
+        )
+
+    @app.callback(
+        Output("task-plot-selection", "data", allow_duplicate=True),
+        Output("detail-tabs", "active_tab"),
+        Input("task-view-navigation", "data"),
+        State("task-id-store", "data"),
+        prevent_initial_call=True,
+    )
+    def restore_task_view(navigation, task_id):
+        if not navigation or navigation.get("task_id") != task_id:
+            raise PreventUpdate
+        search = navigation.get("search")
+        return parse_plot_selection(search), parse_task_tab(search)
 
     @app.callback(
         Output("task-plot-selection", "data"),
@@ -2156,6 +2181,8 @@ def register_callbacks(app, limiter=None):
         Output("site-filter-value", "value"),
         Output("site-defor-selector", "value"),
         Output("site-map-selection", "value"),
+        Output("site-filter-value", "options", allow_duplicate=True),
+        Output("site-filter-value", "disabled", allow_duplicate=True),
         Input("site-filter-field", "value"),
         Input("site-filter-value", "value"),
         Input("site-defor-selector", "value"),
@@ -2163,22 +2190,43 @@ def register_callbacks(app, limiter=None):
         Input("site-map-clear", "data"),
         Input("clear-plot-selection-btn", "n_clicks"),
         State("task-plot-selection", "data"),
+        Input("task-view-navigation", "data"),
+        State("site-filter-attributes", "data"),
         prevent_initial_call=True,
     )
     def update_plot_selection(
-        field, value, selected_site, map_site, map_clear, clear_all, selection
+        field,
+        value,
+        selected_site,
+        map_site,
+        map_clear,
+        clear_all,
+        selection,
+        navigation=None,
+        attributes=None,
     ):
         trigger = callback_context.triggered_id
         selection = selection or {}
+        if trigger == "task-view-navigation":
+            if not navigation:
+                raise PreventUpdate
+            restored = parse_plot_selection(navigation.get("search"))
+            return (
+                restored,
+                restored.get("field"),
+                restored.get("value"),
+                restored.get("site"),
+                "",
+                _site_filter_values(restored.get("field"), attributes),
+                not bool(restored.get("field")),
+            )
         group_selection = (
-            {"field": field, "value": value}
-            if field and value is not None
-            else {}
+            {"field": field, "value": value} if field and value is not None else {}
         )
         if trigger == "clear-plot-selection-btn" and clear_all:
-            return {}, None, None, None, ""
+            return {}, None, None, None, "", no_update, no_update
         if trigger == "site-map-clear" and map_clear:
-            return group_selection, no_update, no_update, None, ""
+            return group_selection, no_update, no_update, None, "", no_update, no_update
         if trigger == "site-map-selection" and map_site:
             return (
                 {**group_selection, "site": map_site},
@@ -2186,47 +2234,50 @@ def register_callbacks(app, limiter=None):
                 no_update,
                 map_site,
                 no_update,
+                no_update,
+                no_update,
             )
         if trigger == "site-defor-selector":
             if selected_site == selection.get("site"):
                 raise PreventUpdate
             if selected_site:
                 group_selection["site"] = selected_site
-            return group_selection, no_update, no_update, no_update, ""
+            return (
+                group_selection,
+                no_update,
+                no_update,
+                no_update,
+                "",
+                no_update,
+                no_update,
+            )
         if trigger == "site-filter-field":
             if field == selection.get("field"):
                 raise PreventUpdate
-            return {}, no_update, None, None, ""
+            return (
+                {"field": field} if field else {},
+                no_update,
+                None,
+                None,
+                "",
+                no_update,
+                no_update,
+            )
         if trigger == "site-filter-value":
             if field == selection.get("field") and value == selection.get("value"):
                 raise PreventUpdate
-            selection = {"field": field, "value": value} if field and value is not None else {}
-            return selection, no_update, no_update, None, ""
+            selection = (
+                {"field": field, "value": value} if field and value is not None else {}
+            )
+            return selection, no_update, no_update, None, "", no_update, no_update
         raise PreventUpdate
 
     app.clientside_callback(
-        """
-        function(selection, activeTab) {
-            if (activeTab !== "tab-plots" || (selection && selection.error)) {
-                return window.dash_clientside.no_update;
-            }
-            const url = new URL(window.location.href);
-            url.searchParams.set("tab", "plots");
-            ["site", "field", "value"].forEach(key => url.searchParams.delete(key));
-            if (selection && selection.site) {
-                url.searchParams.set("site", selection.site);
-            }
-            if (selection && selection.field && selection.value != null) {
-                url.searchParams.set("field", selection.field);
-                url.searchParams.set("value", selection.value);
-            }
-            window.history.replaceState(window.history.state, "", url);
-            return window.dash_clientside.no_update;
-        }
-        """,
-        Output("task-plot-selection", "id"),
+        ClientsideFunction(namespace="taskViewHistory", function_name="sync"),
+        Output("task-view-navigation", "id"),
         Input("task-plot-selection", "data"),
         Input("detail-tabs", "active_tab"),
+        State("task-id-store", "data"),
     )
 
     app.clientside_callback(
@@ -2381,25 +2432,7 @@ def register_callbacks(app, limiter=None):
     # -- Site selector: zoom the map to the selected site --------------------
 
     app.clientside_callback(
-        """
-        function(selectedSite, attributes) {
-            var mapEl = document.getElementById("task-sites-map");
-            if (mapEl) {
-                mapEl._selectedSiteId = selectedSite || "";
-                const zoom = function () {
-                    mapEl.dispatchEvent(new CustomEvent("zoom-to-site", {
-                        detail: { siteId: selectedSite || "" },
-                    }));
-                };
-                if (mapEl._olMap) {
-                    zoom();
-                } else {
-                    mapEl.addEventListener("ol-map-ready", zoom, { once: true });
-                }
-            }
-            return window.dash_clientside.no_update;
-        }
-        """,
+        ClientsideFunction(namespace="taskViewHistory", function_name="zoomToSite"),
         Output("site-defor-selector", "id"),
         Input("site-defor-selector", "value"),
         Input("site-filter-attributes", "data"),
