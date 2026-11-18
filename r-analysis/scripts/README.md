@@ -72,7 +72,11 @@ For each site fragment:
    (forest cover change from `start_year - 6` to `start_year - 1`).
 3. For each replicate, sample up to `max_treatment_pixels` treatment pixels
    and `control_multiplier` controls per sampled treatment pixel in each
-   stratum.
+   stratum. With `shared_support_controls: true`, first restrict controls
+   jointly to values of direct numeric covariates constant across all eligible
+   treatment in that stratum. Treatment and atom memberships are unchanged;
+   the flag defaults to true. Set it to false to retain legacy control
+   selection. Resumed workflows keep their frozen policy.
 4. In each stratum, choose the distance:
    - fewer than `min_glm_treatment_pixels` treatment pixels: Mahalanobis;
    - separation (detected before fitting, or GLM non-convergence / fitted
@@ -102,8 +106,17 @@ summary task requests four CPUs; the local profile uses one. Logs report match
 index and aggregation timings.
 
 Resuming a previous workflow still requires the original snapshot, inputs, and
-checkpoints. A changed image or workflow version reuses checkpoints without
-automatic compatibility verification; check compatibility before resuming.
+checkpoints. New matching checkpoints validate their diagnostic schema,
+matching policy, and atom/input compatibility. Do not mix pre-contract
+checkpoints with new matching runs, or reuse non-atom outputs for atom-enabled
+inputs. Use a fresh task for policy comparisons.
+
+Every replicate writes structured diagnostics, including failed strata in
+successful fragments. Summary publishes a gzip JSONL stream, compact counts,
+and a failed-fit replay manifest under the normal task results prefix.
+Reconciliation promotes referenced sample checkpoints to durable result
+storage and verifies their checksums before declaring the work complete.
+See [output contracts](../../docs/analysis-outputs.md#matching-diagnostic-exports).
 
 ## Tests
 
@@ -120,9 +133,9 @@ is skipped when they are missing. To run everything in the container image:
 ```bash
 docker build -t ae-ranalysis r-analysis
 docker run --rm --entrypoint bash \
-    -e R_SCRIPTS_DIR=/app/scripts \
-    -v "$PWD/r-analysis/scripts:/app/scripts:ro" -v "$PWD/r-analysis/tests:/tests:ro" \
-    ae-ranalysis -c "Rscript -e \"install.packages('testthat')\" && cd /tests && \
+    -e R_SCRIPTS_DIR=/pipeline/scripts \
+    -v "$PWD/r-analysis:/pipeline:ro" \
+    ae-ranalysis -c "Rscript -e \"install.packages('testthat')\" && cd /pipeline/tests && \
     Rscript -e \"testthat::test_dir('.')\""
 ```
 
@@ -133,3 +146,23 @@ docker run --rm --entrypoint python \
     -v "$PWD/r-analysis:/pipeline:ro" \
     ae-ranalysis /pipeline/tests/test_extraction.py
 ```
+
+### Shared-support pilot
+
+Run the persisted, synthetic 100-replicate baseline/policy comparison in the
+analysis image, using a new output directory:
+
+```bash
+R_SCRIPTS_DIR=../scripts Rscript run_shared_support_pilot.R /path/to/new-pilot
+```
+
+Run this command from `r-analysis/tests`. It retains configuration, logs,
+samples, atom outputs, diagnostic exports and a report. It checks recovery of
+shared-zero strata, unchanged mixed-atom cases, parent/atom reconciliation,
+retained covariate constraints and absolute SMD at or below 0.1. It also
+replays a replicate-2 GLM failure with checksum and environment validation.
+The report records timing and diagnostic artifact sizes.
+It is not a production deployment or a substitute for an atom-enabled real-data
+pilot. For that pilot, export fresh Part A inputs, submit a new AE task, import
+Part B atom results, and check original-site reconstruction and atom-union
+rollups. Historical parent-only results cannot be prorated into atom results.

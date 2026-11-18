@@ -202,6 +202,53 @@ above the 32-bit integer limit.
 
 ## Final Result Files (Step 3)
 
+### Matching diagnostic exports
+
+New matching runs publish these private, task-scoped files:
+
+| File | Contents |
+| --- | --- |
+| `results_matching_diagnostics.jsonl.gz` | One nested JSON record per terminal fragment/stratum/replicate attempt, followed by atom-inclusion records for atom-enabled runs |
+| `results_matching_diagnostics_summary.json` | Schema/policy, completeness checks, counts by cause and implicated covariate, replay count, and artifact names |
+| `results_matching_replay_manifest.json` | Exact failed-GLM attempt references, immutable sample locations, and checksums |
+
+`results_summary.json` includes a compact `matching_diagnostics` object pointing
+to these exports. Schema version 1 distinguishes `legacy` matching from
+`shared_support_v1`; the latter requires `shared_support_controls: true`.
+Old output sets without this contract remain readable but do not claim new
+diagnostic completeness.
+
+Attempt records retain the task, parent site, numeric fragment, sub-site,
+replicate, exact-match values and stable attempt key. They include eligibility,
+control restriction, sampling and matching counts; formulas and removed terms;
+separation variables; by-arm covariate summaries; original warning/error
+messages and classes; GLM convergence, iteration, coefficient, rank and
+probability/linear-predictor evidence; and matcher warnings. Machine-readable
+values are not rounded for presentation. Pre-fit and pre-sampling failures are
+recorded even when no GLM can be fitted. Existing coarse analytical failure
+reasons remain compatible.
+
+Atom breakdowns do not create extra model attempts. Atom-inclusion records
+retain every declared atom, including zero-grid atoms, with sampled/matched
+replicates, missing domains, upstream attempt references, and a final inclusion
+reason. An atom sampled but unmatched is distinct from an atom never sampled;
+an otherwise successful match excluded by the consistency rule is also
+identifiable. `atom_run_id` is the KPI job/export ID, not the AE task ID.
+Original-site membership belongs to the downstream KPI export: join by
+`(run_id, atomic_id)` there to assess impact on overlapping/non-owning sites.
+Never count one failed fit several times merely because it affects many sites.
+Covariate-attribution counts overlap when several covariates are implicated.
+
+Failed-fit samples contain the exact sampled frame, atom IDs, formula/config,
+RNG state, and code/package provenance required for replay. Workflow execution
+promotes referenced samples into the final results retention scope before
+committing reconciliation; replay must not depend on expiring Nextflow work.
+Standalone results reference their retained local samples. Keep those inputs
+with the results. Private access controls are unchanged; raw pixels are not
+printed to CloudWatch. Missing/corrupt required evidence, conflicting attempt
+keys, or incompatible policy/schema identities fail explicitly rather than
+producing a success-shaped diagnostic summary.
+
 All files are produced by `03_summarize_results.R` and written to
 `{results_s3_uri}`. An exact-match stratum of a site fragment is included
 only when it was matched in every replicate; site results sum their included

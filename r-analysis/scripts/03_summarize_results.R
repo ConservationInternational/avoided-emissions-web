@@ -30,6 +30,7 @@ library(jsonlite)
 scripts_dir <- Sys.getenv("R_SCRIPTS_DIR", "/app/scripts")
 source(file.path(scripts_dir, "utils.R"))
 source(file.path(scripts_dir, "stats_functions.R"))
+source(file.path(scripts_dir, "matching_diagnostics.R"))
 rollbar_init()
 
 with_rollbar({
@@ -114,9 +115,10 @@ write_csv(select(sites, site_id, display_site_id, site_name), out_path("site_ide
 
 # Each match batch writes mb_{batch}.parquet (matched pixels) and
 # mb_{batch}.json (diagnostics, failure markers, missing-data exclusions).
-read_sidecar <- function(path) fromJSON(path, simplifyVector = FALSE)
+read_sidecar <- function(path) compact_match_sidecar(fromJSON(path, simplifyVector = FALSE))
+sidecar_paths <- list.files(config$matches_dir, "^mb_.*\\.json$", full.names = TRUE)
 sidecars <- lapply(
-    list.files(config$matches_dir, "^mb_.*\\.json$", full.names = TRUE), read_sidecar
+    sidecar_paths, read_sidecar
 )
 batch_files <- unlist(lapply(sidecars, function(x) x$matches_file))
 batch_paths <- file.path(config$matches_dir, batch_files)
@@ -1094,6 +1096,12 @@ if (atom_enabled) {
     summary_data$atom_results_schema_version <- 1L
     summary_data$atom_run_id <- atom_metadata$run_id
 }
+matching_diagnostics <- write_matching_diagnostics(
+    sidecar_paths, config, fragments, complete_strata, atom_status,
+    atom_declarations, invalid_sites,
+    if (atom_enabled) atom_year_rep_all else NULL
+)
+if (!is.null(matching_diagnostics)) summary_data$matching_diagnostics <- matching_diagnostics
 write_json(summary_data, out_path("results_summary.json"), auto_unbox = TRUE,
            pretty = TRUE, null = "null", na = "null", digits = NA)
 

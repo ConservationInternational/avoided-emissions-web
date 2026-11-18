@@ -33,6 +33,11 @@ CUMULATIVE_METRICS = [
     "extrapolated_cumulative_treatment_defor_ha",
     "extrapolated_cumulative_control_defor_ha",
 ]
+MATCHING_ARTIFACTS = {
+    "matching_diagnostics": "results_matching_diagnostics.jsonl.gz",
+    "matching_diagnostics_summary": "results_matching_diagnostics_summary.json",
+    "matching_replay_manifest": "results_matching_replay_manifest.json",
+}
 
 
 def _number(row, key):
@@ -98,6 +103,31 @@ def _collect_results(output_dir, task_id, log):
         "methodology_warnings": summary["methodology_warnings"],
         "portfolio": summary["portfolio"],
     }
+    for key in ("atom_results_schema_version", "atom_run_id"):
+        if key in summary:
+            summary_dict[key] = summary[key]
+    diagnostics_path = os.path.join(
+        output_dir, MATCHING_ARTIFACTS["matching_diagnostics_summary"]
+    )
+    if os.path.isfile(diagnostics_path):
+        with open(diagnostics_path) as f:
+            diagnostics = json.load(f)
+        if diagnostics.get("diagnostics_complete") is not True:
+            raise ValueError("Matching diagnostic export is incomplete")
+        summary_dict["matching_diagnostics"] = {
+            **{
+                key: diagnostics[key]
+                for key in ("diagnostics_schema_version", "matching_policy", "atom_run_id")
+                if key in diagnostics
+            },
+            "diagnostics_complete": True,
+            # Keep only scalar counts out of the potentially large breakdowns.
+            "counts": {
+                key: value for key, value in diagnostics.get("counts", {}).items()
+                if type(value) is int
+            },
+            "artifacts": MATCHING_ARTIFACTS,
+        }
 
     time_series = []
     with open(os.path.join(output_dir, "results_by_site_year.csv"), newline="") as f:

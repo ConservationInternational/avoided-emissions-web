@@ -15,13 +15,20 @@ import time
 import uuid
 from pathlib import Path
 
-from workflow_store import Store, checkpoint_key
+from workflow_store import Store, checkpoint_key, digest
 
 log = logging.getLogger(__name__)
 SCRIPTS = Path(os.environ.get("R_SCRIPTS_DIR", "/app/scripts"))
 # Share of a recovery task's budget filled by measured replicate costs; the
 # remainder absorbs solve-time variance and data loading.
 REPACK_BUDGET_FRACTION = 0.6
+DIAGNOSTICS_SCHEMA_VERSION = 1
+GLM_REPLAY_CAUSES = {"glm_error", "glm_nonconvergence", "glm_warning"}
+DIAGNOSTIC_RESULTS = (
+    "results_matching_diagnostics.jsonl.gz",
+    "results_matching_diagnostics_summary.json",
+    "results_matching_replay_manifest.json",
+)
 ANALYSIS_FIELDS = {
     "task_id",
     "task_name",
@@ -42,6 +49,7 @@ ANALYSIS_FIELDS = {
     "matching_method",
     "min_control_distance_km",
     "separation_fallback_mahalanobis",
+    "shared_support_controls",
     "n_replicates",
     "random_seed",
     "matching_extent",
@@ -50,6 +58,28 @@ ANALYSIS_FIELDS = {
     "exact_match_group_mapping",
     "site_id",
 }
+
+
+def diagnostics_contract(params: dict) -> dict:
+    enabled = params.get("shared_support_controls", False)
+    if type(enabled) is not bool:
+        raise ValueError("shared_support_controls must be a boolean")
+    return {
+        "diagnostics_schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+        "matching_policy": "shared_support_v1" if enabled else "legacy",
+    }
+
+
+def workflow_contract(params: dict) -> dict | None:
+    contract = diagnostics_contract(params)
+    runtime = params["_workflow"]
+    frozen = runtime.get("diagnostics_contract")
+    # Markerless data is supported only by the in-process legacy fixture helpers.
+    if frozen is None and not params.get("shared_support_controls", False):
+        return None
+    if frozen != contract or type(frozen.get("diagnostics_schema_version")) is not int:
+        raise ValueError("Incompatible immutable workflow diagnostic contract")
+    return contract
 
 
 def write_json(path: str | Path, value) -> None:
@@ -61,11 +91,19 @@ def load_params(path: str) -> dict:
     runtime = params["_workflow"]
     if not runtime.get("identity") or not runtime.get("state_uri"):
         raise ValueError("Missing immutable workflow identity/state URI")
+    if workflow_contract(params) is None:
+        raise ValueError("Missing immutable workflow diagnostic contract")
     return params
 
 
 def configuration(params: dict) -> dict:
     config = {key: value for key, value in params.items() if key in ANALYSIS_FIELDS}
+    config.setdefault("shared_support_controls", False)
+    contract = workflow_contract(params)
+    if contract is not None:
+        config.update(contract)
+        config["analysis_image"] = params["_workflow"].get("analysis_image")
+        config["workflow_version"] = params["_workflow"].get("workflow_version")
     config["data_dir"] = str(Path.cwd())
     config["output_dir"] = str(Path("output").resolve())
     config["matches_dir"] = str(Path("output/matches").resolve())
@@ -167,6 +205,34 @@ def restore_extract(descriptor: dict, output: Path, *, pixels: bool = False) -> 
         if not pixels and key == "treatment_pixels.parquet":
             continue
         store.restore(key, output / key)
+
+
+def fragment_identities(sites_path: Path, ids: set[int]) -> dict[str, dict]:
+    import pyarrow.parquet as pq
+
+    if not ids:
+        return {}
+    columns = ["id_numeric", "site_id", "sub_site_index"]
+    if "ae_atoms" in pq.read_schema(sites_path).names:
+        columns.append("ae_atoms")
+    result = {}
+    for row in pq.read_table(
+        sites_path, columns=columns, filters=[("id_numeric", "in", sorted(ids))]
+    ).to_pylist():
+        id_ = row["id_numeric"]
+        if str(id_) in result:
+            raise ValueError(f"Duplicate extracted fragment identity: {id_}")
+        result[str(id_)] = {
+            "site_id": str(row["site_id"]),
+            "sub_site_index": row["sub_site_index"],
+            "atom_run_id": json.loads(row["ae_atoms"])["run_id"]
+            if row.get("ae_atoms") is not None
+            else None,
+            "atom_results_schema_version": 1 if row.get("ae_atoms") is not None else None,
+        }
+    if set(result) != {str(id_) for id_ in ids}:
+        raise ValueError("Expected fragments are missing from committed extraction")
+    return result
 
 
 def prepare(params: dict, descriptor: dict) -> None:
@@ -310,7 +376,10 @@ def checkpoint_files(params: dict, work: dict) -> list[str]:
                 r"f[0-9]+/((?:mb_)?f[0-9]+_r([0-9]+).*?)\.receipt\.json", key
             )
             if match and int(match[2]) in replicates:
-                result.append(key.removesuffix(".receipt.json"))
+                artifact = checkpoint_key(match[1])
+                if artifact != key.removesuffix(".receipt.json"):
+                    raise ValueError(f"Incompatible checkpoint fragment: {key}")
+                result.append(artifact)
     return result
 
 
@@ -330,8 +399,28 @@ def match_batch(params: dict, work: dict, seconds: int) -> None:
     for name in ("treatment_cell_key.parquet", "treatment_pixels.parquet"):
         Store(work["group_uri"]).restore(name, Path("output") / name)
     checkpoint_store = artifact_store(params, "checkpoints")
+    matches = Path(config["matches_dir"])
     for key in checkpoint_files(params, work):
-        checkpoint_store.restore(key, Path(config["matches_dir"]) / Path(key).name)
+        checkpoint_store.restore(key, matches / Path(key).name)
+    contract = workflow_contract(params)
+    if contract is not None:
+        fragments = fragment_identities(Path("output/sites_processed.parquet"), set(work["ids"]))
+        config["diagnostic_fragments"] = fragments
+        for id_ in work["ids"]:
+            for replicate in work["replicates"]:
+                sidecar_path = matches / f"mb_f{id_}_r{replicate}.json"
+                if sidecar_path.exists():
+                    sidecar = json.loads(sidecar_path.read_text())
+                    replays = validate_sidecar(
+                        sidecar, id_, replicate, contract, fragments[str(id_)],
+                        config.get("task_id", ""),
+                    )
+                    match_name = sidecar.get("matches_file")
+                    if match_name and not (matches / match_name).is_file():
+                        raise FileNotFoundError(f"Missing committed matches: {match_name}")
+                    if replays:
+                        # Restored files already passed the SHA-256 receipt check.
+                        verify_sample(matches / replays[0]["sample_file"], replays)
     # Controls are immutable committed objects; expose a real dataset prefix,
     # not the receipt namespace. prepare_controls writes it once at extraction.
     config.update(
@@ -424,11 +513,147 @@ def prepare_reconcile(expected: dict, outcomes: list[dict]) -> None:
         )
     Path("reconcile_batches").mkdir()
     ids = expected["ids"]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Duplicate expected fragment IDs")
     for start in range(0, max(1, len(ids)), 25):
         write_json(
             Path("reconcile_batches") / f"batch{start // 25:06d}.json",
             {**expected, "ids": ids[start : start + 25]},
         )
+
+
+def validate_sidecar(
+    sidecar: dict, id_: int, replicate: int, contract: dict | None,
+    fragment: dict | None, task_id: str,
+) -> list[dict]:
+    name = f"mb_f{id_}_r{replicate}.json"
+    match_name = sidecar.get("matches_file")
+    if match_name is not None and match_name != f"mb_f{id_}_r{replicate}.parquet":
+        raise ValueError(f"Invalid matched artifact name: {name}")
+    records = sidecar.get("diagnostics" if match_name else "failures", [])
+    if (
+        not isinstance(records, list)
+        or len(records) != 1
+        or sidecar.get("failures" if match_name else "diagnostics")
+        or (records[0].get("id_numeric"), records[0].get("replicate")) != (id_, replicate)
+    ):
+        raise ValueError(f"Incomplete or incompatible match sidecar: {name}")
+    record = records[0]
+    if not match_name and record.get("reason") not in (
+        "no_overlap", "no_matches", "no_eligible_treatment",
+    ):
+        raise ValueError(f"Unrecognized analytical failure: {name}")
+    if contract is None:
+        return []
+    if (
+        type(sidecar.get("diagnostics_schema_version")) is not int
+        or any(sidecar.get(key) != value for key, value in contract.items())
+    ):
+        raise ValueError(f"Incompatible sidecar schema or policy: {name}")
+    compatibility = sidecar.get("compatibility") or {}
+    if (
+        "atom_run_id" not in sidecar
+        or sidecar["atom_run_id"] != fragment["atom_run_id"]
+        or any(
+            key not in compatibility or compatibility[key] != value
+            for key, value in {
+                **contract,
+                "task_id": task_id,
+                "atom_run_id": fragment["atom_run_id"],
+                "atom_results_schema_version": fragment["atom_results_schema_version"],
+            }.items()
+        )
+    ):
+        raise ValueError(f"Incompatible sidecar task or atom contract: {name}")
+
+    groups = record.get("group_diagnostics")
+    expected_keys = record.get("expected_attempt_keys")
+    expected_groups = record.get("expected_groups")
+    if (
+        not isinstance(groups, list) or not groups or not isinstance(expected_keys, list)
+        or not isinstance(expected_groups, list)
+    ):
+        raise ValueError(f"Missing matching attempt roster or diagnostics: {name}")
+    attempts = set()
+    observed_groups = set()
+    replays = []
+    expected_sample = f"f{id_}_r{replicate}_sample.rds"
+    for group in groups:
+        attempt = group.get("attempt_key")
+        stratum = group.get("group")
+        if (
+            not isinstance(attempt, str) or not attempt or attempt in attempts
+            or not isinstance(stratum, str) or stratum in observed_groups
+            or group.get("id_numeric") != id_
+            or group.get("replicate") != replicate
+            or group.get("task_id") != task_id
+            or type(group.get("diagnostics_schema_version")) is not int
+            or any(group.get(key) != value for key, value in contract.items())
+            or any(key not in group or group[key] != value for key, value in fragment.items())
+        ):
+            raise ValueError(f"Incompatible or duplicate matching attempt: {name}")
+        attempts.add(attempt)
+        observed_groups.add(stratum)
+        replay = group.get("replay")
+        requires_replay = (
+            group.get("glm_failed") is True
+            or group.get("reason_code", group.get("cause")) in GLM_REPLAY_CAUSES
+            or (group.get("glm") or {}).get("cause") is not None
+        )
+        if replay is None and not requires_replay:
+            continue
+        if (
+            not isinstance(replay, dict)
+            or replay.get("sample_file") != expected_sample
+            or not isinstance(replay.get("sample_md5"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", replay["sample_md5"])
+            or "group" not in replay or replay["group"] != group.get("group")
+            or replay.get("attempt_key") != attempt
+        ):
+            raise ValueError(f"Missing or invalid matching replay reference: {attempt}")
+        replays.append(replay)
+    if (
+        any(not isinstance(key, str) for key in expected_keys)
+        or len(expected_keys) != len(attempts)
+        or set(expected_keys) != attempts
+        or sidecar.get("expected_attempt_keys") != expected_keys
+        or any(not isinstance(group, str) for group in expected_groups)
+        or len(expected_groups) != len(observed_groups)
+        or set(expected_groups) != observed_groups
+    ):
+        raise ValueError(f"Incomplete or conflicting matching attempt roster: {name}")
+    return replays
+
+
+def verify_sample(path: Path, replays: list[dict]) -> None:
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing committed replay sample: {path.name}")
+    checksum = digest(path, "md5")
+    if any(replay["sample_md5"] != checksum for replay in replays):
+        raise ValueError(f"Matching replay checksum mismatch: {path.name}")
+
+
+def retain_replay(params: dict, source: Store, replays: list[dict]) -> None:
+    path = Path(replays[0]["sample_file"])
+    try:
+        source.restore(checkpoint_key(path.name), path)
+        verify_sample(path, replays)
+        results = Store(params["_workflow"]["results_uri"].rstrip("/") + "/matching_replay")
+        key = f"{digest(path)}/{path.name}"
+        already_published = results.json(key + ".receipt.json") is not None
+        receipt = results.commit(path, key)
+        if already_published:
+            # A valid receipt is not enough if its retained object was removed.
+            results.restore(key, path)
+        for replay in replays:
+            replay.update(
+                uri=f"{results.uri}/{receipt['object']}",
+                sha256=receipt["sha256"],
+                size_bytes=receipt["size"],
+                analysis_image=params["_workflow"].get("analysis_image"),
+            )
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def reconcile(params: dict, expected: dict, outcomes: list[dict]) -> None:
@@ -439,28 +664,41 @@ def reconcile(params: dict, expected: dict, outcomes: list[dict]) -> None:
             f"Matching resource budget exhausted: {unfinished[:20]} ({len(unfinished)} items)"
         )
     store = artifact_store(params, "checkpoints")
+    contract = workflow_contract(params)
+    ids = expected["ids"]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Duplicate expected fragment IDs")
+    fragments = {}
+    if contract is not None and ids:
+        extraction = expected["extract"]
+        if "sites_processed.parquet" not in extraction["files"]:
+            raise ValueError("Missing processed site metadata from extraction manifest")
+        path = Path("sites_processed.parquet")
+        Store(extraction["uri"]).restore(path.name, path)
+        fragments = fragment_identities(path, set(ids))
     Path("matches").mkdir()
-    for id_ in expected["ids"]:
+    for id_ in ids:
         for replicate in range(1, expected["n_replicates"] + 1):
             name = f"mb_f{id_}_r{replicate}.json"
-            store.restore(checkpoint_key(name), Path("matches") / name)
-            sidecar = json.loads((Path("matches") / name).read_text())
+            sidecar_path = Path("matches") / name
+            store.restore(checkpoint_key(name), sidecar_path)
+            sidecar = json.loads(sidecar_path.read_text())
+            fragment = fragments.get(str(id_))
+            replays = validate_sidecar(
+                sidecar, id_, replicate, contract, fragment, params.get("task_id", ""),
+            )
             match_name = sidecar.get("matches_file")
-            records = sidecar.get("diagnostics" if match_name else "failures", [])
-            if len(records) != 1 or (
-                records[0].get("id_numeric"),
-                records[0].get("replicate"),
-            ) != (id_, replicate):
-                raise ValueError(f"Incomplete or incompatible match sidecar: {name}")
             if match_name:
                 import pyarrow.parquet as pq
 
-                if match_name != f"mb_f{id_}_r{replicate}.parquet":
-                    raise ValueError("Invalid match sidecar")
-                store.restore(checkpoint_key(match_name), Path("matches") / match_name)
-                pairs = pq.read_table(
-                    Path("matches") / match_name, columns=["id_numeric", "replicate"]
-                )
+                path = Path("matches") / match_name
+                store.restore(checkpoint_key(match_name), path)
+                pairs = pq.read_table(path, columns=["id_numeric", "replicate"])
+                if fragment is not None and (
+                    ("atomic_id" in pq.read_schema(path).names)
+                    != (fragment["atom_run_id"] is not None)
+                ):
+                    raise ValueError(f"Incompatible atom-bearing matches: {match_name}")
                 if (
                     not pairs.num_rows
                     or pairs["id_numeric"].unique().to_pylist() != [id_]
@@ -469,12 +707,9 @@ def reconcile(params: dict, expected: dict, outcomes: list[dict]) -> None:
                     raise ValueError(
                         f"Incompatible matched fragment/replicate: {match_name}"
                     )
-            elif records[0].get("reason") not in (
-                "no_overlap",
-                "no_matches",
-                "no_eligible_treatment",
-            ):
-                raise ValueError(f"Unrecognized analytical failure: {name}")
+            if replays:
+                retain_replay(params, store, replays)
+                write_json(sidecar_path, sidecar)
     write_json("reconciled.json", {"expected": expected})
     log.info(
         "[TIMING] Reconciled %d fragments x %d replicates in %.2fs",
@@ -532,11 +767,21 @@ def summarize(
         raise ValueError("Summary worker count must be positive")
     config["summary_workers"] = workers
     config["validated_match_files"] = validated_matches
+    if workflow_contract(params) is not None:
+        config.update(
+            diagnostic_expected_ids=reconciled["expected"]["ids"],
+            diagnostic_expected_replicates=reconciled["expected"]["n_replicates"],
+            require_matching_diagnostics=True,
+        )
     restore_extract(reconciled["expected"]["extract"], Path("output"))
     for path in matches.iterdir():
         shutil.copyfile(path, Path(config["matches_dir"]) / path.name)
     if not run_script("03_summarize_results.R", config, seconds):
         raise TimeoutError("Summary exceeded its internal deadline")
+    if workflow_contract(params) is not None and not all(
+        (Path("output") / name).is_file() for name in DIAGNOSTIC_RESULTS
+    ):
+        raise ValueError("Summary did not publish required matching diagnostic artifacts")
     payload = _collect_results("output", params["task_id"], log)
     runtime = params["_workflow"]
     results_store = Store(runtime["results_uri"])
@@ -563,6 +808,23 @@ def commit(config_path: str, files: list[str]) -> None:
         path = Path(filename).resolve()
         if path.parent != root:
             raise ValueError("Checkpoint is outside matches directory")
+        item = re.fullmatch(r"mb_f([0-9]+)_r([0-9]+)\.json", path.name)
+        if item and "diagnostic_fragments" in config:
+            id_, replicate = map(int, item.groups())
+            sidecar = json.loads(path.read_text())
+            replays = validate_sidecar(
+                sidecar, id_, replicate, diagnostics_contract(config),
+                config["diagnostic_fragments"][str(id_)], config.get("task_id", ""),
+            )
+            if replays:
+                sample = root / replays[0]["sample_file"]
+                verify_sample(sample, replays)
+                receipt = store.json(checkpoint_key(sample.name) + ".receipt.json")
+                if receipt is None or receipt["sha256"] != digest(sample):
+                    raise ValueError(f"Replay sample was not committed: {sample.name}")
+            match_name = sidecar.get("matches_file")
+            if match_name and store.json(checkpoint_key(match_name) + ".receipt.json") is None:
+                raise ValueError(f"Matches were not committed: {match_name}")
         store.commit(path, checkpoint_key(path.name))
 
 

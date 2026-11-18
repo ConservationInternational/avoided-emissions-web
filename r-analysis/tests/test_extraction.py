@@ -18,7 +18,8 @@ import pyarrow.parquet as pq
 import rasterio
 from rasterio.transform import from_origin
 from rasterio.windows import Window
-from shapely.geometry import Point, box, mapping
+from shapely.geometry import Point, Polygon, box, mapping
+from shapely.ops import unary_union
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -30,6 +31,23 @@ class ExtractionTests(unittest.TestCase):
         environment = patch.dict(os.environ, {"AE_EXTRACT_WORKERS": "1"})
         environment.start()
         self.addCleanup(environment.stop)
+
+    def test_shared_support_defaults_on_and_respects_explicit_settings(self):
+        with tempfile.TemporaryDirectory() as output:
+            path = Path(output) / "config.json"
+            base = {
+                "data_dir": output, "max_treatment_pixels": 100,
+                "control_multiplier": 2, "min_glm_treatment_pixels": 5,
+            }
+            for settings, expected in (
+                ({}, True),
+                ({"shared_support_controls": False}, False),
+                ({"shared_support_controls": True}, True),
+            ):
+                with self.subTest(settings=settings):
+                    path.write_text(json.dumps({**base, **settings}))
+                    config = extract.parse_config(["--config", str(path)])
+                    self.assertIs(config["shared_support_controls"], expected)
 
     def test_sparse_global_extent_never_loads_a_global_raster(self):
         with tempfile.TemporaryDirectory() as output:
@@ -138,6 +156,64 @@ class ExtractionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Inconsistent ae_atoms"):
             extract._validate_atom_contract(invalid)
+
+    def test_atom_contract_tolerates_roundoff_from_splitting_sloped_edges(self):
+        atom = Polygon([(0, 0), (1, 0), (1, 1), (0, 0.2)])
+        left = atom.intersection(box(0, -1, 0.1, 2))
+        right = atom.difference(left)
+        metadata = {
+            "run_id": "job-1",
+            "atoms": [{"atomic_id": 11, "geometry": mapping(atom)}],
+        }
+        sites = gpd.GeoDataFrame(
+            {"site_id": ["parent", "parent"], "ae_atoms": [metadata, metadata]},
+            geometry=[left, right],
+            crs=4326,
+        )
+        self.assertEqual(extract._validate_atom_contract(sites)["atomic_ids"], {11})
+
+        # A gap and a spillover can cancel in total area but still break coverage.
+        sites.geometry = sites.geometry.translate(xoff=0.01)
+        with self.assertRaisesRegex(ValueError, "Atom polygons do not.*partition site parent"):
+            extract._validate_atom_contract(sites)
+
+    def test_atom_contract_tolerates_roundoff_with_one_fragment(self):
+        atom = Polygon([(0, 0), (1, 0), (1, 1), (0, 0.2)])
+        left = atom.intersection(box(0, -1, 0.1, 2))
+        reconstructed = unary_union([left, atom.difference(left)])
+        self.assertFalse(reconstructed.equals(atom))
+        sites = gpd.GeoDataFrame(
+            {
+                "site_id": ["parent"],
+                "ae_atoms": [{
+                    "run_id": "job-1",
+                    "atoms": [{"atomic_id": 11, "geometry": mapping(atom)}],
+                }],
+            },
+            geometry=[reconstructed],
+            crs=4326,
+        )
+        self.assertEqual(extract._validate_atom_contract(sites)["atomic_ids"], {11})
+
+        sites.geometry = sites.geometry.translate(xoff=0.01)
+        with self.assertRaisesRegex(ValueError, "Atom polygons do not.*partition site parent"):
+            extract._validate_atom_contract(sites)
+
+    def test_atom_contract_rejects_overlaps_even_when_union_matches_fragments(self):
+        metadata = {
+            "run_id": "job-1",
+            "atoms": [
+                {"atomic_id": 11, "geometry": mapping(box(0, 0, 1.1, 1))},
+                {"atomic_id": 12, "geometry": mapping(box(1, 0, 2, 1))},
+            ],
+        }
+        sites = gpd.GeoDataFrame(
+            {"site_id": ["parent", "parent"], "ae_atoms": [metadata, metadata]},
+            geometry=[box(0, 0, 1, 1), box(1, 0, 2, 1)],
+            crs=4326,
+        )
+        with self.assertRaisesRegex(ValueError, "Atom polygons overlap within site parent"):
+            extract._validate_atom_contract(sites)
 
     def test_atom_rasterization_assigns_exact_parent_cell_memberships(self):
         atom_metadata = json.dumps(

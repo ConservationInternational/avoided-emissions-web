@@ -10,11 +10,13 @@ No database connection, Redis broker, or trends.earth API call is made.
 """
 
 import uuid
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from services.analysis_task import (
+    download_results_csv,
     queue_analysis_task,
 )
 
@@ -31,13 +33,16 @@ def _walk(component):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("resolution_m", [250, 1000, None])
+@pytest.mark.parametrize("shared_support_controls", [None, False, True])
 def test_recompute_preserves_resolution_in_submission_form(
-    mocker, sample_task_id, sample_user_id, resolution_m
+    mocker, sample_task_id, sample_user_id, resolution_m, shared_support_controls
 ):
     from layouts.submit import submit_layout
     from services.sharing import get_recompute_config
 
     config = {} if resolution_m is None else {"resolution_m": resolution_m}
+    if shared_support_controls is not None:
+        config["shared_support_controls"] = shared_support_controls
     task = SimpleNamespace(
         name="Original",
         description="",
@@ -52,6 +57,7 @@ def test_recompute_preserves_resolution_in_submission_form(
     recompute = get_recompute_config(sample_task_id, sample_user_id)
     expected_resolution = resolution_m if resolution_m is not None else 1000
     assert recompute["resolution_m"] == expected_resolution
+    assert recompute["shared_support_controls"] is bool(shared_support_controls)
 
     layout = submit_layout(
         SimpleNamespace(name="User", is_admin=False), recompute_config=recompute
@@ -62,8 +68,36 @@ def test_recompute_preserves_resolution_in_submission_form(
         if getattr(component, "id", None)
     }
     assert components["resolution-m"].value == str(expected_resolution)
+    assert components["shared-support-controls"].value is bool(shared_support_controls)
+    default_layout = submit_layout(SimpleNamespace(name="User", is_admin=False))
+    assert (
+        next(
+            component
+            for component in _walk(default_layout)
+            if getattr(component, "id", None) == "shared-support-controls"
+        ).value
+        is True
+    )
     assert components["recompute-config-store"].data["resolution_m"] == (
         expected_resolution
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("result_type", "filename", "raw", "expected"),
+    [
+        ("matching_diagnostics", "results_matching_diagnostics.jsonl.gz", b"\x1f\x8b", b"\x1f\x8b"),
+        ("matching_diagnostics_summary", "results_matching_diagnostics_summary.json", b"{}", "{}"),
+        ("matching_replay_manifest", "results_matching_replay_manifest.json", b"{}", "{}"),
+    ],
+)
+def test_matching_artifact_downloads(mocker, result_type, filename, raw, expected):
+    client = mocker.patch("services.analysis_task.get_s3_client").return_value
+    client.get_object.return_value = {"Body": BytesIO(raw)}
+    assert download_results_csv("task", result_type, "s3://test/private-output") == expected
+    client.get_object.assert_called_once_with(
+        Bucket="test", Key=f"private-output/{filename}"
     )
 
 
@@ -133,6 +167,22 @@ class TestQueueAnalysisTaskSuccess:
 
         added = mock_db.add.call_args.args[0]
         assert added.config["exact_match_vars"] == ["admin0"]
+        assert added.config["shared_support_controls"] is True
+
+    def test_task_config_persists_shared_support_opt_out(self, mocker):
+        mock_db, _ = _setup_happy_path(mocker)
+        queue_analysis_task(
+            user_id=str(uuid.uuid4()), shared_support_controls=False, **_BASE_KWARGS
+        )
+        assert mock_db.add.call_args.args[0].config["shared_support_controls"] is False
+
+    @pytest.mark.parametrize("value", ["true", 1, None])
+    def test_shared_support_requires_a_boolean(self, mocker, value):
+        _setup_happy_path(mocker)
+        with pytest.raises(ValueError, match="shared_support_controls must be a boolean"):
+            queue_analysis_task(
+                user_id=str(uuid.uuid4()), shared_support_controls=value, **_BASE_KWARGS
+            )
 
     def test_task_config_stores_n_replicates(self, mocker):
         mock_db, _ = _setup_happy_path(mocker)

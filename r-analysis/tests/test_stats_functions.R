@@ -214,6 +214,82 @@ test_that("factor levels in only one group are separated", {
     sep <- check_separation(d, treatment ~ factor(eco))
     expect_true(sep$separated)
     expect_equal(sep$sep_vars, "eco")
+    expect_equal(sep$evidence$eco$only_treatment, list("2"))
+})
+
+test_that("shared support is the exact joint intersection of bare numeric terms", {
+    d <- tibble(
+        treatment = c(TRUE, TRUE, FALSE, FALSE, FALSE, FALSE),
+        atomic_id = c("9223372036854775801", "2", rep(NA_character_, 4)),
+        cropland = c(0, 0, 0, 1e-15, 0, 1),
+        defor_pre_intervention = c(0, 0, 0, 0, -1, -1),
+        x = c(1, 1, 2, 2, 2, 2),
+        cat = c(1, 1, 2, 2, 2, 2)
+    )
+    f <- treatment ~ cropland + defor_pre_intervention + I(x^2) + factor(cat) + x:cat
+    out <- restrict_shared_support(d, f)
+    expect_equal(out$data, d[1:3, ])
+    expect_equal(names(out$constraints), c("cropland", "defor_pre_intervention"))
+    expect_equal(out$constraints$cropland, list(value = 0, n_controls_removed = 2))
+    expect_equal(out$constraints$defor_pre_intervention$n_controls_removed, 2)
+    expect_equal(out$n_controls_removed, 3)
+    expect_equal(out$n_controls_retained, 1)
+    exhausted <- restrict_shared_support(d[-3, ], f)
+    expect_equal(exhausted$data, d[1:2, ])
+    expect_equal(exhausted$n_controls_retained, 0)
+})
+
+test_that("one atom or a constant sample does not determine full treatment support", {
+    d <- tibble(
+        treatment = c(TRUE, TRUE, TRUE, FALSE, FALSE),
+        atomic_id = c("1", "1", "2", NA, NA),
+        group = "stratum",
+        cropland = c(0, 0, 1, 0, 1e-15)
+    )
+    expect_equal(restrict_shared_support(d, treatment ~ cropland)$data, d)
+    set.seed(2)
+    sampled <- sample_strata(d, max_treatment = 1L, control_multiplier = 2L)
+    expect_equal(n_distinct(sampled$cropland[sampled$treatment]), 1)
+    expect_equal(sum(!sampled$treatment), 2)
+})
+
+test_that("fit diagnostics retain all warning classes, model details and GLM errors", {
+    d <- as.data.frame(tibble(
+        treatment = rep(c(TRUE, FALSE), each = 6),
+        x = c(-1, 1, 2, 3, 4, 5, 1, -1, 2, 3, 5, 5)
+    ))
+    note <- function(x) {
+        warning(warningCondition("custom diagnostic", class = "example_glm_warning"))
+        log(x)
+    }
+    fit <- fit_propensity(treatment ~ note(x) + I(2 * note(x)), d)
+    expect_null(fit$cause) # Unrelated warnings do not change the estimator.
+    expect_true(fit$diagnostics$converged)
+    expect_equal(fit$diagnostics$rank, 2L)
+    expect_equal(fit$diagnostics$aliased_coefficients, list("I(2 * note(x))"))
+    expect_equal(fit$diagnostics$fitted_probabilities$treatment$n, 5L)
+    expect_equal(fit$diagnostics$linear_predictors$control$n, 5L)
+    expect_equal(vapply(fit$diagnostics$warnings, `[[`, "", "message"),
+                 rep(c("custom diagnostic", "NaNs produced"), 2))
+    expect_equal(fit$diagnostics$warnings[[1]]$classes[[1]], "example_glm_warning")
+
+    failed <- fit_propensity(treatment ~ I(stop("fixture model error")), d)
+    expect_identical(failed$cause, "glm_error")
+    expect_match(failed$diagnostics$error$message, "fixture model error")
+    expect_null(failed$diagnostics$converged)
+})
+
+test_that("multivariate separation retains the real binomial nonconvergence warning", {
+    d <- tibble(treatment = rep(c(TRUE, FALSE), each = 100),
+                x = c(rep(c(2, -1), 50), rep(c(-2, 1), 50))) %>%
+        mutate(z = if_else(treatment, 1 - x, -1 - x))
+    f <- treatment ~ x + z
+    expect_false(check_separation(d, f)$separated)
+    fit <- fit_propensity(f, d)
+    expect_identical(fit$cause, "glm_nonconvergence")
+    expect_false(fit$diagnostics$converged)
+    expect_match(fit$diagnostics$warnings[[1]]$message, "did not converge")
+    expect_equal(fit$diagnostics$fitted_probabilities$treatment$n, 100L)
 })
 
 test_that("drop_formula_vars removes terms using separated variables", {

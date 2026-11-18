@@ -247,6 +247,7 @@ def get_recompute_config(task_id, user_id, is_admin=False):
             "separation_fallback_mahalanobis": config.get(
                 "separation_fallback_mahalanobis", False
             ),
+            "shared_support_controls": config.get("shared_support_controls", False),
             "matching_method": config.get("matching_method", "optimal"),
             "n_replicates": config.get("n_replicates", 1),
             "random_seed": _random.randint(1, 2_147_483_647),
@@ -339,6 +340,7 @@ def resubmit_analysis_task(task_id, user):
             separation_fallback_mahalanobis=config.get(
                 "separation_fallback_mahalanobis", False
             ),
+            shared_support_controls=config.get("shared_support_controls", False),
             matching_method=config.get("matching_method", "optimal"),
             n_replicates=config.get("n_replicates", 1),
             match_batch_size=config.get(

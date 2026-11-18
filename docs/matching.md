@@ -222,6 +222,43 @@ Otherwise, the distance used within each exact-match stratum is chosen as follow
 
 For Mahalanobis matching no caliper is applied and `pscore` is `NA`.
 
+### Shared-support controls
+
+**Parameter**: `shared_support_controls`
+**Default**: `true` for new analyses (matching policy `shared_support_v1`)
+
+Set this to `false` to use the legacy policy. Recomputed tasks and resumed
+workflows retain their recorded setting; historical tasks and saved presets
+without the setting use the legacy policy.
+
+Before replicate sampling, each eligible fragment/exact-match stratum is
+checked for direct numeric covariates constant across all its treatment pixels.
+With this policy enabled, controls must equal those treatment values, jointly
+across the constrained covariates. For example, zero-cropland treatment is
+compared only with zero-cropland controls. Equality uses stored values, not a
+near-zero tolerance. Transformed, interaction, and categorical terms do not
+receive this restriction.
+
+No treatment is removed and no covariate constraint is dropped. Terms constant
+after selection can be omitted from the fitted formula because their equality
+is enforced by control selection. The requested control multiplier is a
+sampling ceiling, not a minimum required pool size. Strata without remaining
+controls are explicitly unmatchable. GLM separation handling, calipers,
+control-distance exclusions, and all-replicate inclusion rules are unchanged.
+
+Atoms retain their identity, but the model and restriction remain at the
+existing parent fragment/stratum level. Constancy in one atom or one random
+sample does not establish constancy across the eligible treatment stratum.
+This policy does not guarantee that small atoms are sampled in every replicate.
+Atom-level diagnostics distinguish that sampling omission from model failure.
+
+Both policies produce versioned diagnostics for every replicate, including
+failed strata in partly successful fragments. See
+[matching diagnostic exports](analysis-outputs.md#matching-diagnostic-exports)
+for structured causes, exact failed-fit replay inputs, and atom inclusion
+evidence. Changing the policy requires a fresh compatible matching run; do not
+reuse old non-atom checkpoints for atom-enabled inputs.
+
 ---
 
 ### Replicates
@@ -390,6 +427,7 @@ All defaults are defined in `webapp/services/analysis_task.py`:
 | `max_controls_per_treatment` | `1` | 1:1 matching |
 | `exact_match_vars` | `["admin1", "ecoregion", "pa"]` | |
 | `separation_fallback_mahalanobis` | `false` | Must be opted in |
+| `shared_support_controls` | `true` | Joint control restriction for treatment-constant numeric covariates |
 | `n_replicates` | `1` | No replicate range by default |
 | `min_control_distance_km` | `10` | km |
 | `max_treatment_pixels` | `1000` | pixels per site |

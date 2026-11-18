@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "nextflow"))
 
 import driver
 import nextflow_worker as worker
-from workflow_store import Store, checkpoint_key
+from workflow_store import Store, checkpoint_key, digest
 
 
 def exercise_fixture(config_path: Path) -> None:
@@ -34,6 +34,7 @@ def exercise_fixture(config_path: Path) -> None:
         "identity": "integration",
         "match_memory_mib": 1024,
         "results_uri": str(root / "results"),
+        "diagnostics_contract": worker.diagnostics_contract(params),
     }
     params["replicate_block_size"] = 2
     store = worker.artifact_store(params, "extract")
@@ -59,17 +60,7 @@ def exercise_fixture(config_path: Path) -> None:
         with contextlib.chdir(directory):
             worker.match_batch(params, json.loads(batch.read_text()), 120)
             outcomes.append(json.loads(Path("outcome.json").read_text()))
-    upgraded = {
-        **params,
-        "_workflow": {**params["_workflow"], "group_namespace": "new-image"},
-    }
-    preparation_updated = root / "prepare-updated"
-    preparation_updated.mkdir()
-    with contextlib.chdir(preparation_updated):
-        worker.prepare(upgraded, descriptor)
-    batch = json.loads(
-        min((preparation_updated / "batches").glob("*.json")).read_text()
-    )
+    batch = json.loads(min((preparation / "batches").glob("*.json")).read_text())
     checkpoint_store = worker.artifact_store(params, "checkpoints")
     receipt_key = checkpoint_key(
         f"mb_f{batch['ids'][0]}_r{batch['replicates'][0]}.json"
@@ -95,7 +86,7 @@ def exercise_fixture(config_path: Path) -> None:
         contextlib.chdir(replay),
         patch.object(worker, "run_script", side_effect=run_matching_and_verify_reuse),
     ):
-        worker.match_batch(upgraded, batch, 120)
+        worker.match_batch(params, batch, 120)
         assert not json.loads(Path("outcome.json").read_text())["unfinished"]
     assert checkpoint_store.json(receipt_key + ".receipt.json") == before
     reconciliation = root / "reconcile"
@@ -116,6 +107,12 @@ def exercise_fixture(config_path: Path) -> None:
     assert payload["summary"]["n_replicates"] == 2, payload["summary"]
     assert len(list((reconciliation / "matches").glob("mb_*.json"))) == 8
     assert (root / "results/results_by_site_total.csv").exists()
+    diagnostics = payload["summary"]["matching_diagnostics"]
+    assert diagnostics["counts"]["expected_items"] == 8
+    assert diagnostics["counts"]["observed_items"] == 8
+    assert set(diagnostics["artifacts"].values()) == set(worker.DIAGNOSTIC_RESULTS)
+    for filename in diagnostics["artifacts"].values():
+        assert (root / "results" / filename).is_file()
 
     partitioning = root / "reconcile-partitioning"
     partitioning.mkdir()
@@ -205,19 +202,27 @@ class WorkflowTests(unittest.TestCase):
         params["exact_match_vars"] = ["admin1"]
         source = self.root / "source"
         source.mkdir()
+        atom_id = "9007199254740993"
         tables = {
             "sites_processed.parquet": pa.table(
                 {
                     "id_numeric": [1, 2],
                     "site_id": ["a", "b"],
                     "sub_site_index": [0, 0],
+                    "ae_atoms": [
+                        json.dumps({"run_id": "atoms", "atoms": [{"atomic_id": atom_id}]}),
+                        json.dumps({"run_id": "atoms", "atoms": [{"atomic_id": "2"}]}),
+                    ],
                 }
             ),
             "treatment_cell_key.parquet": pa.table(
-                {"id_numeric": [1, 2], "cell": [10, 20]}
+                {"id_numeric": [1, 2], "cell": [10, 20], "atomic_id": [atom_id, "2"]}
             ),
             "treatment_pixels.parquet": pa.table(
                 {"cell": [10, 20], "value": [1.0, 2.0], "admin1": [1, 2]}
+            ),
+            "ae_atom_counts.parquet": pa.table(
+                {"atomic_id": [atom_id, "2"], "site_id": ["a", "b"], "n_forest_pixels": [1, 1]}
             ),
         }
         store = worker.artifact_store(params, "extract")
@@ -247,6 +252,22 @@ class WorkflowTests(unittest.TestCase):
             "treatment_pixels.parquet", self.root / "shard"
         )
         self.assertEqual(pq.read_table(self.root / "shard").num_rows, 2)
+        Store(batches[0]["group_uri"]).restore(
+            "treatment_cell_key.parquet", self.root / "key"
+        )
+        self.assertEqual(pq.read_table(self.root / "key")["atomic_id"].to_pylist(), [atom_id, "2"])
+        # The recovery batch and final summary both restore extraction metadata.
+        for name in ("recovery", "summary"):
+            output = self.root / name
+            worker.restore_extract(batches[0]["extract"], output)
+            self.assertEqual(
+                pq.read_table(output / "ae_atom_counts.parquet")["atomic_id"].to_pylist(),
+                [atom_id, "2"],
+            )
+            self.assertEqual(
+                worker.fragment_identities(output / "sites_processed.parquet", {1})["1"]["atom_run_id"],
+                "atoms",
+            )
         coverage = [
             (id_, rep)
             for batch in batches
@@ -347,7 +368,7 @@ class WorkflowTests(unittest.TestCase):
         unmeasured = [b["replicates"] for b in batches if b["ids"] == [40]]
         self.assertEqual(unmeasured, [list(range(21, 26)), list(range(26, 31))])
 
-    def test_snapshot_reuses_checkpoints_with_updated_image_and_workflow(self):
+    def test_snapshot_rejects_incompatible_resumes(self):
         params = {
             "sites_parquet_s3_uri": "s3://inputs/sites.parquet",
             "results_s3_uri": "s3://results/task",
@@ -365,37 +386,24 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(first, resumed)
             self.assertEqual(first["_workflow"]["match_memory_mib"], 61440)
             self.assertEqual(first["_workflow"]["initial_queue"], "ae-ondemand-gp3")
+            self.assertIs(first["shared_support_controls"], True)
+            self.assertEqual(first["_workflow"]["diagnostics_contract"]["matching_policy"], "shared_support_v1")
             self.assertEqual(client.copy_object.call_count, 1)
             updated_image = image.replace("a" * 64, "b" * 64)
-            upgraded = driver.prepare(client, store, params, updated_image, True)
-            self.assertEqual(upgraded["random_seed"], first["random_seed"])
-            self.assertEqual(
-                upgraded["_workflow"]["identity"], first["_workflow"]["identity"]
-            )
-            self.assertNotEqual(upgraded, first)
-            self.assertEqual(
-                worker.artifact_store(upgraded, "checkpoints").uri,
-                worker.artifact_store(first, "checkpoints").uri,
-            )
+            with self.assertRaisesRegex(ValueError, "incompatible"):
+                driver.prepare(client, store, params, updated_image, True)
             self.assertEqual(store.json("snapshot.json")["image"], image)
             with self.assertRaisesRegex(ValueError, "identical"):
                 driver.prepare(
-                    client, store, {**params, "n_replicates": 5}, updated_image, True
+                    client, store, {**params, "shared_support_controls": False}, image, True
                 )
-            with patch.object(driver, "VERSION", "2.0.0"):
-                upgraded_version = driver.prepare(
-                    client, store, params, updated_image, True
-                )
-                self.assertEqual(
-                    upgraded_version["_workflow"]["identity"],
-                    first["_workflow"]["identity"],
-                )
-                self.assertNotEqual(
-                    upgraded_version["_workflow"]["group_namespace"],
-                    upgraded["_workflow"]["group_namespace"],
-                )
-                driver_only = driver.prepare(client, store, params, image, True)
-                self.assertIn("group_namespace", driver_only["_workflow"])
+            with (
+                patch.object(driver, "VERSION", "2.0.0"),
+                self.assertRaisesRegex(ValueError, "incompatible"),
+            ):
+                driver.prepare(client, store, params, image, True)
+            with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                driver.prepare(client, store, {**params, "shared_support_controls": "true"}, image, True)
         with (
             patch.object(
                 driver, "input_manifest", return_value=[["raster", "changed"]]
@@ -405,6 +413,29 @@ class WorkflowTests(unittest.TestCase):
             driver.prepare(client, store, params, image, True)
         with self.assertRaisesRegex(ValueError, "pinned"):
             driver.prepare(client, store, params, "registry/analysis:latest", False)
+
+    def test_resume_preserves_legacy_default_from_frozen_analysis(self):
+        params = {
+            "sites_parquet_s3_uri": "s3://inputs/sites.parquet",
+            "results_s3_uri": "s3://results/task",
+        }
+        image = "registry/analysis@sha256:" + "a" * 64
+        store = Store(str(self.root / "legacy-state"))
+        store.bucket, store.prefix = "state-bucket", "execution"
+        client = Mock()
+        client.head_object.return_value = {"ETag": '"etag"'}
+        with patch.object(driver, "input_manifest", return_value=[["raster", "etag"]]):
+            legacy = driver.prepare(
+                client, store, {**params, "shared_support_controls": False}, image, False
+            )
+            snapshot = store.json("snapshot.json")
+            snapshot["source"].pop("shared_support_controls")
+            store.write_json("snapshot.json", snapshot)
+            resumed = driver.prepare(client, store, params, image, True)
+        self.assertEqual(resumed, legacy)
+        self.assertIs(resumed["shared_support_controls"], False)
+        self.assertEqual(resumed["_workflow"]["diagnostics_contract"]["matching_policy"], "legacy")
+        self.assertEqual(client.copy_object.call_count, 1)
 
     def test_driver_validates_matching_preferences_before_loading_inputs(self):
         image = "registry/analysis@sha256:" + "a" * 64
@@ -422,6 +453,212 @@ class WorkflowTests(unittest.TestCase):
                 driver.prepare(client, store, preference, image, False)
         client.get_paginator.assert_not_called()
         client.copy_object.assert_not_called()
+
+    def replay_fixture(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        params = {
+            **self.params(),
+            "task_id": "task",
+            "shared_support_controls": True,
+        }
+        contract = worker.diagnostics_contract(params)
+        params["_workflow"].update(
+            diagnostics_contract=contract,
+            results_uri=str(self.root / "results"),
+            analysis_image="test-image",
+        )
+        metadata = self.root / "sites_processed.parquet"
+        pq.write_table(
+            pa.table({
+                "id_numeric": [1], "site_id": ["a"], "sub_site_index": [0],
+                "ae_atoms": ['{"run_id":"atoms","atoms":[{"atomic_id":"9007199254740993"}]}'],
+            }),
+            metadata,
+        )
+        extraction = worker.artifact_store(params, "extract")
+        extraction.commit(metadata, metadata.name)
+        expected = {
+            "ids": [1], "n_replicates": 1,
+            "extract": {"uri": extraction.uri, "files": [metadata.name]},
+        }
+        sample = self.root / "f1_r1_sample.rds"
+        sample.write_bytes(b"sample payload")
+        groups = []
+        for stratum in ("a", "b"):
+            groups.append({
+                **contract, "id_numeric": 1, "replicate": 1, "site_id": "a",
+                "sub_site_index": 0, "atom_run_id": "atoms", "atom_results_schema_version": 1,
+                "task_id": "task", "group": stratum, "attempt_key": stratum,
+                "cause": "glm_warning",
+                "replay": {
+                    "sample_file": sample.name, "sample_md5": digest(sample, "md5"),
+                    "group": stratum, "attempt_key": stratum,
+                },
+            })
+        item = {
+            "id_numeric": 1, "replicate": 1, "reason": "no_matches",
+            "expected_attempt_keys": ["a", "b"], "expected_groups": ["a", "b"],
+            "group_diagnostics": groups,
+        }
+        sidecar = {
+            **contract, "atom_run_id": "atoms",
+            "compatibility": {
+                **contract, "task_id": "task", "atom_run_id": "atoms",
+                "atom_results_schema_version": 1,
+            },
+            "matches_file": None, "expected_attempt_keys": ["a", "b"], "failures": [item],
+        }
+        return params, expected, sidecar, sample
+
+    def test_reconcile_promotes_one_sample_for_multiple_attempts_and_retries(self):
+        import copy
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        params, expected, sidecar, sample = self.replay_fixture()
+        expected["n_replicates"] = 2
+        store = worker.artifact_store(params, "checkpoints")
+        store.commit(sample, checkpoint_key(sample.name))
+        name = "mb_f1_r1.json"
+        sidecar_path = self.root / name
+        worker.write_json(sidecar_path, sidecar)
+        store.commit(sidecar_path, checkpoint_key(name))
+        partial = copy.deepcopy(sidecar)
+        partial["matches_file"] = "mb_f1_r2.parquet"
+        item = partial.pop("failures")[0]
+        partial["diagnostics"] = [item]
+        item["replicate"] = 2
+        for group, attempt in zip(item["group_diagnostics"], ("c", "d"), strict=True):
+            group.update(replicate=2, attempt_key=attempt)
+            group["replay"].update(attempt_key=attempt, sample_file="f1_r2_sample.rds")
+        matched_group = item["group_diagnostics"][0]
+        matched_group.update(cause="matched", replay=None)
+        partial["expected_attempt_keys"] = item["expected_attempt_keys"] = ["c", "d"]
+        sample2 = self.root / "f1_r2_sample.rds"
+        shutil.copyfile(sample, sample2)
+        store.commit(sample2, checkpoint_key(sample2.name))
+        parquet = self.root / partial["matches_file"]
+        pq.write_table(
+            pa.table({"id_numeric": [1], "replicate": [2], "atomic_id": ["9007199254740993"]}),
+            parquet,
+        )
+        store.commit(parquet, checkpoint_key(parquet.name))
+        partial_name = "mb_f1_r2.json"
+        worker.write_json(self.root / partial_name, partial)
+        store.commit(self.root / partial_name, checkpoint_key(partial_name))
+        archived = []
+        for run in ("first", "retry"):
+            directory = self.root / run
+            directory.mkdir()
+            with contextlib.chdir(directory):
+                worker.reconcile(params, expected, [])
+                worker.archive_matches()
+                with tarfile.open("matches.tar") as archive:
+                    self.assertEqual(archive.getnames(), [name, partial_name, parquet.name])
+                archived.append([
+                    json.loads((Path("matches") / filename).read_text())
+                    for filename in (name, partial_name)
+                ])
+        self.assertEqual(*archived)
+        shutil.rmtree(store.root)
+        replays = [
+            group["replay"] for group in archived[0][0]["failures"][0]["group_diagnostics"]
+        ]
+        self.assertEqual(replays[0]["uri"], replays[1]["uri"])
+        retained = Path(replays[0]["uri"])
+        self.assertTrue(retained.is_relative_to(self.root / "results" / "matching_replay"))
+        self.assertEqual(retained.read_bytes(), sample.read_bytes())
+        self.assertEqual(digest(retained), replays[0]["sha256"])
+        partial_groups = archived[0][1]["diagnostics"][0]["group_diagnostics"]
+        self.assertIsNone(partial_groups[0]["replay"])
+        self.assertEqual(digest(Path(partial_groups[1]["replay"]["uri"])), digest(sample2))
+
+    def test_reconcile_rejects_missing_and_corrupt_committed_replay(self):
+        params, expected, sidecar, sample = self.replay_fixture()
+        store = worker.artifact_store(params, "checkpoints")
+        completion = self.root / "mb_f1_r1.json"
+        worker.write_json(completion, sidecar)
+        store.commit(completion, checkpoint_key(completion.name))
+        missing = self.root / "missing"
+        missing.mkdir()
+        with contextlib.chdir(missing), self.assertRaisesRegex(FileNotFoundError, "_sample"):
+            worker.reconcile(params, expected, [])
+        receipt = store.commit(sample, checkpoint_key(sample.name))
+        (store.root / receipt["object"]).write_bytes(b"tampered")
+        corrupt = self.root / "corrupt"
+        corrupt.mkdir()
+        with contextlib.chdir(corrupt), self.assertRaisesRegex(ValueError, "Corrupt artifact"):
+            worker.reconcile(params, expected, [])
+        self.assertFalse((self.root / "results").exists())
+
+    def test_new_checkpoint_requires_complete_matching_contract(self):
+        import copy
+
+        params, _, sidecar, _ = self.replay_fixture()
+        contract = worker.workflow_contract(params)
+        fragment = {
+            "atom_run_id": "atoms", "atom_results_schema_version": 1,
+            "site_id": "a", "sub_site_index": 0,
+        }
+        for field, value, error in (
+            ("matching_policy", "legacy", "schema or policy"),
+            ("diagnostics_schema_version", None, "schema or policy"),
+            ("atom_run_id", None, "atom contract"),
+            ("expected_attempt_keys", ["a"], "attempt roster"),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, error):
+                worker.validate_sidecar({**sidecar, field: value}, 1, 1, contract, fragment, "task")
+        for changes, error in (
+            ({"replay": None}, "invalid matching replay"),
+            ({"atom_results_schema_version": None}, "incompatible|Incompatible"),
+        ):
+            invalid = copy.deepcopy(sidecar)
+            invalid["failures"][0]["group_diagnostics"][0].update(changes)
+            with self.assertRaisesRegex(ValueError, error):
+                worker.validate_sidecar(invalid, 1, 1, contract, fragment, "task")
+        invalid = copy.deepcopy(sidecar)
+        groups = invalid["failures"][0]["group_diagnostics"]
+        groups[1] = groups[0]
+        with self.assertRaisesRegex(ValueError, "duplicate matching attempt"):
+            worker.validate_sidecar(invalid, 1, 1, contract, fragment, "task")
+
+    @unittest.skipUnless(shutil.which("Rscript"), "Requires Rscript")
+    def test_r_config_defaults_to_legacy_and_rejects_non_boolean_values(self):
+        probe = subprocess.run(
+            ["Rscript", "-e", 'quit(status=!all(sapply(c("tidyverse","jsonlite","httr"), requireNamespace, quietly=TRUE)))'],
+            capture_output=True, check=False,
+        )
+        if probe.returncode:
+            self.skipTest("R config dependencies are not installed")
+        cfg = self.root / "config.json"
+        required = {
+            "data_dir": str(self.root), "max_treatment_pixels": 100,
+            "control_multiplier": 2, "min_glm_treatment_pixels": 5,
+            "caliper_width": 0.2, "max_controls_per_treatment": 1,
+        }
+        command = [
+            "Rscript", "-e",
+            f'source("{ROOT / "scripts/utils.R"}"); cat(parse_config()$shared_support_controls)',
+            "--args", "--config", str(cfg),
+        ]
+        for settings, expected in (
+            ({}, "TRUE"), ({"shared_support_controls": True}, "TRUE"),
+            ({"shared_support_controls": False}, "FALSE"),
+            ({"shared_support_controls": None}, None),
+            ({"shared_support_controls": [True]}, None),
+        ):
+            with self.subTest(settings=settings):
+                worker.write_json(cfg, {**required, **settings})
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("shared_support_controls must be a boolean", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, expected)
 
     def test_reconcile_requires_explicit_outcomes_for_each_requested_replicate(self):
         import pyarrow as pa

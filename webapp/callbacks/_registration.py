@@ -337,6 +337,7 @@ def register_callbacks(app, limiter=None):
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
         State("separation-fallback-mahalanobis", "value"),
+        State("shared-support-controls", "value"),
         State("matching-method", "value"),
         State("n-replicates", "value"),
         State("random-seed", "value"),
@@ -360,6 +361,7 @@ def register_callbacks(app, limiter=None):
         max_controls_per_treatment,
         min_control_distance_km,
         separation_fallback_mahalanobis,
+        shared_support_controls,
         matching_method,
         n_replicates,
         random_seed,
@@ -555,6 +557,12 @@ def register_callbacks(app, limiter=None):
                                 _param_row(
                                     "Min control distance (km)",
                                     str(min_control_distance_km),
+                                ),
+                                _param_row(
+                                    "Shared-support controls",
+                                    "Enabled"
+                                    if shared_support_controls
+                                    else "Disabled",
                                 ),
                                 _param_row(
                                     "Separation fallback",
@@ -1372,6 +1380,7 @@ def register_callbacks(app, limiter=None):
         State("max-controls-per-treatment", "value"),
         State("min-control-distance-km", "value"),
         State("separation-fallback-mahalanobis", "value"),
+        State("shared-support-controls", "value"),
         State("matching-method", "value"),
         State("n-replicates", "value"),
         State("random-seed", "value"),
@@ -1395,6 +1404,7 @@ def register_callbacks(app, limiter=None):
         max_controls_per_treatment,
         min_control_distance_km,
         separation_fallback_mahalanobis,
+        shared_support_controls,
         matching_method,
         n_replicates,
         random_seed,
@@ -1515,6 +1525,7 @@ def register_callbacks(app, limiter=None):
                 max_controls_per_treatment=_mcpt,
                 min_control_distance_km=_mcd,
                 separation_fallback_mahalanobis=bool(separation_fallback_mahalanobis),
+                shared_support_controls=bool(shared_support_controls),
                 matching_method=matching_method or ANALYSIS_DEFAULTS["matching_method"],
                 random_seed=_seed,
                 n_replicates=_nrep,
@@ -3610,6 +3621,7 @@ def register_callbacks(app, limiter=None):
             Output("min-control-distance-km", "value"),
             Output("matching-method", "value"),
             Output("separation-fallback-mahalanobis", "value"),
+            Output("shared-support-controls", "value"),
             Output("n-replicates", "value"),
             Output("match-memory-gb", "value"),
             Output("matching-job-queue", "value"),
@@ -3623,7 +3635,7 @@ def register_callbacks(app, limiter=None):
     def load_preset(_n, preset_id, presets_data):
         """Restore covariates, exact-match variables and matching settings."""
         if not preset_id or not presets_data:
-            return (*([no_update] * 14), "Please select a preset to load.")
+            return (*([no_update] * 15), "Please select a preset to load.")
 
         for p in presets_data:
             if p["id"] == preset_id:
@@ -3640,6 +3652,7 @@ def register_callbacks(app, limiter=None):
                     s["min_control_distance_km"],
                     s["matching_method"],
                     s["separation_fallback_mahalanobis"],
+                    s.get("shared_support_controls", False),
                     s["n_replicates"],
                     s["match_memory_gb"],
                     s["matching_job_queue"],
@@ -3651,7 +3664,7 @@ def register_callbacks(app, limiter=None):
                 )
 
         return (
-            *([no_update] * 14),
+            *([no_update] * 15),
             dbc.Alert(
                 "Preset not found.",
                 color="warning",
@@ -3678,6 +3691,7 @@ def register_callbacks(app, limiter=None):
         State("min-control-distance-km", "value"),
         State("matching-method", "value"),
         State("separation-fallback-mahalanobis", "value"),
+        State("shared-support-controls", "value"),
         State("n-replicates", "value"),
         State("match-memory-gb", "value"),
         State("matching-job-queue", "value"),
@@ -3697,6 +3711,7 @@ def register_callbacks(app, limiter=None):
         min_control_distance_km,
         matching_method,
         separation_fallback_mahalanobis,
+        shared_support_controls,
         n_replicates,
         match_memory_gb,
         matching_job_queue,
@@ -3737,6 +3752,7 @@ def register_callbacks(app, limiter=None):
             "min_control_distance_km": min_control_distance_km,
             "matching_method": matching_method,
             "separation_fallback_mahalanobis": separation_fallback_mahalanobis,
+            "shared_support_controls": bool(shared_support_controls),
             "n_replicates": n_replicates,
             "match_memory_gb": match_memory_gb,
             "matching_job_queue": matching_job_queue,

@@ -126,6 +126,10 @@ def parse_config(argv: list[str] | None = None) -> dict:
     with open(args.config) as f:
         config: dict = json.load(f)
 
+    config.setdefault("shared_support_controls", True)
+    if type(config["shared_support_controls"]) is not bool:
+        raise ValueError("shared_support_controls must be a boolean")
+
     if args.data_dir:
         config["data_dir"] = args.data_dir
     if args.site_id:
@@ -316,10 +320,20 @@ def _validate_atom_contract(sites: gpd.GeoDataFrame) -> dict | None:
             if any(not geom.intersection(other).is_empty and geom.intersection(other).area > 0
                    for other in atom_geometries[index + 1 :]):
                 raise ValueError(f"Atom polygons overlap within site {site_id}.")
-        parent_geom = unary_union(sites.loc[sites.site_id == site_id].geometry.to_list())
+        fragments = sites.loc[sites.site_id == site_id].geometry.to_list()
+        parent_geom = unary_union(fragments)
         atom_union = unary_union(atom_geometries)
         if not parent_geom.equals(atom_union):
-            raise ValueError(f"Atom polygons do not exactly partition site {site_id}.")
+            # Region overlays can move vertices off the original edge by roundoff.
+            # Use the same coverage precision budget as services.polygon_partition.
+            coverage_error = parent_geom.symmetric_difference(atom_union).area
+            tolerance = max(1e-14, atom_union.area * 1e-10)
+            if coverage_error > tolerance:
+                raise ValueError(
+                    f"Atom polygons do not partition site {site_id}: "
+                    f"symmetric difference {coverage_error:.6g} square degrees "
+                    f"(tolerance {tolerance:.6g})."
+                )
 
     return {"run_id": next(iter(run_ids)), "atomic_ids": set(atomic_owners)}
 

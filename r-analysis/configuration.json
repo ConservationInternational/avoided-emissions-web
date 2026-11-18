@@ -5,6 +5,12 @@
   "environment_version": "2.2.4",
   "compute_type": "batch",
   "batch_image": "avoided-emissions-ranalysis:production-latest",
+  "parameters_schema": {
+    "type": "object",
+    "properties": {
+      "shared_support_controls": {"type": "boolean", "default": true}
+    }
+  },
   "batch_execution_config": {
     "allowed_workflow_backends": ["nextflow"],
     "default_workflow_backend": "nextflow",

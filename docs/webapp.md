@@ -208,7 +208,11 @@ Every parent row in an atom-enabled input must declare the same non-empty
 `run_id`; atom IDs must be globally unique positive integers. Within each
 parent, atom geometries must be valid, disjoint, and exactly partition the
 parent polygon. Upload/import preserves this property in source attributes,
-and preparation carries it through exact-match fragment splitting. A declared
+and preparation carries it through exact-match fragment splitting. Extraction
+compares the union of the fragments (including a single fragment) with the atom
+union using the same area tolerance as the region splitter, so numerical
+roundoff does not reject otherwise valid partitions. Every rasterized treatment cell
+must still be assigned to an atom. A declared
 atom parent cannot be silently removed by the minimum-site-area filter; such
 submissions fail with the excluded parent IDs.
 
@@ -238,6 +242,15 @@ Incomplete atoms remain explicit in the atom status file and their omitted
 coverage is reflected in parent/site coverage and status. Both atom CSVs are
 available from the normal task results prefix and via the `atom_replicates`
 and `atom_status` result-download types.
+
+New matching runs also publish
+[all-replicate matching diagnostics](analysis-outputs.md#matching-diagnostic-exports)
+with per-atom sampling/matching counts and final inclusion evidence. These
+distinguish completed processing from consistently represented atoms. Preserve
+the atom run identity when joining downstream original-site memberships:
+wholly duplicated sites can have usable atom statistics without owning a
+matching unit, while missing atom domains must remain explicit rather than
+being replaced by zeroes or copied parent totals.
 
 The read-only audit command can inventory historical jobs and references or
 validate downloaded artifacts. Run from the repository root with the application's
@@ -531,6 +544,12 @@ On the submission form's **Matching Setup** tab, a single preset control saves
 and loads matching covariates, exact match variables, and the other matching
 settings together. Presets are private to each user; saving with the same name
 replaces the entire preset. Loading a preset leaves the random seed unchanged.
+The **Restrict controls to shared support** checkbox enables
+`shared_support_controls` (on by default for new analyses). It restricts controls
+to treatment values for numeric covariates constant within an eligible matching stratum;
+it does not enable Mahalanobis fallback. The checkbox is saved and restored
+with presets, and pre-filled when recomputing a task. Older presets without
+this setting load it as off.
 The unified preset migration discards the old separate covariate and
 matching-settings presets.
 

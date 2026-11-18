@@ -13,8 +13,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 
-def digest(path: Path) -> str:
-    hasher = hashlib.sha256()
+def digest(path: Path, algorithm: str = "sha256") -> str:
+    hasher = hashlib.new(algorithm, usedforsecurity=algorithm != "md5")
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             hasher.update(block)
@@ -100,7 +100,7 @@ class Store:
             )
         return sorted(result)
 
-    def commit(self, path: Path, key: str) -> None:
+    def commit(self, path: Path, key: str) -> dict:
         """Publish immutable data first, then its small conditional receipt."""
         key = self._key(key)
         receipt_key = key + ".receipt.json"
@@ -109,7 +109,7 @@ class Store:
         if existing is not None:
             if existing["sha256"] != checksum:
                 raise ValueError(f"Conflicting artifact commit: {key}")
-            return
+            return existing
         object_key = f"objects/{uuid.uuid4()}/{path.name}"
         if self.root is not None:
             import shutil
@@ -135,10 +135,11 @@ class Store:
                 "ConditionalRequestConflict",
             ):
                 raise
-            if self.json(receipt_key) != receipt:
-                previous = self.json(receipt_key)
-                if previous is None or previous["sha256"] != checksum:
-                    raise ValueError(f"Concurrent conflicting commit: {key}") from exc
+            previous = self.json(receipt_key)
+            if previous is None or previous["sha256"] != checksum:
+                raise ValueError(f"Concurrent conflicting commit: {key}") from exc
+            return previous
+        return receipt
 
     def restore(self, key: str, path: Path) -> None:
         receipt = self.json(key + ".receipt.json")
@@ -154,7 +155,7 @@ class Store:
             self.client.download_file(
                 self.bucket, f"{self.prefix}/{object_key}", str(path)
             )
-        if digest(path) != receipt["sha256"]:
+        if path.stat().st_size != receipt["size"] or digest(path) != receipt["sha256"]:
             path.unlink()
             raise ValueError(f"Corrupt artifact: {key}")
 

@@ -636,6 +636,33 @@ def submit_layout(user, recompute_config=None):
                                                                                     dbc.Col(
                                                                                         [
                                                                                             dbc.Checkbox(
+                                                                                                id="shared-support-controls",
+                                                                                                label="Restrict controls to shared support",
+                                                                                                value=rc.get(
+                                                                                                    "shared_support_controls",
+                                                                                                    ANALYSIS_DEFAULTS[
+                                                                                                        "shared_support_controls"
+                                                                                                    ],
+                                                                                                ),
+                                                                                            ),
+                                                                                            html.Small(
+                                                                                                "Before sampling, keep only controls that equal treatment values "
+                                                                                                "for numeric covariates constant across the eligible treatment "
+                                                                                                "stratum. This can recover shared-zero cases without removing "
+                                                                                                "covariates or changing the matching method.",
+                                                                                                className="text-muted",
+                                                                                            ),
+                                                                                        ],
+                                                                                        xs=12,
+                                                                                    ),
+                                                                                ],
+                                                                                className="g-3 mt-1",
+                                                                            ),
+                                                                            dbc.Row(
+                                                                                [
+                                                                                    dbc.Col(
+                                                                                        [
+                                                                                            dbc.Checkbox(
                                                                                                 id="separation-fallback-mahalanobis",
                                                                                                 label="Use Mahalanobis distance when GLM separation detected",
                                                                                                 value=rc.get(

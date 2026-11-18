@@ -72,6 +72,7 @@ ANALYSIS_DEFAULTS = {
     "max_controls_per_treatment": 1,
     "min_control_distance_km": 10,
     "separation_fallback_mahalanobis": False,
+    "shared_support_controls": True,
     "matching_method": "optimal",
     "n_replicates": 1,
     "match_batch_size": 25,
@@ -114,6 +115,7 @@ def queue_analysis_task(
     session_id=None,
     submitter_email=None,
     submitter_name=None,
+    shared_support_controls=ANALYSIS_DEFAULTS["shared_support_controls"],
 ):
     """Create an analysis task record and queue it for async submission.
 
@@ -133,6 +135,8 @@ def queue_analysis_task(
     Raises ``ValueError`` for validation failures so the caller can
     surface them to the user before any DB work is done.
     """
+    if type(shared_support_controls) is not bool:
+        raise ValueError("shared_support_controls must be a boolean")
     if not exact_match_vars:
         raise ValueError(
             "At least one exact match variable must be selected "
@@ -231,6 +235,7 @@ def queue_analysis_task(
                 "separation_fallback_mahalanobis": bool(
                     separation_fallback_mahalanobis
                 ),
+                "shared_support_controls": shared_support_controls,
                 "matching_method": matching_method,
                 "n_replicates": n_replicates,
                 "match_batch_size": match_batch_size,
@@ -347,6 +352,9 @@ def _complete_analysis_task_submission(task_id, user_id):
         separation_fallback_mahalanobis = config.get(
             "separation_fallback_mahalanobis", False
         )
+        shared_support_controls = config.get("shared_support_controls", False)
+        if type(shared_support_controls) is not bool:
+            raise ValueError("shared_support_controls must be a boolean")
         matching_method = config.get(
             "matching_method", ANALYSIS_DEFAULTS["matching_method"]
         )
@@ -801,6 +809,7 @@ def _complete_analysis_task_submission(task_id, user_id):
             "max_controls_per_treatment": max_controls_per_treatment,
             "min_control_distance_km": min_control_distance_km,
             "separation_fallback_mahalanobis": bool(separation_fallback_mahalanobis),
+            "shared_support_controls": shared_support_controls,
             "matching_method": matching_method,
             "n_replicates": n_replicates,
             "replicate_block_size": min(
@@ -1746,13 +1755,14 @@ def _atom_metadata_values(gdf):
 
 
 def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=None):
-    """Download result CSV from S3 for a completed task.
+    """Download a result artifact from S3 for a completed task.
 
     Args:
         task_id: The task UUID.
         result_type: One of 'by_site_year', 'by_site_total', 'pixel_level',
             'match_covariates', 'balance', 'propensity_scores',
-            'match_quality_summary', 'matched_pixels'.
+            'match_quality_summary', 'matched_pixels', 'matching_diagnostics',
+            'matching_diagnostics_summary', 'matching_replay_manifest'.
         results_s3_uri: Optional ``s3://bucket/prefix`` URI pointing to the
             output directory.  When provided the bucket and prefix are
             extracted from this URI instead of being derived from
@@ -1763,7 +1773,7 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
             in the database before constructing a default path.
 
     Returns:
-        CSV content as string, or None if not found.
+        Result text (CSV/JSON), gzip bytes, or None if not found.
     """
     filename_map = {
         "by_site_year": "results_by_site_year.csv",
@@ -1778,6 +1788,9 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         "site_identity": "site_identity.csv",
         "atom_replicates": "results_by_atom_replicate_year.csv",
         "atom_status": "results_atom_status.csv",
+        "matching_diagnostics": "results_matching_diagnostics.jsonl.gz",
+        "matching_diagnostics_summary": "results_matching_diagnostics_summary.json",
+        "matching_replay_manifest": "results_matching_replay_manifest.json",
     }
     filename = filename_map.get(result_type)
     if not filename:
@@ -1818,7 +1831,8 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
 
     try:
         response = s3.get_object(Bucket=bucket, Key=key)
-        return response["Body"].read().decode("utf-8")
+        content = response["Body"].read()
+        return content if filename.endswith(".gz") else content.decode("utf-8")
     except s3.exceptions.NoSuchKey:
         return None
 

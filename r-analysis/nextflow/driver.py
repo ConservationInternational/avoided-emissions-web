@@ -18,12 +18,12 @@ from pathlib import Path
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from nextflow_worker import ANALYSIS_FIELDS
+from nextflow_worker import ANALYSIS_FIELDS, diagnostics_contract
 from workflow_store import Store
 
 log = logging.getLogger(__name__)
 WORKFLOW = Path(__file__).with_name("main.nf")
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 JOB_ID = re.compile(r"submitted > job=([0-9a-f-]{36});")
 ACTIVE_JOB_STATUSES = {"SUBMITTED", "PENDING", "RUNNABLE", "STARTING", "RUNNING"}
 PROGRESS_INTERVAL_SECONDS = 60
@@ -111,6 +111,8 @@ def prepare(client, store: Store, params: dict, image: str, resume: bool) -> dic
         raise ValueError("The analysis image must be pinned to a SHA256 digest")
     if "_workflow" in params:
         raise ValueError("Client-supplied workflow runtime configuration is forbidden")
+    shared_support_controls = params.get("shared_support_controls", True)
+    contract = diagnostics_contract({"shared_support_controls": shared_support_controls})
     memory = params.get(
         "match_memory_mib", bounded_env("AE_NEXTFLOW_MATCH_MEMORY_MIB", 30720, 122880)
     )
@@ -141,24 +143,17 @@ def prepare(client, store: Store, params: dict, image: str, resume: bool) -> dic
                 "Workflow already initialized; explicit resume is required"
             )
         analysis = existing["analysis"]
-        if existing["image"] != image or existing["version"] != VERSION:
-            analysis = {
-                **analysis,
-                "_workflow": {
-                    **analysis["_workflow"],
-                    "group_namespace": hashlib.sha256(
-                        canonical({"image": image, "version": VERSION})
-                    ).hexdigest(),
-                },
-            }
-            log.warning(
-                "Resuming with worker image %s instead of %s and workflow version "
-                "%s instead of %s; reusing existing checkpoints without "
-                "compatibility checks",
-                image,
-                existing["image"],
-                VERSION,
-                existing["version"],
+        # A resume uses the original policy, not the current new-task default.
+        if "shared_support_controls" not in params:
+            contract = diagnostics_contract(analysis)
+        if (
+            existing["image"] != image
+            or existing["version"] != VERSION
+            or analysis["_workflow"].get("diagnostics_contract") != contract
+        ):
+            raise ValueError(
+                "Resume rejected: incompatible image, workflow version or diagnostic "
+                "contract; submit a fresh task"
             )
         return analysis
     if resume:
@@ -186,6 +181,7 @@ def prepare(client, store: Store, params: dict, image: str, resume: bool) -> dic
     analysis["random_seed"] = (
         int(seed) if seed is not None else secrets.randbelow(2**30)
     )
+    analysis["shared_support_controls"] = shared_support_controls
     analysis["sites_parquet_s3_uri"] = f"s3://{store.bucket}/{frozen_key}"
     analysis.pop("sites_s3_uri", None)
     results_uri = params["results_s3_uri"]
@@ -197,6 +193,7 @@ def prepare(client, store: Store, params: dict, image: str, resume: bool) -> dic
                 "inputs": current_inputs,
                 "image": image,
                 "version": VERSION,
+                "diagnostics_contract": contract,
             }
         )
     ).hexdigest()
@@ -206,6 +203,9 @@ def prepare(client, store: Store, params: dict, image: str, resume: bool) -> dic
         "results_uri": results_uri,
         "match_memory_mib": memory,
         "initial_queue": initial_queue,
+        "diagnostics_contract": contract,
+        "analysis_image": image,
+        "workflow_version": VERSION,
     }
     store.write_json(
         "snapshot.json",

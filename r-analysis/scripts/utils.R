@@ -175,6 +175,14 @@ parse_config <- function(args = commandArgs(trailingOnly = TRUE)) {
 
     config <- fromJSON(config_path)
     config$config_path <- config_path
+    # Vector simplification turns JSON [true] into TRUE and masks invalid input.
+    shared_support <- if ("shared_support_controls" %in% names(config)) {
+        read_json(config_path, simplifyVector = FALSE)$shared_support_controls
+    } else TRUE
+    if (!is.logical(shared_support) || length(shared_support) != 1L || is.na(shared_support)) {
+        stop("shared_support_controls must be a boolean")
+    }
+    config$shared_support_controls <- shared_support
 
     # Override data_dir if provided on command line
     if (!is.null(data_dir)) {

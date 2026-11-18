@@ -7,6 +7,7 @@ library(dplyr, warn.conflicts = FALSE)
 CARBON_FRACTION <- 0.5
 CO2_PER_CARBON <- 44 / 12
 PRE_INTERVENTION_YEARS <- 5
+MATCH_DIAGNOSTICS_SCHEMA_VERSION <- 1L
 
 
 # -- Timing ------------------------------------------------------------------
@@ -35,6 +36,34 @@ defor_pre_intervention <- function(vals, start_year, fc_years) {
 
 
 # -- Sampling and matching ---------------------------------------------------
+
+restrict_shared_support <- function(d, f) {
+    # Operate on one entire eligible stratum. Only bare numeric terms qualify.
+    labels <- attr(terms(f), "term.labels")
+    direct <- lapply(labels, str2lang)
+    vars <- vapply(direct[vapply(direct, is.symbol, logical(1))], as.character, character(1))
+    t <- d$treatment
+    retained <- rep(TRUE, sum(!t))
+    constraints <- list()
+    if (any(t)) for (v in vars) {
+        x <- d[[v]]
+        if (!is.numeric(x) || is.factor(x) || !is.null(dim(x))) next
+        tx <- x[t]
+        value <- tx[[1]]
+        if (!all(is.finite(tx)) || !all(tx == value)) next
+        cx <- x[!t]
+        keep <- is.finite(cx) & cx == value
+        constraints[[v]] <- list(value = value, n_controls_removed = sum(!keep))
+        retained <- retained & keep
+    }
+    rows <- rep(TRUE, nrow(d))
+    rows[!t] <- retained
+    list(
+        data = d[rows, , drop = FALSE], retained_rows = rows, constraints = constraints,
+        n_treatment = sum(t), n_controls_before = sum(!t),
+        n_controls_retained = sum(retained), n_controls_removed = sum(!retained)
+    )
+}
 
 sample_strata <- function(vals, max_treatment, control_multiplier) {
     # Sample up to max_treatment treatment pixels per exact-match stratum and
@@ -109,6 +138,7 @@ check_separation <- function(d, f) {
     categorical <- factor_vars(f)
     problems <- character(0)
     problem_vars <- character(0)
+    evidence <- list()
     for (v in setdiff(all.vars(f), "treatment")) {
         t_vals <- d[[v]][d$treatment]
         c_vals <- d[[v]][!d$treatment]
@@ -116,6 +146,9 @@ check_separation <- function(d, f) {
             only_t <- setdiff(unique(as.character(t_vals)), as.character(c_vals))
             only_c <- setdiff(unique(as.character(c_vals)), as.character(t_vals))
             if (length(only_t) + length(only_c) > 0) {
+                evidence[[v]] <- list(type = "exclusive_levels",
+                                      only_treatment = as.list(only_t),
+                                      only_control = as.list(only_c))
                 problem_vars <- c(problem_vars, v)
                 problems <- c(problems, paste0(
                     v, ": ", length(only_t), " level(s) only in treatment, ",
@@ -128,6 +161,13 @@ check_separation <- function(d, f) {
             constant <- t_range[1] == t_range[2] && c_range[1] == c_range[2] &&
                 t_range[1] == c_range[1]
             if (!constant && (c_range[2] <= t_range[1] || t_range[2] <= c_range[1])) {
+                evidence[[v]] <- list(
+                    type = if (t_range[1] == c_range[2] || c_range[1] == t_range[2]) {
+                        "range_boundary"
+                    } else "range_gap",
+                    treatment_min = t_range[1], treatment_max = t_range[2],
+                    control_min = c_range[1], control_max = c_range[2]
+                )
                 problem_vars <- c(problem_vars, v)
                 problems <- c(problems, paste0(
                     v, ": treatment [", signif(t_range[1], 4), ", ",
@@ -140,25 +180,194 @@ check_separation <- function(d, f) {
     list(
         separated = length(problems) > 0,
         details = problems,
-        sep_vars = unique(problem_vars)
+        sep_vars = unique(problem_vars),
+        evidence = evidence
     )
 }
 
 
-fit_propensity <- function(f, d) {
-    # Logistic propensity model.  Non-convergence or fitted probabilities of
-    # 0/1 indicate (multivariable) separation, so `separated` is TRUE.
-    warned <- FALSE
-    model <- withCallingHandlers(
-        glm(f, data = d, family = binomial()),
+condition_diagnostic <- function(cnd) {
+    list(message = conditionMessage(cnd), classes = as.list(class(cnd)))
+}
+
+
+capture_match_conditions <- function(expr) {
+    warnings <- list()
+    error <- NULL
+    value <- tryCatch(withCallingHandlers(
+        expr,
         warning = function(w) {
-            if (grepl("converge|fitted probabilities", conditionMessage(w))) {
-                warned <<- TRUE
-                invokeRestart("muffleWarning")
-            }
+            warnings[[length(warnings) + 1L]] <<- condition_diagnostic(w)
+            invokeRestart("muffleWarning")
         }
+    ), error = function(e) {
+        error <<- condition_diagnostic(e)
+        NULL
+    })
+    list(value = value, warnings = warnings, error = error)
+}
+
+
+arm_summary <- function(x, categorical = FALSE) {
+    numeric <- is.numeric(x) && !categorical && !is.factor(x)
+    finite <- if (is.numeric(x)) is.finite(x) else !is.na(x)
+    y <- x[finite]
+    n <- length(y)
+    out <- list(n = length(x), n_finite = n, n_missing = sum(is.na(x)),
+                n_nonfinite = sum(!finite & !is.na(x)), n_unique = length(unique(y)))
+    if (numeric) {
+        out <- c(out, list(
+            min = if (n) min(y) else NA_real_,
+            max = if (n) max(y) else NA_real_,
+            mean = if (n) mean(y) else NA_real_,
+            sd = if (n > 1L) sd(y) else NA_real_,
+            quartiles = as.list(if (n) unname(quantile(y, c(.25, .5, .75))) else rep(NA_real_, 3)),
+            n_zero = sum(y == 0)
+        ))
+    }
+    if (categorical || is.factor(x) || is.character(x) || is.logical(x)) {
+        counts <- table(x)
+        out$level_counts <- lapply(seq_along(counts), function(i) {
+            list(level = names(counts)[[i]], n = as.integer(counts[[i]]))
+        })
+    }
+    out
+}
+
+
+covariate_diagnostics <- function(d, f) {
+    vars <- setdiff(all.vars(f), "treatment")
+    factors <- factor_vars(f)
+    setNames(lapply(vars, function(v) {
+        x <- d[[v]][d$treatment]
+        y <- d[[v]][!d$treatment]
+        categorical <- v %in% factors
+        ts <- arm_summary(x, categorical)
+        cs <- arm_summary(y, categorical)
+        valid <- function(a) if (is.numeric(a)) a[is.finite(a)] else a[!is.na(a)]
+        x <- valid(x)
+        y <- valid(y)
+        shared <- intersect(x, y)
+        list(treatment = ts, control = cs, n_shared_values = length(shared),
+             n_treatment_at_shared_values = sum(x %in% shared),
+             n_control_at_shared_values = sum(y %in% shared))
+    }), vars)
+}
+
+
+fit_propensity <- function(f, d) {
+    # Preserve the existing rejection criterion, not "any GLM warning".
+    lp <- NULL
+    model <- NULL
+    warned <- FALSE
+    phase <- "fit"
+    captured <- capture_match_conditions(withCallingHandlers({
+        model <- glm(f, data = d, family = binomial())
+        if (!warned && isTRUE(model$converged)) {
+            phase <- "predict"
+            lp <- predict(model, type = "link")
+        }
+    }, warning = function(w) {
+        if (phase == "fit" && grepl("converge|fitted probabilities", conditionMessage(w))) {
+            warned <<- TRUE
+        }
+    }))
+    cause <- if (!is.null(captured$error)) {
+        "glm_error"
+    } else if (!isTRUE(model$converged)) {
+        "glm_nonconvergence"
+    } else if (warned) {
+        "glm_warning"
+    } else NULL
+    by_arm <- function(x, probabilities = FALSE) {
+        if (is.null(x)) return(NULL)
+        # Align the model frame to sampled treatment, including fits that
+        # subsequently fail on prediction.
+        treated <- d$treatment[match(rownames(model$model), rownames(d))]
+        arm <- function(y) {
+            out <- arm_summary(y)
+            if (probabilities) {
+                eps <- 10 * .Machine$double.eps  # glm.fit's warning boundary
+                y <- y[is.finite(y)]
+                out$n_one <- sum(y == 1)
+                out$n_near_zero <- sum(y < eps)
+                out$n_near_one <- sum(y > 1 - eps)
+            }
+            out
+        }
+        list(treatment = arm(x[treated]), control = arm(x[!treated]))
+    }
+    coefs <- if (!is.null(model)) coef(model) else NULL
+    list(
+        model = model, lp = lp, separated = warned || (!is.null(model) && !model$converged),
+        cause = cause, diagnostics = list(
+            warnings = captured$warnings, error = captured$error,
+            error_phase = if (!is.null(captured$error)) phase else NULL,
+            converged = model$converged, iterations = model$iter, rank = model$rank,
+            df_residual = model$df.residual, coefficients = as.list(coefs),
+            aliased_coefficients = as.list(names(coefs)[is.na(coefs)]),
+            fitted_probabilities = by_arm(model$fitted.values, probabilities = TRUE),
+            linear_predictors = by_arm(model$linear.predictors)
+        )
     )
-    list(model = model, separated = warned || !model$converged)
+}
+
+
+verify_match_replay_environment <- function(provenance, scripts_dir) {
+    if (!identical(provenance$r_version, R.version.string)) {
+        stop("Replay R version mismatch: recorded ", provenance$r_version,
+             "; running ", R.version.string)
+    }
+    for (pkg in names(provenance$package_versions)) {
+        actual <- tryCatch(as.character(utils::packageVersion(pkg)), error = function(e) "<missing>")
+        if (!identical(provenance$package_versions[[pkg]], actual)) {
+            stop("Replay package version mismatch: ", pkg, " recorded ",
+                 provenance$package_versions[[pkg]], "; installed ", actual)
+        }
+    }
+    files <- c("02_perform_matching.R", "stats_functions.R", "utils.R")
+    for (file in files) {
+        actual <- unname(tools::md5sum(file.path(scripts_dir, file)))
+        if (is.na(actual) || !identical(provenance$code_md5[[file]], actual)) {
+            stop("Replay code checksum mismatch: ", file)
+        }
+    }
+}
+
+
+replay_match_propensity <- function(sample_file, group, rng = NULL, scripts_dir = NULL) {
+    sample <- readRDS(sample_file)
+    if (!identical(sample$compatibility$diagnostics_schema_version,
+                   MATCH_DIAGNOSTICS_SCHEMA_VERSION)) stop("Incompatible matching replay sample")
+    # Supply the original script directory to require exact R/package/code
+    # identity instead of replaying in the caller's current environment.
+    if (!is.null(scripts_dir)) verify_match_replay_environment(sample$provenance, scripts_dir)
+    d <- as.data.frame(sample$data[as.character(sample$data$group) == group, , drop = FALSE])
+    if (nrow(d) == 0L) stop("Replay group not found in sample: ", group)
+    d$group <- as.character(d$group)
+    rownames(d) <- NULL
+    old_rng <- get0(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+    old_kind <- RNGkind()
+    old_options <- options(sample$provenance$model_options)
+    old_locale <- Sys.getlocale("LC_MESSAGES")
+    on.exit({
+        options(old_options)
+        Sys.setlocale("LC_MESSAGES", old_locale)
+        do.call(RNGkind, as.list(old_kind))
+        if (!is.null(old_rng)) {
+            assign(".Random.seed", old_rng, envir = .GlobalEnv)
+        } else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+            rm(".Random.seed", envir = .GlobalEnv)
+        }
+    })
+    Sys.setlocale("LC_MESSAGES", sample$provenance$locale_messages)
+    do.call(RNGkind, as.list(sample$provenance$rng_kind))
+    if (is.null(rng)) rng <- sample$rng
+    if (!is.null(rng)) assign(".Random.seed", as.integer(unlist(rng)), envir = .GlobalEnv)
+    mf <- drop_constant_terms(as.formula(sample$formula), d)
+    separation <- check_separation(d, mf)
+    fit <- if (!separation$separated) fit_propensity(mf, d) else NULL
+    list(formula = mf, separation = separation, glm = fit, provenance = sample$provenance)
 }
 
 

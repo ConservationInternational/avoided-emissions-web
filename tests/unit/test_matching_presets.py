@@ -45,14 +45,23 @@ def settings():
         "min_control_distance_km": 0,
         "matching_method": "nearest",
         "separation_fallback_mahalanobis": False,
+        "shared_support_controls": True,
         "n_replicates": 5,
         "match_memory_gb": 60,
         "matching_job_queue": "ae-spot-gp3",
     }
 
 
-def test_form_preset_round_trip(monkeypatch, sample_user_id, settings):
-    user = SimpleNamespace(id=sample_user_id, name="User", is_admin=False)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_form_preset_round_trip(monkeypatch, sample_user_id, settings, enabled):
+    settings["shared_support_controls"] = enabled
+    user = SimpleNamespace(
+        id=sample_user_id,
+        name="User",
+        is_admin=False,
+        session_id="session",
+        email="user@example.test",
+    )
     monkeypatch.setattr(registration, "get_current_user", lambda: user)
     app = Dash(__name__, suppress_callback_exceptions=True)
     app.layout = html.Div([dcc.Location(id="url"), submit_layout(user)])
@@ -66,11 +75,16 @@ def test_form_preset_round_trip(monkeypatch, sample_user_id, settings):
             if metadata.get("callback")
             and metadata["callback"].__name__ == function_name
         )
+        outputs = metadata["output"]
         response = client.post(
             "/_dash-update-component",
             json={
                 "output": key,
-                "outputs": [output.to_dict() for output in metadata["output"]],
+                "outputs": (
+                    [output.to_dict() for output in outputs]
+                    if isinstance(outputs, list)
+                    else outputs.to_dict()
+                ),
                 "inputs": [
                     {**field, "value": values[field["id"]]}
                     for field in metadata["inputs"]
@@ -79,7 +93,9 @@ def test_form_preset_round_trip(monkeypatch, sample_user_id, settings):
                     {**field, "value": values[field["id"]]}
                     for field in metadata["state"]
                 ],
-                "changedPropIds": [f"{metadata['inputs'][0]['id']}.n_clicks"],
+                "changedPropIds": [
+                    f"{metadata['inputs'][0]['id']}.{metadata['inputs'][0]['property']}"
+                ],
             },
         )
         assert response.status_code == 200
@@ -128,12 +144,55 @@ def test_form_preset_round_trip(monkeypatch, sample_user_id, settings):
         assert loaded[name.replace("_", "-")]["value"] == value
     assert "random-seed" not in loaded
 
+    queue = Mock(return_value="task-1")
+    monkeypatch.setattr(registration, "queue_analysis_task", queue)
+    values = {
+        "task-name": "Shared support",
+        "task-description": "",
+        "parsed-sites-store": {"site_set_id": "sites-1"},
+        **{
+            name: props["value"]
+            for name, props in loaded.items()
+            if name != "preset-feedback"
+        },
+        "shared-support-controls": not enabled,
+        "random-seed": 123,
+        "resolution-m": "1000",
+    }
+    review = invoke(
+        "populate_review_summary",
+        {"submit-tabs": "tab-submit-review", **values},
+    )
+    assert "Shared-support controls" in str(review)
+    submitted = invoke("handle_submit", {"submit-task-button": 1, **values})
+    assert submitted["submit-errors"]["children"] is None
+    queue.assert_called_once()
+    assert queue.call_args.kwargs["shared_support_controls"] is not enabled
+
 
 @pytest.mark.parametrize("preset_id", [None, "missing"])
 def test_unselected_or_missing_preset_leaves_all_fields_unchanged(callbacks, preset_id):
     result = callbacks["load_preset"](1, preset_id, [{"id": "other"}])
-    assert len(result) == 15
+    assert len(result) == 16
     assert all(value is no_update for value in result[:-1])
+
+
+def test_legacy_preset_disables_shared_support(callbacks, settings):
+    settings.pop("shared_support_controls")
+    result = callbacks["load_preset"](
+        1,
+        "legacy",
+        [
+            {
+                "id": "legacy",
+                "name": "Legacy",
+                "covariates": ["elev"],
+                "exact_match_vars": ["pa"],
+                "settings": settings,
+            }
+        ],
+    )
+    assert result[11] is False
 
 
 @pytest.mark.parametrize("existing", [False, True])
