@@ -1,11 +1,11 @@
 # Matching Methodology and Parameters
 
-The analysis estimates *avoided* deforestation by comparing what actually
-happened inside each conservation site (the **treatment**) against what would
-have happened without the intervention — estimated from a matched set of
-outside-site pixels (the **control**, not necessarily unprotected). This is done via **propensity score
-matching (PSM)**, which selects controls that look as similar as possible to
-treatment pixels on a set of pre-intervention covariates.
+The analysis estimates *avoided* deforestation by comparing observed forest
+loss inside each conservation site (the **treatment**) with a counterfactual
+estimated from matched outside-site pixels (the **controls**). Controls may
+be protected or unprotected, depending on the selected settings. **Propensity
+score matching (PSM)** selects controls with similar observed
+pre-intervention covariates.
 
 ## Contents
 
@@ -37,10 +37,9 @@ The propensity score is the probability that a pixel is a treatment pixel
 $$e(X) = P(\text{treatment} = 1 \mid X)$$
 
 This single number summarises the multivariate covariate profile of each
-pixel. By matching treatment pixels to control pixels with similar propensity
-scores, we produce a comparison group that is balanced on the observed
-covariates. This improves observed comparability but does not make the
-comparison a randomised experiment or account for unmeasured confounding.
+pixel. Matching treatment and control pixels with similar scores improves
+comparability on observed covariates. Treatment assignment remains
+observational, and unmeasured confounding can remain.
 
 ### GLM-based propensity scores
 
@@ -95,8 +94,8 @@ A pixel is eligible for matching when it has forest cover in the site's
 baseline year (`start_year − 6`, or the first forest-cover year if earlier),
 complete covariate and outcome data (`total_biomass_2000`, `fc_2000`, and every
 forest-cover year), and a value for every exact-match variable. Treatment and
-control pixels use the same rules. Pixels without forest at baseline cannot
-lose forest, so including them would bias the comparison.
+control pixels use the same rules. Pixels without forest at baseline are
+ineligible because they cannot lose forest.
 
 ### Pre-intervention deforestation covariate
 
@@ -117,7 +116,7 @@ intervention-period outcome influences the matches.
 
 | Method | Package | Algorithm | Notes |
 |---|---|---|---|
-| `optimal` | `optmatch` | Network flow optimisation (RELAX-IV solver) | Minimises total absolute propensity score distance across all matched pairs globally; slower but produces better overall balance |
+| `optimal` | `optmatch` | Network flow optimisation (RELAX-IV solver) | Minimises total absolute propensity score distance across all matched pairs globally; typically requires more time and memory |
 | `nearest` | `MatchIt` | Greedy nearest-neighbour | Faster; matches each treatment pixel to the closest available control in propensity score space; can leave some treatment pixels poorly matched if controls are scarce |
 
 For most analyses `"optimal"` is recommended. Use `"nearest"` if the site
@@ -163,10 +162,10 @@ Controls how many control pixels are matched to each treatment pixel.
 | `k > 1` | k controls per treatment pixel |
 | `0` | Full matching — variable-ratio matched sets, subject to eligibility and distance constraints. Requires `matching_method = "optimal"` |
 
-Increasing the ratio increases statistical power (more matched pairs) at the
-cost of potentially worse per-pair balance. Full matching (`0`) is the most
-flexible option and often achieves the best overall balance, but matched-set
-weights must be applied carefully downstream.
+Increasing the ratio includes more controls per treatment pixel and may
+increase information, with the possibility of worse per-pair balance. Full
+matching (`0`) allows variable-ratio sets and often achieves strong overall
+balance. Apply matched-set weights in downstream calculations.
 
 Within each matched set, treatment pixels have weight 1 and control weights
 are scaled so that total control weight equals the number of treatment
@@ -186,23 +185,19 @@ same stratum for each exact-match variable. For example, with
 ecoregion can only be matched to control pixels also in the Amazon
 ecoregion.
 
-This prevents spurious matches across ecologically or administratively
-distinct regions where the relationships between covariates and
-deforestation are fundamentally different.
+This avoids comparisons across ecologically or administratively distinct
+regions where covariate relationships with deforestation may differ.
 
-**Trade-off**: More exact-match variables reduce the available control pool
-within each stratum. If a site is the only protected area in its
-country × ecoregion combination there may be no eligible controls, and the
-site will be excluded from the analysis.
+More exact-match variables reduce the available control pool within each
+stratum. If a site is the only protected area in its country × ecoregion
+combination, it may have no eligible controls and be excluded.
 
-To use `ecoregion` or `pa` as a covariate rather than a stratification
-variable, add it to the covariate list instead of the exact-match list (a
-variable cannot be both). These two variables are marked as *dual-purpose* in
-the UI.
+`ecoregion` and `pa` can each serve as a covariate or a stratification
+variable. Select one role for each; the UI marks them as *dual-purpose*.
 
-Exact matching on `pa` matches protected treatment pixels to controls in
-other protected areas, not to unprotected land. Leave `pa` out of the
-exact-match list when the comparison should include unprotected controls.
+Exact matching on `pa` compares protected treatment pixels with controls in
+other protected areas. Leave `pa` out of the exact-match list to allow
+unprotected controls.
 
 If site polygons overlap, each overlapping pixel is assigned to only one site
 (the last one rasterized).
@@ -260,10 +255,10 @@ sampling ceiling, not a minimum required pool size. Strata without remaining
 controls are explicitly unmatchable. GLM separation handling, calipers,
 control-distance exclusions, and all-replicate inclusion rules are unchanged.
 
-Atoms retain their identity, but the model and restriction remain at the
-existing parent fragment/stratum level. Constancy in one atom or one random
-sample does not establish constancy across the eligible treatment stratum.
-This policy does not guarantee that small atoms are sampled in every replicate.
+Atoms retain their identity. The model and restriction remain at the existing
+parent fragment/stratum level. Constancy in one atom or one random sample does
+not establish constancy across the eligible treatment stratum. Small atoms may
+be unsampled in some replicates.
 Atom-level diagnostics distinguish that sampling omission from model failure.
 
 Both policies produce versioned diagnostics for every replicate, including
@@ -289,15 +284,14 @@ Step 3 aggregates each replicate separately, then reports the mean and the
 site total, and all sites). Bounds are never summed across sites or years.
 
 These bounds are the **range across matching replicates**: they reflect
-variability from pixel sampling and matching only. They are not confidence
-intervals for the avoided emissions, because they do not capture spatial
-dependence or model uncertainty. Fewer than 50 replicates gives imprecise
-bounds; the web app shows a warning.
+variability from pixel sampling and matching. They omit spatial dependence
+and model uncertainty, so they are not confidence intervals for avoided
+emissions. Fewer than 50 replicates gives imprecise bounds; the web app shows
+a warning.
 
 An exact-match stratum of a site fragment is included only if it has matches
 in every replicate. This keeps the represented population constant across
-replicates: a stratum missing from some replicates must not count as zero
-there. Excluded strata produce an `inconsistent_strata` warning; a fragment
+replicates. Excluded strata produce an `inconsistent_strata` warning; a fragment
 with no consistently matched stratum is reported as failed. Pixel downloads
 and balance diagnostics use the same included strata as the estimates.
 
@@ -316,8 +310,8 @@ from the control pool. This prevents matching treatment pixels against
 nearby unprotected pixels that may be influenced by spillover effects from
 the intervention (e.g. wildlife dispersal, edge effects).
 
-The buffer is computed once in extraction and rasterized using pixel centres,
-not recomputed in every match worker. Treatment pixels are retained.
+Extraction computes the buffer once and rasterizes it using pixel centres;
+treatment pixels remain eligible.
 Nearby geometries share local azimuthal-equidistant projections (5-degree
 tiles), rather than a global equal-area projection that distorts distances
 with latitude. Boundaries are simplified by at most the smaller of 100 m

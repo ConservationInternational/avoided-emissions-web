@@ -6,7 +6,7 @@ A causal interpretation requires that measured pre-intervention covariates
 adequately account for differences affecting both intervention placement and
 forest loss, with suitable overlap between treatment and controls.
 Unmeasured governance, tenure, enforcement, threats, and economic changes can
-violate that assumption. Matching is not random assignment.
+violate that assumption. Treatment assignment remains observational.
 
 Results principally concern the eligible treatment population in consistently
 matched strata. Extrapolation within a stratum assumes unmatched treatment
@@ -16,29 +16,29 @@ by larger weights.
 ## Temporal leakage
 
 A variable recorded after intervention can be an outcome of the intervention.
-Matching on it can bias the comparison. Review snapshot dates for population,
-accessibility, cropland, SDG indicators, and carbon layers rather than
-assuming every default is pre-intervention for every site.
+Matching on it can bias the comparison. Check population, accessibility,
+cropland, SDG, and carbon-layer dates against each intervention period.
 
-In particular, loss-masked 2025 biomass is not a historical emissions
-reference. The current pipeline requires unmasked year-2000 total biomass.
+The current pipeline requires unmasked year-2000 total biomass as its
+historical emissions reference. Loss-masked 2025 biomass represents remaining
+stock and can encode subsequent forest loss.
 
 ## Spatial dependence and interference
 
-Nearby pixels share environmental and social conditions. They are not
-independent experimental units. A distance buffer can reduce local spillover
-but does not prove that controls are unaffected by displacement, leakage,
-or other interventions.
+Nearby pixels share environmental and social conditions and have spatial
+dependence. A distance buffer reduces proximity to treatment sites. Residual
+spillovers, displacement, leakage, and other interventions can still affect
+controls.
 
-Grid resolution affects pixel counts, not the number of independent
-observations. Resampling coarse layers to 250 m does not create new source
-information.
+Smaller grid cells increase pixel counts; spatial dependence limits the
+corresponding increase in independent information. Resampling coarse layers
+to 250 m does not add source detail.
 
 ## Measurement and model uncertainty
 
 Source datasets have errors, incomplete coverage, changing versions, and
-different definitions. Hansen tree-cover loss is not synonymous with
-permanent deforestation; this pipeline's forest-cover series does not model
+different definitions. Hansen tree-cover loss does not always represent
+permanent deforestation. The pipeline's forest-cover series excludes
 regrowth. Biomass and carbon-conversion assumptions introduce additional
 uncertainty.
 
@@ -46,9 +46,9 @@ The logistic model, selected covariates, fallback policy, matching algorithm,
 caliper, and control geography affect estimates. Balance diagnostics reveal
 some problems but cannot validate all assumptions.
 
-Replicate quantiles reflect sampling and matching variability only. They are
-not confidence intervals and omit uncertainty from spatial dependence,
-measurement, model choice, and unmeasured confounding.
+Replicate quantiles summarize sampling and matching variability. They omit
+uncertainty from spatial dependence, measurement, model choice, and unmeasured
+confounding, so they should not be interpreted as confidence intervals.
 
 ## Reproducibility and historical results
 
@@ -58,9 +58,8 @@ revision, and diagnostic exports.
 
 Historical tasks or saved presets missing shared-support settings retain the
 legacy policy; new tasks normally enable `shared_support_v1`. Recomputing or
-resuming uses recorded policy where applicable. Compare the task's provenance
-with the current methodology rather than assuming old results used today's
-defaults or corrected biomass inputs.
+resuming uses recorded policy where applicable. Check task provenance to
+identify the settings, data, and biomass inputs used in older results.
 
 ## Scientific references
 
@@ -84,6 +83,6 @@ defaults or corrected biomass inputs.
 
 The [searchable variable reference](covariates.md) provides dataset-specific
 links, versions, units, processing, and caveats for every supported layer.
-Where the source version depends on an imported reference or externally
-prepared COG, inspect the task provenance rather than treating a publication
-date as the deployed artifact version.
+For imported references or externally prepared COGs, use task provenance to
+identify the deployed artifact version; publication dates alone may not
+identify it.

@@ -3,9 +3,9 @@
 ## The question
 
 How much forest loss, and associated carbon emissions, might a conservation
-site have experienced without its intervention? We can observe what happened
-inside the site, but not the alternative history of the same place without
-the intervention. That alternative is the **counterfactual**.
+site have experienced without its intervention? The **counterfactual** is the
+site's unobserved forest-loss and emissions history in a world without the
+intervention.
 
 The app estimates a counterfactual using comparison pixels outside all
 submitted treatment sites. It chooses pixels with similar observed
@@ -26,9 +26,10 @@ pre-intervention forest loss. This is called **matching**.
 5. **Check credibility.** Review [balance, coverage, and warnings](interpreting-results.md)
    before interpreting the estimated effect.
 
-Candidate controls are not necessarily unprotected land. For example, exact
-matching on protected-area status can compare a protected treatment site
-with other protected areas. The selected settings define the comparison.
+Candidate controls can be protected or unprotected, depending on the selected
+matching settings. Exact matching on protected-area status, for example,
+compares a protected treatment site with controls that are also protected.
+The selected settings define the comparison.
 
 ## A small example
 
@@ -40,25 +41,24 @@ The estimated avoided forest loss is **5 - 2 = 3 hectares**. If the treatment
 and counterfactual emissions are 400 and 900 MgCO2e respectively, estimated
 avoided emissions are **900 - 400 = 500 MgCO2e**.
 
-These illustrative numbers are already weighted totals. In real analyses,
-biomass varies among pixels: avoided emissions are computed from pixel
-outcomes, not by multiplying avoided hectares by an arbitrary carbon factor.
+These illustrative numbers are already weighted totals. Real analyses compute
+emissions from each pixel's forest loss and biomass, then apply matching and
+sampling weights to the pixel outcomes.
 
 A negative estimate means treatment loss or emissions exceeded the matched
-counterfactual. It should not be hidden or interpreted as proof that the
-intervention caused harm.
+counterfactual. Report it transparently; it does not by itself establish that
+the intervention caused harm.
 
-## What this estimate does and does not establish
+## Interpreting the estimate
 
-Matching improves comparability on measured characteristics. It does **not**
-turn an observational comparison into a randomized experiment. Unmeasured
-drivers, inappropriate time periods, poor overlap, or spillovers can still
-bias results.
+Matching improves comparability on measured characteristics. Treatment
+assignment remains observational, so unmeasured drivers, inappropriate time
+periods, poor overlap, or spillovers can still bias results.
 
 Estimates represent eligible pixels in strata matched in every replicate,
-not automatically the entire submitted site. Repeating the matching measures
-sampling and matching variability; its ranges are **not confidence intervals**
-and do not capture all scientific uncertainty.
+which may cover part of the submitted site. Repeated matching measures
+sampling and matching variability. Its ranges omit other scientific
+uncertainty and should not be interpreted as confidence intervals.
 
 Read the [detailed methodology](matching.md) for the calculation and the
 [limitations](limitations.md) before making causal or accounting claims.

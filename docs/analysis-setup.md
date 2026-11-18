@@ -10,7 +10,7 @@ Upload reusable site sets through **Admin > Site Uploads**, then select a site
 set on the **Task & Sites** tab. Supported inputs include GeoJSON, GeoPackage,
 and supported vector datasets in ZIP/TAR archives. Map the source columns:
 only the intervention start date is required; IDs, names, and end dates are
-optional. Use explicit dates, not numeric years or spreadsheet serial dates.
+optional. Enter dates as explicit calendar dates (YYYY-MM-DD).
 
 Geometries must be polygons or multipolygons. GeoJSON uses EPSG:4326; other
 formats must declare their CRS. Preparation validates geometry, filters whole
@@ -28,16 +28,17 @@ available forest years, especially for very early interventions.
 The grids are EPSG:4326 at 30 and 7.5 arc-seconds, aligned to the same origin.
 Actual cell dimensions and areas vary with latitude.
 
-A finer grid creates more pixels and can increase runtime and cost; it does
-not add detail to a coarser source dataset. The form only lists covariates
-ready at the selected resolution. A documented layer may not yet be deployed
-at both resolutions.
+The selected grid determines output pixel size. Source resolution determines
+the detail available in each layer; resampling cannot add source information.
+The form lists covariates ready at the selected resolution, and availability
+can differ between the 1 km and 250 m grids.
 
 ## Presets
 
 Save and load covariates, exact-match variables, and matching settings together.
-Review the loaded settings and layer availability before submission. A preset
-does not freeze datasets or guarantee a scientifically appropriate comparison.
+Review the loaded settings and layer availability before submission. Presets
+store configuration; data versions and scientific suitability still require
+review.
 
 Historical presets without shared-support settings use the legacy policy.
 Recomputing a task retains its recorded policy and settings while generating
@@ -49,11 +50,11 @@ Choose variables describing both treatment selection and forest-loss risk.
 Use the [variable reference](covariates.md) to check sources, dates, units,
 processing, and limitations before selection.
 
-Avoid variables measured after intervention when they may have been affected
-by it. Default selection is a starting point, not a guarantee of
-pre-intervention timing: population snapshots and growth periods may overlap
-early interventions. More variables can improve comparability but also cause
-missing-data exclusions, poor overlap, separation, or excessive model complexity.
+Check whether each variable was measured before the intervention and could
+have been affected by it. Population snapshots and growth periods may overlap
+early interventions. The default selection provides a starting point. Adding
+variables may improve comparability while increasing missing-data exclusions,
+overlap problems, separation, or model complexity.
 
 Forest-cover outcomes and the historical biomass input are extracted
 automatically. Pre-intervention deforestation is automatically added when the
@@ -65,25 +66,25 @@ Choose at least one of country (`admin0`), province/state (`admin1`), district
 (`admin2`), ecoregion, and protected-area status (`pa`). The initial selection
 is `admin1`, `ecoregion`, and `pa`.
 
-Exact matching forces equality on all selected attributes. It prevents
-cross-region comparisons, but can leave no eligible controls.
+Exact matching forces equality on all selected attributes, avoiding
+cross-region comparisons while reducing the eligible control pool.
 `ecoregion` and `pa` can be predictors **or** exact-match constraints, never
 both simultaneously. Other administrative IDs are exact-match constraints.
 
 The protected-area mask includes IUCN categories Ia-IV only. Matching on
-`pa` can compare protected treatment to other protected controls.
-Omit that constraint if unprotected controls should be eligible; this does
-not itself exclude protected controls from the pool.
+`pa` compares protected treatment to protected controls. Omitting that
+constraint admits both protected and unprotected controls, subject to the
+other matching restrictions.
 
 ## Max treatment pixels
 
 **Default: {{max_treatment_pixels}}. Form range: 1-100,000, integer.**
 Maximum treatment pixels sampled without replacement per exact-match stratum
-of each site fragment, not a single cap across the entire submitted site.
+of each site fragment. Each stratum has its own cap.
 
-Larger samples can improve representation but make optimal matching expensive.
-Review sampling fractions and match rates; a large requested sample does not
-ensure all sampled treatment pixels can be matched.
+Larger samples can improve representation and increase optimal-matching
+runtime. Review sampling fractions and match rates to see how many treatment
+pixels obtained matches.
 
 ## Control multiplier
 
@@ -91,10 +92,10 @@ ensure all sampled treatment pixels can be matched.
 Sample up to this many candidate controls per sampled treatment pixel within
 each stratum.
 
-This is a candidate-pool ceiling, **not** the final controls-per-treatment
-ratio and not a minimum required number of controls. Increasing it gives the
-algorithm more choices at a memory and runtime cost. A scarce pool is not
-automatically a failure if feasible matches remain.
+This setting caps the candidate pool. The separate controls-per-treatment
+setting determines the final matched ratio. Eligibility may leave fewer
+candidates than the cap. Increasing the cap gives the algorithm more choices
+at a memory and runtime cost.
 
 ## Minimum site area
 
@@ -106,11 +107,11 @@ few eligible pixels for meaningful matching.
 ## Minimum GLM treatment pixels
 
 **Default: {{min_glm_treatment_pixels}}. Form range: 1-10,000, integer.**
-Below this sampled treatment count within a stratum, use Mahalanobis distance
-instead of fitting a logistic propensity model.
+When the sampled treatment count within a stratum falls below this threshold,
+the pipeline uses Mahalanobis distance and skips the logistic propensity model.
 
-This small-sample fallback does not require the separate separation-fallback
-checkbox. Mahalanobis matching has no propensity score and no caliper.
+This small-sample fallback applies independently of the separation-fallback
+checkbox. Mahalanobis matching has no propensity score or caliper.
 
 ## Caliper width
 
@@ -118,21 +119,22 @@ checkbox. Mahalanobis matching has no propensity score and no caliper.
 Maximum distance in units of the within-stratum standard deviation of the
 logit propensity score, across sampled treatment and controls.
 
-Set to **0** to disable. Tighter calipers can reject poor comparisons but
-reduce match rates or make a requested optimal ratio infeasible. A caliper
-does not apply to Mahalanobis or equal-distance matching.
+Set to **0** to disable. Tighter calipers can reject poor comparisons, reduce
+match rates, or make a requested optimal ratio infeasible. Calipers apply to
+propensity-score matching; Mahalanobis and equal-distance matching skip them.
 
 ## Controls per treatment
 
 **Default: {{max_controls_per_treatment}}. Form choices: 1, 3, 5, or 0
 (full matching).**
 
-The final matched-set ratio differs from the candidate-control multiplier.
-More controls can increase information but force worse matches. Controls are
-weighted so their total weight in a set equals the number of treatment pixels.
+The final matched-set ratio is set independently of the candidate-control
+multiplier. More controls can increase information and may worsen match
+quality. Controls are weighted so their total weight in a set equals the
+number of treatment pixels.
 
 Full matching permits variable-ratio sets and requires **optimal** matching.
-It does not override eligibility, exact-match restrictions, or calipers.
+Eligibility, exact-match restrictions, and calipers continue to apply.
 
 ## Minimum control distance
 
@@ -142,8 +144,8 @@ Set to **0** to disable. Larger buffers shrink the pool and may force more
 distant comparisons.
 
 Extraction computes approximate local-projection buffers and rasterizes them
-by pixel centre. This is not a guarantee of zero interference between sites
-and controls.
+by pixel centre. Spillovers or displacement can still affect controls outside
+the buffer.
 
 ## Matching method
 
@@ -154,8 +156,8 @@ and controls.
 - **Nearest neighbour (MatchIt):** greedy matching, usually faster; available
   controls and match order can affect which treatment pixels obtain matches.
 
-Neither algorithm guarantees acceptable covariate balance. Inspect diagnostics.
-Full matching is not supported with nearest neighbour.
+Review balance diagnostics for either algorithm. Full matching requires the
+optimal method; nearest-neighbour matching supports fixed ratios.
 
 ## Shared-support controls
 
@@ -164,16 +166,16 @@ Before sampling, restrict controls jointly to the treatment values of direct
 numeric covariates constant throughout an eligible fragment/stratum.
 
 For example, all-zero cropland treatment is compared with zero-cropland
-controls. Equality uses stored values, not a tolerance. This restriction
-does not drop treatment pixels or discard covariates, and it does not apply
-to categorical, interaction, or transformed terms.
+controls. Equality uses exact stored values. The restriction filters
+candidate controls, leaves the treatment pixels and covariate list unchanged,
+and applies only to direct numeric terms.
 
-If no controls remain, the stratum is explicitly unmatchable. This setting
-does not establish general multivariate overlap.
+If no controls remain, the stratum is explicitly unmatchable. The setting
+checks shared support only for treatment-constant direct numeric covariates.
 
 Historical tasks and presets missing the setting use the legacy policy.
-Consult recorded settings and diagnostics, not today's default, for an old
-task. See the [methodology](matching.md#shared-support-controls).
+Consult recorded settings and diagnostics to identify the policy used by an
+older task. See the [methodology](matching.md#shared-support-controls).
 
 ## Separation fallback
 
@@ -184,8 +186,8 @@ Otherwise the stratum is not matched and diagnostics record the cause.
 A site with no matched stratum fails.
 
 Enabling fallback changes the information used for the match and can weaken
-comparability. Examine which terms were removed; a successful job is not
-evidence of an unbiased estimate.
+comparability. Examine which terms were removed; a successful match alone
+does not establish an unbiased estimate.
 
 ## Replicates
 
@@ -193,8 +195,9 @@ evidence of an unbiased estimate.
 Repeat sampling and matching with different reproducible random draws.
 Results report means and 2.5%/97.5% quantiles across replicates.
 
-These ranges describe sampling and matching variability, **not confidence
-intervals**. They omit spatial dependence, measurement and model uncertainty.
+These ranges summarize sampling and matching variability. They omit spatial
+dependence, measurement, and model uncertainty, so they should not be
+interpreted as confidence intervals.
 With one replicate there is no informative between-replicate range.
 Fewer than 50 replicates gives imprecise bounds and triggers a warning.
 
@@ -207,23 +210,23 @@ replicates increase cost and may expose inconsistent strata.
 Keep the seed to repeat pixel sampling with the same inputs, settings, and
 pipeline version. Use the refresh button to request a new seed.
 
-A seed alone does not freeze changing datasets, software, site geometries,
-or settings. The pipeline permits an unspecified seed, which is not
-reproducible; the form normally supplies one.
+Reproducibility also depends on dataset and software versions, site geometries,
+and settings. The form generates a seed; API submissions can omit one, making
+the random sampling non-reproducible.
 
 ## Matching memory
 
 **Default: {{match_memory_gb}} GB. Choices: 30, 60, or 120 GB.**
 Initial memory per Nextflow matching worker. Confirmed out-of-memory failures
 retry at higher memory, up to 120 GB. Larger allocations cost more.
-This is an execution setting, not a scientific matching parameter.
+This execution setting controls resource allocation.
 
 ## Worker queue
 
 **Default: {{matching_job_queue}}. Choices: ae-spot-gp3 or ae-ondemand-gp3.**
 Spot workers are the normal lower-cost choice. On-demand workers cost
-substantially more. Queue selection affects scheduling and cost, not the
-intended statistical method.
+substantially more. Queue selection controls scheduling and cost; statistical
+settings determine the matching method.
 
 ## Review before submitting
 

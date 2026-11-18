@@ -131,10 +131,11 @@ The upload task checks:
   datasets require a declared CRS and are transformed to EPSG:4326.
 - A required `start_date` mapping is supplied. Optional IDs and names are
   generated when omitted.
-- `start_date` (and optional `end_date`) parse as ISO 8601 dates.
-- Dates must be explicit dates, not numeric years or serial dates.
+- `start_date` (and optional `end_date`) must use ISO 8601 calendar-date
+  format (YYYY-MM-DD); numeric years and spreadsheet serial dates are rejected.
 - Duplicate display `site_id` values are accepted. Immutable feature UUIDs are
-  canonical analysis identities; original labels are retained as `display_site_id`.
+  canonical analysis identities; original labels are retained as
+  `display_site_id`.
 
 Validation errors and import diagnostics are displayed with the import history.
 Mapping and upload status changes are announced to assistive technology.
@@ -188,7 +189,8 @@ changes stored analytical geometries or their GeoParquet exports.
 
 ### Conservative analysis preparation
 
-Preparation uses authoritative reference boundaries, not display simplifications.
+Preparation uses authoritative reference boundaries. Display simplifications
+are used for map rendering.
 All positive polygon coverage survives splitting, including tiny cross-stratum
 pieces and uncovered residuals. Reference overlaps of any size are assigned
 once to the first region in lexicographic string-ID order (for example, `10`
@@ -213,7 +215,8 @@ simply because a split adds vertices along a curved projected edge. The original
 geometry coordinates are not densified or simplified in the analysis artifact.
 Extraction validates the same area convention before reading covariates.
 
-Analysis `site_id` is the immutable feature UUID, not the display label.
+Analysis `site_id` uses the immutable feature UUID; display labels are stored
+separately.
 Extraction supports multiple feature memberships in a raster cell, so overlapping
 features remain independent reports. Portfolio totals sum these reports; they
 are not a unique-area union of overlapping source features. The results'

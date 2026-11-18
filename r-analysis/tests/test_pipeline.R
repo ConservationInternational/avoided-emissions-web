@@ -610,9 +610,14 @@ test_that(paste(method, "checkpoints yield, resume strata, and preserve seeded m
     expect_true("f1/mb_f1_r1.json.receipt.json" %in% receipts)
     expect_true("f1/f1_r1_sample.rds.receipt.json" %in% receipts)
 
-    updated_scripts <- tempfile("ae_updated_scripts_")
+    updated_root <- tempfile("ae_updated_")
+    dir.create(updated_root)
+    updated_scripts <- file.path(updated_root, "scripts")
     dir.create(updated_scripts)
     file.copy(list.files(scripts_dir, full.names = TRUE), updated_scripts)
+    dir.create(file.path(updated_root, "src"))
+    file.copy(list.files(file.path(scripts_dir, "../src"), "\\.py$", full.names = TRUE),
+              file.path(updated_root, "src"))
     cat("\n# Updated deployment\n", file = file.path(updated_scripts, "02_perform_matching.R"),
         append = TRUE)
     log <- run_script("02_perform_matching.R", config_path, script_dir = updated_scripts)
