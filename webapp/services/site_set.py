@@ -1,6 +1,5 @@
 """User site set CRUD, GeoJSON/Parquet export, and S3 upload."""
 
-import io
 import json
 import logging
 import tempfile
@@ -8,6 +7,8 @@ from itertools import islice
 
 import geopandas as gpd
 import pandas as pd
+import shapely
+from boto3.s3.transfer import TransferConfig
 from config import Config
 from models import (
     AnalysisTask,
@@ -20,6 +21,9 @@ from sqlalchemy import text
 from services.s3 import S3_COST_TAGGING, get_s3_client
 
 logger = logging.getLogger(__name__)
+
+# About 6 MiB of coordinate data, including three-dimensional geometries.
+_PARQUET_BATCH_COORDINATES = 250_000
 
 
 def _site_set_summary_row(row):
@@ -814,20 +818,93 @@ def upload_user_site_set_geojson_to_s3(site_set_id, task_id):
     return f"s3://{Config.S3_BUCKET}/{key}"
 
 
+def _write_sites_parquet(gdf, stream):
+    """Encode geometry-sized row groups without materialising all WKB at once."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    geometry_columns = list(gdf.columns[gdf.dtypes == "geometry"])
+    attributes = pa.Table.from_pandas(
+        pd.DataFrame(gdf.drop(columns=geometry_columns)), preserve_index=False
+    )
+    metadata = dict(attributes.schema.metadata or {})
+    metadata[b"geo"] = json.dumps(
+        {
+            "version": "1.0.0",
+            "primary_column": gdf.geometry.name,
+            "columns": {
+                name: {
+                    "encoding": "WKB",
+                    "geometry_types": [],
+                    "crs": (gdf[name].crs.to_json_dict() if gdf[name].crs else None),
+                }
+                for name in geometry_columns
+            },
+        }
+    ).encode()
+    if gdf.attrs:
+        metadata[b"PANDAS_ATTRS"] = json.dumps(gdf.attrs).encode()
+    schema = pa.schema(
+        [
+            pa.field(name, pa.binary())
+            if name in geometry_columns
+            else attributes.schema.field(name)
+            for name in gdf.columns
+        ],
+        metadata=metadata,
+    )
+    coordinate_counts = sum(
+        shapely.get_num_coordinates(gdf[name].array) for name in geometry_columns
+    )
+    with pq.ParquetWriter(stream, schema) as writer:
+        start = 0
+        while start < len(gdf):
+            end = start
+            coordinates = 0
+            while end < len(gdf) and end - start < 500:
+                count = int(coordinate_counts[end])
+                if end > start and coordinates + count > _PARQUET_BATCH_COORDINATES:
+                    break
+                coordinates += count
+                end += 1
+            # A single large feature remains intact even if it exceeds the budget.
+            table = pa.Table.from_arrays(
+                [
+                    pa.array(
+                        shapely.to_wkb(gdf[name].iloc[start:end].array),
+                        type=pa.binary(),
+                    )
+                    if name in geometry_columns
+                    else attributes[name].slice(start, end - start)
+                    for name in gdf.columns
+                ],
+                schema=schema,
+            )
+            writer.write_table(table)
+            del table
+            start = end
+
+
 def upload_sites_parquet_to_s3(gdf, task_id):
-    """Upload a GeoDataFrame as GeoParquet to S3."""
+    """Upload GeoParquet using bounded geometry encoding and transfer buffers."""
     s3 = get_s3_client()
     key = f"{Config.S3_PREFIX}/tasks/{task_id}/sites.parquet"
-    buf = io.BytesIO()
-    gdf.to_parquet(buf, index=False)
-    buf.seek(0)
-    s3.put_object(
-        Bucket=Config.S3_BUCKET,
-        Key=key,
-        Body=buf,
-        ContentType="application/vnd.apache.parquet",
-        Tagging=S3_COST_TAGGING,
-    )
+    with tempfile.TemporaryFile(suffix=".parquet") as stream:
+        _write_sites_parquet(gdf, stream)
+        stream.seek(0)
+        s3.upload_fileobj(
+            stream,
+            Config.S3_BUCKET,
+            key,
+            ExtraArgs={
+                "ContentType": "application/vnd.apache.parquet",
+                "Tagging": S3_COST_TAGGING,
+            },
+            Config=TransferConfig(
+                use_threads=False,
+                multipart_chunksize=8 * 1024 * 1024,
+            ),
+        )
     return f"s3://{Config.S3_BUCKET}/{key}"
 
 

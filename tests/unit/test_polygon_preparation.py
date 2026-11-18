@@ -13,7 +13,10 @@ import shapely
 from botocore.exceptions import ClientError
 from services.polygon_partition import equal_area_ha, partition_by_regions, polygonal
 from services.reference_layers import compute_exact_match_groups_with_splitting
-from services.site_set import _stream_site_set_to_parquet_buf
+from services.site_set import (
+    _stream_site_set_to_parquet_buf,
+    upload_sites_parquet_to_s3,
+)
 from shapely.geometry import Polygon, box
 
 
@@ -319,6 +322,115 @@ def test_export_writes_multiple_valid_geoparquet_row_groups():
     finally:
         stream.close()
     result.close.assert_called_once()
+
+
+@pytest.mark.parametrize(("budget", "groups"), [(1, 5), (10, 3)])
+def test_site_artifact_upload_bounds_geometry_encoding_and_preserves_data(
+    mocker, budget, groups
+):
+    import pyarrow.parquet as pq
+    from config import Config as AppConfig
+    from geopandas.testing import assert_geodataframe_equal
+
+    frame = gpd.GeoDataFrame(
+        {
+            "site_id": ["a", "a", "b", "c", "d"],
+            "geometry": [box(i, 0, i + 0.5, 0.5) for i in range(5)],
+            "sub_site_index": [0, 1, 0, 0, 0],
+            "area_ha": [1.5, 2.5, 3.5, 4.5, 5.5],
+            "start_date": pd.to_datetime(["2000-01-01"] * 5),
+            "end_date": pd.to_datetime([None] * 5),
+            "ae_atoms": [None, None, "[]", None, None],
+        },
+        crs=4326,
+        index=[9, 8, 7, 6, 5],
+    )
+    expected = frame.reset_index(drop=True)
+    mocker.patch("services.site_set._PARQUET_BATCH_COORDINATES", budget)
+    encode = mocker.spy(shapely, "to_wkb")
+    client = mocker.patch("services.site_set.get_s3_client").return_value
+    streams = []
+
+    def upload(stream, bucket, key, *, ExtraArgs, Config):
+        streams.append(stream)
+        assert not isinstance(stream, io.BytesIO)
+        assert stream.tell() == 0
+        assert bucket == AppConfig.S3_BUCKET
+        assert key == f"{AppConfig.S3_PREFIX}/tasks/task/sites.parquet"
+        assert ExtraArgs["ContentType"] == "application/vnd.apache.parquet"
+        assert ExtraArgs["Tagging"]
+        assert Config.use_threads is False
+        assert Config.multipart_chunksize <= 8 * 1024 * 1024
+        assert pq.ParquetFile(stream).num_row_groups == groups
+        stream.seek(0)
+        actual = gpd.read_parquet(stream)
+        assert_geodataframe_equal(actual, expected)
+
+    client.upload_fileobj.side_effect = upload
+
+    uri = upload_sites_parquet_to_s3(frame, "task")
+
+    assert (
+        uri
+        == f"s3://{AppConfig.S3_BUCKET}/{AppConfig.S3_PREFIX}/tasks/task/sites.parquet"
+    )
+    assert encode.call_count == groups
+    assert all(
+        len(call.args[0]) == 1
+        or shapely.get_num_coordinates(call.args[0]).sum() <= budget
+        for call in encode.call_args_list
+    )
+    assert all(stream.closed for stream in streams)
+    assert_geodataframe_equal(frame.reset_index(drop=True), expected)
+
+
+def test_site_artifact_upload_failure_closes_staging_file(mocker):
+    frame = gpd.GeoDataFrame({"geometry": [box(0, 0, 1, 1)]}, crs=4326)
+    client = mocker.patch("services.site_set.get_s3_client").return_value
+    streams = []
+
+    def fail_upload(stream, *args, **kwargs):
+        streams.append(stream)
+        raise RuntimeError("Upload interrupted")
+
+    client.upload_fileobj.side_effect = fail_upload
+
+    with pytest.raises(RuntimeError, match="Upload interrupted"):
+        upload_sites_parquet_to_s3(frame, "task")
+
+    assert len(streams) == 1
+    assert streams[0].closed
+
+
+@pytest.mark.parametrize(
+    "geometries",
+    [[], [None, Polygon()], [shapely.force_3d(box(0, 0, 1, 1))]],
+)
+def test_site_artifact_upload_roundtrips_through_s3(mocker, geometries):
+    import boto3
+    from config import Config
+    from geopandas.testing import assert_geodataframe_equal
+    from moto import mock_aws
+
+    frame = gpd.GeoDataFrame({"geometry": gpd.GeoSeries(geometries, crs=4326)})
+    with mock_aws():
+        client = boto3.client(
+            "s3",
+            region_name="us-east-1",
+            aws_access_key_id="testing",
+            aws_secret_access_key="testing",
+        )
+        client.create_bucket(Bucket=Config.S3_BUCKET)
+        mocker.patch("services.site_set.get_s3_client", return_value=client)
+
+        upload_sites_parquet_to_s3(frame, "task")
+
+        key = f"{Config.S3_PREFIX}/tasks/task/sites.parquet"
+        obj = client.get_object(Bucket=Config.S3_BUCKET, Key=key)
+        assert obj["ContentType"] == "application/vnd.apache.parquet"
+        actual = gpd.read_parquet(io.BytesIO(obj["Body"].read()))
+        assert_geodataframe_equal(actual, frame)
+        assert client.get_object_tagging(Bucket=Config.S3_BUCKET, Key=key)["TagSet"]
 
 
 def test_stale_reference_exports_cannot_be_used_for_preparation():

@@ -317,6 +317,13 @@ Grouped matching settings with defaults pre-filled. See
 If submission fails (e.g. trends.earth API error) the task status is set to
 `failed` and the error message is stored on the `AnalysisTask` record.
 
+Site artifact uploads encode GeoParquet in row groups capped at 500 features
+and 250,000 coordinates (except an individual larger feature). The artifact
+is staged in a temporary file and uploaded with a single-threaded, 8 MiB
+multipart transfer, avoiding whole-dataset WKB and Parquet buffers. Submission
+workers must use disk-backed temporary storage, not a RAM-backed `tmpfs`.
+Rebuild and redeploy the submission worker to apply this change.
+
 ### Preparation audit and analysis units
 
 Preparation runs after submission, not on every form edit. The task detail page
