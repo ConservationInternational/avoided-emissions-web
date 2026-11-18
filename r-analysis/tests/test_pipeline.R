@@ -199,7 +199,7 @@ test_that("atom outputs require complete replicate domains and reconcile parent 
             treatment <- tibble(
                 cell = c(id * 10, id * 10 + 1),
                 treatment = c(TRUE, FALSE),
-                atomic_id = c(c("101", "102", "201")[id], NA_character_),
+                atomic_id = c(c(101L, 102L, 201L)[id], NA_integer_),
                 group = paste0("group", id),
                 match_group = paste0("group", id, "_set"),
                 match_weight = 1,
@@ -217,6 +217,12 @@ test_that("atom outputs require complete replicate domains and reconcile parent 
                 replicate = replicate,
                 n_forest_pixels = 10
             ) %>% bind_cols(forest_cover(2, 1))
+            if (id == 1 && replicate == 1) {
+                # Atom 101 should still be estimated from its complete stratum.
+                treatment <- bind_rows(treatment, treatment %>%
+                    mutate(cell = cell + 100L, group = "unstable",
+                           match_group = "unstable_set"))
+            }
             batch <- paste0("atoms", id, "_", replicate)
             write_parquet(
                 treatment,

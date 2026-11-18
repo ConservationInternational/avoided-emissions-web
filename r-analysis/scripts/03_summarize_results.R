@@ -487,7 +487,7 @@ if (atom_enabled) {
             n_site_pixels = coalesce(n_site_pixels, 0),
             n_forest_pixels = coalesce(n_forest_pixels, 0)
         )
-    atom_stratum <- if (length(atom_rows) > 0) {
+    atom_stratum <- (if (length(atom_rows) > 0) {
         bind_rows(atom_rows)
     } else {
         bind_cols(
@@ -498,7 +498,7 @@ if (atom_enabled) {
             ),
             as_tibble(setNames(rep(list(numeric()), 8), metric_cols[1:8]))
         )
-    } %>%
+    }) %>%
         mutate(atomic_id = as.character(atomic_id)) %>%
         semi_join(complete_strata, by = c("id_numeric", "group"))
     atom_year_rep_all <- atom_stratum %>%

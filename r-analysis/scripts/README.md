@@ -110,6 +110,10 @@ complete-stratum, per-replicate, and portfolio aggregation rules. The Batch
 summary task requests four CPUs; the local profile uses one. Logs report match
 index and aggregation timings.
 
+Atom estimates and coverage use only complete strata, just like site estimates.
+The summary treats atom IDs as text when joining match data and declarations,
+including when Parquet stores the IDs as integers.
+
 Resuming a previous workflow still requires the original snapshot, inputs, and
 checkpoints. New matching checkpoints validate their diagnostic schema,
 matching policy, and atom/input compatibility. Do not mix pre-contract
