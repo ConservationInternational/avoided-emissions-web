@@ -194,6 +194,7 @@ def test_submission_keeps_database_artifact_and_group_identities_consistent(
         assert len(rows) == len(artifact) == (4 if variables == ["admin1"] else 2)
         assert sum(row.area_ha for row in rows) == pytest.approx(artifact.area_ha.sum())
         report = task.extra_metadata["preparation"]
+        assert report["version"] == "avoided-emissions-v1"
         assert report["input_sites"] == report["retained_sites"] == 2
         assert report["fragments"] == len(rows)
         assert report["uncovered_area_ha"] == 0

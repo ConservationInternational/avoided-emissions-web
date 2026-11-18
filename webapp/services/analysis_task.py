@@ -548,7 +548,7 @@ def _complete_analysis_task_submission(task_id, user_id):
                 )
         gdf = gdf[gdf["area_ha"] >= min_site_area_ha].reset_index(drop=True)
         preparation = {
-            "version": "authoritative-conservative-v1",
+            "version": "avoided-emissions-v1",
             "area_method": "Mollweide; boundaries densified to 0.005 degrees",
             "input_sites": input_count,
             "retained_sites": len(gdf),

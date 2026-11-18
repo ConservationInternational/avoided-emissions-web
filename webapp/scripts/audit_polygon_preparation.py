@@ -94,7 +94,7 @@ def database_inventory():
                     SELECT count(*) AS total,
                         count(*) FILTER (WHERE
                             metadata->'preparation'->>'version'
-                            IS DISTINCT FROM 'authoritative-conservative-v1'
+                            IS DISTINCT FROM 'avoided-emissions-v1'
                         ) AS requires_historical_review
                     FROM analysis_tasks
                     """
