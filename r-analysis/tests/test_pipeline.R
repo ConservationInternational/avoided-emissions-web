@@ -667,15 +667,79 @@ test_that("expensive fragments defer replicates that cannot fit and report their
     expect_true(all(c("2", "3") %in% names(costs)))
 })
 
-test_that("Nextflow workers stage, checkpoint, reconcile, and summarize real matches", {
+test_that("Nextflow workers preserve whole-site exclusion for a later invalid replicate", {
     data_dir <- tempfile("ae_workers_")
     config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
     log <- suppressWarnings(system2(
         Sys.getenv("AE_PYTHON", "python"),
-        c(shQuote(file.path(scripts_dir, "../tests/test_nextflow.py")), "--fixture", shQuote(config_path)),
+        c(shQuote(file.path(scripts_dir, "../tests/test_nextflow.py")), "--fixture-invalid",
+          shQuote(config_path)),
         env = paste0("R_SCRIPTS_DIR=", scripts_dir), stdout = TRUE, stderr = TRUE
     ))
     expect_true(is.null(attr(log, "status")), info = paste(tail(log, 40), collapse = "\n"))
+})
+
+test_that("Nextflow atom summary shards retain unmapped parents and empty diagnostic scopes", {
+    data_dir <- tempfile("ae_atom_workers_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
+    out <- file.path(data_dir, "output")
+    sites <- read_parquet(file.path(out, "sites_processed.parquet"))
+    atoms <- list(A = c("101", "102"), B = "201", C = "301")
+    sites$ae_atoms <- vapply(sites$site_id, function(site) {
+        toJSON(list(run_id = "atom-shards", atoms = lapply(atoms[[site]], function(id) {
+            list(atomic_id = id, geometry = list(type = "Polygon", coordinates = list()))
+        })), auto_unbox = TRUE)
+    }, character(1))
+    sites$site_id <- unname(c(A = "Z", B = "A", C = "M")[sites$site_id])
+    write_parquet(sites, file.path(out, "sites_processed.parquet"))
+    key <- read_parquet(file.path(out, "treatment_cell_key.parquet")) %>%
+        mutate(site_id = c("Z", "Z", "A", "M")[id_numeric],
+               atomic_id = c("101", "102", "201", "301")[id_numeric])
+    write_parquet(key, file.path(out, "treatment_cell_key.parquet"))
+    forest <- read_parquet(file.path(out, "treatment_pixels.parquet")) %>%
+        select(cell, fc_2008)
+    key %>%
+        left_join(forest, by = "cell") %>%
+        group_by(site_id, atomic_id) %>%
+        summarise(n_site_pixels = n(), n_forest_pixels = sum(fc_2008 > 0),
+                  .groups = "drop") %>%
+        write_parquet(file.path(out, "ae_atom_counts.parquet"))
+    config <- fromJSON(config_path, simplifyVector = FALSE)
+    config$exact_match_group_mapping <- list(
+        "1" = list(list("Z", 0), list("A", 0)), "2" = list(list("Z", 1))
+    )
+    write_json(config, config_path, auto_unbox = TRUE)
+    log <- suppressWarnings(system2(
+        Sys.getenv("AE_PYTHON", "python"),
+        c(shQuote(file.path(scripts_dir, "../tests/test_nextflow.py")), "--fixture",
+          shQuote(config_path)),
+        env = paste0("R_SCRIPTS_DIR=", scripts_dir), stdout = TRUE, stderr = TRUE
+    ))
+    expect_true(is.null(attr(log, "status")), info = paste(tail(log, 50), collapse = "\n"))
+    published <- file.path(data_dir, "published", "output")
+    connection <- gzfile(file.path(published, "results_matching_diagnostics.jsonl.gz"), "rt")
+    records <- readLines(connection)
+    close(connection)
+    counts <- fromJSON(file.path(published, "results_matching_diagnostics_summary.json"))$counts
+    expect_length(records, counts$attempts + counts$atoms)
+    expect_equal(sum(vapply(records, function(record) {
+        fromJSON(record)$record_type == "atom_inclusion"
+    }, logical(1))), 4)
+
+    source(file.path(scripts_dir, "summary_shards.R"), local = TRUE)
+    states <- file.path(
+        data_dir, c("summary-s000000", "summary-s000001"), "output", "summary_state.rds"
+    )
+    first <- readRDS(states[1])
+    second <- readRDS(states[2])
+    bad_path <- file.path(data_dir, "invalid_state.rds")
+    duplicate <- second
+    duplicate$atom_declarations$atomic_id[1] <- first$atom_declarations$atomic_id[1]
+    saveRDS(duplicate, bad_path)
+    expect_error(read_summary_states(c(states[1], bad_path)), "Overlapping.*atom")
+    second$atom_metadata$run_id <- "other-run"
+    saveRDS(second, bad_path)
+    expect_error(read_summary_states(c(states[1], bad_path)), "Incompatible.*atom_metadata")
 })
 
 test_that("fragments without baseline forest are not applicable", {

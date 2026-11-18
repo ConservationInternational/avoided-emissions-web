@@ -70,7 +70,8 @@ process PREPARE_RECONCILE {
     path expected, stageAs: 'expected.json'
     path outcomes, stageAs: 'outcomes/outcome??.json'
     output:
-    path 'reconcile_batches/*.json'
+    path 'reconcile_batches/*.json', emit: batches
+    path 'summary_plan.json', emit: plan
     script:
     """
     python3 '${params.worker}' prepare-reconcile --params analysis.json --input expected.json --outcomes ${outcomes}
@@ -80,27 +81,66 @@ process PREPARE_RECONCILE {
 process RECONCILE {
     input:
     path analysis, stageAs: 'analysis.json'
-    path batch, stageAs: 'batch.json'
+    tuple val(shard_id), path(batch, stageAs: 'batch.json')
     output:
-    path 'matches.tar'
+    tuple val(shard_id), path('batch.json'), path('matches.tar')
     script:
     """
     python3 '${params.worker}' reconcile --params analysis.json --input batch.json --archive
     """
 }
 
-process SUMMARIZE {
-    publishDir "${params.state_uri}/published", mode: 'copy', overwrite: true
-
+process SUMMARIZE_SHARD {
+    tag shard_id
     input:
     path analysis, stageAs: 'analysis.json'
-    path expected, stageAs: 'expected.json'
-    path archives, stageAs: 'archives/archive??.tar'
+    tuple val(shard_id), path(shard, stageAs: 'shard.json'), path(archive, stageAs: 'matches.tar')
+    output:
+    tuple val(shard_id), path('shard.json'), path('reports.tar'), path('diagnostic_inputs.tar')
+    script:
+    """
+    python3 '${params.worker}' summarize-shard --params analysis.json --input shard.json --archives matches.tar --workers ${task.cpus} --seconds ${task.time.toSeconds() - 120}
+    """
+}
+
+process EXPORT_DIAGNOSTICS {
+    tag shard_id
+    input:
+    path analysis, stageAs: 'analysis.json'
+    tuple val(shard_id), path(shard, stageAs: 'shard.json'), path(archive, stageAs: 'diagnostic_inputs.tar')
+    output:
+    tuple val(shard_id), path('diagnostics.tar')
+    script:
+    """
+    python3 '${params.worker}' export-diagnostics --params analysis.json --input shard.json --archives diagnostic_inputs.tar --workers ${task.cpus} --seconds ${task.time.toSeconds() - 120}
+    """
+}
+
+process FINALIZE_REPORTS {
+    input:
+    path analysis, stageAs: 'analysis.json'
+    path plan, stageAs: 'summary_plan.json'
+    path archives, stageAs: 'reports/shard??.tar'
+    output:
+    path 'final_reports.tar'
+    script:
+    """
+    python3 '${params.worker}' finalize-reports --params analysis.json --input summary_plan.json --archives ${archives} --seconds ${task.time.toSeconds() - 120}
+    """
+}
+
+process PUBLISH_RESULTS {
+    publishDir "${params.state_uri}/published", mode: 'copy', overwrite: true
+    input:
+    path analysis, stageAs: 'analysis.json'
+    path plan, stageAs: 'summary_plan.json'
+    path report, stageAs: 'final_reports.tar'
+    path diagnostics, stageAs: 'diagnostics/shard??.tar'
     output:
     path 'results.json'
     script:
     """
-    python3 '${params.worker}' summarize --params analysis.json --input expected.json --archives ${archives} --workers ${task.cpus} --seconds ${task.time.toSeconds() - 120}
+    python3 '${params.worker}' publish-summary --params analysis.json --input summary_plan.json --report final_reports.tar --archives ${diagnostics}
     """
 }
 
@@ -123,6 +163,9 @@ workflow {
     PREPARE_LONG(analysis, MATCH_RECOVERY.out.toList().filter { outcomes -> needsRecovery(outcomes) })
     MATCH_LONG(analysis, PREPARE_LONG.out.flatten().filter { batch -> hasWork(batch) })
     PREPARE_RECONCILE(analysis, PREPARE_MATCH_BATCHES.out.expected, MATCH_LONG.out.toList())
-    RECONCILE(analysis, PREPARE_RECONCILE.out.flatten())
-    SUMMARIZE(analysis, PREPARE_MATCH_BATCHES.out.expected, RECONCILE.out.toList())
+    RECONCILE(analysis, PREPARE_RECONCILE.out.batches.flatten().map { batch -> tuple(batch.baseName, batch) })
+    SUMMARIZE_SHARD(analysis, RECONCILE.out)
+    EXPORT_DIAGNOSTICS(analysis, SUMMARIZE_SHARD.out.map { id, shard, reports, diagnostics -> tuple(id, shard, diagnostics) })
+    FINALIZE_REPORTS(analysis, PREPARE_RECONCILE.out.plan, SUMMARIZE_SHARD.out.map { id, shard, reports, diagnostics -> reports }.toList())
+    PUBLISH_RESULTS(analysis, PREPARE_RECONCILE.out.plan, FINALIZE_REPORTS.out, EXPORT_DIAGNOSTICS.out.map { id, diagnostics -> diagnostics }.toList())
 }

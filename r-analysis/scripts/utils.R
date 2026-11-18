@@ -205,7 +205,9 @@ parse_config <- function(args = commandArgs(trailingOnly = TRUE)) {
     # Set up directory paths
     config$input_dir <- file.path(config$data_dir, "input")
     config$output_dir <- file.path(config$data_dir, "output")
-    config$matches_dir <- file.path(config$output_dir, "matches")
+    if (is.null(config$matches_dir)) {
+        config$matches_dir <- file.path(config$output_dir, "matches")
+    }
 
     dir.create(config$output_dir, showWarnings = FALSE, recursive = TRUE)
     dir.create(config$matches_dir, showWarnings = FALSE, recursive = TRUE)

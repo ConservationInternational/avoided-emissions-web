@@ -31,6 +31,7 @@ scripts_dir <- Sys.getenv("R_SCRIPTS_DIR", "/app/scripts")
 source(file.path(scripts_dir, "utils.R"))
 source(file.path(scripts_dir, "stats_functions.R"))
 source(file.path(scripts_dir, "matching_diagnostics.R"))
+source(file.path(scripts_dir, "summary_shards.R"))
 rollbar_init()
 
 with_rollbar({
@@ -48,12 +49,26 @@ GROUP_MAPPING <- fromJSON(config$config_path, simplifyVector = FALSE)$exact_matc
 BOUNDS_LABEL <- "Range across matching replicates"
 LOW_COVERAGE <- 0.8
 out_path <- function(name) file.path(config$output_dir, name)
+summary_mode <- if (is.null(config$summary_mode)) "full" else config$summary_mode
+if (!summary_mode %in% c("full", "shard", "reduce")) stop("Invalid summary mode")
 
 formula_json <- fromJSON(out_path("formula.json"))
 f <- as.formula(formula_json$formula_str)
 CATEGORICAL <- factor_vars(f)
 COVARIATES <- c(setdiff(all.vars(f), "treatment"), "defor_pre_intervention")
 
+if (summary_mode == "reduce") {
+    list2env(read_summary_states(unlist(config$summary_states)), envir = environment())
+    if (!setequal(sites$site_id, unlist(config$summary_site_ids))) {
+        stop("Incomplete summary site coverage")
+    }
+    sites <- arrange(sites, site_id)
+    site_counts <- arrange(site_counts, site_id)
+    results_by_year <- arrange(results_by_year, site_id, year)
+    results_total <- arrange(results_total, site_id)
+    write_csv(results_by_year, out_path("results_by_site_year.csv"))
+    write_csv(results_total, out_path("results_by_site_total.csv"))
+} else {
 fragments <- read_parquet(
     out_path("sites_processed.parquet"),
     col_select = any_of(c("site_id", "display_site_id", "site_name", "id_numeric", "sub_site_index",
@@ -61,6 +76,9 @@ fragments <- read_parquet(
 ) %>%
     as_tibble() %>%
     mutate(site_id = as.character(site_id))
+if (!is.null(config$summary_site_ids)) {
+    fragments <- filter(fragments, site_id %in% unlist(config$summary_site_ids))
+}
 if (!"display_site_id" %in% names(fragments)) fragments$display_site_id <- fragments$site_id
 atom_metadata <- NULL
 atom_declarations <- tibble(
@@ -92,10 +110,11 @@ if ("ae_atoms" %in% names(fragments) && any(!is.na(fragments$ae_atoms))) {
     if (anyDuplicated(atom_declarations$atomic_id)) {
         stop("Atom IDs must be globally unique.")
     }
-    atom_metadata <- list(run_id = run_ids[1])
+    atom_metadata <- list(run_id = unname(run_ids[1]))
 }
 atom_enabled <- !is.null(atom_metadata)
-site_pixels <- read_parquet(out_path("treatment_cell_key.parquet")) %>%
+site_pixels <- read_parquet(out_path("treatment_cell_key.parquet"),
+                            col_select = "id_numeric") %>%
     count(id_numeric, name = "n_site_pixels")
 fragments <- fragments %>%
     left_join(site_pixels, by = "id_numeric") %>%
@@ -173,6 +192,13 @@ cov_rows <- list()
 diagnostics <- list()
 detail_path <- out_path("results_pixel_year_emissions.csv")
 if (file.exists(detail_path)) file.remove(detail_path)
+detail_parts <- out_path("pixel_detail_parts")
+if (summary_mode == "shard") {
+    if (dir.exists(detail_parts)) {
+        stop("Summary detail partition directory already exists: ", detail_parts)
+    }
+    if (!dir.create(detail_parts)) stop("Cannot create summary detail partition directory")
+}
 
 summarize_batch <- function(path) {
     batch <- read_parquet(path) %>%
@@ -307,7 +333,13 @@ process_batches <- function(paths) {
                 atom_coverage_rows[[length(atom_coverage_rows) + 1L]] <- result$atom_coverage
             }
             if (!is.null(result$detail)) {
-                write_csv(result$detail, detail_path, append = file.exists(detail_path))
+                if (summary_mode == "shard") {
+                    write_parquet(result$detail, file.path(
+                        detail_parts, sprintf("part%06d.parquet", length(cov_rows) + 1L)
+                    ))
+                } else {
+                    write_csv(result$detail, detail_path, append = file.exists(detail_path))
+                }
                 cov_rows[[length(cov_rows) + 1L]] <- result$covariates
             }
         }
@@ -350,7 +382,13 @@ n_inconsistent_strata <- nrow(distinct(strata, id_numeric, group)) - nrow(comple
 strata <- semi_join(strata, complete_strata, by = c("id_numeric", "group"))
 included_ids <- unique(complete_strata$id_numeric)
 
-if (file.exists(detail_path) && (n_inconsistent_strata > 0 || length(invalid_sites) > 0)) {
+if (summary_mode == "shard") {
+    for (path in list.files(detail_parts, "\\.parquet$", full.names = TRUE)) {
+        detail <- read_parquet(path) %>%
+            semi_join(complete_strata, by = c("id_numeric", "group"))
+        write_csv(detail, detail_path, append = file.exists(detail_path))
+    }
+} else if (file.exists(detail_path) && (n_inconsistent_strata > 0 || length(invalid_sites) > 0)) {
     filtered_detail <- tempfile("pixel_year_", tmpdir = config$output_dir, fileext = ".csv")
     read_csv_chunked(
         detail_path,
@@ -515,7 +553,7 @@ if (atom_enabled) {
         group_by(site_id, atomic_id) %>%
         summarise(
             replicates_complete = n_distinct(replicate) == N_REPLICATES,
-            years_complete = {
+            years_complete = if (n() == 0L) FALSE else {
                 start <- sites$start_year[match(first(site_id), sites$site_id)]
                 expected_years <- seq(
                     baseline_year(start, FC_YEAR_MIN) + 1L, FC_YEAR_MAX
@@ -834,6 +872,7 @@ results_total <- (if (nrow(site_total_rep) > 0) {
 write_csv(results_total, out_path("results_by_site_total.csv"))
 message("  Per-site results: ", nrow(results_by_year), " site-years, ",
         nrow(results_total), " sites")
+}
 phase_timer <- proc.time()[["elapsed"]]
 log_summary_phase <- function(name) {
     now <- proc.time()[["elapsed"]]
@@ -885,7 +924,7 @@ if (nrow(site_total_rep) > 0) {
 
 log_summary_phase("Portfolio statistics")
 message("  Finalizing: pixel covariate exports")
-cov_data <- bind_rows(
+if (summary_mode != "reduce") cov_data <- bind_rows(
     tibble(id_numeric = integer(), site_id = character(), cell = numeric(),
            group = character(), treatment = logical(), match_group = character(),
            match_weight = numeric(), pscore = numeric()),
@@ -894,20 +933,28 @@ cov_data <- bind_rows(
     semi_join(complete_strata, by = c("id_numeric", "group")) %>%
     select(-id_numeric, -group)
 covariates <- intersect(COVARIATES, names(cov_data))
-write_csv(cov_data, out_path("results_pixel_covariates.csv"))
-write_csv(
-    select(cov_data, cell, site_id, treatment, match_group, match_weight, pscore),
-    out_path("results_propensity_scores.csv")
-)
+if (summary_mode != "reduce") {
+    write_csv(cov_data, out_path("results_pixel_covariates.csv"))
+    write_csv(
+        select(cov_data, cell, site_id, treatment, match_group, match_weight, pscore),
+        out_path("results_propensity_scores.csv")
+    )
+}
 
 log_summary_phase("Pixel covariate exports")
 message("  Finalizing: covariate balance")
-balance <- bind_rows(
-    balance_table(cov_data, covariates, CATEGORICAL) %>% mutate(site_id = "__all__"),
+site_balance <- if (summary_mode == "reduce") {
+    read_csv(out_path("results_covariate_balance.csv"), show_col_types = FALSE) %>%
+        filter(site_id != "__all__")
+} else {
     cov_data %>%
         group_by(site_id) %>%
         group_modify(~ balance_table(.x, covariates, CATEGORICAL)) %>%
         ungroup()
+}
+balance <- bind_rows(
+    balance_table(cov_data, covariates, CATEGORICAL) %>% mutate(site_id = "__all__"),
+    site_balance
 )
 if (nrow(balance) == 0) {
     balance <- tibble(site_id = character(), covariate = character(), smd = numeric())
@@ -941,8 +988,15 @@ scope_quality <- function(df) {
 }
 mq <- list(summary_stats = list(), histograms = list(), qq_quantiles = list(),
            covariate_cols = covariates, categorical_cols = CATEGORICAL)
+if (summary_mode == "reduce") {
+    prior_quality <- fromJSON(out_path("results_match_quality_summary.json"),
+                              simplifyVector = FALSE)
+    for (field in c("summary_stats", "histograms", "qq_quantiles")) {
+        mq[[field]] <- prior_quality[[field]]
+    }
+}
 if (nrow(cov_data) > 0) {
-    scopes <- c("__all__", unique(cov_data$site_id))
+    scopes <- if (summary_mode == "reduce") "__all__" else c("__all__", unique(cov_data$site_id))
     for (scope in scopes) {
         df <- if (scope == "__all__") cov_data else cov_data[cov_data$site_id == scope, ]
         counts <- if (scope == "__all__") {
@@ -970,6 +1024,7 @@ write_json(mq, out_path("results_match_quality_summary.json"), auto_unbox = TRUE
 log_summary_phase("Match-quality distributions")
 message("  Finalizing: pixel locations")
 
+if (summary_mode != "reduce") {
 gm <- fromJSON(out_path("grid_metadata.json"))
 tf <- gm$transform
 cov_data %>%
@@ -979,6 +1034,7 @@ cov_data %>%
         lat = tf[6] + (cell %/% gm$width + 0.5) * tf[5]
     ) %>%
     write_csv(out_path("results_pixel_locations.csv"))
+}
 
 
 # -- Diagnostics and summary -------------------------------------------------
@@ -992,7 +1048,9 @@ write_csv(sampling_by_site, out_path("results_sampling_by_site.csv"))
 
 as_records <- function(df) unname(lapply(seq_len(nrow(df)), function(i) as.list(df[i, ])))
 
-na_records <- unlist(lapply(sidecars, function(x) x$na_exclusions), recursive = FALSE)
+if (summary_mode != "reduce") {
+    na_records <- unlist(lapply(sidecars, function(x) x$na_exclusions), recursive = FALSE)
+}
 na_summary <- NULL
 if (length(na_records) > 0) {
     na_df <- bind_rows(lapply(na_records, function(x) {
@@ -1118,11 +1176,21 @@ if (atom_enabled) {
     summary_data$atom_run_id <- atom_metadata$run_id
 }
 log_summary_phase("Summary metadata")
-matching_diagnostics <- write_matching_diagnostics(
+matching_diagnostics <- if (summary_mode == "full") write_matching_diagnostics(
     sidecar_paths, config, fragments, complete_strata, atom_status,
     atom_declarations, invalid_sites,
     if (atom_enabled) atom_year_rep_all else NULL
-)
+) else NULL
+if (summary_mode == "shard") {
+    saveRDS(mget(summary_state_fields, envir = environment()),
+            out_path("summary_state.rds"), compress = FALSE)
+    saveRDS(list(
+        fragments = fragments, complete_strata = complete_strata,
+        atom_status = atom_status, atom_declarations = atom_declarations,
+        invalid_sites = invalid_sites,
+        atom_domains = if (atom_enabled) atom_year_rep_all else NULL
+    ), out_path("diagnostic_state.rds"), compress = FALSE)
+}
 if (!is.null(matching_diagnostics)) summary_data$matching_diagnostics <- matching_diagnostics
 message("  Finalizing: summary JSON")
 phase_timer <- proc.time()[["elapsed"]]

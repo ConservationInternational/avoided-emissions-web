@@ -208,7 +208,7 @@ New matching runs publish these private, task-scoped files:
 
 | File | Contents |
 | --- | --- |
-| `results_matching_diagnostics.jsonl.gz` | One nested JSON record per terminal fragment/stratum/replicate attempt, followed by atom-inclusion records for atom-enabled runs |
+| `results_matching_diagnostics.jsonl.gz` | One nested JSON record per terminal fragment/stratum/replicate attempt, plus atom-inclusion records for atom-enabled runs |
 | `results_matching_diagnostics_summary.json` | Schema/policy, completeness checks, counts by cause and implicated covariate, replay count, and artifact names |
 | `results_matching_replay_manifest.json` | Exact failed-GLM attempt references, immutable sample locations, and checksums |
 
@@ -249,7 +249,15 @@ printed to CloudWatch. Missing/corrupt required evidence, conflicting attempt
 keys, or incompatible policy/schema identities fail explicitly rather than
 producing a success-shaped diagnostic summary.
 
-All files are produced by `03_summarize_results.R` and written to
+Nextflow summarizes whole-parent-site shards in parallel, exports diagnostics
+independently, and reduces reports globally. Diagnostic JSONL is grouped by
+shard, with atom-inclusion records following attempts within each shard. Its gzip
+stream may contain multiple concatenated members; readers must consume all
+members (as Python `gzip` and R `gzfile` do). Artifact names and schemas are
+unchanged. Standalone summary also produces these artifacts.
+
+Summary files are produced by `03_summarize_results.R` (with diagnostic exports
+handled separately by `04_export_diagnostics.R` in Nextflow) and written to
 `{results_s3_uri}`. An exact-match stratum of a site fragment is included
 only when it was matched in every replicate; site results sum their included
 strata and fragments. Pixel-level downloads use the same inclusion rule.

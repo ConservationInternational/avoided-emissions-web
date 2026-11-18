@@ -16,6 +16,13 @@ import uuid
 from pathlib import Path
 
 from workflow_store import Store, checkpoint_key, digest
+from summary_shards import (
+    archive_summary,
+    merge_diagnostics,
+    merge_report_tables,
+    partition_summary,
+    restore_summary,
+)
 
 log = logging.getLogger(__name__)
 SCRIPTS = Path(os.environ.get("R_SCRIPTS_DIR", "/app/scripts"))
@@ -515,10 +522,13 @@ def prepare_reconcile(expected: dict, outcomes: list[dict]) -> None:
     ids = expected["ids"]
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate expected fragment IDs")
-    for start in range(0, max(1, len(ids)), 25):
+    shards = partition_summary(expected)
+    write_json(
+        "summary_plan.json", {"expected_ids": ids, "shards": shards}
+    )
+    for shard in shards:
         write_json(
-            Path("reconcile_batches") / f"batch{start // 25:06d}.json",
-            {**expected, "ids": ids[start : start + 25]},
+            Path("reconcile_batches") / f"{shard['shard_id']}.json", shard,
         )
 
 
@@ -728,7 +738,7 @@ def archive_matches() -> None:
 def restore_archives(archives: list[str], matches: Path) -> None:
     import shutil
 
-    matches.mkdir()
+    matches.mkdir(parents=True, exist_ok=True)
     for filename in archives:
         with tarfile.open(filename, "r") as archive:
             for member in archive:
@@ -758,15 +768,12 @@ def summarize(
     workers: int = 1,
     validated_matches: bool = False,
 ) -> None:
-    import shutil
-
-    from main import _collect_results
-
     config = configuration(params)
     if workers < 1:
         raise ValueError("Summary worker count must be positive")
     config["summary_workers"] = workers
     config["validated_match_files"] = validated_matches
+    config["matches_dir"] = str(matches.resolve())
     if workflow_contract(params) is not None:
         config.update(
             diagnostic_expected_ids=reconciled["expected"]["ids"],
@@ -774,14 +781,20 @@ def summarize(
             require_matching_diagnostics=True,
         )
     restore_extract(reconciled["expected"]["extract"], Path("output"))
-    for path in matches.iterdir():
-        shutil.copyfile(path, Path(config["matches_dir"]) / path.name)
     if not run_script("03_summarize_results.R", config, seconds):
         raise TimeoutError("Summary exceeded its internal deadline")
     if workflow_contract(params) is not None and not all(
         (Path("output") / name).is_file() for name in DIAGNOSTIC_RESULTS
     ):
         raise ValueError("Summary did not publish required matching diagnostic artifacts")
+    publish_results(params)
+
+
+def publish_results(params: dict) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from main import _collect_results
+
     started = time.monotonic()
     log.info("Collecting summary result payload")
     payload = _collect_results("output", params["task_id"], log)
@@ -790,26 +803,142 @@ def summarize(
     results_store = Store(runtime["results_uri"])
     started = time.monotonic()
     log.info("Uploading summary results")
-    uploaded = 0
-    for path in Path("output").glob("*"):
-        if path.is_file() and path.name.startswith(("results_", "site_identity")):
-            # Keep the existing download convention (not the checkpoint layout).
-            if results_store.root is not None:
-                results_store.write(path.name, path.read_bytes())
-            else:
-                results_store.client.upload_file(
-                    str(path),
-                    results_store.bucket,
-                    f"{results_store.prefix}/{path.name}",
-                )
-            uploaded += 1
-            log.info("Uploaded summary result: %s", path.name)
+    files = sorted(
+        path for path in Path("output").glob("*")
+        if path.is_file() and path.name.startswith(("results_", "site_identity"))
+    )
+
+    def upload(path: Path) -> str:
+        if results_store.root is not None:
+            results_store.write(path.name, path.read_bytes())
+        else:
+            results_store.client.upload_file(
+                str(path), results_store.bucket, f"{results_store.prefix}/{path.name}"
+            )
+        return path.name
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for name in executor.map(upload, files):
+            log.info("Uploaded summary result: %s", name)
     payload["results_s3_uri"] = results_store.uri
     write_json("results.json", payload)
     log.info(
         "[TIMING] Result upload: %.2fs across %d files",
-        time.monotonic() - started, uploaded,
+        time.monotonic() - started, len(files),
     )
+
+
+def summary_metadata(expected: dict) -> None:
+    names = {
+        "sites_processed.parquet", "treatment_cell_key.parquet", "formula.json",
+        "grid_metadata.json", "ae_atom_counts.parquet",
+    }
+    descriptor = expected["extract"]
+    required = names - {"ae_atom_counts.parquet"}
+    if not required.issubset(descriptor["files"]):
+        raise ValueError("Missing summary extraction metadata")
+    restore_extract(
+        {**descriptor, "files": [key for key in descriptor["files"] if key in names]},
+        Path("output"),
+    )
+
+
+def summarize_shard(
+    params: dict, shard: dict, archive: str, seconds: int, workers: int
+) -> None:
+    config = configuration(params)
+    summary_metadata(shard)
+    restore_archives([archive], Path(config["matches_dir"]))
+    config.update(
+        summary_mode="shard", summary_site_ids=shard["site_ids"],
+        summary_workers=workers, validated_match_files=True,
+    )
+    if not run_script("03_summarize_results.R", config, seconds):
+        raise TimeoutError("Summary shard exceeded its internal deadline")
+    archive_summary(
+        "reports.tar", shard, "reports",
+        [path for path in Path("output").iterdir()
+         if path.is_file() and (
+             path.name.startswith(("results_", "site_identity", "na_exclusion"))
+             or path.name == "summary_state.rds"
+         )],
+    )
+    archive_summary(
+        "diagnostic_inputs.tar", shard, "diagnostic_inputs",
+        [Path("output/diagnostic_state.rds"),
+         *sorted(Path(config["matches_dir"]).glob("mb_*.json"))],
+    )
+
+
+def export_diagnostics(
+    params: dict, shard: dict, archive: str, seconds: int, workers: int
+) -> None:
+    folders = restore_summary(
+        [archive], {"expected_ids": shard["ids"], "shards": [shard]},
+        "diagnostic_inputs", Path("diagnostic_inputs"),
+    )
+    config = configuration(params)
+    config.update(
+        diagnostic_state=str((folders[0] / "diagnostic_state.rds").resolve()),
+        matches_dir=str(folders[0].resolve()),
+        diagnostic_expected_ids=shard["ids"],
+        diagnostic_expected_replicates=shard["n_replicates"],
+        require_matching_diagnostics=True, summary_workers=workers,
+    )
+    if not run_script("04_export_diagnostics.R", config, seconds):
+        raise TimeoutError("Diagnostic shard exceeded its internal deadline")
+    archive_summary(
+        "diagnostics.tar", shard, "diagnostics",
+        [Path("output") / name for name in DIAGNOSTIC_RESULTS],
+    )
+
+
+def finalize_reports(params: dict, plan: dict, archives: list[str], seconds: int) -> None:
+    folders = restore_summary(archives, plan, "reports", Path("report_shards"))
+    config = configuration(params)
+    summary_metadata(plan["shards"][0])
+    merge_report_tables(folders, Path("output"))
+    config.update(
+        summary_mode="reduce",
+        summary_site_ids=[site for shard in plan["shards"] for site in shard["site_ids"]],
+        summary_states=[str((folder / "summary_state.rds").resolve()) for folder in folders],
+    )
+    if not run_script("03_summarize_results.R", config, seconds):
+        raise TimeoutError("Summary reducer exceeded its internal deadline")
+    archive_summary(
+        "final_reports.tar",
+        {"shard_id": "s000000", "ids": plan["expected_ids"],
+         "fragment_ids": [], "site_ids": []},
+        "final_reports",
+        [path for path in Path("output").iterdir()
+         if path.is_file() and path.name.startswith(
+             ("results_", "site_identity", "na_exclusion")
+         )],
+    )
+
+
+def publish_summary(
+    params: dict, plan: dict, report: str, diagnostics: list[str]
+) -> None:
+    # The report reducer has already checked complete, disjoint site/atom domains.
+    final = {"shard_id": "s000000", "ids": plan["expected_ids"],
+             "fragment_ids": [], "site_ids": []}
+    folders = restore_summary(
+        [report], {"expected_ids": plan["expected_ids"], "shards": [final]},
+        "final_reports", Path("final_report"),
+    )
+    Path("output").mkdir(exist_ok=True)
+    import shutil
+
+    for path in folders[0].iterdir():
+        if path.name != "shard.json":
+            shutil.move(str(path), Path("output") / path.name)
+    folders = restore_summary(diagnostics, plan, "diagnostics", Path("diagnostic_shards"))
+    diagnostic_summary = merge_diagnostics(folders, Path("output"))
+    summary = json.loads(Path("output/results_summary.json").read_text())
+    summary["matching_diagnostics"] = diagnostic_summary
+    write_json("output/results_summary.json", summary)
+    publish_results(params)
 
 
 def commit(config_path: str, files: list[str]) -> None:
@@ -852,6 +981,10 @@ def main() -> None:
             "prepare-reconcile",
             "reconcile",
             "summarize",
+            "summarize-shard",
+            "export-diagnostics",
+            "finalize-reports",
+            "publish-summary",
             "commit",
         ],
     )
@@ -860,6 +993,7 @@ def main() -> None:
     parser.add_argument("--outcomes", nargs="*", default=[])
     parser.add_argument("--matches")
     parser.add_argument("--archives", nargs="*")
+    parser.add_argument("--report")
     parser.add_argument("--archive", action="store_true")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--seconds", type=int, default=14280)
@@ -909,6 +1043,14 @@ def main() -> None:
                 args.seconds,
                 workers=args.workers,
             )
+    elif args.command == "summarize-shard":
+        summarize_shard(params, descriptor, args.archives[0], args.seconds, args.workers)
+    elif args.command == "export-diagnostics":
+        export_diagnostics(params, descriptor, args.archives[0], args.seconds, args.workers)
+    elif args.command == "finalize-reports":
+        finalize_reports(params, descriptor, args.archives, args.seconds)
+    elif args.command == "publish-summary":
+        publish_summary(params, descriptor, args.report, args.archives)
 
 
 if __name__ == "__main__":

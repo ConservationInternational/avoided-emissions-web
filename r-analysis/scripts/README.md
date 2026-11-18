@@ -99,20 +99,39 @@ For each site fragment:
 
 ## Reconciliation and summary
 
-After matching, Nextflow validates checkpoints in parallel batches of up to
-25 fragments. Each batch produces one uncompressed archive, avoiding a separate
-Nextflow staging operation for every sidecar and Parquet file. Missing,
-corrupt, incomplete, or incompatible checkpoints fail reconciliation.
+After matching, Nextflow partitions parent sites into up to 16 shards, balanced
+by treatment-pixel counts and replicate count. All fragments and replicates of
+a parent stay together, including fragments without a matching stratum. Each
+`RECONCILE` task validates its shard's checkpoints and produces one uncompressed
+archive, avoiding a separate staging operation for every sidecar and Parquet
+file. Missing, corrupt, incomplete, or incompatible checkpoints fail explicitly.
 
-The summary processes validated match files in bounded parallel batches, then
-merges them in input order. It retains the existing whole-site invalidation,
-complete-stratum, per-replicate, and portfolio aggregation rules. The Batch
-summary task requests four CPUs; the local profile uses one. Diagnostic JSONL
-and replay-manifest encoding also use these workers in bounded, ordered batches.
-Distinct diagnostic counts use hash sets rather than repeatedly copying growing
-collections, and schema validation shares the diagnostic export's read pass.
-Logs report match index/aggregation and each finalization phase, diagnostic
-progress every 1,000 sidecars, and result collection/upload timings.
+Each `SUMMARIZE_SHARD` reads its validated match files once and writes site
+reports, reducer state, and a separate diagnostic-input archive. It stages only
+summary metadata rather than copying the full extracted pixel datasets.
+Replicate-1 pixel details are temporarily partitioned as Parquet, filtered after
+whole-site and complete-stratum eligibility is known, and written to CSV once.
+
+Two independently resumable branches follow: `EXPORT_DIAGNOSTICS` encodes each
+shard's diagnostics while `FINALIZE_REPORTS` combines report shards. The reducer
+sums site totals **within each replicate before computing portfolio quantiles**;
+it recomputes global quality distributions from replicate-1 covariates rather
+than averaging site distributions. Site estimates, atom coverage, whole-site
+invalidation, and complete-stratum rules are unchanged. Missing, duplicate, or
+overlapping shard domains are rejected.
+
+CSV tables are merged as streams. `PUBLISH_RESULTS` joins both branches,
+streams the replay-manifest merge, and concatenates gzip members without
+decoding or recompressing diagnostic records. Diagnostic JSONL remains readable through standard
+multi-member gzip readers (including Python gzip and R gzfile); record order is
+site-shard grouped. Public artifact names and schemas are unchanged. Up to four
+result files upload concurrently.
+
+Batch summary/diagnostic tasks request four CPUs; the local profile uses one.
+Within each shard, aggregation and diagnostic encoding use bounded parallel
+batches. Distinct diagnostic counts use hash sets, and schema validation shares
+the diagnostic export's read pass. Logs report aggregation/finalization phases,
+diagnostic progress every 1,000 sidecars, and result collection/upload timings.
 
 Atom estimates and coverage use only complete strata, just like site estimates.
 The summary treats atom IDs as text when joining match data and declarations,

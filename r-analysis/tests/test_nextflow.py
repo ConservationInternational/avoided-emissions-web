@@ -4,6 +4,7 @@ import contextlib
 import csv
 import gzip
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -25,7 +26,7 @@ import nextflow_worker as worker
 from workflow_store import Store, checkpoint_key, digest
 
 
-def exercise_fixture(config_path: Path) -> None:
+def exercise_fixture(config_path: Path, invalid_late_outcome: bool = False) -> None:
     """Run real worker stages against the synthetic R pipeline fixture."""
     root = config_path.parent
     params = json.loads(config_path.read_text())
@@ -91,8 +92,23 @@ def exercise_fixture(config_path: Path) -> None:
     assert checkpoint_store.json(receipt_key + ".receipt.json") == before
     reconciliation = root / "reconcile"
     reconciliation.mkdir()
+
+    def inject_invalid_outcome(directory):
+        if not invalid_late_outcome or not (directory / "mb_f2_r2.parquet").exists():
+            return
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        path = directory / "mb_f2_r2.parquet"
+        table = pq.read_table(path)
+        values = table["total_biomass_2000"].to_pylist()
+        values[0] = -9999
+        column = table.schema.get_field_index("total_biomass_2000")
+        pq.write_table(table.set_column(column, table.schema.field(column), pa.array(values)), path)
+
     with contextlib.chdir(reconciliation):
         worker.reconcile(params, expected, outcomes)
+        inject_invalid_outcome(Path("matches"))
     summary = root / "summary"
     summary.mkdir()
     with contextlib.chdir(summary):
@@ -103,13 +119,14 @@ def exercise_fixture(config_path: Path) -> None:
             120,
         )
         payload = json.loads(Path("results.json").read_text())
-    assert payload["summary"]["n_sites"] == 2, payload["summary"]
+    assert payload["summary"]["n_sites"] == (1 if invalid_late_outcome else 2), payload["summary"]
     assert payload["summary"]["n_replicates"] == 2, payload["summary"]
-    assert len(list((reconciliation / "matches").glob("mb_*.json"))) == 8
+    expected_items = len(expected["ids"]) * expected["n_replicates"]
+    assert len(list((reconciliation / "matches").glob("mb_*.json"))) == expected_items
     assert (root / "results/results_by_site_total.csv").exists()
     diagnostics = payload["summary"]["matching_diagnostics"]
-    assert diagnostics["counts"]["expected_items"] == 8
-    assert diagnostics["counts"]["observed_items"] == 8
+    assert diagnostics["counts"]["expected_items"] == expected_items
+    assert diagnostics["counts"]["observed_items"] == expected_items
     assert set(diagnostics["artifacts"].values()) == set(worker.DIAGNOSTIC_RESULTS)
     for filename in diagnostics["artifacts"].values():
         assert (root / "results" / filename).is_file()
@@ -119,13 +136,29 @@ def exercise_fixture(config_path: Path) -> None:
     with contextlib.chdir(partitioning):
         worker.prepare_reconcile(expected, outcomes)
     archives = []
+    reports = []
+    diagnostic_archives = []
     for batch in sorted((partitioning / "reconcile_batches").glob("*.json")):
+        descriptor = json.loads(batch.read_text())
         shard = root / f"reconcile-{batch.stem}"
         shard.mkdir()
         with contextlib.chdir(shard):
-            worker.reconcile(params, json.loads(batch.read_text()), [])
+            worker.reconcile(params, descriptor, [])
+            inject_invalid_outcome(Path("matches"))
             worker.archive_matches()
         archives.append(str(shard / "matches.tar"))
+        summary = root / f"summary-{batch.stem}"
+        summary.mkdir()
+        with contextlib.chdir(summary):
+            worker.summarize_shard(params, descriptor, archives[-1], 120, 1)
+        reports.append(str(summary / "reports.tar"))
+        diagnostics = root / f"diagnostics-{batch.stem}"
+        diagnostics.mkdir()
+        with contextlib.chdir(diagnostics):
+            worker.export_diagnostics(
+                params, descriptor, str(summary / "diagnostic_inputs.tar"), 120, 1
+            )
+        diagnostic_archives.append(str(diagnostics / "diagnostics.tar"))
     parallel_summary = root / "parallel-summary"
     parallel_summary.mkdir()
     with contextlib.chdir(parallel_summary):
@@ -139,6 +172,55 @@ def exercise_fixture(config_path: Path) -> None:
             validated_matches=True,
         )
         assert json.loads(Path("results.json").read_text()) == payload
+    reduced = root / "reduced"
+    reduced.mkdir()
+    plan = json.loads((partitioning / "summary_plan.json").read_text())
+    with contextlib.chdir(reduced):
+        worker.finalize_reports(params, plan, reports, 120)
+    published = root / "published"
+    published.mkdir()
+    with contextlib.chdir(published):
+        worker.publish_summary(
+            params, plan, str(reduced / "final_reports.tar"), diagnostic_archives
+        )
+        assert json.loads(Path("results.json").read_text()) == payload
+        with gzip.open("output/results_matching_diagnostics.jsonl.gz", "rt") as stream:
+            distributed_records = [json.loads(line) for line in stream]
+    with gzip.open(root / "summary/output/results_matching_diagnostics.jsonl.gz", "rt") as stream:
+        original_records = [json.loads(line) for line in stream]
+    record_key = lambda record: (
+        record["record_type"], record.get("attempt_key", record.get("atomic_id"))
+    )
+    assert sorted(distributed_records, key=record_key) == sorted(original_records, key=record_key)
+    for name in ("results_match_quality_summary.json", "results_matching_diagnostics_summary.json"):
+        original = json.loads((root / "summary/output" / name).read_text())
+        distributed = json.loads((published / "output" / name).read_text())
+        if name == "results_matching_diagnostics_summary.json":
+            original.pop("output_bytes")
+            distributed.pop("output_bytes")
+        assert distributed == original, name
+    for path in (root / "summary/output").glob("*.csv"):
+        if not path.name.startswith(("results_", "site_identity", "na_exclusion")):
+            continue
+        with path.open(newline="") as stream:
+            expected_rows = list(csv.DictReader(stream))
+        with (published / "output" / path.name).open(newline="") as stream:
+            actual_rows = list(csv.DictReader(stream))
+        normalize = lambda rows: sorted(rows, key=lambda row: json.dumps(row, sort_keys=True))
+        actual_rows, expected_rows = normalize(actual_rows), normalize(expected_rows)
+        assert len(actual_rows) == len(expected_rows), path.name
+        for actual, expected_row in zip(actual_rows, expected_rows, strict=True):
+            assert actual.keys() == expected_row.keys(), path.name
+            for key, value in actual.items():
+                if value == expected_row[key]:
+                    continue
+                assert key not in {
+                    "cell", "site_id", "atomic_id", "run_id", "replicate",
+                    "year", "group", "match_group",
+                }, (path.name, key)
+                assert math.isclose(
+                    float(value), float(expected_row[key]), rel_tol=1e-12, abs_tol=1e-12
+                ), (path.name, key, value, expected_row[key])
 
 
 class WorkflowTests(unittest.TestCase):
@@ -158,6 +240,26 @@ class WorkflowTests(unittest.TestCase):
                 "match_memory_mib": 1024,
             },
         }
+
+    def summary_extraction(self, ids):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        store = Store(str(self.root / "summary-extract"))
+        sites = self.root / "summary-sites.parquet"
+        key = self.root / "summary-key.parquet"
+        pq.write_table(pa.table({
+            "id_numeric": pa.array(ids, type=pa.int64()),
+            "site_id": pa.array(
+                [f"site{(id_ - 1) // 2:03}" for id_ in ids], type=pa.string()
+            ),
+        }), sites)
+        pq.write_table(pa.table({"id_numeric": pa.array(ids, type=pa.int64())}), key)
+        store.commit(sites, "sites_processed.parquet")
+        store.commit(key, "treatment_cell_key.parquet")
+        return {"uri": store.uri, "files": [
+            "sites_processed.parquet", "treatment_cell_key.parquet"
+        ]}
 
     def test_driver_logs_invalid_site_details_once(self):
         failure = {
@@ -727,7 +829,10 @@ class WorkflowTests(unittest.TestCase):
 
     def test_reconciliation_batches_and_archives_cover_work_once(self):
         params = self.params()
-        expected = {"ids": list(range(1, 28)), "n_replicates": 1}
+        expected = {
+            "ids": list(range(1, 28)), "n_replicates": 1,
+            "extract": self.summary_extraction(list(range(1, 30))),
+        }
         store = worker.artifact_store(params, "checkpoints")
         for id_ in expected["ids"]:
             sidecar = self.root / f"mb_f{id_}_r1.json"
@@ -747,7 +852,16 @@ class WorkflowTests(unittest.TestCase):
         with contextlib.chdir(prepare):
             worker.prepare_reconcile(expected, [])
         batches = sorted((prepare / "reconcile_batches").glob("*.json"))
-        self.assertEqual(len(batches), 2)
+        self.assertEqual(len(batches), 15)
+        descriptors = [json.loads(path.read_text()) for path in batches]
+        self.assertEqual(
+            sorted(id_ for item in descriptors for id_ in item["fragment_ids"]),
+            list(range(1, 30)),
+        )
+        self.assertTrue(all(
+            len({(id_ - 1) // 2 for id_ in item["fragment_ids"]}) == 1
+            for item in descriptors
+        ))
         archives = []
         for index, batch in enumerate(batches):
             directory = self.root / f"reconcile-{index}"
@@ -774,7 +888,10 @@ class WorkflowTests(unittest.TestCase):
         empty = self.root / "empty"
         empty.mkdir()
         with contextlib.chdir(empty):
-            worker.prepare_reconcile({"ids": [], "n_replicates": 1}, [])
+            worker.prepare_reconcile({
+                "ids": [], "n_replicates": 1,
+                "extract": self.summary_extraction([]),
+            }, [])
             batch = json.loads(
                 next(Path("reconcile_batches").glob("*.json")).read_text()
             )
@@ -794,6 +911,74 @@ class WorkflowTests(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "Invalid match archive member"),
         ):
             worker.restore_archives([str(unsafe)], Path("unsafe"))
+
+    def test_summary_archives_require_complete_disjoint_planned_domains(self):
+        import copy
+
+        shards = [
+            {"shard_id": f"s{index:06d}", "ids": [index + 1],
+             "fragment_ids": [index + 1], "site_ids": [site]}
+            for index, site in enumerate(("A", "B"))
+        ]
+        plan = {"expected_ids": [1, 2], "shards": shards}
+        payload = self.root / "payload.csv"
+        payload.write_text("site_id\nA\n")
+
+        def pack(descriptors, prefix):
+            archives = []
+            for index, descriptor in enumerate(descriptors):
+                path = self.root / f"{prefix}-{index}.tar"
+                worker.archive_summary(str(path), descriptor, "reports", [payload])
+                archives.append(str(path))
+            return archives
+
+        archives = pack(shards, "valid")
+        folders = worker.restore_summary(archives, plan, "reports", self.root / "valid")
+        self.assertEqual(len(folders), 2)
+        self.assertTrue(all((folder / payload.name).read_text() == payload.read_text()
+                            for folder in folders))
+        for name, inputs, error in (
+            ("missing", archives[:1], "Incomplete"),
+            ("duplicate", archives + archives[:1], "Duplicate"),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, error):
+                worker.restore_summary(inputs, plan, "reports", self.root / name)
+        wrong = copy.deepcopy(shards)
+        wrong[0]["site_ids"] = ["other-parent"]
+        with self.assertRaisesRegex(ValueError, "incompatible"):
+            worker.restore_summary(pack(wrong, "wrong"), plan, "reports", self.root / "wrong")
+        for key in ("ids", "fragment_ids", "site_ids"):
+            overlapping = copy.deepcopy(plan)
+            overlapping["shards"][1][key] = overlapping["shards"][0][key]
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "Overlapping"):
+                worker.restore_summary(
+                    pack(overlapping["shards"], key), overlapping, "reports", self.root / key
+                )
+        with self.assertRaisesRegex(ValueError, "coverage"):
+            worker.restore_summary(
+                archives, {**plan, "expected_ids": [1, 2, 3]}, "reports", self.root / "coverage"
+            )
+
+    def test_summary_partition_cap_preserves_parent_and_unscheduled_fragment_coverage(self):
+        expected = {
+            "ids": list(range(1, 60)), "n_replicates": 100,
+            "extract": self.summary_extraction(list(range(1, 66))),
+        }
+        with contextlib.chdir(self.root):
+            shards = worker.partition_summary(expected)
+            self.assertEqual(shards, worker.partition_summary(expected))
+        self.assertEqual(len(shards), 16)
+        self.assertEqual(sorted(id_ for shard in shards for id_ in shard["ids"]), expected["ids"])
+        self.assertEqual(
+            sorted(id_ for shard in shards for id_ in shard["fragment_ids"]),
+            list(range(1, 66)),
+        )
+        owners = {}
+        for shard in shards:
+            for id_ in shard["fragment_ids"]:
+                site = (id_ - 1) // 2
+                self.assertEqual(owners.setdefault(site, shard["shard_id"]), shard["shard_id"])
+        self.assertLessEqual(max(len(shard["fragment_ids"]) for shard in shards), 5)
 
     def test_internal_timeout_is_not_reported_as_success(self):
         script = self.root / "slow.py"
@@ -1034,7 +1219,7 @@ class WorkflowTests(unittest.TestCase):
             "f.write(sys.argv[sys.argv.index('--seconds')+1]+'\\n')\n"
             "retry=p(__file__).with_suffix('.retry')\n"
             "if cmd=='match' and retry.exists(): retry.unlink(); sys.exit(75)\n"
-            "if cmd=='summarize' and p(__file__).with_suffix('.fail').exists(): sys.exit(2)\n"
+            "if cmd=='publish-summary' and p(__file__).with_suffix('.fail').exists(): sys.exit(2)\n"
             "if cmd=='extract': p('extraction.json').write_text('{}')\n"
             "if cmd=='prepare':\n"
             " p('batches').mkdir(); p('batches/a.json').write_text('{\"ids\":[1],\"phase\":0}'); "
@@ -1054,14 +1239,21 @@ class WorkflowTests(unittest.TestCase):
             "p(f'batches/recovery{i}.json').write_text(json.dumps({'ids':[1],'phase':phase}))\n"
             "if cmd=='prepare-reconcile':\n"
             " p('reconcile_batches').mkdir(); "
-            "p('reconcile_batches/a.json').write_text('{}')\n"
+            "p('reconcile_batches/a.json').write_text('{}'); "
+            "p('summary_plan.json').write_text('{}')\n"
             " if p(__file__).with_suffix('.multiple').exists(): "
             "p('reconcile_batches/b.json').write_text('{}')\n"
             "if cmd=='reconcile': p('matches.tar').write_text('archive')\n"
-            "if cmd=='summarize':\n"
-            " archives=sys.argv[sys.argv.index('--archives')+1:sys.argv.index('--workers')]\n"
+            "if cmd=='summarize-shard':\n"
+            " p('reports.tar').write_text('reports'); "
+            "p('diagnostic_inputs.tar').write_text('diagnostics')\n"
+            "if cmd=='export-diagnostics': p('diagnostics.tar').write_text('diagnostics')\n"
+            "if cmd=='finalize-reports':\n"
+            " archives=sys.argv[sys.argv.index('--archives')+1:sys.argv.index('--seconds')]\n"
             " assert len(archives)==(2 if p(__file__).with_suffix('.multiple').exists() else 1)\n"
             " assert all(p(x).is_file() for x in archives)\n"
+            " p('final_reports.tar').write_text('final')\n"
+            "if cmd=='publish-summary':\n"
             " p('results.json').write_text('{\"ok\":true}')\n"
         )
         (self.root / "analysis.json").write_text("{}")
@@ -1073,7 +1265,10 @@ class WorkflowTests(unittest.TestCase):
             "PREPARE_LONG",
             "PREPARE_RECONCILE",
             "RECONCILE",
-            "SUMMARIZE",
+            "SUMMARIZE_SHARD",
+            "EXPORT_DIAGNOSTICS",
+            "FINALIZE_REPORTS",
+            "PUBLISH_RESULTS",
         )
         local_config.write_text(
             "process.executor='local'\nprocess.container=null\nprocess.resourceLabels=[:]\n"
@@ -1118,7 +1313,7 @@ class WorkflowTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SUMMARIZE", result.stdout)
+        self.assertIn("PUBLISH_RESULTS", result.stdout)
         self.assertIn("Execution is retried (1)", result.stdout)
         seconds = fake.with_suffix(".seconds").read_text().splitlines()
         self.assertEqual(list(map(int, seconds[:2])), [14280, 28680])
@@ -1127,7 +1322,7 @@ class WorkflowTests(unittest.TestCase):
         progress_store = Store(str(self.root / "progress-state"))
         self.assertEqual(
             driver.record_progress(progress_store, self.root / "trace.tsv", 0, "test"),
-            90,
+            97,
         )
         match_attempts = [
             row for row in attempts if row["name"].startswith("MATCH_BATCH")
@@ -1156,7 +1351,7 @@ class WorkflowTests(unittest.TestCase):
         )
         with (self.root / "trace.tsv").open() as stream:
             tasks = list(csv.DictReader(stream, delimiter="\t"))
-        self.assertEqual(len(tasks), 6)
+        self.assertEqual(len(tasks), 9)
         self.assertTrue(all(task["status"] == "CACHED" for task in tasks), tasks)
         self.assertEqual(
             driver.record_progress(progress_store, self.root / "trace.tsv", 90, "test"),
@@ -1179,7 +1374,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         with (self.root / "trace.tsv").open() as stream:
             tasks = list(csv.DictReader(stream, delimiter="\t"))
-        self.assertEqual(len(tasks), 8)
+        self.assertEqual(len(tasks), 11)
         self.assertTrue((recovered_state / "published/results.json").exists())
         fake.with_suffix(".yield").touch()
         fake.with_suffix(".multiple").touch()
@@ -1199,12 +1394,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         with (self.root / "trace.tsv").open() as stream:
             tasks = list(csv.DictReader(stream, delimiter="\t"))
-        self.assertEqual(len(tasks), 14)
+        self.assertEqual(len(tasks), 19)
         self.assertTrue((yielded_state / "published/results.json").exists())
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--fixture":
-        exercise_fixture(Path(sys.argv[2]))
+    if len(sys.argv) == 3 and sys.argv[1] in ("--fixture", "--fixture-invalid"):
+        exercise_fixture(Path(sys.argv[2]), invalid_late_outcome=sys.argv[1] == "--fixture-invalid")
     else:
         unittest.main()

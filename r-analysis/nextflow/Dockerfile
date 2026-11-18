@@ -27,6 +27,6 @@ RUN for attempt in 1 2 3; do \
     done
 WORKDIR /work
 COPY nextflow/ /opt/ae-workflow/
-COPY src/workflow_store.py src/nextflow_worker.py /opt/ae-workflow/
+COPY src/workflow_store.py src/nextflow_worker.py src/summary_shards.py /opt/ae-workflow/
 ENTRYPOINT []
 CMD ["python", "/opt/ae-workflow/driver.py"]

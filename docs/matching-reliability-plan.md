@@ -96,7 +96,15 @@ EXTRACT -> PREPARE_MATCH_BATCHES -> MATCH_BATCH
                                                    |
                                        bounded long-tier fallback
                                                    |
-                                  RECONCILE -> SUMMARIZE -> PUBLISH
+                                      PREPARE_RECONCILE
+                                                   |
+                                       RECONCILE (site shards)
+                                                   |
+                                          SUMMARIZE_SHARD
+                                            /         \
+                              FINALIZE_REPORTS     EXPORT_DIAGNOSTICS
+                                            \         /
+                                          PUBLISH_RESULTS
 ```
 
 1. Wrap existing extraction and summarization commands as Nextflow processes.
@@ -280,8 +288,15 @@ silent success; failures beyond approved resources remain explicit and resumable
   Initial matching memory: 30 GiB by default, optionally 60/120 GiB through
   the webapp; confirmed-OOM ceiling: 120 GiB.
   Extraction starts at 128 GiB, confirmed-OOM ceiling 512 GiB; preparation and
-  summary start at 32 GiB with a 128 GiB ceiling. Host failures alone do not
+  summary stages start at 32 GiB with a 128 GiB ceiling. Host failures alone do not
   increase memory. Summary time is 6/12/24 hours.
+- Reconciliation and summary use up to 16 treatment-pixel-weighted parent-site
+  shards, keeping every fragment and replicate of a parent together. Diagnostic
+  encoding branches independently from report reduction. Portfolio quantiles
+  are recomputed from per-replicate portfolio sums, and global quality
+  distributions use replicate-1 covariates rather than site-level averages.
+  Publication requires every planned report and diagnostic shard and rejects
+  missing, duplicate, or overlapping domains.
 - Driver duration defaults to 72 hours (server-configurable, maximum 168).
   An indivisible solve exceeding approved resources fails explicitly; no
   fallback changes the statistical matching method.
