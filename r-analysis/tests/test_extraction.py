@@ -244,6 +244,85 @@ class ExtractionTests(unittest.TestCase):
         )
         self.assertEqual(assigned.atomic_id.tolist(), [11, 12])
 
+    def test_atom_counts_cover_control_only_tiles_and_unmatched_fragments(self):
+        with tempfile.TemporaryDirectory() as output:
+            root = Path(output)
+            resolution = 1 / 480
+            transform = from_origin(0, 2 * resolution, resolution, resolution)
+            forest = np.full((2, 8), 100, dtype="float32")
+            forest[:, 7] = 0
+            for name in ("fc_2000", "fc_2014", "total_biomass_2000"):
+                with rasterio.open(
+                    root / f"{name}.tif",
+                    "w",
+                    driver="GTiff",
+                    width=8,
+                    height=2,
+                    count=1,
+                    dtype="float32",
+                    crs=4326,
+                    transform=transform,
+                ) as dst:
+                    dst.write(forest, 1)
+
+            def rectangle(left, right):
+                return box(left * resolution, 0, right * resolution, 2 * resolution)
+
+            geometries = [rectangle(4, 6), rectangle(6, 8)]
+            sites = gpd.GeoDataFrame(
+                {
+                    "site_id": ["A", "B"],
+                    "id_numeric": [1, 2],
+                    "sub_site_index": [0, 0],
+                    "start_year": [2020, 2020],
+                    "ae_atoms": [
+                        json.dumps({
+                            "run_id": "job",
+                            "atoms": [{"atomic_id": i, "geometry": mapping(geom)}],
+                        })
+                        for i, geom in enumerate(geometries, 1)
+                    ],
+                },
+                geometry=geometries,
+                crs=4326,
+            )
+            config = {
+                "cog_bucket": "test",
+                "cog_prefix": "test",
+                "covariates": [],
+                "fc_years": [2014],
+                "exact_match_vars": [],
+                "resolution_m": 250,
+                "matching_extent": mapping(rectangle(0, 4)),
+                "exact_match_group_mapping": {"1": [["A", 0]]},
+            }
+            outputs = []
+            for tile_size, workers in ((2, 1), (2, 2), (1024, 1)):
+                destination = root / f"{tile_size}-{workers}"
+                destination.mkdir()
+                with (
+                    patch.object(extract, "_EXTRACTION_TILE_SIZE", tile_size),
+                    patch.dict(os.environ, {"AE_EXTRACT_WORKERS": str(workers)}),
+                    patch.object(
+                        extract, "_s3_path",
+                        side_effect=lambda bucket, prefix, name: str(root / f"{name}.tif"),
+                    ),
+                ):
+                    extract.extract_covariates(
+                        {**config, "output_dir": str(destination)}, sites
+                    )
+                counts = pd.read_parquet(destination / "ae_atom_counts.parquet")
+                counts = counts.groupby(["site_id", "atomic_id"], as_index=False).sum()
+                self.assertEqual(counts.n_site_pixels.tolist(), [4, 4])
+                self.assertEqual(counts.n_forest_pixels.tolist(), [4, 2])
+                treatment = pd.read_parquet(destination / "treatment_pixels.parquet")
+                controls = pd.read_parquet(destination / "control_pixels")
+                self.assertEqual(sorted(treatment.cell.tolist()), [4, 5, 12, 13])
+                self.assertFalse(set(controls.cell) & {6, 7, 14, 15})
+                outputs.append(counts)
+            for counts in outputs[1:]:
+                pd.testing.assert_frame_equal(outputs[0], counts)
+
     def test_tiled_extraction_preserves_pixels_memberships_and_global_grid(self):
         with tempfile.TemporaryDirectory() as output:
             root = Path(output)

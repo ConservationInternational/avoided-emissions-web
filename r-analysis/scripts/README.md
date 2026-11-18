@@ -19,6 +19,11 @@ Pure statistical functions shared by steps 2 and 3 live in
 is described in [docs/matching.md](../../docs/matching.md) and the outputs in
 [docs/analysis-outputs.md](../../docs/analysis-outputs.md).
 
+For atom-enabled inputs, extraction counts site and baseline-forest pixels for
+every atom, including fragments without a matching stratum. Pixels from any
+site are excluded from the control pool, and control-only tiles contribute no
+atom counts.
+
 ## Nextflow on AWS Batch
 
 Nextflow exclusively manages extraction, locality-batched matching, bounded

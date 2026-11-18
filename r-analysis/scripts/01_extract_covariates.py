@@ -749,6 +749,7 @@ class _TileWorker:
     def __init__(self, config, sites, grid, all_layers, layer_uris, directory):
         self.config = config
         self.sites = sites
+        self.atoms_enabled = "ae_atoms" in sites.columns and sites["ae_atoms"].notna().any()
         self.grid = grid
         self.all_layers = all_layers
         self.layer_uris = layer_uris
@@ -784,6 +785,7 @@ class _TileWorker:
             int(window.row_off),
             int(window.col_off),
             self.grid[1][1],
+            self.atoms_enabled,
         )
         return str(directory), time.monotonic() - started, os.getpid()
 
@@ -1078,7 +1080,8 @@ def extract_covariates(config: dict, sites: gpd.GeoDataFrame) -> None:
 
 
 def _extract_tile(
-    config, sites, grid, all_layers, layer_uris, readers, top, left, global_width
+    config, sites, grid, all_layers, layer_uris, readers, top, left, global_width,
+    atoms_enabled,
 ):
     """Apply the pixel-selection rules to one tile and write its outputs."""
     extent_geom = shape(config["matching_extent"])
@@ -1100,6 +1103,10 @@ def _extract_tile(
     treatment_key = _atom_memberships(
         treatment_key, sites, transform, width, height
     )
+    if atoms_enabled and "atomic_id" not in treatment_key:
+        if not sites.empty:
+            raise ValueError("Atom-enabled tile is missing atom metadata.")
+        treatment_key["atomic_id"] = pd.Series(dtype="int64")
     site_mask = np.zeros(height * width, dtype=bool)
     site_mask[treatment_key["cell"].to_numpy(dtype=np.int64)] = True
     mapped_ids = _mapped_fragment_ids(config, sites)
@@ -1155,8 +1162,9 @@ def _extract_tile(
         del near_sites
     # No pixel inside any site, matched or not, may serve as a control.
     in_extent &= ~site_mask
-    del site_mask
     candidate_mask = in_extent | treatment_mask
+    if atoms_enabled:
+        candidate_mask |= site_mask
     del in_extent, treatment_mask  # free boolean arrays
 
     candidate_indices = np.nonzero(candidate_mask)[0]
@@ -1211,7 +1219,7 @@ def _extract_tile(
         # Keep pixels that either belong to a treatment site (unconditionally)
         # or had some tree cover in the baseline year.  Hansen GFC encodes
         # water/non-land as 0, so ref_vals > 0 is correct.
-        _is_treatment = np.isin(candidate_indices, treatment_indices)
+        _is_treatment = site_mask[candidate_indices]
         _keep = _is_treatment | (_ref_vals > 0)
         del _is_treatment
         n_before = len(candidate_indices)
@@ -1298,6 +1306,8 @@ def _extract_tile(
 
     treatment_key["cell"] = global_cells(treatment_key["cell"].to_numpy())
     _treatment_mask = np.isin(data["cell"], treatment_indices)
+    _site_mask = site_mask[data["cell"]]
+    del site_mask
     data["cell"] = global_cells(data["cell"])
     treatment_key.to_parquet(
         os.path.join(output_dir, "treatment_cell_key.parquet"),
@@ -1389,9 +1399,9 @@ def _extract_tile(
     gc.collect()
     log.debug("Written treatment_pixels.parquet: %d rows", _n_treatment)
 
-    # 2. control_pixels/ -- every pixel that is not a treatment pixel.
-    _control_mask = ~_treatment_mask
-    del _treatment_mask
+    # 2. control_pixels/ -- no pixel from any site can serve as a control.
+    _control_mask = ~_site_mask
+    del _treatment_mask, _site_mask
     _control_count = int(_control_mask.sum())
     _control_pixels_dir = os.path.join(output_dir, "control_pixels")
     os.makedirs(_control_pixels_dir, exist_ok=True)
