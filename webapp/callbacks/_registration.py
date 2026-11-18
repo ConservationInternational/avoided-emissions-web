@@ -29,6 +29,7 @@ from layouts import (
     TASK_LIST_COLUMNS,
     _make_ag_grid,
 )
+from layouts.documentation import variable_cards, variable_links
 from plot_selection import parse_plot_selection, parse_task_tab, plot_selection_query
 from services import (
     ANALYSIS_DEFAULTS,
@@ -164,6 +165,25 @@ def register_callbacks(app, limiter=None):
         future use.  Sign-in itself happens on Flask routes (see
         ``auth_routes.py``), which are rate-limited there.
     """
+
+    @app.callback(
+        Output("docs-variable-list", "children"),
+        Input("docs-variable-search", "value"),
+    )
+    def search_documentation_variables(query):
+        return variable_cards(query)
+
+    @app.callback(
+        Output("covariate-metadata-links", "children"),
+        Output("exact-match-metadata-links", "children"),
+        Input("covariate-selection", "options"),
+        Input("exact-match-selection", "options"),
+    )
+    def refresh_variable_metadata_links(covariates, exact_matches):
+        return (
+            variable_links([option["value"] for option in covariates or []]),
+            variable_links([option["value"] for option in exact_matches or []]),
+        )
 
     # -- Navbar toggle (responsive collapse) ----------------------------------
 

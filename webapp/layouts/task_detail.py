@@ -7,6 +7,7 @@ from plot_selection import parse_plot_selection, parse_task_tab
 from layouts.common import (
     navbar,
 )
+from layouts.documentation import help_link
 
 
 def task_detail_layout(user, task_id, shared_token=None, search=None):
@@ -37,6 +38,14 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
         html.P(
             "Review progress, outputs, plots, and map layers for this analysis task.",
             className="text-muted mb-0",
+        ),
+        html.Div(
+            [
+                help_link("results", label="Interpreting results and quality warnings"),
+                " | ",
+                help_link("methodology", label="Matching methodology"),
+            ],
+            className="mt-2",
         ),
     ]
 

@@ -12,6 +12,7 @@ from layouts.common import (
     MATCHING_JOB_QUEUE_OPTIONS,
     navbar,
 )
+from layouts.documentation import help_link, setting_help, setting_label
 
 
 def submit_layout(user, recompute_config=None):
@@ -44,6 +45,7 @@ def submit_layout(user, recompute_config=None):
                                 "Use the guided tabs to select uploaded sites, configure matching, and submit.",
                                 className="text-muted mb-0",
                             ),
+                            help_link("overview", label="How this analysis works"),
                         ],
                         width=True,
                     )
@@ -108,8 +110,8 @@ def submit_layout(user, recompute_config=None):
                                                 [
                                                     dbc.Col(
                                                         [
-                                                            dbc.Label(
-                                                                "Analysis Resolution"
+                                                            setting_label(
+                                                                "Analysis Resolution", "resolution-m"
                                                             ),
                                                             dbc.Select(
                                                                 id="resolution-m",
@@ -149,7 +151,7 @@ def submit_layout(user, recompute_config=None):
                                             dbc.Card(
                                                 [
                                                     dbc.CardHeader(
-                                                        "Use Uploaded Sites"
+                                                        ["Use Uploaded Sites", " ", help_link("setup", "sites-and-dates")]
                                                     ),
                                                     dbc.CardBody(
                                                         [
@@ -234,7 +236,7 @@ def submit_layout(user, recompute_config=None):
                                 children=[
                                     dbc.Card(
                                         [
-                                            dbc.CardHeader("Matching Preset"),
+                                            dbc.CardHeader(["Matching Preset", " ", setting_help("preset-selector")]),
                                             dbc.CardBody(
                                                 [
                                                     dbc.Row(
@@ -319,7 +321,7 @@ def submit_layout(user, recompute_config=None):
                                                                     dbc.CardBody(
                                                                         [
                                                                             html.H6(
-                                                                                "Matching Covariates",
+                                                                                ["Matching Covariates", " ", setting_help("covariate-selection")],
                                                                                 className="mb-2 fw-semibold",
                                                                             ),
                                                                             dbc.Card(
@@ -335,11 +337,18 @@ def submit_layout(user, recompute_config=None):
                                                                                 ),
                                                                                 className="mb-3",
                                                                             ),
+                                                                            html.Details(
+                                                                                [
+                                                                                    html.Summary("Metadata for available covariates"),
+                                                                                    html.Ul(id="covariate-metadata-links"),
+                                                                                ],
+                                                                                className="mb-3",
+                                                                            ),
                                                                             html.Hr(
                                                                                 className="my-2"
                                                                             ),
                                                                             html.H6(
-                                                                                "Exact Match Variables",
+                                                                                ["Exact Match Variables", " ", setting_help("exact-match-selection")],
                                                                                 className="mb-1 fw-semibold",
                                                                             ),
                                                                             html.Small(
@@ -355,6 +364,13 @@ def submit_layout(user, recompute_config=None):
                                                                                 ),
                                                                                 inline=False,
                                                                                 className="ms-2",
+                                                                            ),
+                                                                            html.Details(
+                                                                                [
+                                                                                    html.Summary("Metadata for exact-match layers"),
+                                                                                    html.Ul(id="exact-match-metadata-links"),
+                                                                                ],
+                                                                                className="mt-2",
                                                                             ),
                                                                         ]
                                                                     ),
@@ -378,8 +394,8 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Max treatment pixels"
+                                                                                            setting_label(
+                                                                                                "Max treatment pixels", "max-treatment-pixels"
                                                                                             ),
                                                                                             dbc.Input(
                                                                                                 id="max-treatment-pixels",
@@ -395,7 +411,7 @@ def submit_layout(user, recompute_config=None):
                                                                                                 ),
                                                                                             ),
                                                                                             html.Small(
-                                                                                                "Maximum treatment pixels sampled per group/site.",
+                                                                                                "Maximum treatment pixels sampled per fragment/exact-match stratum.",
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
@@ -404,8 +420,8 @@ def submit_layout(user, recompute_config=None):
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Control multiplier"
+                                                                                            setting_label(
+                                                                                                "Control multiplier", "control-multiplier"
                                                                                             ),
                                                                                             dbc.Input(
                                                                                                 id="control-multiplier",
@@ -421,7 +437,7 @@ def submit_layout(user, recompute_config=None):
                                                                                                 ),
                                                                                             ),
                                                                                             html.Small(
-                                                                                                "Maximum controls sampled per treatment pixel.",
+                                                                                                "Maximum candidate controls sampled per treatment pixel, not the final matching ratio.",
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
@@ -435,8 +451,8 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Minimum site area (ha)"
+                                                                                            setting_label(
+                                                                                                "Minimum site area (ha)", "min-site-area-ha"
                                                                                             ),
                                                                                             dbc.Input(
                                                                                                 id="min-site-area-ha",
@@ -461,8 +477,8 @@ def submit_layout(user, recompute_config=None):
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Min GLM treatment pixels"
+                                                                                            setting_label(
+                                                                                                "Min GLM treatment pixels", "min-glm-treatment-pixels"
                                                                                             ),
                                                                                             dbc.Input(
                                                                                                 id="min-glm-treatment-pixels",
@@ -492,8 +508,8 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Caliper width"
+                                                                                            setting_label(
+                                                                                                "Caliper width", "caliper-width"
                                                                                             ),
                                                                                             dbc.Input(
                                                                                                 id="caliper-width",
@@ -520,8 +536,8 @@ def submit_layout(user, recompute_config=None):
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Max controls per treatment pixel"
+                                                                                            setting_label(
+                                                                                                "Max controls per treatment pixel", "max-controls-per-treatment"
                                                                                             ),
                                                                                             dcc.Dropdown(
                                                                                                 id="max-controls-per-treatment",
@@ -568,8 +584,8 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Min control distance (km)"
+                                                                                            setting_label(
+                                                                                                "Min control distance (km)", "min-control-distance-km"
                                                                                             ),
                                                                                             dbc.Input(
                                                                                                 id="min-control-distance-km",
@@ -595,8 +611,8 @@ def submit_layout(user, recompute_config=None):
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Matching method"
+                                                                                            setting_label(
+                                                                                                "Matching method", "matching-method"
                                                                                             ),
                                                                                             dcc.Dropdown(
                                                                                                 id="matching-method",
@@ -652,6 +668,7 @@ def submit_layout(user, recompute_config=None):
                                                                                                 "covariates or changing the matching method.",
                                                                                                 className="text-muted",
                                                                                             ),
+                                                                                            setting_help("shared-support-controls"),
                                                                                         ],
                                                                                         xs=12,
                                                                                     ),
@@ -679,6 +696,7 @@ def submit_layout(user, recompute_config=None):
                                                                                                 "failing the site.",
                                                                                                 className="text-muted",
                                                                                             ),
+                                                                                            setting_help("separation-fallback-mahalanobis"),
                                                                                         ],
                                                                                         xs=12,
                                                                                     ),
@@ -689,8 +707,8 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Number of replicates"
+                                                                                            setting_label(
+                                                                                                "Number of replicates", "n-replicates"
                                                                                             ),
                                                                                             dbc.Input(
                                                                                                 id="n-replicates",
@@ -707,9 +725,9 @@ def submit_layout(user, recompute_config=None):
                                                                                             ),
                                                                                             html.Small(
                                                                                                 "Run matching multiple times with different random "
-                                                                                                "samples to construct confidence intervals around "
-                                                                                                "deforestation and emissions estimates. "
-                                                                                                "Set to 1 for a single run (no CIs).",
+                                                                                                "samples to measure sampling and matching variability, "
+                                                                                                "not confidence intervals. "
+                                                                                                "Set to 1 for a single run (no informative replicate range).",
                                                                                                 className="text-muted",
                                                                                             ),
                                                                                         ],
@@ -751,6 +769,7 @@ def submit_layout(user, recompute_config=None):
                                                                                                 "Prefilled with a random value. ",
                                                                                                 className="text-muted",
                                                                                             ),
+                                                                                            setting_help("random-seed"),
                                                                                         ],
                                                                                         xs=12,
                                                                                         sm=6,
@@ -762,8 +781,8 @@ def submit_layout(user, recompute_config=None):
                                                                                 [
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Initial matching memory (GB)"
+                                                                                            setting_label(
+                                                                                                "Initial matching memory (GB)", "match-memory-gb"
                                                                                             ),
                                                                                             dcc.Dropdown(
                                                                                                 id="match-memory-gb",
@@ -801,8 +820,8 @@ def submit_layout(user, recompute_config=None):
                                                                                     ),
                                                                                     dbc.Col(
                                                                                         [
-                                                                                            dbc.Label(
-                                                                                                "Matching worker queue"
+                                                                                            setting_label(
+                                                                                                "Matching worker queue", "matching-job-queue"
                                                                                             ),
                                                                                             dcc.Dropdown(
                                                                                                 id="matching-job-queue",

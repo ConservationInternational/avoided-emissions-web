@@ -64,6 +64,8 @@ A Dash (Plotly) web application providing:
 - Task submission via the trends.earth API (dispatched to AWS Batch)
 - Task status monitoring
 - Results download and interactive visualization (plots, maps)
+- Public in-app documentation with matching guidance, searchable variable
+  metadata, methodology, and contextual help links
 - Shareable read-only result links with configurable expiry
 - Admin panel for triggering GEE covariate exports and managing asynchronous site uploads
 

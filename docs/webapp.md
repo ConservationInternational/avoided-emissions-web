@@ -8,6 +8,7 @@ progress, and viewing results.
 ## Contents
 
 - [Authentication and Roles](#authentication-and-roles)
+- [Documentation and Contextual Help](#documentation-and-contextual-help)
 - [Site Upload](#site-upload)
 - [Submitting a Task](#submitting-a-task)
 - [Task Monitoring](#task-monitoring)
@@ -17,6 +18,25 @@ progress, and viewing results.
 - [Background Workers](#background-workers)
 
 ---
+
+## Documentation and Contextual Help
+
+Select **Documentation** in the top menubar to read the public
+[overview](how-it-works.md), [setup guide](analysis-setup.md),
+[variable reference](covariates.md), [methodology](matching.md),
+[results guide](interpreting-results.md), and [limitations](limitations.md).
+These pages are available without signing in, including to shared-results
+viewers; they do not grant access to task data.
+
+**Learn more** links beside submission settings open the corresponding section
+in a separate tab, preserving unfinished form values. Expand the metadata
+lists near covariate and exact-match selectors for per-variable links.
+Recorded task settings, quality warnings, match-quality plots, and map layers
+also link to explanations or metadata.
+
+The variable catalog can be searched by identifier, readable name, category,
+or source. It documents supported datasets independently of their current
+availability at a particular analysis resolution.
 
 ## Authentication and Roles
 

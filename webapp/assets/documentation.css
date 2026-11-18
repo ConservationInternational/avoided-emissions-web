@@ -1,0 +1,112 @@
+.ae-help-link {
+    display: inline-block;
+    font-size: 0.875rem;
+    text-decoration: underline;
+    margin-inline-start: 0.25rem;
+}
+
+.ae-help-link,
+.ae-docs-content a,
+.ae-docs-sidebar .nav-link:not(.active),
+.ae-docs-sidebar li a {
+    color: #176a9b;
+}
+
+.ae-help-link:focus-visible,
+.ae-docs-sidebar a:focus-visible,
+.ae-docs-content a:focus-visible {
+    outline: 3px solid #176a9b;
+    outline-offset: 3px;
+}
+
+.ae-docs-sidebar {
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+}
+
+.ae-docs-sidebar ul {
+    padding-left: 1.25rem;
+}
+
+.ae-docs-content {
+    background: white;
+    padding: clamp(1rem, 3vw, 2rem);
+    border-radius: 0.5rem;
+    overflow-wrap: anywhere;
+}
+
+.ae-docs-content h2 {
+    font-size: 1.5rem;
+    margin-top: 2rem;
+}
+
+.ae-docs-content h3 {
+    font-size: 1.25rem;
+    margin-top: 1.5rem;
+}
+
+.ae-docs-content [id] {
+    scroll-margin-top: 1rem;
+}
+
+.ae-docs-content table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    margin-bottom: 1rem;
+}
+
+.ae-docs-content td,
+.ae-docs-content th {
+    padding: 0.5rem;
+    border: 1px solid #dbe1e7;
+    vertical-align: top;
+}
+
+.ae-docs-content pre {
+    overflow-x: auto;
+    padding: 0.75rem;
+    background: #f3f5f7;
+}
+
+.ae-variable-card {
+    border-top: 1px solid #dbe1e7;
+    padding-top: 0.5rem;
+}
+
+.ae-variable-card dl > div {
+    display: grid;
+    grid-template-columns: minmax(8rem, 1fr) 3fr;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.ae-variable-card dd {
+    margin-bottom: 0;
+}
+
+.ae-skip-link {
+    position: absolute;
+    left: -10000px;
+}
+
+.ae-skip-link:focus {
+    position: static;
+    display: block;
+    padding: 0.5rem;
+}
+
+@media (max-width: 991.98px) {
+    .ae-docs-sidebar {
+        position: static;
+        max-height: none;
+    }
+}
+
+@media (max-width: 575.98px) {
+    .ae-variable-card dl > div {
+        display: block;
+    }
+}

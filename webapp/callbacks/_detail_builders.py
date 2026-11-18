@@ -15,6 +15,7 @@ from layouts import (
     RESULTS_YEARLY_COLUMNS,
     _make_ag_grid,
 )
+from layouts.documentation import help_link, setting_help, variable_links
 from services import (
     download_results_csv,
     list_task_s3_files,
@@ -248,12 +249,35 @@ def _build_overview(task, sites, totals, quality_warnings=None):
     config = task.config or {}
 
     def _detail_row(label, value):
+        setting = {
+            "Resolution": "resolution-m",
+            "Max treatment pixels": "max-treatment-pixels",
+            "Control multiplier": "control-multiplier",
+            "Min site area (ha)": "min-site-area-ha",
+            "Min GLM treatment pixels": "min-glm-treatment-pixels",
+            "Caliper width (SD)": "caliper-width",
+            "Max controls per treatment": "max-controls-per-treatment",
+            "Min control distance (km)": "min-control-distance-km",
+            "Separation fallback": "separation-fallback-mahalanobis",
+            "Shared-support controls": "shared-support-controls",
+            "Matching method": "matching-method",
+            "Replicates": "n-replicates",
+            "Random seed": "random-seed",
+            "Matching memory": "match-memory-gb",
+            "Batch job queue": "matching-job-queue",
+        }.get(label)
         return html.Div(
             [
                 html.Span(label, className="text-muted", style={"minWidth": "200px"}),
                 html.Span(str(value), style={"fontWeight": "500"}),
+                setting_help(setting) if setting else None,
             ],
-            style={"display": "flex", "gap": "0.5rem", "marginBottom": "0.25rem"},
+            style={
+                "display": "flex",
+                "flexWrap": "wrap",
+                "gap": "0.5rem",
+                "marginBottom": "0.25rem",
+            },
         )
 
     caliper_val = config.get("caliper_width")
@@ -322,6 +346,15 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                             "Exact match variables",
                             ", ".join(config.get("exact_match_vars", [])) or "—",
                         ),
+                        html.Details(
+                            [
+                                html.Summary("Variable metadata"),
+                                html.Ul(variable_links(list(dict.fromkeys(
+                                    (task.covariates or []) + config.get("exact_match_vars", [])
+                                )))),
+                            ],
+                            className="my-2",
+                        ),
                         _detail_row(
                             "Resolution",
                             (
@@ -353,6 +386,11 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         _detail_row(
                             "Min control distance (km)",
                             config.get("min_control_distance_km", "—"),
+                        ),
+                        _detail_row(
+                            "Shared-support controls",
+                            "Enabled" if config.get("shared_support_controls", False)
+                            else "Disabled (legacy policy)",
                         ),
                         _detail_row(
                             "Separation fallback",
@@ -2246,6 +2284,9 @@ def _build_plots(
                     [
                         dbc.AccordionItem(
                             [
+                                help_link("results", "covariate-balance", "How to assess match quality"),
+                                " | ",
+                                help_link("variables", label="Covariate metadata"),
                                 dcc.Loading(
                                     html.Div(
                                         id="match-quality-plots-container",

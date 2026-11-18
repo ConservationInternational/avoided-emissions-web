@@ -983,7 +983,7 @@ def navbar(user=None, active_page=None):
     Parameters
     ----------
     active_page : str | None
-        One of ``"/submit"``, ``"/"``, ``"/admin"``, ``"/settings"``.
+        One of ``"/submit"``, ``"/"``, ``"/admin"``, ``"/settings"``, ``"/docs"``.
         The matching nav link is rendered bold to indicate the current page.
     """
     nav_items = []
@@ -1026,6 +1026,17 @@ def navbar(user=None, active_page=None):
                 )
             )
         )
+
+    nav_items.append(
+        dbc.NavItem(
+            dbc.NavLink(
+                "Documentation",
+                href="/docs",
+                active=(active_page == "/docs"),
+                className="fw-bold" if active_page == "/docs" else "",
+            )
+        )
+    )
 
     right_items = []
     if user:

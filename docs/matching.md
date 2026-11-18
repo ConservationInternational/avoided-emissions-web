@@ -3,7 +3,7 @@
 The analysis estimates *avoided* deforestation by comparing what actually
 happened inside each conservation site (the **treatment**) against what would
 have happened without the intervention — estimated from a matched set of
-unprotected pixels (the **control**). This is done via **propensity score
+outside-site pixels (the **control**, not necessarily unprotected). This is done via **propensity score
 matching (PSM)**, which selects controls that look as similar as possible to
 treatment pixels on a set of pre-intervention covariates.
 
@@ -39,7 +39,8 @@ $$e(X) = P(\text{treatment} = 1 \mid X)$$
 This single number summarises the multivariate covariate profile of each
 pixel. By matching treatment pixels to control pixels with similar propensity
 scores, we produce a comparison group that is balanced on the observed
-covariates — mimicking a randomised experiment.
+covariates. This improves observed comparability but does not make the
+comparison a randomised experiment or account for unmeasured confounding.
 
 ### GLM-based propensity scores
 
@@ -66,14 +67,27 @@ converted to avoided biomass loss and CO₂e emissions
 ## Analysis Pipeline Steps
 
 The matching analysis runs in three steps inside the `r-analysis` Docker
-container (see [covariate-pipeline.md](covariate-pipeline.md#stage-4--pixel-extraction)
-for Step 1 details):
+container:
 
 | Step | Script | What it does |
 |---|---|---|
 | 1 — extract | Python | Samples covariate values for treatment and control candidate pixels from COG files; computes matching extent and control exclusion buffer |
 | 2 — match | R | Within each exact-match stratum of each site, fits a propensity model and matches sampled treatment pixels to controls; each AWS Batch array element handles one bounded unit of site fragments for one replicate |
 | 3 — summarize | R | Computes annual forest loss and emissions for matched pixels, aggregates within each replicate, and reports means and replicate ranges per site-year, per site, and for all sites |
+
+### Site preparation and control geography
+
+Preparation applies the whole-site area threshold before splitting sites
+across selected reference regions. Splitting preserves positive area and
+reference strata; overlapping reference coverage fails explicitly rather than
+silently discarding area. Retained/excluded sites, fragment counts, uncovered
+area, and reference versions are recorded in the preparation report.
+
+Candidate controls are outside all submitted sites, within the selected
+matching geography, and outside the requested distance buffer. Treatment and
+controls must share every selected exact-match value. Finer geographic
+constraints can improve comparability but also remove all controls.
+See the [setup guide](analysis-setup.md#exact-matching) for interpretation.
 
 ### Eligible pixels
 
@@ -115,7 +129,7 @@ has many thousands of pixels and optimal matching is too slow.
 
 **Parameter**: `caliper_width`  
 **Default**: `0.2`  
-**Units**: Standard deviations of the logit of the propensity score  
+**Units**: Within-stratum standard deviations of the logit of the propensity score (sampled treatment and controls)
 **Range**: `0` (disabled) to any positive number; values > 0.5 are rarely useful
 
 The caliper is the maximum allowable distance between matched treatment and
@@ -147,7 +161,7 @@ Controls how many control pixels are matched to each treatment pixel.
 |---|---|
 | `1` | 1:1 matching — one control per treatment pixel |
 | `k > 1` | k controls per treatment pixel |
-| `0` | Full matching — variable ratio; every pixel (treatment and control) is matched into a set. Requires `matching_method = "optimal"` |
+| `0` | Full matching — variable-ratio matched sets, subject to eligibility and distance constraints. Requires `matching_method = "optimal"` |
 
 Increasing the ratio increases statistical power (more matched pairs) at the
 cost of potentially worse per-pair balance. Full matching (`0`) is the most
@@ -317,20 +331,21 @@ bounding box enclosing them.
 ### Pixel Sampling Limits
 
 **Parameter**: `max_treatment_pixels`  
-**Default**: `1000` pixels per site
+**Default**: `1000` pixels per fragment/exact-match stratum
 
 **Parameter**: `control_multiplier`  
 **Default**: `50` controls per treatment pixel
 
 Large sites can have tens of thousands of treatment pixels. Running optimal
-matching at that scale is computationally infeasible. When a site exceeds
+matching at that scale can be computationally infeasible. When a stratum exceeds
 `max_treatment_pixels`, a **random subsample** of treatment pixels is drawn
 (without replacement). The `sampled_fraction` column in the results records
 what fraction of treatment pixels were used.
 
-The control pool for each site is drawn as a random sample of size
-`max_treatment_pixels × control_multiplier` from the full set of eligible
-control pixels. A larger `control_multiplier` gives the matching algorithm
+The sampled control pool for each stratum has up to
+`sampled treatment count × control_multiplier` eligible control pixels.
+This is a ceiling, not a required minimum or the final matching ratio.
+A larger `control_multiplier` gives the matching algorithm
 more options and generally improves balance, at the cost of more memory and
 computation.
 
@@ -423,16 +438,22 @@ All defaults are defined in `webapp/services/analysis_task.py`:
 | Parameter | Default | Notes |
 |---|---|---|
 | `matching_method` | `"optimal"` | |
-| `caliper_width` | `0.2` | Propensity score SDs |
+| `caliper_width` | `0.2` | Logit propensity score SDs |
 | `max_controls_per_treatment` | `1` | 1:1 matching |
 | `exact_match_vars` | `["admin1", "ecoregion", "pa"]` | |
 | `separation_fallback_mahalanobis` | `false` | Must be opted in |
 | `shared_support_controls` | `true` | Joint control restriction for treatment-constant numeric covariates |
 | `n_replicates` | `1` | No replicate range by default |
 | `min_control_distance_km` | `10` | km |
-| `max_treatment_pixels` | `1000` | pixels per site |
+| `max_treatment_pixels` | `1000` | pixels per fragment/exact-match stratum |
 | `control_multiplier` | `50` | controls per treatment pixel |
 | `min_site_area_ha` | `100` | ha |
 | `min_glm_treatment_pixels` | `15` | pixels |
 | `random_seed` | `null` | |
 | `resolution_m` | `1000` | 1 km grid |
+
+The [setup guide](analysis-setup.md) displays current application defaults
+from the form configuration, including generated random seeds and execution
+settings. For older tasks, consult recorded settings rather than current
+defaults. See [limitations and references](limitations.md) for identifying
+assumptions, temporal leakage, spatial dependence, and scientific citations.

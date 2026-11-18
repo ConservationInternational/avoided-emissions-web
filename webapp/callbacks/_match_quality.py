@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
+from layouts.documentation import help_link
 from services import download_results_csv
 
 from callbacks._helpers import (
@@ -426,6 +427,7 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
                 "advice if needed.",
                 className="mb-0 fst-italic",
             ),
+            help_link("results", "covariate-balance", "Understanding these warnings"),
             html.Details(
                 [
                     html.Summary(

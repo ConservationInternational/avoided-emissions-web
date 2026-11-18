@@ -28,6 +28,7 @@ Thumbs.db
 
 # Docs
 *.md
+!docs/*.md
 LICENSE
 
 # Large data files

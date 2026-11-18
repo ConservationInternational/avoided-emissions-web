@@ -26,6 +26,7 @@ from auth_routes import create_auth_blueprint
 from callbacks import register_callbacks
 from config import Config
 from dash import Input, Output, State, dcc, html
+from documentation import PAGES
 from flask import got_request_exception, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -42,6 +43,7 @@ from layouts import (
     submit_layout,
     task_detail_layout,
 )
+from layouts.documentation import documentation_layout
 
 # ---------------------------------------------------------------------------
 # Logging — configure the root logger so that all application loggers (auth,
@@ -309,6 +311,13 @@ def display_page(pathname, search):
 
     if pathname == "/logout":
         return logout_layout(user)
+
+    # Scientific documentation is public and contains no task or account data.
+    if pathname == "/docs" or (pathname and pathname.startswith("/docs/")):
+        page = pathname.removeprefix("/docs").strip("/") or "overview"
+        if page not in PAGES:
+            return html.Div([not_found_layout(user), footer()])
+        return html.Div([documentation_layout(user, page), footer()])
 
     # Shared task view — no login required
     if pathname and pathname.startswith("/shared/"):
