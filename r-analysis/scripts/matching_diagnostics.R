@@ -27,6 +27,19 @@ compact_match_sidecar <- function(sidecar) {
     sidecar
 }
 
+encode_diagnostic_records <- function(entries) {
+    json <- function(value) as.character(jsonlite::toJSON(
+        value, auto_unbox = TRUE, null = "null", na = "null", digits = NA
+    ))
+    list(
+        records = vapply(entries, function(entry) json(entry$record), character(1)),
+        replays = vapply(
+            Filter(function(entry) !is.null(entry$replay), entries),
+            function(entry) json(entry$replay), character(1)
+        )
+    )
+}
+
 write_matching_diagnostics <- function(paths, config, fragments, complete_strata,
                                        atom_status = NULL, atom_declarations = NULL,
                                        invalid_sites = list(), atom_domains = NULL) {
@@ -36,13 +49,36 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
             stop("Missing matching diagnostics")
         }
     }
+    started <- proc.time()[["elapsed"]]
+    message("  Matching diagnostic export: starting (", length(paths), " sidecars)")
     read_sidecar <- function(path) jsonlite::fromJSON(path, simplifyVector = FALSE)
-    versions <- vapply(paths, function(path) {
-        version <- read_sidecar(path)$diagnostics_schema_version
-        if (is.null(version)) 0L else as.integer(version)
-    }, integer(1))
-    if (all(versions == 0L) && !isTRUE(config$require_matching_diagnostics)) return(NULL)
-    if (any(versions != 1L)) stop("Missing or incompatible matching diagnostic schema")
+    schema_version <- function(sidecar) {
+        version <- sidecar$diagnostics_schema_version
+        if (is.null(version)) return(0L)
+        if (length(version) != 1L || is.na(version) || !as.integer(version) %in% 0:1) {
+            stop("Missing or incompatible matching diagnostic schema")
+        }
+        as.integer(version)
+    }
+    first_sidecar <- if (length(paths)) read_sidecar(paths[[1]]) else NULL
+    if (length(paths) && schema_version(first_sidecar) == 0L &&
+        !isTRUE(config$require_matching_diagnostics)) {
+        for (path in paths[-1]) {
+            if (schema_version(read_sidecar(path)) != 0L) {
+                stop("Missing or incompatible matching diagnostic schema")
+            }
+        }
+        return(NULL)
+    }
+    workers <- if (is.null(config$summary_workers)) 1L else as.integer(config$summary_workers)
+    if (length(workers) != 1L || is.na(workers) || workers < 1L) {
+        stop("Invalid summary worker count")
+    }
+    cluster <- NULL
+    on.exit(if (!is.null(cluster)) parallel::stopCluster(cluster), add = TRUE)
+    batch_size <- 64L
+    pending <- vector("list", workers * batch_size)
+    n_pending <- 0L
 
     policy <- if (isTRUE(config$shared_support_controls)) "shared_support_v1" else "legacy"
     output <- function(name) file.path(config$output_dir, name)
@@ -60,12 +96,37 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
             close(manifest)
         }
     }, add = TRUE)
-    json <- function(value) jsonlite::toJSON(
-        value, auto_unbox = TRUE, null = "null", na = "null", digits = NA
-    )
-    emit <- function(value) writeLines(json(value), stream)
     writeLines('{"diagnostics_schema_version":1,"attempts":[', manifest)
     first_replay <- TRUE
+    flush <- function() {
+        if (!n_pending) return(invisible(NULL))
+        if (workers > 1L && is.null(cluster)) {
+            cluster <<- parallel::makePSOCKcluster(workers)
+        }
+        batches <- split(pending[seq_len(n_pending)],
+                         ceiling(seq_len(n_pending) / batch_size))
+        encoded <- if (is.null(cluster)) {
+            lapply(batches, encode_diagnostic_records)
+        } else {
+            parallel::parLapply(cluster, batches, encode_diagnostic_records)
+        }
+        for (batch in encoded) {
+            writeLines(batch$records, stream)
+            if (length(batch$replays)) {
+                if (!first_replay) writeLines(",", manifest)
+                writeLines(paste(batch$replays, collapse = ",\n"), manifest)
+                first_replay <<- FALSE
+            }
+        }
+        pending <<- vector("list", workers * batch_size)
+        n_pending <<- 0L
+        invisible(NULL)
+    }
+    emit <- function(value, replay = NULL) {
+        n_pending <<- n_pending + 1L
+        pending[[n_pending]] <<- list(record = value, replay = replay)
+        if (n_pending == length(pending)) flush()
+    }
     seen <- new.env(hash = TRUE, parent = emptyenv())
     items <- new.env(hash = TRUE, parent = emptyenv())
     scopes <- lapply(c("fragments", "strata", "atoms"), function(x) {
@@ -76,32 +137,42 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
     variables <- new.env(hash = TRUE, parent = emptyenv())
     replicates <- new.env(hash = TRUE, parent = emptyenv())
     atom_evidence <- new.env(hash = TRUE, parent = emptyenv())
-    complete_keys <- paste(complete_strata$id_numeric, complete_strata$group, sep = "\r")
+    complete_keys <- new.env(hash = TRUE, parent = emptyenv())
+    declared_atoms <- new.env(hash = TRUE, parent = emptyenv())
     n_attempts <- 0L
     n_replays <- 0L
     n_duplicates <- 0L
     set_add <- function(env, values) {
         for (value in unique(as.character(values))) assign(value, TRUE, envir = env)
     }
+    set_add(complete_keys, paste(complete_strata$id_numeric, complete_strata$group, sep = "\r"))
+    if (!is.null(atom_declarations)) set_add(declared_atoms, atom_declarations$atomic_id)
     count_add <- function(env, key, record, atom_ids) {
         if (!exists(key, env, inherits = FALSE)) {
-            assign(key, list(attempts = 0L, fragments = character(),
-                             strata = character(), atoms = character()), env)
+            value <- new.env(parent = emptyenv())
+            value$attempts <- 0L
+            for (scope in c("fragments", "strata", "atoms")) {
+                value[[scope]] <- new.env(hash = TRUE, parent = emptyenv())
+            }
+            assign(key, value, env)
         }
         value <- get(key, env, inherits = FALSE)
         value$attempts <- value$attempts + 1L
-        value$fragments <- union(value$fragments, as.character(record$id_numeric))
-        value$strata <- union(value$strata, paste(record$id_numeric, record$group, sep = "\r"))
-        value$atoms <- union(value$atoms, atom_ids)
-        assign(key, value, env)
+        set_add(value$fragments, record$id_numeric)
+        set_add(value$strata, paste(record$id_numeric, record$group, sep = "\r"))
+        set_add(value$atoms, atom_ids)
     }
     atom_run <- if (!is.null(atom_declarations) && nrow(atom_declarations)) {
         unique(as.character(atom_declarations$run_id))
     } else NULL
     if (length(atom_run) > 1L) stop("Inconsistent diagnostic atom run")
 
-    for (path in paths) {
-        sidecar <- read_sidecar(path)
+    for (path_index in seq_along(paths)) {
+        path <- paths[[path_index]]
+        sidecar <- if (path_index == 1L) first_sidecar else read_sidecar(path)
+        if (schema_version(sidecar) != 1L) {
+            stop("Missing or incompatible matching diagnostic schema")
+        }
         if (!identical(sidecar$matching_policy, policy)) {
             stop("Incompatible matching policy in diagnostic sidecar: ", basename(path))
         }
@@ -133,7 +204,8 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
             }
             if (exists(item_key, items, inherits = FALSE)) {
                 previous <- get(item_key, items, inherits = FALSE)
-                previous_items <- c(read_sidecar(previous)$diagnostics, read_sidecar(previous)$failures)
+                previous_sidecar <- read_sidecar(previous)
+                previous_items <- c(previous_sidecar$diagnostics, previous_sidecar$failures)
                 previous_item <- Filter(function(value) {
                     identical(paste(value$id_numeric, value$replicate, sep = "\r"), item_key)
                 }, previous_items)
@@ -169,7 +241,7 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
             }
             stratum_key <- paste(record$id_numeric, record$group, sep = "\r")
             record$record_type <- "attempt"
-            record$stratum_consistent <- stratum_key %in% complete_keys
+            record$stratum_consistent <- exists(stratum_key, complete_keys, inherits = FALSE)
             record$site_valid <- !record$site_id %in% names(invalid_sites)
             atom_ids <- vapply(record$atoms, function(atom) as.character(atom$atomic_id), character(1))
             set_add(scopes$fragments, record$id_numeric)
@@ -185,7 +257,7 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
             for (atom in record$atoms) {
                 atom_id <- as.character(atom$atomic_id)
                 if (!is.null(atom_declarations) &&
-                    !atom_id %in% as.character(atom_declarations$atomic_id)) {
+                    !exists(atom_id, declared_atoms, inherits = FALSE)) {
                     stop("Undeclared diagnostic atom: ", atom_id)
                 }
                 if (!exists(atom_id, atom_evidence, inherits = FALSE)) {
@@ -218,6 +290,7 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
                 }
                 assign(atom_id, evidence, atom_evidence)
             }
+            entry <- NULL
             if (isTRUE(record$glm_failed)) {
                 replay <- record$replay
                 if (is.null(replay) || is.null(replay$sample_file)) {
@@ -246,14 +319,16 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
                     replicate = record$replicate, group = record$group,
                     atom_run_id = record$atom_run_id
                 ), replay, keep.null = TRUE)
-                if (!first_replay) writeLines(",", manifest)
-                writeLines(json(entry), manifest)
-                first_replay <- FALSE
                 n_replays <- n_replays + 1L
                 record$replay <- replay
             }
-            emit(record)
+            emit(record, entry)
             n_attempts <- n_attempts + 1L
+        }
+        if (path_index %% 1000L == 0L || path_index == length(paths)) {
+            message("  Matching diagnostics: ", path_index, "/", length(paths),
+                    " sidecars validated; ", n_attempts, " attempts; ",
+                    round(proc.time()[["elapsed"]] - started, 1), "s elapsed")
         }
     }
     expected_ids <- config$diagnostic_expected_ids
@@ -324,6 +399,7 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
         }
         emit(status)
     }
+    flush()
     writeLines("]}", manifest)
     close(manifest)
     close(stream)
@@ -331,7 +407,8 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
     counts <- function(env) {
         setNames(lapply(sort(ls(env, all.names = TRUE)), function(key) {
             value <- get(key, env, inherits = FALSE)
-            c(list(attempts = value$attempts), lapply(value[-1], length))
+            list(attempts = value$attempts, fragments = length(value$fragments),
+                 strata = length(value$strata), atoms = length(value$atoms))
         }), sort(ls(env, all.names = TRUE)))
     }
     summary <- list(
@@ -357,5 +434,8 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
     )
     jsonlite::write_json(summary, output(artifacts$summary), auto_unbox = TRUE,
                          pretty = TRUE, null = "null", na = "null", digits = NA)
+    message("[TIMING] Matching diagnostic export: ",
+            round(proc.time()[["elapsed"]] - started, 1), "s; ",
+            n_attempts, " attempts, ", n_replays, " replay references")
     summary
 }

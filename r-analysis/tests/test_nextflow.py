@@ -390,18 +390,30 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(first["_workflow"]["diagnostics_contract"]["matching_policy"], "shared_support_v1")
             self.assertEqual(client.copy_object.call_count, 1)
             updated_image = image.replace("a" * 64, "b" * 64)
-            with self.assertRaisesRegex(ValueError, "incompatible"):
-                driver.prepare(client, store, params, updated_image, True)
+            snapshot = store.json("snapshot.json")
+            with patch.object(driver, "VERSION", "2.0.0"):
+                updated = driver.prepare(client, store, params, updated_image, True)
+            self.assertEqual(updated["_workflow"]["identity"], first["_workflow"]["identity"])
+            self.assertEqual(updated["_workflow"]["analysis_image"], updated_image)
+            self.assertEqual(updated["_workflow"]["workflow_version"], "2.0.0")
+            self.assertEqual(
+                {key: value for key, value in updated.items() if key != "_workflow"},
+                {key: value for key, value in first.items() if key != "_workflow"},
+            )
+            self.assertEqual(store.json("snapshot.json"), snapshot)
             self.assertEqual(store.json("snapshot.json")["image"], image)
             with self.assertRaisesRegex(ValueError, "identical"):
                 driver.prepare(
                     client, store, {**params, "shared_support_controls": False}, image, True
                 )
-            with (
-                patch.object(driver, "VERSION", "2.0.0"),
-                self.assertRaisesRegex(ValueError, "incompatible"),
-            ):
-                driver.prepare(client, store, params, image, True)
+            incompatible = json.loads(json.dumps(snapshot))
+            incompatible["analysis"]["_workflow"]["diagnostics_contract"][
+                "diagnostics_schema_version"
+            ] = 2
+            store.write_json("snapshot.json", incompatible)
+            with self.assertRaisesRegex(ValueError, "incompatible diagnostic contract"):
+                driver.prepare(client, store, params, updated_image, True)
+            store.write_json("snapshot.json", snapshot)
             with self.assertRaisesRegex(ValueError, "must be a boolean"):
                 driver.prepare(client, store, {**params, "shared_support_controls": "true"}, image, True)
         with (
@@ -519,6 +531,9 @@ class WorkflowTests(unittest.TestCase):
         import pyarrow.parquet as pq
 
         params, expected, sidecar, sample = self.replay_fixture()
+        params["_workflow"]["analysis_image"] = "current-image"
+        for group in sidecar["failures"][0]["group_diagnostics"]:
+            group["replay"]["analysis_image"] = "original-image"
         expected["n_replicates"] = 2
         store = worker.artifact_store(params, "checkpoints")
         store.commit(sample, checkpoint_key(sample.name))
@@ -568,6 +583,7 @@ class WorkflowTests(unittest.TestCase):
             group["replay"] for group in archived[0][0]["failures"][0]["group_diagnostics"]
         ]
         self.assertEqual(replays[0]["uri"], replays[1]["uri"])
+        self.assertEqual(replays[0]["analysis_image"], "original-image")
         retained = Path(replays[0]["uri"])
         self.assertTrue(retained.is_relative_to(self.root / "results" / "matching_replay"))
         self.assertEqual(retained.read_bytes(), sample.read_bytes())
@@ -965,6 +981,7 @@ class WorkflowTests(unittest.TestCase):
             "_workflow": {
                 "match_memory_mib": 30720,
                 "initial_queue": "ae-spot-gp3",
+                "analysis_image": "registry/analysis@sha256:" + "b" * 64,
             }
         }
         with (
@@ -992,6 +1009,10 @@ class WorkflowTests(unittest.TestCase):
             batch_client.assert_called_with("batch", region_name=env["AWS_REGION"])
             command = popen.call_args.args[0]
             self.assertEqual(command[command.index("-resume") + 1], session)
+            self.assertEqual(
+                command[command.index("--image") + 1],
+                env["NEXTFLOW_TASK_IMAGE"],
+            )
 
     @unittest.skipUnless(
         shutil.which("nextflow"), "requires pinned Nextflow installation"

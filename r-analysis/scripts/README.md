@@ -107,15 +107,27 @@ corrupt, incomplete, or incompatible checkpoints fail reconciliation.
 The summary processes validated match files in bounded parallel batches, then
 merges them in input order. It retains the existing whole-site invalidation,
 complete-stratum, per-replicate, and portfolio aggregation rules. The Batch
-summary task requests four CPUs; the local profile uses one. Logs report match
-index and aggregation timings.
+summary task requests four CPUs; the local profile uses one. Diagnostic JSONL
+and replay-manifest encoding also use these workers in bounded, ordered batches.
+Distinct diagnostic counts use hash sets rather than repeatedly copying growing
+collections, and schema validation shares the diagnostic export's read pass.
+Logs report match index/aggregation and each finalization phase, diagnostic
+progress every 1,000 sidecars, and result collection/upload timings.
 
 Atom estimates and coverage use only complete strata, just like site estimates.
 The summary treats atom IDs as text when joining match data and declarations,
 including when Parquet stores the IDs as integers.
 
 Resuming a previous workflow still requires the original snapshot, inputs, and
-checkpoints. New matching checkpoints validate their diagnostic schema,
+checkpoints, but not the original driver version or currently deployed image.
+Every resumed stage, including extraction and matching, uses the currently
+deployed image. The original snapshot and checkpoint identity remain unchanged;
+the resumed runtime records the current image and driver version. Matching code
+fingerprints remain provenance, not a version gate for reusing checkpoints.
+Statistical settings, input/atom identity, RNG state, and replay checksums still
+gate reuse. Historical replay image references are preserved. A changed diagnostic
+contract or changed parameters/raster/reference inputs still rejects resume.
+New matching checkpoints validate their diagnostic schema,
 matching policy, and atom/input compatibility. Do not mix pre-contract
 checkpoints with new matching runs, or reuse non-atom outputs for atom-enabled
 inputs. Use a fresh task for policy comparisons.

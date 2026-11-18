@@ -834,6 +834,13 @@ results_total <- (if (nrow(site_total_rep) > 0) {
 write_csv(results_total, out_path("results_by_site_total.csv"))
 message("  Per-site results: ", nrow(results_by_year), " site-years, ",
         nrow(results_total), " sites")
+phase_timer <- proc.time()[["elapsed"]]
+log_summary_phase <- function(name) {
+    now <- proc.time()[["elapsed"]]
+    message("[TIMING] ", name, ": ", round(now - phase_timer, 1), "s")
+    phase_timer <<- now
+}
+message("  Finalizing: portfolio statistics")
 
 # Portfolio series are summed within each replicate, then summarised.  The
 # names match the fields plotted by the web app.
@@ -876,6 +883,8 @@ if (nrow(site_total_rep) > 0) {
 
 # -- Match quality -----------------------------------------------------------
 
+log_summary_phase("Portfolio statistics")
+message("  Finalizing: pixel covariate exports")
 cov_data <- bind_rows(
     tibble(id_numeric = integer(), site_id = character(), cell = numeric(),
            group = character(), treatment = logical(), match_group = character(),
@@ -891,6 +900,8 @@ write_csv(
     out_path("results_propensity_scores.csv")
 )
 
+log_summary_phase("Pixel covariate exports")
+message("  Finalizing: covariate balance")
 balance <- bind_rows(
     balance_table(cov_data, covariates, CATEGORICAL) %>% mutate(site_id = "__all__"),
     cov_data %>%
@@ -903,6 +914,8 @@ if (nrow(balance) == 0) {
 }
 write_csv(balance, out_path("results_covariate_balance.csv"))
 
+log_summary_phase("Covariate balance")
+message("  Finalizing: match-quality distributions")
 numeric_covariates <- setdiff(covariates, CATEGORICAL)
 scope_quality <- function(df) {
     ps <- df[!is.na(df$pscore), ]
@@ -947,9 +960,15 @@ if (nrow(cov_data) > 0) {
         q <- scope_quality(df)
         mq$histograms[[scope]] <- q$histograms
         if (!is.null(q$qq)) mq$qq_quantiles[[scope]] <- q$qq
+        if (scope == tail(scopes, 1) || match(scope, scopes) %% 25L == 0L) {
+            message("  Match-quality distributions: ", match(scope, scopes),
+                    "/", length(scopes), " scopes")
+        }
     }
 }
 write_json(mq, out_path("results_match_quality_summary.json"), auto_unbox = TRUE)
+log_summary_phase("Match-quality distributions")
+message("  Finalizing: pixel locations")
 
 gm <- fromJSON(out_path("grid_metadata.json"))
 tf <- gm$transform
@@ -964,6 +983,8 @@ cov_data %>%
 
 # -- Diagnostics and summary -------------------------------------------------
 
+log_summary_phase("Pixel locations")
+message("  Finalizing: summary metadata")
 sampling_by_site <- site_counts %>%
     transmute(site_id, sampled_fraction, sampled_percent = sampled_fraction * 100,
               was_subsampled = sampled_fraction < 1)
@@ -1096,14 +1117,18 @@ if (atom_enabled) {
     summary_data$atom_results_schema_version <- 1L
     summary_data$atom_run_id <- atom_metadata$run_id
 }
+log_summary_phase("Summary metadata")
 matching_diagnostics <- write_matching_diagnostics(
     sidecar_paths, config, fragments, complete_strata, atom_status,
     atom_declarations, invalid_sites,
     if (atom_enabled) atom_year_rep_all else NULL
 )
 if (!is.null(matching_diagnostics)) summary_data$matching_diagnostics <- matching_diagnostics
+message("  Finalizing: summary JSON")
+phase_timer <- proc.time()[["elapsed"]]
 write_json(summary_data, out_path("results_summary.json"), auto_unbox = TRUE,
            pretty = TRUE, null = "null", na = "null", digits = NA)
+log_summary_phase("Summary JSON")
 
 message("[TIMING] Step 3 total: ", round((proc.time() - step3_timer)["elapsed"], 1), "s")
 message("Step 3 complete. Results written to: ", config$output_dir)

@@ -212,11 +212,17 @@ package_versions <- as.list(sapply(c("stats", "dplyr", "arrow", "MatchIt", "optm
                                      if (requireNamespace("rrelaxiv", quietly = TRUE)) "rrelaxiv"),
                                    function(p) as.character(packageVersion(p))))
 
+same_matching_contract <- function(saved, expected) {
+    # Code fingerprints are provenance; statistical and input contracts gate reuse.
+    saved$code_md5 <- expected$code_md5 <- NULL
+    identical(saved, expected)
+}
+
 validate_sidecar <- function(path, id = NULL, k = NULL) {
     saved <- read_json(path)
     # Compare JSON-normalized contracts without dropping explicit null fields.
     expected <- parse_json(toJSON(compatibility, auto_unbox = TRUE, null = "null", digits = NA))
-    if (!identical(saved$compatibility, expected) ||
+    if (!same_matching_contract(saved$compatibility, expected) ||
         !identical(saved$diagnostics_schema_version, expected$diagnostics_schema_version) ||
         !identical(saved$matching_policy, MATCHING_POLICY)) {
         stop("Incompatible matching sidecar: ", basename(path))
@@ -527,7 +533,8 @@ match_strata <- function(d, f, groups, sample_path, saved_sample) {
         } else if (!is.null(stratum_path) && file.exists(stratum_path)) {
             saved <- readRDS(stratum_path)
             if (is.null(sample_md5)) sample_md5 <- unname(tools::md5sum(sample_path))
-            if (!identical(saved$group, g) || !identical(saved$compatibility, compatibility) ||
+            if (!identical(saved$group, g) ||
+                !same_matching_contract(saved$compatibility, compatibility) ||
                 !identical(saved$attempt_key, group_diag$attempt_key) ||
                 !identical(saved$sample_md5, sample_md5)) {
                 stop("Incompatible stratum checkpoint: ", stratum_path)
@@ -947,7 +954,7 @@ process_site <- function(site, pixels, missing_exact, missing_extracted, n_site_
         expected <- attempt_keys(roster)
         if (!no_overlap && file.exists(sample_path)) {
             saved_sample <- readRDS(sample_path)
-            if (!identical(saved_sample$compatibility, compatibility) ||
+            if (!same_matching_contract(saved_sample$compatibility, compatibility) ||
                 !identical(saved_sample$item, progress$current_item) ||
                 !identical(saved_sample$formula, format_formula(this_f)) ||
                 !identical(saved_sample$expected_attempt_keys, expected)) {

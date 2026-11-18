@@ -73,11 +73,11 @@ make_fixture <- function(data_dir, method, n_replicates) {
     path
 }
 
-run_script <- function(script, config_path, array_index = NULL) {
-    env <- c(paste0("R_SCRIPTS_DIR=", scripts_dir), paste0("R_LIBS=", paste(.libPaths(), collapse = ":")))
+run_script <- function(script, config_path, array_index = NULL, script_dir = scripts_dir) {
+    env <- c(paste0("R_SCRIPTS_DIR=", script_dir), paste0("R_LIBS=", paste(.libPaths(), collapse = ":")))
     if (!is.null(array_index)) env <- c(env, paste0("AWS_BATCH_JOB_ARRAY_INDEX=", array_index))
     log <- suppressWarnings(system2(
-        "Rscript", c(file.path(scripts_dir, script), "--config", config_path),
+        "Rscript", c(file.path(script_dir, script), "--config", config_path),
         env = env, stdout = TRUE, stderr = TRUE
     ))
     status <- attr(log, "status")
@@ -610,20 +610,35 @@ test_that(paste(method, "checkpoints yield, resume strata, and preserve seeded m
     expect_true("f1/mb_f1_r1.json.receipt.json" %in% receipts)
     expect_true("f1/f1_r1_sample.rds.receipt.json" %in% receipts)
 
+    updated_scripts <- tempfile("ae_updated_scripts_")
+    dir.create(updated_scripts)
+    file.copy(list.files(scripts_dir, full.names = TRUE), updated_scripts)
+    cat("\n# Updated deployment\n", file = file.path(updated_scripts, "02_perform_matching.R"),
+        append = TRUE)
+    log <- run_script("02_perform_matching.R", config_path, script_dir = updated_scripts)
+    expect_false(any(grepl("Starting stratum", log)))
     checkpoints <- file.path(out, "matches", c("f1_r1_sample.rds", "f1_r1_g1.rds"))
     checksums <- tools::md5sum(checkpoints)
     unlink(file.path(out, "matches", c("mb_f1_r1.json", "mb_f1_r1.parquet")))
+    unlink(file.path(config$checkpoint_uri, "f1",
+                     c("mb_f1_r1.json.receipt.json", "mb_f1_r1.parquet.receipt.json")))
     config$match_work <- list(ids = 1L, replicates = 1L)
     write_json(config, config_path, auto_unbox = TRUE)
-    log <- run_script("02_perform_matching.R", config_path)
+    log <- run_script("02_perform_matching.R", config_path, script_dir = updated_scripts)
     expect_false(any(grepl("Starting stratum", log)))
     expect_equal(tools::md5sum(checkpoints), checksums)
     resumed <- read_batches(out) %>% arrange(id_numeric, replicate, cell, treatment)
     expect_equal(resumed, expected)
-    log <- run_script("02_perform_matching.R", config_path)
+    log <- run_script("02_perform_matching.R", config_path, script_dir = updated_scripts)
     expect_false(any(grepl("Replicate 1:", log)))
     run_script("03_summarize_results.R", config_path)
     expect_equal(fromJSON(file.path(out, "results_summary.json"))$n_sites, 2)
+    config$max_treatment_pixels <- config$max_treatment_pixels + 1L
+    write_json(config, config_path, auto_unbox = TRUE)
+    expect_error(
+        run_script("02_perform_matching.R", config_path, script_dir = updated_scripts),
+        "Incompatible matching sidecar"
+    )
 })
 }
 

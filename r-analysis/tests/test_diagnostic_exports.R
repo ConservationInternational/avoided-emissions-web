@@ -139,3 +139,81 @@ test_that("explicit empty workflow work is complete but missing scheduled work i
     expect_equal(result$counts$attempts, 0L)
     expect_equal(result$counts$atoms, 2L)
 })
+
+test_that("bounded parallel encoding preserves records, replays and distinct counts", {
+    fixture <- diagnostic_fixture()
+    fixture$config$n_replicates <- 130L
+    template <- fromJSON(fixture$paths[2], simplifyVector = FALSE)
+    fixture$paths <- vapply(seq_len(fixture$config$n_replicates), function(rep) {
+        sidecar <- template
+        item <- sidecar$failures[[1]]
+        record <- item$group_diagnostics[[1]]
+        key <- paste("task", 1, rep, "g", sep = "/")
+        record$replicate <- rep
+        record$attempt_key <- key
+        record$glm_failed <- rep %% 2L == 0L
+        record$reason_code <- if (record$glm_failed) "glm_warning" else "matched"
+        record$replay <- if (record$glm_failed) list(
+            sample_file = paste0("f1_r", rep, "_sample.rds"),
+            uri = paste0("s3://replay/", rep), sha256 = paste(rep("a", 64), collapse = "")
+        ) else NULL
+        record$encoding_example <- list(
+            singleton = list(1L), empty = list(), text = "comma,\nquote\"",
+            values = c(0.1, NA_real_, 1e-13)
+        )
+        item$replicate <- rep
+        item$expected_attempt_keys <- list(key)
+        item$group_diagnostics <- list(record)
+        sidecar$failures <- list(item)
+        sidecar$expected_attempt_keys <- list(key)
+        path <- file.path(fixture$config$matches_dir, paste0("encoded_", rep, ".json"))
+        write_json(sidecar, path, auto_unbox = TRUE, null = "null", na = "null", digits = NA)
+        path
+    }, character(1))
+    fixture$paths <- c(fixture$paths, fixture$paths[1])
+    read_export <- function(result) {
+        stream <- gzfile(file.path(fixture$root, result$artifacts$diagnostics), "rt")
+        on.exit(close(stream))
+        list(
+            lines = readLines(stream),
+            replay = fromJSON(file.path(fixture$root, result$artifacts$replay),
+                              simplifyVector = FALSE)
+        )
+    }
+    serial <- export_diagnostic_fixture(fixture)
+    expected <- read_export(serial)
+    fixture$config$summary_workers <- 2L
+    parallel <- export_diagnostic_fixture(fixture)
+    expect_identical(read_export(parallel), expected)
+    expect_identical(parallel, serial)
+    expect_equal(parallel$counts$attempts, 130L)
+    expect_equal(parallel$counts$duplicate_attempts_deduplicated, 1L)
+    expect_equal(parallel$by_cause$glm_warning$attempts, 65L)
+    expect_equal(parallel$by_cause$glm_warning$fragments, 1L)
+    expect_equal(parallel$by_cause$glm_warning$strata, 1L)
+    expect_equal(parallel$by_cause$glm_warning$atoms, 1L)
+    expect_equal(length(expected$replay$attempts), 65L)
+    original <- diagnostic_records(fromJSON(fixture$paths[1], simplifyVector = FALSE))[[1]]
+    actual <- fromJSON(expected$lines[[1]], simplifyVector = FALSE)
+    expect_identical(actual$encoding_example, original$encoding_example)
+})
+
+test_that("single-pass schema validation retains legacy and mixed-schema behavior", {
+    fixture <- diagnostic_fixture()
+    for (path in fixture$paths) {
+        sidecar <- fromJSON(path, simplifyVector = FALSE)
+        sidecar$diagnostics_schema_version <- NULL
+        write_json(sidecar, path, auto_unbox = TRUE, null = "null")
+    }
+    expect_null(export_diagnostic_fixture(fixture))
+    expect_false(file.exists(file.path(fixture$root, "results_matching_diagnostics.jsonl.gz")))
+    fixture$config$require_matching_diagnostics <- TRUE
+    expect_error(export_diagnostic_fixture(fixture), "incompatible matching diagnostic schema")
+    fixture$config$require_matching_diagnostics <- FALSE
+    sidecar <- fromJSON(fixture$paths[2], simplifyVector = FALSE)
+    sidecar$diagnostics_schema_version <- 1L
+    write_json(sidecar, fixture$paths[2], auto_unbox = TRUE, null = "null")
+    expect_error(export_diagnostic_fixture(fixture), "incompatible matching diagnostic schema")
+    fixture$paths <- rev(fixture$paths)
+    expect_error(export_diagnostic_fixture(fixture), "incompatible matching diagnostic schema")
+})

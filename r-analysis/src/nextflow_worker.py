@@ -650,8 +650,8 @@ def retain_replay(params: dict, source: Store, replays: list[dict]) -> None:
                 uri=f"{results.uri}/{receipt['object']}",
                 sha256=receipt["sha256"],
                 size_bytes=receipt["size"],
-                analysis_image=params["_workflow"].get("analysis_image"),
             )
+            replay.setdefault("analysis_image", params["_workflow"].get("analysis_image"))
     finally:
         path.unlink(missing_ok=True)
 
@@ -782,9 +782,15 @@ def summarize(
         (Path("output") / name).is_file() for name in DIAGNOSTIC_RESULTS
     ):
         raise ValueError("Summary did not publish required matching diagnostic artifacts")
+    started = time.monotonic()
+    log.info("Collecting summary result payload")
     payload = _collect_results("output", params["task_id"], log)
+    log.info("[TIMING] Result collection: %.2fs", time.monotonic() - started)
     runtime = params["_workflow"]
     results_store = Store(runtime["results_uri"])
+    started = time.monotonic()
+    log.info("Uploading summary results")
+    uploaded = 0
     for path in Path("output").glob("*"):
         if path.is_file() and path.name.startswith(("results_", "site_identity")):
             # Keep the existing download convention (not the checkpoint layout).
@@ -796,8 +802,14 @@ def summarize(
                     results_store.bucket,
                     f"{results_store.prefix}/{path.name}",
                 )
+            uploaded += 1
+            log.info("Uploaded summary result: %s", path.name)
     payload["results_s3_uri"] = results_store.uri
     write_json("results.json", payload)
+    log.info(
+        "[TIMING] Result upload: %.2fs across %d files",
+        time.monotonic() - started, uploaded,
+    )
 
 
 def commit(config_path: str, files: list[str]) -> None:

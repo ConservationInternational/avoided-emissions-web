@@ -146,15 +146,17 @@ def prepare(client, store: Store, params: dict, image: str, resume: bool) -> dic
         # A resume uses the original policy, not the current new-task default.
         if "shared_support_controls" not in params:
             contract = diagnostics_contract(analysis)
-        if (
-            existing["image"] != image
-            or existing["version"] != VERSION
-            or analysis["_workflow"].get("diagnostics_contract") != contract
-        ):
+        if analysis["_workflow"].get("diagnostics_contract") != contract:
             raise ValueError(
-                "Resume rejected: incompatible image, workflow version or diagnostic "
-                "contract; submit a fresh task"
+                "Resume rejected: incompatible diagnostic contract; submit a fresh task"
             )
+        log.info(
+            "Resuming snapshot from driver %s with driver %s; replacing analysis "
+            "image %s with %s for all stages; preserving checkpoint identity",
+            existing["version"], VERSION, existing["image"], image,
+        )
+        analysis["_workflow"]["analysis_image"] = image
+        analysis["_workflow"]["workflow_version"] = VERSION
         return analysis
     if resume:
         raise ValueError("Cannot resume without the original immutable input snapshot")
