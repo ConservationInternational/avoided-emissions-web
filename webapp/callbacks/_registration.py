@@ -2502,7 +2502,7 @@ def register_callbacks(app, limiter=None):
     @app.callback(
         Output("resume-task-result", "children"),
         Output("task-resume-refresh", "data"),
-        Input("resume-task-btn", "n_clicks"),
+        Input("confirm-resume-task", "submit_n_clicks"),
         State("task-id-store", "data"),
         State("share-token-store", "data"),
         prevent_initial_call=True,
@@ -2551,7 +2551,7 @@ def register_callbacks(app, limiter=None):
 
     @app.callback(
         Output("cancel-task-result", "children"),
-        Input("cancel-task-btn", "n_clicks"),
+        Input("confirm-cancel-task", "submit_n_clicks"),
         State("task-id-store", "data"),
         prevent_initial_call=True,
         running=[

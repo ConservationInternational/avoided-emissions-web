@@ -421,7 +421,8 @@ execution that you own (or administer). It resumes the same execution using
 retained checkpoints; cancelled tasks cannot be resumed. **Recompute** opens
 the submission form with the task's settings to start a new task instead.
 Cancel and resume show progress and prevent repeated clicks while the request
-is in progress. The table temporarily disables its action buttons during a
+is in progress. Both actions require confirmation on the task list and detail
+page. The table temporarily disables its action buttons during a
 request. The API may reject a resume while cleanup is still underway.
 **Logs** shows the execution's user-visible task logs, with manual refresh and
 automatic refresh every 30 seconds while the dialog is open. Logs are available

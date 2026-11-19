@@ -53,13 +53,17 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
         [
             dbc.Col(header_children, width=True),
             dbc.Col(
-                dbc.Button(
-                    [html.I(className="bi bi-play-circle me-1"), "Resume"],
-                    id="resume-task-btn",
-                    color="outline-primary",
-                    size="sm",
-                    className="mt-1",
-                    title="Resume the same failed Nextflow execution using retained checkpoints",
+                dcc.ConfirmDialogProvider(
+                    dbc.Button(
+                        [html.I(className="bi bi-play-circle me-1"), "Resume"],
+                        id="resume-task-btn",
+                        color="outline-primary",
+                        size="sm",
+                        className="mt-1",
+                        title="Resume the same failed Nextflow execution using retained checkpoints",
+                    ),
+                    id="confirm-resume-task",
+                    message="Resume this failed task using retained checkpoints?",
                 ),
                 id="resume-task-control",
                 width="auto",
@@ -89,16 +93,23 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
                                     className="mt-1 me-2",
                                     title="Open submission form pre-filled with this task's settings",
                                 ),
-                                dbc.Button(
-                                    [
-                                        html.I(className="bi bi-x-circle me-1"),
-                                        "Cancel",
-                                    ],
-                                    id="cancel-task-btn",
-                                    color="outline-danger",
-                                    size="sm",
-                                    className="mt-1 me-2",
-                                    title="Cancel this running task",
+                                dcc.ConfirmDialogProvider(
+                                    dbc.Button(
+                                        [
+                                            html.I(className="bi bi-x-circle me-1"),
+                                            "Cancel",
+                                        ],
+                                        id="cancel-task-btn",
+                                        color="outline-danger",
+                                        size="sm",
+                                        className="mt-1 me-2",
+                                        title="Cancel this running task",
+                                    ),
+                                    id="confirm-cancel-task",
+                                    message=(
+                                        "Cancel this task? Cancelled tasks cannot "
+                                        "be resumed."
+                                    ),
                                 ),
                                 dbc.Button(
                                     [

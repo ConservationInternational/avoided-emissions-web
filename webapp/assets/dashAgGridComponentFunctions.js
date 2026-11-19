@@ -516,7 +516,8 @@ dagcomponentfuncs.TaskActions = function (props) {
                     : "Only pending/running tasks can be cancelled",
                 onClick: function (e) {
                     e.stopPropagation();
-                    if (canCancel) {
+                    if (canCancel && !window.taskListAction.pending && data.id &&
+                        window.confirm("Cancel this task? Cancelled tasks cannot be resumed.")) {
                         requestAction("cancel", "Cancelling task...");
                     }
                 },
@@ -544,7 +545,8 @@ dagcomponentfuncs.TaskActions = function (props) {
                     : "Only eligible failed Nextflow executions can be resumed",
                 onClick: function (e) {
                     e.stopPropagation();
-                    if (canResume) {
+                    if (canResume && !window.taskListAction.pending && data.id &&
+                        window.confirm("Resume this failed task using retained checkpoints?")) {
                         requestAction("resume", "Requesting task resume...");
                     }
                 },

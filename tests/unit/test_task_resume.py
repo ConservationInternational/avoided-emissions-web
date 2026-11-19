@@ -342,6 +342,44 @@ def test_list_recompute_opens_submission_form_and_releases_action(callbacks):
     assert complete
 
 
+@pytest.mark.parametrize(
+    ("action", "button_id"),
+    [("resume", "resume-task-btn"), ("cancel", "cancel-task-btn")],
+)
+def test_detail_actions_are_triggered_only_by_confirmation(
+    callbacks, resume_context, action, button_id
+):
+    user, task, _, _, _ = resume_context
+    app = Dash(__name__, suppress_callback_exceptions=True)
+    app.layout = task_detail_layout(user, str(task.id))
+    registration.register_callbacks(app)
+    confirmation_id = f"confirm-{action}-task"
+    key = next(
+        name for name in app.callback_map if f"{action}-task-result.children" in name
+    )
+    assert app.callback_map[key]["inputs"] == [
+        {"id": confirmation_id, "property": "submit_n_clicks"}
+    ]
+
+    def find(component, component_id):
+        if getattr(component, "id", None) == component_id:
+            return component
+        children = getattr(component, "children", None)
+        if children is None:
+            return None
+        if not isinstance(children, (list, tuple)):
+            children = [children]
+        for child in children:
+            found = find(child, component_id)
+            if found is not None:
+                return found
+        return None
+
+    confirmation = find(app.layout, confirmation_id)
+    assert confirmation.message
+    assert confirmation.children.id == button_id
+
+
 def test_registered_list_resume_emits_refresh_event(mocker, callbacks, resume_context):
     _, task, _, _, _ = resume_context
     resume = mocker.patch.object(registration, "resume_task")
