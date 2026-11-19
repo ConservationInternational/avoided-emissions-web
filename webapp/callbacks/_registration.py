@@ -1629,7 +1629,6 @@ def register_callbacks(app, limiter=None):
         for task in tasks:
             cfg = task.config or {}
             covariates = task.covariates or []
-            exact_matches = cfg.get("exact_match_vars", [])
             row = {
                 "id": str(task.id),
                 "name": task.name,
@@ -1641,10 +1640,6 @@ def register_callbacks(app, limiter=None):
                 ),
                 "progress": task.progress,
                 "n_sites": task.n_sites or 0,
-                "covariates_short": ", ".join(covariates),
-                "covariates_full": ", ".join(covariates),
-                "exact_matches_short": ", ".join(exact_matches),
-                "exact_matches_full": ", ".join(exact_matches),
                 "params": {**cfg, "covariates": covariates},
                 "matching_method": cfg.get("matching_method", "optimal"),
                 "created_at": _fmt_dt(task.created_at),

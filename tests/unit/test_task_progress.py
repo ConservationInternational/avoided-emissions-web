@@ -101,6 +101,8 @@ def test_task_list_passes_cached_percentage_to_renderer(mocker):
         "control_multiplier",
         "caliper_width",
         "max_controls_per_treatment",
+        "covariates_short",
+        "exact_matches_short",
     }.intersection(column["field"] for column in columns)
     assert (
         next(col for col in columns if col["field"] == "progress")["cellRenderer"]

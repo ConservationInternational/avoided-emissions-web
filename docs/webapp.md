@@ -382,7 +382,8 @@ Percentages are driver estimates, not the fraction of submitted Batch tasks
 that have finished. Resuming a failed analysis resets its cached progress.
 
 Select **View** in the **Params** column to open the task's saved configuration,
-including covariates, as pretty-printed JSON in a scrollable dialog.
+including covariates and exact-match variables, as pretty-printed JSON in a
+scrollable dialog. These settings are shown there rather than in separate columns.
 
 The **Resume** action is enabled for failed Nextflow tasks with a tracked API
 execution that you own (or administer). It resumes the same execution using
