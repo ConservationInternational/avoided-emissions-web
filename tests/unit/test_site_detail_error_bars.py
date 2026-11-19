@@ -136,7 +136,7 @@ def test_yearly_bars_rank_2025_and_split_remaining_sites_by_yearly_sign(
     )
     figures = [
         graph.figure
-        for graph in container.children[0].children
+        for graph in container["task-results-graphs"].children
         if graph.figure.layout.title.text
         in ("Avoided Emissions by Year", "Forest Loss Avoided by Year")
     ]
@@ -257,7 +257,7 @@ def test_ranked_emissions_charts_limit_sort_and_link_sites(selection):
         for child in content.children
         if getattr(child, "id", None) == "task-results-plots"
     )
-    graphs = container.children[0].children
+    graphs = container["task-results-graphs"].children
     ranked = [
         graph
         for graph in graphs
@@ -386,7 +386,7 @@ def test_avoided_emissions_aggregate_plots_show_replicate_ranges():
         ],
         agg_yearly=[aggregate_year],
     )
-    graphs = content.children[0].children[0].children
+    graphs = content["task-results-graphs"].children
     yearly = next(
         graph.figure
         for graph in graphs
@@ -567,7 +567,7 @@ def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years, monk
                 for child in content.children
                 if getattr(child, "id", None) == "task-results-plots"
             )
-            children = results_container.children[0].children
+            children = results_container["task-results-graphs"].children
         else:
             children = content
         graphs = [item for item in children if isinstance(item, dcc.Graph)]
@@ -700,7 +700,9 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
         for child in aggregate.children
         if getattr(child, "id", None) == "task-results-plots"
     )
-    aggregate_graphs = [item.figure for item in results_container.children[0].children]
+    aggregate_graphs = [
+        item.figure for item in results_container["task-results-graphs"].children
+    ]
 
     for fig in aggregate_graphs[:2]:
         assert [trace.line.color for trace in fig.data[:2]] == [
@@ -1333,23 +1335,20 @@ def test_task_detail_has_no_separate_map_tab():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("shared_token", [None, "share"])
-def test_results_loading_covers_selection_and_chained_plot_updates(shared_token):
+def test_task_tabs_have_independent_loading_indicators(shared_token):
     layout = task_detail_layout(None, "task", shared_token=shared_token)
-    loading = layout["task-results-loading"]
-
-    assert isinstance(loading, dcc.Loading)
-    assert loading["task-plot-selection"] is layout["task-plot-selection"]
-    assert loading["task-plots"] is layout["task-plots"]
-    assert loading["task-title"] is layout["task-title"]
-    assert loading.target_components == {
-        "task-title": "children",
-        "task-plot-selection": "data",
-        "task-results-graphs": "children",
-        "task-plots": "children",
-        "site-filtered-ids": "data",
-    }
-    assert loading.custom_spinner.role == "status"
-    assert loading.custom_spinner.children.children[-1].children == "Loading results..."
+    assert layout["detail-tabs"] in layout.children
+    for tab, output_id in zip(
+        layout["detail-tabs"].children,
+        ("task-overview", "task-results-content", "task-plots", "task-raw-results"),
+        strict=True,
+    ):
+        loading = tab[f"{output_id}-loading"]
+        assert isinstance(loading, dcc.Loading)
+        assert loading.children.id == output_id
+        assert loading.target_components == {output_id: "children"}
+        assert loading.overlay_style == {"visibility": "visible"}
+        assert loading.custom_spinner.role == "status"
 
 
 @pytest.mark.unit

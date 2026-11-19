@@ -10,6 +10,30 @@ from layouts.common import (
 from layouts.documentation import help_link
 
 
+def task_section_loading(content, label):
+    """Show progress for one callback output without hiding or blocking it."""
+    return dcc.Loading(
+        content,
+        id=f"{content.id}-loading",
+        target_components={content.id: "children"},
+        parent_className="ae-section-loading",
+        delay_show=150,
+        show_initially=False,
+        overlay_style={"visibility": "visible"},
+        custom_spinner=html.Div(
+            [
+                html.Span(
+                    className="spinner-border spinner-border-sm text-primary",
+                    **{"aria-hidden": "true"},
+                ),
+                html.Span(label),
+            ],
+            className="ae-section-loading-status",
+            role="status",
+        ),
+    )
+
+
 def task_detail_layout(user, task_id, shared_token=None, search=None):
     """Task detail page with status, results, plots, and map.
 
@@ -255,7 +279,11 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
                 children=[
                     html.Div(
                         dbc.Card(
-                            dbc.CardBody(html.Div(id="task-overview")),
+                            dbc.CardBody(
+                                task_section_loading(
+                                    html.Div(id="task-overview"), "Loading overview..."
+                                )
+                            ),
                             className="ae-section-card",
                         ),
                         className="p-3",
@@ -268,7 +296,12 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
                 children=[
                     html.Div(
                         dbc.Card(
-                            dbc.CardBody(html.Div(id="task-results-content")),
+                            dbc.CardBody(
+                                task_section_loading(
+                                    html.Div(id="task-results-content"),
+                                    "Loading results tables...",
+                                )
+                            ),
                             className="ae-section-card",
                         ),
                         className="p-3",
@@ -281,7 +314,11 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
                 children=[
                     html.Div(
                         dbc.Card(
-                            dbc.CardBody(html.Div(id="task-plots")),
+                            dbc.CardBody(
+                                task_section_loading(
+                                    html.Div(id="task-plots"), "Loading results plots..."
+                                )
+                            ),
                             className="ae-section-card",
                         ),
                         className="p-3",
@@ -294,7 +331,12 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
                 children=[
                     html.Div(
                         dbc.Card(
-                            dbc.CardBody(html.Div(id="task-raw-results")),
+                            dbc.CardBody(
+                                task_section_loading(
+                                    html.Div(id="task-raw-results"),
+                                    "Loading raw results...",
+                                )
+                            ),
                             className="ae-section-card",
                         ),
                         className="p-3",
@@ -311,45 +353,13 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
         [
             navbar(user, active_page="/"),
             shared_banner,
-            dcc.Loading(
-                [
-                    header_row,
-                    html.Div(id="recompute-result"),
-                    html.Div(id="cancel-task-result"),
-                    html.Div(id="resume-task-result"),
-                    html.Div(id="quality-warning-banner"),
-                    tabs,
-                    dcc.Store(id="task-plot-selection", data=selection),
-                ],
-                id="task-results-loading",
-                target_components={
-                    # Tab contents mount lazily; the title tracks every tab refresh.
-                    "task-title": "children",
-                    "task-plot-selection": "data",
-                    "task-results-graphs": "children",
-                    "task-plots": "children",
-                    "site-filtered-ids": "data",
-                },
-                delay_show=150,
-                delay_hide=150,
-                show_initially=False,
-                overlay_style={"visibility": "visible"},
-                custom_spinner=html.Div(
-                    html.Div(
-                        [
-                            html.Div(
-                                className="spinner-border text-primary",
-                                **{"aria-hidden": "true"},
-                            ),
-                            html.Div("Loading results...", className="mt-2"),
-                        ],
-                        className="bg-white rounded shadow p-4 text-center",
-                    ),
-                    className="ae-results-loading",
-                    role="status",
-                    **{"aria-live": "polite"},
-                ),
-            ),
+            header_row,
+            html.Div(id="recompute-result"),
+            html.Div(id="cancel-task-result"),
+            html.Div(id="resume-task-result"),
+            html.Div(id="quality-warning-banner"),
+            tabs,
+            dcc.Store(id="task-plot-selection", data=selection),
             edit_modal,
             share_modal,
             dcc.Store(id="task-id-store", data=task_id),

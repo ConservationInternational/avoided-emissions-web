@@ -16,6 +16,7 @@ from layouts import (
     _make_ag_grid,
 )
 from layouts.documentation import help_link, setting_help, variable_links
+from layouts.task_detail import task_section_loading
 from services import (
     download_results_csv,
     list_task_s3_files,
@@ -1139,7 +1140,9 @@ def _build_results_content(
         content.extend(
             [
                 dcc.Store(id="task-yearly-request", data=True),
-                dcc.Loading(html.Div(id="task-yearly-results")),
+                task_section_loading(
+                    html.Div(id="task-yearly-results"), "Loading yearly results..."
+                ),
             ]
         )
     else:
@@ -2442,7 +2445,9 @@ def _build_plots(
             plots.extend(
                 [
                     dcc.Store(id="task-map-request", data=True),
-                    dcc.Loading(html.Div(id="task-map-content")),
+                    task_section_loading(
+                        html.Div(id="task-map-content"), "Loading map..."
+                    ),
                 ]
             )
         plots.append(
@@ -2455,7 +2460,10 @@ def _build_plots(
     plots.append(
         html.Div(
             [
-                html.Div(aggregate_plots, id="task-results-graphs"),
+                task_section_loading(
+                    html.Div(aggregate_plots, id="task-results-graphs"),
+                    "Updating results plots...",
+                ),
                 dbc.Accordion(
                     [
                         dbc.AccordionItem(
@@ -2463,12 +2471,12 @@ def _build_plots(
                                 help_link("results", "covariate-balance", "How to assess match quality"),
                                 " | ",
                                 help_link("variables", label="Covariate metadata"),
-                                dcc.Loading(
+                                task_section_loading(
                                     html.Div(
                                         id="match-quality-plots-container",
                                         className="mt-3",
                                     ),
-                                    type="default",
+                                    "Loading match quality...",
                                 ),
                                 html.Hr(className="my-3"),
                                 dbc.Button(

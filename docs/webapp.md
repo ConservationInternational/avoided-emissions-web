@@ -551,10 +551,9 @@ group filters, and results tabs without reloading the whole page. The map also
 returns to its saved center, zoom, and rotation. Panning and zooming alone do not
 add history entries. Map positions stay in browser history, not in shared URLs;
 opening a direct or shared link still fits the selected site or the full map.
-A centered **Loading results...** indicator appears when loading the Overview,
-Results Tables, Results Plots, or Raw Results tab, and while a plot selection,
-group filter, or Back/Forward navigation is updating results. It stays visible
-until the tab content, selection, and filtered plots finish loading.
+Loading indicators appear in the tab or section being updated. The map,
+yearly results table, filtered plots, and Match Quality each show their own
+progress without blocking navigation or hiding results that are already visible.
 Group ranges are calculated from the selected sites' yearly outcomes within
 each matching replicate, not by adding site-level bounds. Site sets must be
 reimported to retain source attributes, and analyses rerun to produce the
