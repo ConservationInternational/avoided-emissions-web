@@ -231,7 +231,7 @@ def test_resume_action_refreshes_status_and_restarts_the_disabled_interval(
     _, task, _, _, _ = resume_context
     refresh = callbacks["refresh_task_detail"]
     before = refresh(0, "tab-raw-results", None, str(task.id), None)
-    assert before[-2:] == (True, {})
+    assert before[-3:] == (True, {}, {"display": "none"})
 
     def accepted(*args):
         task.status = "submitted"
@@ -241,8 +241,30 @@ def test_resume_action_refreshes_status_and_restarts_the_disabled_interval(
     assert alert.color == "success"
     assert event
     after = refresh(0, "tab-raw-results", event, str(task.id), None)
-    assert after[-2:] == (False, {"display": "none"})
+    assert after[-3:] == (False, {"display": "none"}, {})
     assert after[1].children == "SUBMITTED"
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "cancelled"])
+def test_detail_hides_cancel_control_for_terminal_tasks(
+    mocker, callbacks, resume_context, status
+):
+    _, task, _, _, _ = resume_context
+    task.status = status
+    mocker.patch.object(registration, "_compute_quality_warnings", return_value=[])
+    outputs = callbacks["refresh_task_detail"](
+        0, "tab-raw-results", None, str(task.id), None
+    )
+    assert outputs[-1] == {"display": "none"}
+
+
+def test_detail_shows_cancel_control_for_running_tasks(callbacks, resume_context):
+    _, task, _, _, _ = resume_context
+    task.status = "running"
+    outputs = callbacks["refresh_task_detail"](
+        0, "tab-raw-results", None, str(task.id), None
+    )
+    assert outputs[-1] == {}
 
 
 def test_cleanup_message_is_visible_without_restarting_polling(mocker, callbacks):
@@ -420,7 +442,7 @@ def test_shared_views_never_offer_or_invoke_resume(mocker, callbacks):
     outputs = callbacks["refresh_task_detail"](
         0, "tab-raw-results", None, "task", "share-token"
     )
-    assert outputs[-1] == {"display": "none"}
+    assert outputs[-2:] == ({"display": "none"}, {"display": "none"})
     with pytest.raises(PreventUpdate):
         callbacks["handle_resume_task"](1, "task", "share-token")
     resume.assert_not_called()

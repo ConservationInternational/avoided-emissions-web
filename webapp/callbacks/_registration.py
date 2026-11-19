@@ -1704,6 +1704,7 @@ def register_callbacks(app, limiter=None):
             Output("quality-warning-banner", "children"),
             Output("detail-refresh-interval", "disabled"),
             Output("resume-task-control", "style"),
+            Output("cancel-task-control", "style"),
         ],
         [
             Input("detail-refresh-interval", "n_intervals"),
@@ -1733,6 +1734,7 @@ def register_callbacks(app, limiter=None):
                 None,
                 True,
                 {"display": "none"},
+                {"display": "none"},
             )
 
         # Batch task status is polled by the Celery Beat worker;
@@ -1748,6 +1750,7 @@ def register_callbacks(app, limiter=None):
                 None,
                 None,
                 True,
+                {"display": "none"},
                 {"display": "none"},
             )
 
@@ -1856,6 +1859,11 @@ def register_callbacks(app, limiter=None):
             (
                 {}
                 if not share_token and can_resume_task(task, get_current_user())
+                else {"display": "none"}
+            ),
+            (
+                {}
+                if not share_token and task.status not in terminal_states
                 else {"display": "none"}
             ),
         )
