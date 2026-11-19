@@ -311,18 +311,20 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
         [
             navbar(user, active_page="/"),
             shared_banner,
-            header_row,
-            html.Div(id="recompute-result"),
-            html.Div(id="cancel-task-result"),
-            html.Div(id="resume-task-result"),
-            html.Div(id="quality-warning-banner"),
             dcc.Loading(
                 [
+                    header_row,
+                    html.Div(id="recompute-result"),
+                    html.Div(id="cancel-task-result"),
+                    html.Div(id="resume-task-result"),
+                    html.Div(id="quality-warning-banner"),
                     tabs,
                     dcc.Store(id="task-plot-selection", data=selection),
                 ],
                 id="task-results-loading",
                 target_components={
+                    # Tab contents mount lazily; the title tracks every tab refresh.
+                    "task-title": "children",
                     "task-plot-selection": "data",
                     "task-results-graphs": "children",
                     "task-plots": "children",

@@ -1287,7 +1287,9 @@ def test_results_loading_covers_selection_and_chained_plot_updates(shared_token)
     assert isinstance(loading, dcc.Loading)
     assert loading["task-plot-selection"] is layout["task-plot-selection"]
     assert loading["task-plots"] is layout["task-plots"]
+    assert loading["task-title"] is layout["task-title"]
     assert loading.target_components == {
+        "task-title": "children",
         "task-plot-selection": "data",
         "task-results-graphs": "children",
         "task-plots": "children",
