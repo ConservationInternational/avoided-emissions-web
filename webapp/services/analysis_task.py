@@ -2133,38 +2133,66 @@ def get_filtered_match_quality_pixels(task_id, site_ids, results_s3_uri=None):
     return pixels
 
 
-def list_task_s3_files(task_id, results_s3_uri=None):
-    """List all S3 files under a task's output directory.
+_MATCHING_REPLAY_DIR = "matching_replay/"
 
-    Returns a list of dicts with ``key``, ``filename``, ``size_bytes``,
-    and ``last_modified`` for each object found.
-    """
+
+def _sign_task_result(s3, bucket, key):
+    return s3.generate_presigned_url(
+        "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600
+    )
+
+
+def list_task_s3_files(task_id, results_s3_uri=None):
+    """Return (main files, has replay files), without enumerating replay objects."""
     bucket, prefix = _resolve_results_s3(task_id, results_s3_uri)
+    root = prefix + "/"
+    replay_prefix = root + _MATCHING_REPLAY_DIR
     s3 = get_s3_client()
     paginator = s3.get_paginator("list_objects_v2")
     files = []
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
-        for obj in page.get("Contents", []):
+
+    def add_objects(objects):
+        for obj in objects:
             key = obj["Key"]
-            rel = key[len(prefix) :].lstrip("/")
-            if not rel:
+            if key.endswith("/"):
                 continue
             files.append(
                 {
                     "key": key,
-                    "filename": rel,
+                    "filename": key[len(root) :],
                     "size_bytes": obj.get("Size", 0),
                     "last_modified": obj.get("LastModified", "").isoformat()
                     if hasattr(obj.get("LastModified", ""), "isoformat")
                     else str(obj.get("LastModified", "")),
-                    "download_url": s3.generate_presigned_url(
-                        "get_object",
-                        Params={"Bucket": bucket, "Key": key},
-                        ExpiresIn=3600,
-                    ),
+                    "download_url": _sign_task_result(s3, bucket, key),
                 }
             )
-    return files
+
+    has_replay = False
+    for page in paginator.paginate(Bucket=bucket, Prefix=root, Delimiter="/"):
+        add_objects(page.get("Contents", []))
+        for folder in page.get("CommonPrefixes", []):
+            folder_prefix = folder["Prefix"]
+            if folder_prefix == replay_prefix:
+                has_replay = True
+                continue
+            for nested in paginator.paginate(Bucket=bucket, Prefix=folder_prefix):
+                add_objects(nested.get("Contents", []))
+    return files, has_replay
+
+
+def matching_replay_links(task_id, results_s3_uri=None):
+    """Generate one fresh download URL per matching replay object."""
+    bucket, prefix = _resolve_results_s3(task_id, results_s3_uri)
+    s3 = get_s3_client()
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(
+        Bucket=bucket, Prefix=f"{prefix}/{_MATCHING_REPLAY_DIR}"
+    ):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if not key.endswith("/"):
+                yield _sign_task_result(s3, bucket, key)
 
 
 def _resolve_results_s3(task_id, results_s3_uri=None):

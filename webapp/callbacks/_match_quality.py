@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
+from layouts.common import _make_ag_grid
 from layouts.documentation import help_link
 from services import download_results_csv
 from services.task_result_cache import QUALITY_WARNINGS_KEY, cached_task_result
@@ -572,48 +573,55 @@ def collect_quality_warnings(task_id, results_s3_uri, meta, totals):
     return warnings
 
 
-def _build_site_quality_table(warnings, totals=None):
-    """Build a table listing sites with quality concerns.
+SITE_QUALITY_GRID_ID = "results-site-quality-grid"
+SITE_QUALITY_BLOCK_SIZE = 50
 
-    Returns an empty ``html.Div`` when there are no per-site warnings.
-    """
-    site_warnings = [w for w in warnings if w["scope"] != "aggregate"]
-    if not site_warnings:
+
+def _site_quality_rows(warnings, totals, start, end):
+    """Return one block of site warnings and the total number of affected sites."""
+    site_map = {}
+    for warning in warnings:
+        if warning["scope"] != "aggregate":
+            site_map.setdefault(warning["scope"], []).append(warning)
+    names = {str(t.site_id): t.site_name for t in totals}
+    rows = [
+        {
+            "site_id": sid,
+            "site": names.get(sid) or sid,
+            "severity": (
+                "Critical" if any(w["level"] == "danger" for w in ws) else "Warning"
+            ),
+            "issues": "; ".join(w["message"] for w in ws),
+        }
+        for sid, ws in sorted(site_map.items())[start:end]
+    ]
+    return {"rowData": rows, "rowCount": len(site_map)}
+
+
+def _build_site_quality_table(warnings):
+    if not any(w["scope"] != "aggregate" for w in warnings):
         return html.Div()
 
-    # Group warnings by site
-    site_map = {}
-    for w in site_warnings:
-        site_map.setdefault(w["scope"], []).append(w)
-
-    # Build name lookup from totals
-    name_lookup = {}
-    if totals:
-        for t in totals:
-            name_lookup[str(t.site_id)] = t.site_name or str(t.site_id)
-
-    rows = []
-    for sid, ws in sorted(site_map.items()):
-        has_danger = any(w["level"] == "danger" for w in ws)
-        icon_cls = (
-            "bi bi-exclamation-triangle-fill text-danger"
-            if has_danger
-            else "bi bi-exclamation-triangle text-warning"
-        )
-        issues = "; ".join(w["message"] for w in ws)
-        rows.append(
-            html.Tr(
-                [
-                    html.Td(
-                        html.I(className=icon_cls),
-                        style={"width": "30px", "textAlign": "center"},
-                    ),
-                    html.Td(name_lookup.get(sid, sid)),
-                    html.Td(issues, className="text-muted small"),
-                ]
-            )
-        )
-
+    columns = [
+        {
+            "field": "severity",
+            "width": 105,
+            "cellClassRules": {
+                "text-danger": "value === 'Critical'",
+                "text-warning-emphasis": "value === 'Warning'",
+            },
+        },
+        {"field": "site", "flex": 1, "minWidth": 130, "tooltipField": "site"},
+        {
+            "field": "issues",
+            "headerName": "Issue(s)",
+            "flex": 2,
+            "minWidth": 180,
+            "tooltipField": "issues",
+        },
+    ]
+    for column in columns:
+        column.update(sortable=False, filter=False)
     return dbc.Card(
         [
             dbc.CardHeader(
@@ -625,20 +633,19 @@ def _build_site_quality_table(warnings, totals=None):
                 ]
             ),
             dbc.CardBody(
-                html.Table(
-                    [
-                        html.Thead(
-                            html.Tr(
-                                [
-                                    html.Th("", style={"width": "30px"}),
-                                    html.Th("Site"),
-                                    html.Th("Issue(s)"),
-                                ]
-                            )
-                        ),
-                        html.Tbody(rows),
-                    ],
-                    className="table table-sm table-hover mb-0",
+                _make_ag_grid(
+                    SITE_QUALITY_GRID_ID,
+                    columns,
+                    row_model="infinite",
+                    height="320px",
+                    grid_options_extra={
+                        "rowHeight": 64,
+                        "cacheBlockSize": SITE_QUALITY_BLOCK_SIZE,
+                        "maxBlocksInCache": 4,
+                        "enableBrowserTooltips": True,
+                        "alwaysShowHorizontalScroll": False,
+                        "getRowId": {"function": "params.data.site_id"},
+                    },
                 ),
             ),
         ],

@@ -1030,7 +1030,7 @@ def _build_results_content(
 
     # Show per-site quality issues table (detail, not a duplicate banner)
     if quality_warnings:
-        content.append(_build_site_quality_table(quality_warnings, totals))
+        content.append(_build_site_quality_table(quality_warnings))
 
     if is_large:
         content.append(
@@ -1331,14 +1331,14 @@ def _build_raw_results(task):
             className="text-muted",
         )
     try:
-        files = list_task_s3_files(task.id, task.results_s3_uri)
+        files, has_replay = list_task_s3_files(task.id, task.results_s3_uri)
     except Exception:
         logger.exception("Failed to list S3 files for task %s", task.id)
         return html.P(
             "Unable to retrieve file listing from S3.",
             className="text-danger",
         )
-    if not files:
+    if not files and not has_replay:
         return html.P("No output files found on S3.", className="text-muted")
 
     def _fmt_size(n):
@@ -1396,10 +1396,26 @@ def _build_raw_results(task):
     return html.Div(
         [
             html.P(
-                f"{len(files)} files available. Download links expire after 1 hour.",
+                f"{len(files)} main files available. Download links expire after 1 hour.",
                 className="text-muted mb-2",
             ),
-            table,
+            table if files else None,
+            html.Div(
+                [
+                    dbc.Button(
+                        "Download matching replay links (.txt)",
+                        id="download-replay-links-btn",
+                        color="primary",
+                        outline=True,
+                        size="sm",
+                    ),
+                    dcc.Download(id="download-replay-links"),
+                    task_section_loading(
+                        html.Div(id="download-replay-links-status"),
+                        "Preparing matching replay links...",
+                    ),
+                ],
+            ) if has_replay else None,
         ]
     )
 

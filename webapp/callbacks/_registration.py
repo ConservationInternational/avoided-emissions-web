@@ -11,7 +11,7 @@ import flask_login
 import pandas as pd
 import plotly.graph_objects as go
 from auth import get_current_user
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from config import report_exception
 from dash import (
     ALL,
@@ -78,6 +78,7 @@ from services.analysis_task import (
     get_task_execution_logs,
     get_task_header,
     get_task_top_site_yearly,
+    matching_replay_links,
 )
 from services.task_result_cache import cached_task_result
 from session_store import SessionExpired, SessionUnavailable
@@ -106,10 +107,13 @@ from callbacks._helpers import (
     _render_share_links_list,
 )
 from callbacks._match_quality import (
+    SITE_QUALITY_BLOCK_SIZE,
+    SITE_QUALITY_GRID_ID,
     _build_map,
     _build_quality_warning_banner,
     _build_selected_match_quality,
     _compute_quality_warnings,
+    _site_quality_rows,
 )
 from callbacks._plot_colors import (
     CONTROL_BAND_COLOR,
@@ -1888,6 +1892,34 @@ def register_callbacks(app, limiter=None):
         )
 
     @app.callback(
+        Output(SITE_QUALITY_GRID_ID, "getRowsResponse"),
+        Input(SITE_QUALITY_GRID_ID, "getRowsRequest"),
+        State("task-id-store", "data"),
+        State("share-token-store", "data"),
+        prevent_initial_call=True,
+    )
+    @timed_task_step("task_quality_grid")
+    def load_task_quality_rows(request, task_id, share_token):
+        if not request or not _authorize_task_access(task_id, share_token):
+            raise PreventUpdate
+        start, end = request.get("startRow"), request.get("endRow")
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or start < 0
+            or end <= start
+            or end - start > SITE_QUALITY_BLOCK_SIZE
+        ):
+            logger.warning("Invalid row range requested for the task quality grid")
+            raise PreventUpdate
+        detail = get_task_detail(task_id, section="totals")
+        if not detail or detail["task"].status != "succeeded":
+            raise PreventUpdate
+        totals = detail["totals"]
+        warnings = _compute_quality_warnings(task_id, detail["task"], totals)
+        return _site_quality_rows(warnings, totals, start, end)
+
+    @app.callback(
         Output("task-yearly-results", "children"),
         Input("task-yearly-request", "data"),
         State("task-id-store", "data"),
@@ -1937,6 +1969,46 @@ def register_callbacks(app, limiter=None):
         )
 
     # -- Result downloads ----------------------------------------------------
+
+    @app.callback(
+        Output("download-replay-links", "data"),
+        Output("download-replay-links-status", "children"),
+        Input("download-replay-links-btn", "n_clicks"),
+        State("task-id-store", "data"),
+        State("share-token-store", "data"),
+        prevent_initial_call=True,
+        running=[(Output("download-replay-links-btn", "disabled"), True, False)],
+    )
+    def download_matching_replay_links(n_clicks, task_id, share_token):
+        if not n_clicks:
+            raise PreventUpdate
+        if not _authorize_task_access(task_id, share_token):
+            return no_update, dbc.Alert(
+                "Task not found or access denied.", color="danger"
+            )
+        task = get_task_header(task_id)
+        if not task or task.status != "succeeded":
+            return no_update, dbc.Alert(
+                "Matching replay files are unavailable.", color="warning"
+            )
+        try:
+            links = "\n".join(matching_replay_links(task.id, task.results_s3_uri))
+        except (BotoCoreError, ClientError):
+            logger.exception(
+                "Could not prepare matching replay links for task %s", task_id
+            )
+            return no_update, dbc.Alert(
+                "Could not prepare matching replay links. Please try again.",
+                color="danger",
+            )
+        if not links:
+            return no_update, dbc.Alert(
+                "No matching replay files were found.", color="warning"
+            )
+        return (
+            dcc.send_string(links + "\n", "matching_replay_links.txt", type="text/plain"),
+            None,
+        )
 
     @app.callback(
         Output("download-results", "data"),

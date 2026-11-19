@@ -462,6 +462,13 @@ On the Plots tab, the map and its source-field filters load separately from
 the initial charts. On Results Tables, the per-site yearly grid loads after
 the sites and totals grids. These changes do not truncate the tables or change
 the contents of CSV downloads.
+The **Sites with Potential Quality Issues** grid loads more rows as you scroll.
+Hover over an issue cell to read its full text.
+
+**Raw Results** lists the main download files. If matching replay files are
+available, use **Download matching replay links (.txt)** for a text file with
+one link per replay file. The links are generated on demand and expire after
+one hour.
 
 ### Measuring task-page performance
 
