@@ -30,6 +30,7 @@ from callbacks._helpers import (
 from callbacks._match_quality import (
     _build_group_diagnostics_card,
     _build_site_quality_table,
+    _build_site_status_card,
 )
 from callbacks._plot_colors import (
     CONTROL_BAND_COLOR,
@@ -350,9 +351,16 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         html.Details(
                             [
                                 html.Summary("Variable metadata"),
-                                html.Ul(variable_links(list(dict.fromkeys(
-                                    (task.covariates or []) + config.get("exact_match_vars", [])
-                                )))),
+                                html.Ul(
+                                    variable_links(
+                                        list(
+                                            dict.fromkeys(
+                                                (task.covariates or [])
+                                                + config.get("exact_match_vars", [])
+                                            )
+                                        )
+                                    )
+                                ),
                             ],
                             className="my-2",
                         ),
@@ -390,7 +398,8 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                         ),
                         _detail_row(
                             "Shared-support controls",
-                            "Enabled" if config.get("shared_support_controls", False)
+                            "Enabled"
+                            if config.get("shared_support_controls", False)
                             else "Disabled (legacy policy)",
                         ),
                         _detail_row(
@@ -708,301 +717,16 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                     )
                 )
 
-    # --- Quality issues (compact table instead of long bullet list) --------
-    if quality_warnings:
-        per_site = [w for w in quality_warnings if w["scope"] != "aggregate"]
-        if per_site:
-            # Build lookups from totals
-            name_lookup = {}
-            totals_lookup = {}  # sid ΓåÆ {n_matched, area_ha, ...}
-            if totals:
-                for t in totals:
-                    name_lookup[str(t.site_id)] = t.site_name or str(
-                        _display_site_id(t)
-                    )
-                    totals_lookup[str(t.site_id)] = {
-                        "n_matched": t.n_sample_pixels,
-                        "n_eligible": t.n_eligible_pixels,
-                        "area_ha": t.area_ha,
-                        "sampled_fraction": t.sampled_fraction,
-                    }
+    # --- Per-site quality, excluded fragments, and subsampling ------------
+    site_status = _build_site_status_card(task, totals, quality_warnings)
+    if site_status is not None:
+        cards.append(site_status)
 
-            # Group by site, preserving insertion order
-            site_map = {}
-            for w in per_site:
-                site_map.setdefault(w["scope"], []).append(w)
-
-            # Build AG Grid rows
-            grid_rows = []
-            for sid, ws in site_map.items():
-                sname = name_lookup.get(sid, sid)
-                if sname and str(sname) != str(sid):
-                    site_label = f"{sname} ({sid})"
-                else:
-                    site_label = str(sid)
-                has_danger = any(w["level"] == "danger" for w in ws)
-                issues_text = "; ".join(w["message"] for w in ws)
-                tinfo = totals_lookup.get(sid, {})
-                n_matched = tinfo.get("n_matched", 0)
-                area_ha = tinfo.get("area_ha")
-                # Matched pixels as a share of the eligible pixels sampled
-                sampled = tinfo.get("n_eligible", 0) * tinfo.get("sampled_fraction", 0)
-                pct_matched = n_matched / sampled * 100 if sampled > 0 else None
-
-                grid_rows.append(
-                    {
-                        "severity": "Critical" if has_danger else "Caution",
-                        "site": site_label,
-                        "area_ha": round(area_ha, 1) if area_ha else None,
-                        "matched_pixels": n_matched,
-                        "pct_matched": round(pct_matched, 1) if pct_matched else None,
-                        "issues": issues_text,
-                    }
-                )
-
-            # Sort: critical first, then alphabetical
-            grid_rows.sort(
-                key=lambda r: (
-                    0 if r["severity"] == "Critical" else 1,
-                    r["site"].lower(),
-                )
-            )
-
-            n_danger = sum(1 for r in grid_rows if r["severity"] == "Critical")
-            n_caution = len(grid_rows) - n_danger
-            summary_parts = []
-            if n_danger:
-                summary_parts.append(f"{n_danger} site(s) with critical issues")
-            if n_caution:
-                summary_parts.append(f"{n_caution} site(s) with quality concerns")
-            subtitle = ", ".join(summary_parts)
-
-            quality_cols = [
-                {
-                    "headerName": "",
-                    "field": "severity",
-                    "width": 50,
-                    "maxWidth": 50,
-                    "cellRenderer": "SeverityIcon",
-                    "sortable": False,
-                    "filter": False,
-                },
-                {
-                    "headerName": "Site",
-                    "field": "site",
-                    "flex": 1.2,
-                    "minWidth": 180,
-                    "filter": True,
-                },
-                {
-                    "headerName": "Area (ha)",
-                    "field": "area_ha",
-                    "flex": 0.6,
-                    "minWidth": 95,
-                    "type": "numericColumn",
-                    "valueFormatter": {
-                        "function": (
-                            "params.value != null"
-                            " ? d3.format(',.0f')(params.value)"
-                            " : '\u2014'"
-                        )
-                    },
-                },
-                {
-                    "headerName": "Matched Px",
-                    "field": "matched_pixels",
-                    "flex": 0.6,
-                    "minWidth": 95,
-                    "type": "numericColumn",
-                    "valueFormatter": {
-                        "function": (
-                            "params.value != null"
-                            " ? d3.format(',')(params.value)"
-                            " : '\u2014'"
-                        )
-                    },
-                },
-                {
-                    "headerName": "% Matched",
-                    "field": "pct_matched",
-                    "flex": 0.55,
-                    "minWidth": 90,
-                    "type": "numericColumn",
-                    "valueFormatter": {
-                        "function": (
-                            "params.value != null"
-                            " ? d3.format('.1f')(params.value) + '%'"
-                            " : '\u2014'"
-                        )
-                    },
-                },
-                {
-                    "headerName": "Issues",
-                    "field": "issues",
-                    "flex": 2.5,
-                    "minWidth": 300,
-                    "wrapText": True,
-                    "autoHeight": True,
-                    "cellStyle": {"whiteSpace": "normal", "lineHeight": "1.4"},
-                },
-            ]
-
-            severity_styles = [
-                {
-                    "condition": "params.data.severity === 'Critical'",
-                    "style": {"backgroundColor": "#fce4e4"},
-                },
-                {
-                    "condition": "params.data.severity === 'Caution'",
-                    "style": {"backgroundColor": "#fff8e1"},
-                },
-            ]
-
-            # Compute table height: header + rows capped at 10 visible
-            row_height = 60
-            visible_rows = min(len(grid_rows), 10)
-            table_h = 42 + visible_rows * row_height
-
-            cards.append(
-                dbc.Card(
-                    [
-                        dbc.CardHeader(
-                            [
-                                html.I(
-                                    className=(
-                                        "bi bi-exclamation-triangle-fill "
-                                        "text-danger me-2"
-                                    )
-                                ),
-                                html.Strong("Match Quality Issues"),
-                                html.Span(
-                                    f" — {subtitle}",
-                                    className="text-muted ms-1",
-                                ),
-                            ]
-                        ),
-                        dbc.CardBody(
-                            _make_ag_grid(
-                                "quality-issues-grid",
-                                quality_cols,
-                                row_data=grid_rows,
-                                height=f"{table_h}px",
-                                style_conditions=severity_styles,
-                                grid_options_extra={
-                                    "domLayout": (
-                                        "autoHeight"
-                                        if len(grid_rows) <= 10
-                                        else "normal"
-                                    ),
-                                },
-                            ),
-                            className="p-2",
-                        ),
-                    ],
-                    className="mb-3 border-danger",
-                )
-            )
-
-    # --- Failed sites alert --------------------------------------------------
     meta = task.extra_metadata or {}
-    display_ids = {
-        str(site.site_id): str(_display_site_id(site))
-        for site in [*(sites or []), *(totals or [])]
-    }
-    failed_sites = _normalize_metadata_list(meta.get("failed_sites", []))
-    if failed_sites:
-        failed_items = []
-        for fs in failed_sites:
-            canonical_id = fs.get("site_id") or fs.get("id_numeric", "?")
-            site_id = fs.get("display_site_id") or display_ids.get(
-                str(canonical_id), canonical_id
-            )
-            site_name = fs.get("site_name", "")
-            if site_name and site_name != site_id:
-                label = f"{site_name} ({site_id})"
-            else:
-                label = str(site_id)
-            error = fs.get("error", "Unknown error")
-            item_children = [html.Strong(f"{label}: "), error]
-            # Show separation diagnostics when available
-            sep_warnings = fs.get("separation_warnings")
-            if sep_warnings and isinstance(sep_warnings, dict):
-                sep_details = []
-                for group_name, details in sep_warnings.items():
-                    if isinstance(details, list):
-                        for d in details:
-                            sep_details.append(
-                                html.Li(
-                                    f"Group {group_name}: {d}",
-                                    style={"fontSize": "0.85em"},
-                                )
-                            )
-                if sep_details:
-                    item_children.append(html.Ul(sep_details, className="mb-0 mt-1"))
-            failed_items.append(html.Li(item_children))
-        cards.append(
-            dbc.Alert(
-                [
-                    html.H5(
-                        f"{len(failed_sites)} site fragment(s) could not be included",
-                        className="alert-heading",
-                    ),
-                    html.P(
-                        "The following site fragments are excluded from the results:",
-                        className="mb-2",
-                    ),
-                    html.Ul(failed_items, className="mb-0"),
-                ],
-                color="warning",
-                className="mb-3",
-            )
-        )
-
     # --- Group-level matching diagnostics ------------------------------------
     group_diags = _normalize_metadata_list(meta.get("group_diagnostics", []))
     if group_diags:
         cards.append(_build_group_diagnostics_card(group_diags))
-
-    # --- Subsampled sites info -----------------------------------------------
-    subsampled_sites = _normalize_metadata_list(meta.get("subsampled_sites", []))
-    if subsampled_sites:
-        site_name_map = {s.site_id: s.site_name for s in (sites or []) if s.site_name}
-        sub_items = []
-        for ss in subsampled_sites:
-            site_id = ss.get("site_id")
-            if site_id is None or site_id == "":
-                site_id = ss.get("id_numeric", "?")
-            site_name = ss.get("site_name") or site_name_map.get(str(site_id), "")
-            site_id = ss.get("display_site_id") or display_ids.get(
-                str(site_id), site_id
-            )
-            if site_name and str(site_name) != str(site_id):
-                label = f"{site_name} ({site_id})"
-            else:
-                label = str(site_id)
-            pct = ss.get("sampled_percent", 100)
-            frac = ss.get("sampled_fraction", 1.0)
-            sub_items.append(
-                html.Li(f"{label}: {pct:.1f}% sampled (fraction {frac:.4f})")
-            )
-        cards.append(
-            dbc.Alert(
-                [
-                    html.H5(
-                        f"{len(subsampled_sites)} site(s) were subsampled",
-                        className="alert-heading",
-                    ),
-                    html.P(
-                        "Large sites were subsampled for matching. Their "
-                        "results are scaled up from the sampled fraction:",
-                        className="mb-2",
-                    ),
-                    html.Ul(sub_items, className="mb-0"),
-                ],
-                color="info",
-                className="mb-3",
-            )
-        )
 
     return html.Div(cards)
 
@@ -1415,7 +1139,9 @@ def _build_raw_results(task):
                         "Preparing matching replay links...",
                     ),
                 ],
-            ) if has_replay else None,
+            )
+            if has_replay
+            else None,
         ]
     )
 
@@ -1486,7 +1212,11 @@ def _add_range_error_bars(fig, x, y, y_lower, y_upper, color, name):
 
 
 def _site_filter_values(field, attributes):
-    if not field or not attributes or not any(field in props for props in attributes.values()):
+    if (
+        not field
+        or not attributes
+        or not any(field in props for props in attributes.values())
+    ):
         return []
     values = {
         json.dumps(properties.get(field), sort_keys=True, ensure_ascii=False)
@@ -1528,6 +1258,7 @@ def _build_plots(
     bar_site_data=None,
     graphs_only=False,
     defer_map=False,
+    site_filter_attributes=None,
 ):
     """Build interactive plots for task results.
 
@@ -1908,9 +1639,7 @@ def _build_plots(
                 cumulative_emissions_ci = (
                     "cum_emissions_avoided_mgco2e_ci_lower" in agg_df.columns
                     and "cum_emissions_avoided_mgco2e_ci_upper" in agg_df.columns
-                    and agg_df["cum_emissions_avoided_mgco2e_ci_lower"]
-                    .notna()
-                    .any()
+                    and agg_df["cum_emissions_avoided_mgco2e_ci_lower"].notna().any()
                 )
                 if cumulative_emissions_ci:
                     _add_ci_band(
@@ -2335,6 +2064,8 @@ def _build_plots(
             for feature in features
             if feature.get("properties", {}).get("site_id") is not None
         }
+        if site_filter_attributes is not None:
+            attributes = site_filter_attributes
         fields = sorted({key for values in attributes.values() for key in values})
         selection = plot_selection or {}
         field = selection.get("field")
@@ -2343,7 +2074,10 @@ def _build_plots(
             plots.append(dcc.Store(id="task-graph-selection", data={}))
         plots.append(
             dcc.Store(
-                id="site-filter-attributes", data=None if defer_map else attributes
+                id="site-filter-attributes",
+                data=(
+                    None if defer_map and site_filter_attributes is None else attributes
+                ),
             )
         )
         plots.append(
@@ -2468,7 +2202,10 @@ def _build_plots(
             )
         plots.append(
             dcc.Input(
-                id="site-map-selection", type="text", value="", style={"display": "none"}
+                id="site-map-selection",
+                type="text",
+                value="",
+                style={"display": "none"},
             )
         )
         plots.append(dcc.Store(id="site-map-clear", data=0))
@@ -2484,7 +2221,11 @@ def _build_plots(
                     [
                         dbc.AccordionItem(
                             [
-                                help_link("results", "covariate-balance", "How to assess match quality"),
+                                help_link(
+                                    "results",
+                                    "covariate-balance",
+                                    "How to assess match quality",
+                                ),
                                 " | ",
                                 help_link("variables", label="Covariate metadata"),
                                 task_section_loading(

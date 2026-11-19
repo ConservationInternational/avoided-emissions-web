@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import api_routes
 import pytest
+from callbacks import _match_quality
 from callbacks import _registration as registration
 from callbacks._detail_builders import (
     _build_overview,
@@ -58,8 +59,11 @@ def test_overview_displays_invalid_outcome_site_details(monkeypatch):
     )
     component = _build_overview(task, [], [])
     text = [c for c in _walk(component) if isinstance(c, str)]
-    assert "1 site fragment(s) could not be included" in text
-    assert detail in text
+    assert " — 1 site fragment(s) not included across 1 site(s)" in text
+    rows = _match_quality.build_site_status_rows(
+        task.extra_metadata, [], [], [], has_results=True
+    )
+    assert rows[0]["excluded_fragments"] == f"1: {detail}"
 
 
 def test_overview_shows_forest_loss_avoided_range_and_correct_co2_label(monkeypatch):

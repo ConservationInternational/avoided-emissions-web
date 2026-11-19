@@ -465,6 +465,13 @@ the contents of CSV downloads.
 The **Sites with Potential Quality Issues** grid loads more rows as you scroll.
 Hover over an issue cell to read its full text.
 
+The Overview's **Site Matching Status** grid lists every site in the task, one
+row per site. It combines the match quality rating (Critical, Caution, OK, or
+No results), quality issues, site fragments that could not be included and
+why, and whether the site was subsampled (with the percentage sampled). Rows
+load as you scroll; sorting and filtering apply to all sites, not only the
+loaded rows.
+
 **Raw Results** lists the main download files. If matching replay files are
 available, use **Download matching replay links (.txt)** for a text file with
 one link per replay file. The links are generated on demand and expire after
@@ -550,7 +557,9 @@ their ID. Switching order preserves the selected site.
 
 The optional field and value filter above the site map uses attributes from the
 uploaded source file. It filters the map, site selector, and plots; other results
-tabs are unchanged. Matching sites are highlighted on the map. Selecting a site
+tabs are unchanged. For imported site sets, source fields and values are loaded
+with the plot controls, independently of the deferred map.
+Matching sites are highlighted on the map. Selecting a site
 on the map clears the group filter and shows that site's plots. Clear the
 selection to restore all sites.
 Browser **Back** and **Forward** restore previous site selections, completed

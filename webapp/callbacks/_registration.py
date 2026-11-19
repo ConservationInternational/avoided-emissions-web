@@ -55,6 +55,7 @@ from services import (
     get_ready_exact_match_names,
     get_task_detail,
     get_task_list,
+    get_task_site_index,
     get_task_site_results,
     get_user_site_set_detail,
     get_user_site_set_preview_rows,
@@ -109,11 +110,15 @@ from callbacks._helpers import (
 from callbacks._match_quality import (
     SITE_QUALITY_BLOCK_SIZE,
     SITE_QUALITY_GRID_ID,
+    SITE_STATUS_BLOCK_SIZE,
+    SITE_STATUS_GRID_ID,
     _build_map,
     _build_quality_warning_banner,
     _build_selected_match_quality,
     _compute_quality_warnings,
     _site_quality_rows,
+    build_site_status_rows,
+    site_status_block,
 )
 from callbacks._plot_colors import (
     CONTROL_BAND_COLOR,
@@ -1858,6 +1863,7 @@ def register_callbacks(app, limiter=None):
                     agg_yearly=agg_yearly,
                     is_large=is_large,
                     defer_map=True,
+                    site_filter_attributes=detail.get("site_filter_attributes"),
                     plot_selection=plot_selection,
                     bar_site_data=(
                         get_task_top_site_yearly(task_id, [t.site_id for t in totals])
@@ -1920,6 +1926,42 @@ def register_callbacks(app, limiter=None):
         return _site_quality_rows(warnings, totals, start, end)
 
     @app.callback(
+        Output(SITE_STATUS_GRID_ID, "getRowsResponse"),
+        Input(SITE_STATUS_GRID_ID, "getRowsRequest"),
+        State("task-id-store", "data"),
+        State("share-token-store", "data"),
+        prevent_initial_call=True,
+    )
+    @timed_task_step("task_site_status_grid")
+    def load_task_site_status_rows(request, task_id, share_token):
+        if not request or not _authorize_task_access(task_id, share_token):
+            raise PreventUpdate
+        start, end = request.get("startRow"), request.get("endRow")
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or start < 0
+            or end <= start
+            or end - start > SITE_STATUS_BLOCK_SIZE
+        ):
+            logger.warning("Invalid row range requested for the site status grid")
+            raise PreventUpdate
+        detail = get_task_detail(task_id, section="totals")
+        if not detail:
+            raise PreventUpdate
+        task, totals = detail["task"], detail["totals"]
+        succeeded = task.status == "succeeded"
+        warnings = _compute_quality_warnings(task_id, task, totals) if succeeded else []
+        rows = build_site_status_rows(
+            task.extra_metadata or {},
+            totals,
+            get_task_site_index(task_id),
+            warnings,
+            has_results=succeeded,
+        )
+        return site_status_block(rows, request)
+
+    @app.callback(
         Output("task-yearly-results", "children"),
         Input("task-yearly-request", "data"),
         State("task-id-store", "data"),
@@ -1965,7 +2007,7 @@ def register_callbacks(app, limiter=None):
                 share_token=share_token,
                 use_tiles=bool(task.site_set_id),
             ),
-            attributes,
+            no_update if task.site_set_id else attributes,
         )
 
     # -- Result downloads ----------------------------------------------------
@@ -2006,7 +2048,9 @@ def register_callbacks(app, limiter=None):
                 "No matching replay files were found.", color="warning"
             )
         return (
-            dcc.send_string(links + "\n", "matching_replay_links.txt", type="text/plain"),
+            dcc.send_string(
+                links + "\n", "matching_replay_links.txt", type="text/plain"
+            ),
             None,
         )
 
@@ -2137,9 +2181,8 @@ def register_callbacks(app, limiter=None):
             from flask import request as flask_request
 
             base_url = flask_request.host_url.rstrip("/")
-            share_url = (
-                f"{base_url}/shared/{result['token']}"
-                + plot_selection_query(selection, active_tab)
+            share_url = f"{base_url}/shared/{result['token']}" + plot_selection_query(
+                selection, active_tab
             )
 
             link_display = html.Div(
@@ -2362,7 +2405,9 @@ def register_callbacks(app, limiter=None):
         Input("site-filter-attributes", "data"),
     )
     def update_site_filter_values(field, attributes):
-        return _site_filter_values(field, attributes), not bool(field) or attributes is None
+        return _site_filter_values(field, attributes), not bool(
+            field
+        ) or attributes is None
 
     @app.callback(
         Output("site-filtered-ids", "data"),
@@ -2556,7 +2601,9 @@ def register_callbacks(app, limiter=None):
         if field and attributes is None:
             raise PreventUpdate
         if field and not any(field in props for props in (attributes or {}).values()):
-            return dbc.Alert("The selected source field is not available.", color="warning")
+            return dbc.Alert(
+                "The selected source field is not available.", color="warning"
+            )
         filtered_ids = _filter_site_ids(field, value, attributes)
         try:
             if selection.get("site"):

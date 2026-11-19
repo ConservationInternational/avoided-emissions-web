@@ -1004,18 +1004,21 @@ dagcomponentfuncs.TruncatedList = function (props) {
 /**
  * SeverityIcon – renders a coloured icon based on the severity value.
  *
- * "Critical" → red X-circle, anything else → amber warning triangle.
+ * "Critical" → red X-circle, "OK" → green check, "No results" → grey slash,
+ * empty → nothing, anything else → amber warning triangle.
  */
 dagcomponentfuncs.SeverityIcon = function (props) {
-    var isCritical = props.value === "Critical";
+    if (!props.value) {
+        return null;
+    }
+    var icon = {
+        Critical: ["bi bi-x-circle-fill", "#dc3545"],
+        OK: ["bi bi-check-circle-fill", "#198754"],
+        "No results": ["bi bi-slash-circle", "#6c757d"],
+    }[props.value] || ["bi bi-exclamation-triangle-fill", "#ffc107"];
     return React.createElement("i", {
-        className: isCritical
-            ? "bi bi-x-circle-fill"
-            : "bi bi-exclamation-triangle-fill",
-        style: {
-            color: isCritical ? "#dc3545" : "#ffc107",
-            fontSize: "16px",
-        },
+        className: icon[0],
+        style: { color: icon[1], fontSize: "16px" },
         title: props.value,
     });
 };

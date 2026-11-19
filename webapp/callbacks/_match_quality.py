@@ -16,6 +16,7 @@ from task_timing import task_timing, timed_task_step
 
 from callbacks._helpers import (
     _attach_totals_to_geojson,
+    _normalize_metadata_list,
     _openlayers_map_component,
 )
 from callbacks._plot_colors import CONTROL_COLOR, PROJECT_COLOR
@@ -653,6 +654,397 @@ def _build_site_quality_table(warnings):
     )
 
 
+SITE_STATUS_GRID_ID = "task-site-status-grid"
+SITE_STATUS_BLOCK_SIZE = 100
+_SITE_STATUS_QUALITY_RANK = {"Critical": 0, "Caution": 1, "No results": 2, "OK": 3}
+_SITE_STATUS_TEXT_FIELDS = {"quality", "site", "issues", "excluded_fragments"}
+_SITE_STATUS_NUMERIC_FIELDS = {
+    "area_ha",
+    "matched_pixels",
+    "pct_matched",
+    "n_excluded_fragments",
+    "sampled_pct",
+}
+
+
+def _metadata_site_id(entry):
+    site_id = entry.get("site_id")
+    if site_id is None or site_id == "":
+        site_id = entry.get("id_numeric", "?")
+    return str(site_id)
+
+
+def _excluded_fragment_text(fragment):
+    text = str(fragment.get("error") or "Unknown error")
+    separation = fragment.get("separation_warnings")
+    if isinstance(separation, dict):
+        details = [
+            f"Group {group}: {detail}"
+            for group, group_details in separation.items()
+            if isinstance(group_details, list)
+            for detail in group_details
+        ]
+        if details:
+            text += f" ({'; '.join(details)})"
+    return text
+
+
+def build_site_status_rows(meta, totals, site_index, warnings, *, has_results):
+    """Merge per-site quality, excluded fragments, and subsampling into one row each."""
+    rows = {}
+
+    def row_for(site_id):
+        return rows.setdefault(
+            site_id,
+            {
+                "site_id": site_id,
+                "display_site_id": None,
+                "site_name": None,
+                "area_ha": None,
+                "matched_pixels": None,
+                "pct_matched": None,
+                "issues": "",
+                "_levels": set(),
+                "_fragments": [],
+                "sampled_pct": None,
+                "_has_totals": False,
+            },
+        )
+
+    def fill(row, display_site_id=None, site_name=None):
+        row["display_site_id"] = row["display_site_id"] or display_site_id
+        row["site_name"] = row["site_name"] or site_name
+
+    for site in site_index:
+        row = row_for(str(site["site_id"]))
+        fill(row, site.get("display_site_id"), site.get("site_name"))
+        row["area_ha"] = site.get("area_ha")
+
+    for total in totals:
+        row = row_for(str(total.site_id))
+        fill(row, getattr(total, "display_site_id", None), total.site_name)
+        row["_has_totals"] = True
+        if total.area_ha is not None:
+            row["area_ha"] = total.area_ha
+        row["matched_pixels"] = total.n_sample_pixels
+        sampled = (total.n_eligible_pixels or 0) * (total.sampled_fraction or 0)
+        if total.n_sample_pixels is not None and sampled > 0:
+            row["pct_matched"] = round(total.n_sample_pixels / sampled * 100, 1)
+
+    site_messages = {}
+    for warning in warnings or []:
+        if warning["scope"] == "aggregate":
+            continue
+        row = row_for(str(warning["scope"]))
+        row["_levels"].add(warning["level"])
+        site_messages.setdefault(row["site_id"], []).append(warning["message"])
+    for site_id, messages in site_messages.items():
+        rows[site_id]["issues"] = "; ".join(messages)
+
+    for fragment in _normalize_metadata_list(meta.get("failed_sites", [])):
+        row = row_for(_metadata_site_id(fragment))
+        fill(row, fragment.get("display_site_id"), fragment.get("site_name"))
+        row["_fragments"].append(_excluded_fragment_text(fragment))
+
+    for subsampled in _normalize_metadata_list(meta.get("subsampled_sites", [])):
+        row = row_for(_metadata_site_id(subsampled))
+        fill(row, subsampled.get("display_site_id"), subsampled.get("site_name"))
+        percent = subsampled.get("sampled_percent")
+        if percent is None and subsampled.get("sampled_fraction") is not None:
+            percent = float(subsampled["sampled_fraction"]) * 100
+        if percent is not None:
+            row["sampled_pct"] = round(float(percent), 1)
+
+    result = []
+    for row in rows.values():
+        levels = row.pop("_levels")
+        fragments = row.pop("_fragments")
+        has_totals = row.pop("_has_totals")
+        display_id = str(row.pop("display_site_id") or row["site_id"])
+        name = row.pop("site_name")
+        row["site"] = (
+            f"{name} ({display_id})" if name and name != display_id else display_id
+        )
+        if "danger" in levels:
+            row["quality"] = "Critical"
+        elif levels:
+            row["quality"] = "Caution"
+        elif has_results and not has_totals:
+            row["quality"] = "No results"
+        elif has_results:
+            row["quality"] = "OK"
+        else:
+            row["quality"] = None
+        row["n_excluded_fragments"] = len(fragments)
+        row["excluded_fragments"] = (
+            f"{len(fragments)}: {'; '.join(fragments)}" if fragments else ""
+        )
+        result.append(row)
+    return result
+
+
+def _site_status_sort_key(field, row):
+    if field == "quality":
+        return _SITE_STATUS_QUALITY_RANK.get(row["quality"], 4)
+    if field == "excluded_fragments":
+        return row["n_excluded_fragments"]
+    value = row.get(field)
+    return value.lower() if isinstance(value, str) else value
+
+
+def _matches_text_filter(value, spec):
+    if "conditions" in spec:
+        results = [_matches_text_filter(value, c) for c in spec["conditions"]]
+        return all(results) if spec.get("operator") == "AND" else any(results)
+    op = spec.get("type", "contains")
+    value = str(value or "").lower()
+    if op == "blank":
+        return not value
+    if op == "notBlank":
+        return bool(value)
+    needle = str(spec.get("filter") or "").lower()
+    if not needle:
+        return True
+    return {
+        "contains": needle in value,
+        "notContains": needle not in value,
+        "equals": value == needle,
+        "notEqual": value != needle,
+        "startsWith": value.startswith(needle),
+        "endsWith": value.endswith(needle),
+    }.get(op, True)
+
+
+def _matches_number_filter(value, spec):
+    if "conditions" in spec:
+        results = [_matches_number_filter(value, c) for c in spec["conditions"]]
+        return all(results) if spec.get("operator") == "AND" else any(results)
+    op = spec.get("type", "equals")
+    if op == "blank":
+        return value is None
+    if op == "notBlank":
+        return value is not None
+    target = spec.get("filter")
+    if target is None:
+        return True
+    if value is None:
+        return False
+    if op == "inRange":
+        upper = spec.get("filterTo")
+        return target <= value <= upper if upper is not None else value >= target
+    return {
+        "equals": value == target,
+        "notEqual": value != target,
+        "lessThan": value < target,
+        "lessThanOrEqual": value <= target,
+        "greaterThan": value > target,
+        "greaterThanOrEqual": value >= target,
+    }.get(op, True)
+
+
+def site_status_block(rows, request):
+    """Filter, sort, and slice merged site rows for an infinite-grid request."""
+    for field, spec in (request.get("filterModel") or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        if field in _SITE_STATUS_TEXT_FIELDS:
+            rows = [r for r in rows if _matches_text_filter(r.get(field), spec)]
+        elif field in _SITE_STATUS_NUMERIC_FIELDS:
+            rows = [r for r in rows if _matches_number_filter(r.get(field), spec)]
+
+    rows = sorted(
+        rows,
+        key=lambda r: (
+            _SITE_STATUS_QUALITY_RANK.get(r["quality"], 4),
+            -r["n_excluded_fragments"],
+            r["site"].lower(),
+        ),
+    )
+    for item in reversed(request.get("sortModel") or []):
+        field = item.get("colId")
+        if field not in _SITE_STATUS_TEXT_FIELDS | _SITE_STATUS_NUMERIC_FIELDS:
+            continue
+        descending = item.get("sort") == "desc"
+        present = [r for r in rows if _site_status_sort_key(field, r) is not None]
+        missing = [r for r in rows if _site_status_sort_key(field, r) is None]
+        present.sort(key=lambda r: _site_status_sort_key(field, r), reverse=descending)
+        rows = present + missing
+
+    start, end = request["startRow"], request["endRow"]
+    return {"rowData": rows[start:end], "rowCount": len(rows)}
+
+
+def _build_site_status_card(task, totals, warnings):
+    """Overview card listing every site with quality, exclusions, and sampling."""
+    meta = task.extra_metadata or {}
+    failed = _normalize_metadata_list(meta.get("failed_sites", []))
+    subsampled = _normalize_metadata_list(meta.get("subsampled_sites", []))
+    if not totals and not failed and not subsampled:
+        return None
+
+    site_levels = {}
+    for warning in warnings or []:
+        if warning["scope"] != "aggregate":
+            site_levels.setdefault(warning["scope"], set()).add(warning["level"])
+    n_critical = sum("danger" in levels for levels in site_levels.values())
+    summary = []
+    if n_critical:
+        summary.append(f"{n_critical} site(s) with critical issues")
+    if len(site_levels) > n_critical:
+        summary.append(f"{len(site_levels) - n_critical} site(s) with quality concerns")
+    if failed:
+        n_failed_sites = len({_metadata_site_id(f) for f in failed})
+        summary.append(
+            f"{len(failed)} site fragment(s) not included across "
+            f"{n_failed_sites} site(s)"
+        )
+    if subsampled:
+        summary.append(f"{len(subsampled)} site(s) subsampled")
+
+    def numeric(field, header, fmt, width, suffix=""):
+        return {
+            "headerName": header,
+            "field": field,
+            "minWidth": width,
+            "flex": 0.6,
+            "type": "numericColumn",
+            "filter": "agNumberColumnFilter",
+            "valueFormatter": {
+                "function": (
+                    "params.data == null ? '' : "
+                    f"params.value != null ? d3.format('{fmt}')(params.value)"
+                    f"{' + ' + repr(suffix) if suffix else ''} : '\u2014'"
+                )
+            },
+        }
+
+    wrapped = {"whiteSpace": "normal", "lineHeight": "1.35", "overflow": "hidden"}
+    text_filter = {
+        "filter": "agTextColumnFilter",
+        "filterParams": {"maxNumConditions": 1},
+    }
+    columns = [
+        {
+            "headerName": "Quality",
+            "field": "quality",
+            "width": 80,
+            "cellRenderer": "SeverityIcon",
+            "headerTooltip": "Match quality: Critical, Caution, OK, or No results",
+            **text_filter,
+        },
+        {
+            "headerName": "Site",
+            "field": "site",
+            "flex": 1.2,
+            "minWidth": 180,
+            "tooltipField": "site",
+            "cellStyle": wrapped,
+            **text_filter,
+        },
+        numeric("area_ha", "Area (ha)", ",.0f", 95),
+        numeric("matched_pixels", "Matched Px", ",", 95),
+        numeric("pct_matched", "% Matched", ".1f", 90, "%"),
+        {
+            "headerName": "Quality issues",
+            "field": "issues",
+            "flex": 2.2,
+            "minWidth": 260,
+            "tooltipField": "issues",
+            "cellStyle": wrapped,
+            **text_filter,
+        },
+        {
+            "headerName": "Fragments not included",
+            "field": "excluded_fragments",
+            "flex": 1.5,
+            "minWidth": 200,
+            "tooltipField": "excluded_fragments",
+            "cellStyle": wrapped,
+            **text_filter,
+        },
+        {
+            "headerName": "Subsampled",
+            "field": "sampled_pct",
+            "minWidth": 115,
+            "flex": 0.6,
+            "type": "numericColumn",
+            "filter": "agNumberColumnFilter",
+            "headerTooltip": "Percent of the site's eligible pixels sampled for matching",
+            "valueFormatter": {
+                "function": (
+                    "params.data == null ? '' : params.value != null"
+                    " ? 'Yes (' + d3.format('.1f')(params.value) + '%)' : 'No'"
+                )
+            },
+        },
+    ]
+    row_styles = [
+        {
+            "condition": "params.data && params.data.quality === 'Critical'",
+            "style": {"backgroundColor": "#fce4e4"},
+        },
+        {
+            "condition": "params.data && params.data.quality === 'Caution'",
+            "style": {"backgroundColor": "#fff8e1"},
+        },
+        {
+            "condition": "params.data && params.data.quality === 'No results'",
+            "style": {"backgroundColor": "#f1f3f5"},
+        },
+    ]
+    return dbc.Card(
+        [
+            dbc.CardHeader(
+                [
+                    html.I(className="bi bi-table text-primary me-2"),
+                    html.Strong("Site Matching Status"),
+                    html.Span(
+                        f" — {'; '.join(summary)}" if summary else "",
+                        className="text-muted ms-1",
+                    ),
+                ]
+            ),
+            dbc.CardBody(
+                [
+                    html.P(
+                        [
+                            (
+                                "All sites, with match quality issues, site fragments "
+                                "that could not be included, and subsampling. Large "
+                                "sites were subsampled for matching; their results are "
+                                "scaled up from the sampled fraction. "
+                            ),
+                            help_link(
+                                "results",
+                                "covariate-balance",
+                                "Understanding these warnings",
+                            ),
+                        ],
+                        className="small text-muted mb-2",
+                    ),
+                    _make_ag_grid(
+                        SITE_STATUS_GRID_ID,
+                        columns,
+                        row_model="infinite",
+                        height="560px",
+                        style_conditions=row_styles,
+                        grid_options_extra={
+                            "rowHeight": 64,
+                            "cacheBlockSize": SITE_STATUS_BLOCK_SIZE,
+                            "maxBlocksInCache": 10,
+                            "enableBrowserTooltips": True,
+                            "alwaysShowHorizontalScroll": False,
+                            "getRowId": {"function": "params.data.site_id"},
+                        },
+                    ),
+                ],
+                className="p-2",
+            ),
+        ],
+        className="mb-3",
+    )
+
+
 def _weighted_mean(values, weights):
     weight_total = weights.sum()
     if weight_total <= 0:
@@ -942,9 +1334,7 @@ def _build_love_plot(balance_df, cov_df, site_filter=None):
     agg = agg.sort_values("smd", key=lambda s: s.abs(), ascending=True)
 
     # Colour-code by whether SMD is within the ┬▒0.1 threshold
-    colors = [
-        PROJECT_COLOR if abs(v) <= 0.1 else CONTROL_COLOR for v in agg["smd"]
-    ]
+    colors = [PROJECT_COLOR if abs(v) <= 0.1 else CONTROL_COLOR for v in agg["smd"]]
 
     fig = go.Figure()
     fig.add_trace(
@@ -1248,8 +1638,14 @@ def _build_histograms_from_summary(hist_data):
 
 
 def _build_map(
-    sites_geojson, totals, covariates=None, task_id=None, sites=None, resolution_m=None,
-    share_token=None, use_tiles=True,
+    sites_geojson,
+    totals,
+    covariates=None,
+    task_id=None,
+    sites=None,
+    resolution_m=None,
+    share_token=None,
+    use_tiles=True,
 ):
     """Build an OpenLayers map for task sites and summary values."""
     enriched_geojson = _attach_totals_to_geojson(sites_geojson, totals)

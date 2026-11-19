@@ -19,6 +19,7 @@ from models import (
     TaskResult,
     TaskResultTotal,
     TaskSite,
+    UserSiteFeature,
     get_db,
 )
 from sqlalchemy import case, func
@@ -517,7 +518,9 @@ def _complete_analysis_task_submission(task_id, user_id):
         atom_values = _atom_metadata_values(gdf)
         if atom_values.notna().any():
             if atom_values.isna().any():
-                raise ValueError("Atom-enabled inputs must declare ae_atoms for every parent site.")
+                raise ValueError(
+                    "Atom-enabled inputs must declare ae_atoms for every parent site."
+                )
             gdf = gdf.copy()
             gdf["ae_atoms"] = atom_values
         repaired_count = int((~shapely.is_valid(gdf.geometry.to_numpy())).sum())
@@ -540,9 +543,11 @@ def _complete_analysis_task_submission(task_id, user_id):
         # setting reuses the same entry.
         all_sites = gdf[["site_id", "geometry"]]
         if "ae_atoms" in gdf.columns and gdf["ae_atoms"].notna().any():
-            excluded_atoms = gdf.loc[
-                gdf["area_ha"] < min_site_area_ha, "site_id"
-            ].astype(str).tolist()
+            excluded_atoms = (
+                gdf.loc[gdf["area_ha"] < min_site_area_ha, "site_id"]
+                .astype(str)
+                .tolist()
+            )
             if excluded_atoms:
                 raise ValueError(
                     "Atom-enabled analyses cannot filter declared parent sites by "
@@ -1430,6 +1435,17 @@ def get_task_detail(task_id, *, section="full"):
         sites = []
         results = None
         sites_geojson = None
+        site_filter_attributes = None
+        if section == "plots" and task.site_set_id:
+            with task_timing("task_filter_attributes_sql"):
+                rows = (
+                    db.query(UserSiteFeature.id, UserSiteFeature.source_attributes)
+                    .filter(UserSiteFeature.site_set_id == task.site_set_id)
+                    .all()
+                )
+                site_filter_attributes = {
+                    str(row.id): row.source_attributes or {} for row in rows
+                }
         if not is_large and section in {"full", "overview", "results", "plots"}:
             with task_timing("task_sites_sql"):
                 sites = db.query(TaskSite).filter(TaskSite.task_id == task_id).all()
@@ -1450,11 +1466,51 @@ def get_task_detail(task_id, *, section="full"):
             "results": results,
             "totals": totals,
             "sites_geojson": sites_geojson,
+            "site_filter_attributes": site_filter_attributes,
             "is_large": is_large,
             "agg_yearly": agg_yearly,
         }
     finally:
         db.close()
+
+
+@timed_task_step("task_site_index_sql")
+def get_task_site_index(task_id):
+    """Return one lightweight record per submitted site, merging sub-sites."""
+    db = get_db()
+    try:
+        rows = (
+            db.query(
+                TaskSite.site_id,
+                TaskSite.display_site_id,
+                TaskSite.site_name,
+                TaskSite.area_ha,
+                TaskSite.original_area_ha,
+            )
+            .filter(TaskSite.task_id == task_id)
+            .order_by(TaskSite.site_id, TaskSite.sub_site_index)
+            .all()
+        )
+    finally:
+        db.close()
+    index = {}
+    for row in rows:
+        entry = index.setdefault(
+            str(row.site_id),
+            {
+                "site_id": str(row.site_id),
+                "display_site_id": row.display_site_id,
+                "site_name": row.site_name,
+                "area_ha": row.original_area_ha,
+                "_fragment_area": 0.0,
+            },
+        )
+        entry["_fragment_area"] += row.area_ha or 0.0
+    for entry in index.values():
+        fragment_area = entry.pop("_fragment_area")
+        if entry["area_ha"] is None and fragment_area:
+            entry["area_ha"] = fragment_area
+    return list(index.values())
 
 
 @timed_task_step("task_geometry")
@@ -1972,9 +2028,11 @@ def get_filtered_portfolio_yearly(task_id, site_ids, n_replicates, results_s3_ur
         raise ResultImportError(
             "Replicate outcomes are missing for some selected sites."
         )
-    yearly = pd.concat(parts).groupby(["replicate", "year"], as_index=False)[
-        list(names)
-    ].sum()
+    yearly = (
+        pd.concat(parts)
+        .groupby(["replicate", "year"], as_index=False)[list(names)]
+        .sum()
+    )
     yearly = yearly.rename(columns=names).sort_values(["replicate", "year"])
     for kind in ("treatment", "control"):
         yearly[f"cum_{kind}_defor_ha"] = yearly.groupby("replicate")[
@@ -2036,7 +2094,9 @@ def get_filtered_portfolio_total(task_id, site_ids, n_replicates, results_s3_uri
         body.close()
 
     if not parts:
-        raise ResultImportError("No replicate totals were found for the selected sites.")
+        raise ResultImportError(
+            "No replicate totals were found for the selected sites."
+        )
     rows = pd.concat(parts, ignore_index=True)
     replicate_ids = set(range(1, n_replicates + 1))
     if (
