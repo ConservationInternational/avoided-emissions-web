@@ -67,7 +67,7 @@ FC_YEARS <- as.integer(config$fc_years)
 FC_COLS <- unique(c("fc_2000", paste0("fc_", FC_YEARS)))
 GROUP_MAPPING <- fromJSON(config$config_path, simplifyVector = FALSE)$exact_match_group_mapping
 CHECKPOINT_MODE <- isTRUE(config$match_checkpoints)
-MATCHING_POLICY <- if (isTRUE(config$shared_support_controls)) "shared_support_v1" else "legacy"
+MATCHING_POLICY <- if (isTRUE(config$shared_support_controls)) "shared_support_v2" else "legacy"
 if ((!is.null(config$matching_policy) && !identical(config$matching_policy, MATCHING_POLICY)) ||
     (!is.null(config$diagnostics_schema_version) &&
         config$diagnostics_schema_version != MATCH_DIAGNOSTICS_SCHEMA_VERSION)) {
@@ -457,6 +457,28 @@ match_stratum <- function(gd, f) {
         sep <- check_separation(gd, mf)
         diag$separation <- sep
         diag$separation$sep_vars <- as.list(sep$sep_vars)
+        if (MATCHING_POLICY == "shared_support_v2" &&
+            sep$separated && length(sep$sep_vars)) {
+            boundary <- restrict_boundary_support(gd, mf, sep$sep_vars)
+            diag$boundary_support <- list(
+                variables = as.list(sep$sep_vars),
+                constraints = boundary$constraints,
+                n_controls_before = boundary$n_controls_before,
+                n_controls_retained = boundary$n_controls_retained
+            )
+            diag$removed_separating_terms <- as.list(sep$sep_vars)
+            gd <- boundary$data
+            mf <- boundary$formula
+            if (boundary$n_controls_retained == 0L) {
+                diag$cause <- "shared_support_exhausted"
+                diag$stage <- "support"
+                diag$method <- "none"
+                return(list(result = NULL, diag = diag, replay_rng = replay_rng))
+            }
+            sep_after_boundary <- check_separation(gd, mf)
+            diag$separation_after_boundary <- sep_after_boundary
+            sep <- sep_after_boundary
+        }
         if (!sep$separated) {
             rng <- get_rng()
             fit <- fit_propensity(mf, gd)
@@ -475,8 +497,10 @@ match_stratum <- function(gd, f) {
                 lp <- fit$lp
             }
         } else {
-            diag$cause <- "pre_fit_separation"
-            diag$stage <- "separation"
+            if (is.null(diag$cause) || identical(diag$cause, "matched")) {
+                diag$cause <- "pre_fit_separation"
+                diag$stage <- "separation"
+            }
         }
         if (sep$separated) {
             diag$separation_details <- sep$details
@@ -876,7 +900,7 @@ process_site <- function(site, pixels, missing_exact, missing_extracted, n_site_
     for (g in names(raw_rows)) {
         ix <- raw_rows[[g]]
         before <- vals[pre_rows[[g]], ]
-        support <- if (MATCHING_POLICY == "shared_support_v1" && nrow(before) > 0L) {
+        support <-         if (MATCHING_POLICY == "shared_support_v2" && nrow(before) > 0L) {
             restrict_shared_support(before, this_f)
         } else NULL
         after <- if (is.null(support)) before else support$data

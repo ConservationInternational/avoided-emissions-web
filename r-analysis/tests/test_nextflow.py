@@ -489,7 +489,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(first["_workflow"]["match_memory_mib"], 61440)
             self.assertEqual(first["_workflow"]["initial_queue"], "ae-ondemand-gp3")
             self.assertIs(first["shared_support_controls"], True)
-            self.assertEqual(first["_workflow"]["diagnostics_contract"]["matching_policy"], "shared_support_v1")
+            self.assertEqual(first["_workflow"]["diagnostics_contract"]["matching_policy"], "shared_support_v2")
             self.assertEqual(client.copy_object.call_count, 1)
             updated_image = image.replace("a" * 64, "b" * 64)
             snapshot = store.json("snapshot.json")

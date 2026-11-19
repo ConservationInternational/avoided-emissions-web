@@ -215,7 +215,7 @@ New matching runs publish these private, task-scoped files:
 
 `results_summary.json` includes a compact `matching_diagnostics` object pointing
 to these exports. Schema version 1 distinguishes `legacy` matching from
-`shared_support_v1`; the latter requires `shared_support_controls: true`.
+`shared_support_v2`; the latter requires `shared_support_controls: true`.
 Old output sets without this contract remain readable but do not claim new
 diagnostic completeness.
 

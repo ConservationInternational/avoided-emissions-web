@@ -422,7 +422,7 @@ test_that("summary rejects match outputs of another estimator", {
     write_fixture_matches(out, list(u1_b1 = m))
     sidecar_path <- file.path(out, "matches", "mb_u1_b1.json")
     sidecar <- fromJSON(sidecar_path, simplifyVector = FALSE)
-    sidecar$compatibility <- list(task_id = "test", matching_policy = "shared_support_v1")
+    sidecar$compatibility <- list(task_id = "test", matching_policy = "shared_support_v2")
     write_json(sidecar, sidecar_path, auto_unbox = TRUE, digits = NA)
     expect_error(run_script("03_summarize_results.R", config_path), "another estimator version")
     sidecar$compatibility$estimator_version <- ESTIMATOR_VERSION

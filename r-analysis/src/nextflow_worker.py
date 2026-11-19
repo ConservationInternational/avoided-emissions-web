@@ -75,7 +75,7 @@ def diagnostics_contract(params: dict) -> dict:
         raise ValueError("shared_support_controls must be a boolean")
     return {
         "diagnostics_schema_version": DIAGNOSTICS_SCHEMA_VERSION,
-        "matching_policy": "shared_support_v1" if enabled else "legacy",
+        "matching_policy": "shared_support_v2" if enabled else "legacy",
     }
 
 

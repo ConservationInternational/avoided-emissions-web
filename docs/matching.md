@@ -244,7 +244,7 @@ balance.
 ### Shared-support controls
 
 **Parameter**: `shared_support_controls`
-**Default**: `true` for new analyses (matching policy `shared_support_v1`)
+**Default**: `true` for new analyses (matching policy `shared_support_v2`)
 
 Set this to `false` to use the legacy policy. Recomputed tasks and resumed
 workflows retain their recorded setting; historical tasks and saved presets
@@ -262,8 +262,15 @@ No treatment is removed and no covariate constraint is dropped. Terms constant
 after selection can be omitted from the fitted formula because their equality
 is enforced by control selection. The requested control multiplier is a
 sampling ceiling, not a minimum required pool size. Strata without remaining
-controls are explicitly unmatchable. GLM separation handling, calipers,
-control-distance exclusions, and replicate inclusion rules are unchanged.
+controls are explicitly unmatchable.
+
+After sampling, if a covariate separates treatment from controls only at a
+boundary and controls share observed treatment values, those controls are
+retained and the separating term is omitted from the propensity formula. The
+diagnostics record the restricted counts and removed terms. If there are no
+controls at any treatment value, the stratum remains unsupported; this does not
+enable Mahalanobis fallback. Other separation, calipers, control-distance
+exclusions, and replicate inclusion rules are unchanged.
 
 Atoms retain their identity. The model and restriction remain at the existing
 parent fragment/stratum level. Constancy in one atom or one random sample does

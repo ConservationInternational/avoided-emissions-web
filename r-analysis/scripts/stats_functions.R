@@ -12,7 +12,7 @@ MATCH_DIAGNOSTICS_SCHEMA_VERSION <- 1L
 # Estimator contract shared by matching and summary.  Raise ESTIMATOR_VERSION
 # whenever sampling, weighting or inclusion changes: match outputs written by
 # another version are then rejected instead of being mixed with new ones.
-ESTIMATOR_VERSION <- 2L
+ESTIMATOR_VERSION <- 3L
 ATOM_RESULTS_SCHEMA_VERSION <- 2L
 # Treatment pixels sampled from each atom cell (an atom within one exact-match
 # stratum of one fragment).  Smaller cells are sampled in full.
@@ -77,6 +77,42 @@ restrict_shared_support <- function(d, f) {
         n_controls_retained = sum(retained), n_controls_removed = sum(!retained)
     )
 }
+
+
+restrict_boundary_support <- function(d, f, vars) {
+    # Keep only controls that share the sampled treatment values for each
+    # separating term, then omit those terms from the propensity model.
+    t <- d$treatment
+    retained <- rep(TRUE, nrow(d))
+    constraints <- list()
+    for (v in vars) {
+        treatment_values <- unique(d[[v]][t])
+        control_values <- d[[v]][!t]
+        keep <- !is.na(control_values) & control_values %in% treatment_values
+        if (is.numeric(control_values)) {
+            keep <- is.finite(control_values) & keep
+        }
+        constraints[[v]] <- list(
+            n_treatment_values = length(treatment_values),
+            n_controls_before = length(control_values),
+            n_controls_retained = sum(keep)
+        )
+        retained[!t] <- retained[!t] & keep
+    }
+    labels <- attr(terms(f), "term.labels")
+    keep_terms <- labels[!vapply(
+        labels, function(label) any(all.vars(str2lang(label)) %in% vars), logical(1)
+    )]
+    list(
+        data = d[retained | t, , drop = FALSE],
+        formula = reformulate(if (length(keep_terms)) keep_terms else "1",
+                              response = "treatment"),
+        constraints = constraints,
+        n_controls_before = sum(!t),
+        n_controls_retained = sum(retained & !t)
+    )
+}
+
 
 sample_quota <- function(n_eligible, cap, min_cell) {
     # Treatment pixels to draw from each cell of one stratum.  Cells of at

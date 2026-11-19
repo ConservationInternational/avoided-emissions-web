@@ -13,7 +13,7 @@ diagnostic_fixture <- function() {
         diagnostic_expected_ids = 1L, fc_years = 2008:2016
     )
     make_record <- function(rep) list(
-        diagnostics_schema_version = 1L, matching_policy = "shared_support_v1",
+        diagnostics_schema_version = 1L, matching_policy = "shared_support_v2",
         task_id = "task", attempt_key = paste("task", 1, rep, "g", sep = "/"),
         site_id = "parent", id_numeric = 1L, sub_site_index = 0L,
         replicate = rep, group = "g", atom_run_id = "job",
@@ -31,7 +31,7 @@ diagnostic_fixture <- function() {
                        group_diagnostics = list(make_record(rep)))
         path <- file.path(matches, paste0("mb_f1_r", rep, ".json"))
         write_json(list(
-            diagnostics_schema_version = 1L, matching_policy = "shared_support_v1",
+            diagnostics_schema_version = 1L, matching_policy = "shared_support_v2",
             expected_attempt_keys = list(make_record(rep)$attempt_key),
             diagnostics = if (rep == 1L) list(record) else list(),
             failures = if (rep == 2L) list(record) else list()

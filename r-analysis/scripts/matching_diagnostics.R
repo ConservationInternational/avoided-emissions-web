@@ -80,7 +80,7 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
     pending <- vector("list", workers * batch_size)
     n_pending <- 0L
 
-    policy <- if (isTRUE(config$shared_support_controls)) "shared_support_v1" else "legacy"
+    policy <- if (isTRUE(config$shared_support_controls)) "shared_support_v2" else "legacy"
     output <- function(name) file.path(config$output_dir, name)
     artifacts <- list(
         diagnostics = "results_matching_diagnostics.jsonl.gz",

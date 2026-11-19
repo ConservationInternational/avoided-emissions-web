@@ -65,7 +65,7 @@ test_that("non-atom matching records diagnostics without reading an absent atom 
     log <- expect_support_success(config)
     expect_false(any(grepl("Unknown or uninitialised column: `atomic_id`", log, fixed = TRUE)))
     out <- read_json(file.path(path, "output", "matches", "mb_all.json"))
-    expect_equal(out$matching_policy, "shared_support_v1")
+    expect_equal(out$matching_policy, "shared_support_v2")
     expect_equal(lapply(out$diagnostics[[1]]$group_diagnostics, `[[`, "atoms"),
                  list(list(), list()))
 })
@@ -112,6 +112,46 @@ test_that("shared support narrows controls before either matcher without rescali
             expect_setequal(m$atomic_id[m$treatment], unique(t$atomic_id))
         }
     }
+})
+
+test_that("sampled boundary separation keeps only common treatment values and drops the term", {
+    path <- tempfile("matching_boundary_")
+    on.exit(unlink(path, recursive = TRUE))
+    t <- tibble(
+        cell = 1:8,
+        admin = rep(1:2, each = 4),
+        x = rep(c(0, 0, 1, 1), 2),
+        loss = 0
+    )
+    c <- tibble(
+        cell = 101:108,
+        admin = rep(1:2, each = 4),
+        x = c(-1, -1, 0, 0, -1, -1, -1, -1),
+        loss = 0
+    )
+    config <- write_support_fixture(path, t, c, NULL, "treatment ~ x")
+    config$max_treatment_pixels <- 2
+    config$n_replicates <- 1
+    config$random_seed <- which(vapply(1:1000, function(seed) {
+        set.seed(bitwXor(seed, bitwXor(bitwShiftL(1L, 10L), 1L)))
+        sampled <- sample_strata(
+            mutate(t, treatment = TRUE, group = admin), 2L, 10L
+        )
+        all(sampled$x[sampled$treatment] == 0)
+    }, logical(1)))[1]
+    expect_support_success(config)
+
+    sidecar <- read_json(file.path(path, "output", "matches", "mb_all.json"))
+    groups <- setNames(
+        sidecar$diagnostics[[1]]$group_diagnostics,
+        vapply(sidecar$diagnostics[[1]]$group_diagnostics, `[[`, "", "group")
+    )
+    expect_equal(groups[["1"]]$reason_code, "matched")
+    expect_equal(groups[["1"]]$method, "glm")
+    expect_equal(groups[["1"]]$boundary_support$n_controls_retained, 2)
+    expect_equal(groups[["1"]]$removed_separating_terms, list("x"))
+    expect_equal(groups[["2"]]$reason_code, "shared_support_exhausted")
+    expect_equal(groups[["2"]]$counts$sampled$treatment, 2)
 })
 
 test_that("a later GLM failure within partial success replays its exact warning on either resume path", {

@@ -62,7 +62,7 @@ variables, all settings, random seed, dataset/reference versions, software
 revision, and diagnostic exports.
 
 Historical tasks or saved presets missing shared-support settings retain the
-legacy policy; new tasks normally enable `shared_support_v1`. Recomputing or
+legacy policy; new tasks normally enable `shared_support_v2`. Recomputing or
 resuming uses recorded policy where applicable. Check task provenance to
 identify the settings, data, and biomass inputs used in older results.
 
