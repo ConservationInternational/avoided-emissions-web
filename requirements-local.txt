@@ -1,0 +1,5 @@
+-r webapp/requirements.txt
+-r webapp/requirements-dev.txt
+-r gee_export/requirements.txt
+-r r-analysis/requirements.txt
+ruff>=0.14,<1

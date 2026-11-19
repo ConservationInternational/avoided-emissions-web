@@ -76,8 +76,20 @@ deploy/                       # Deployment configuration
 
 ### Prerequisites
 - Docker and Docker Compose
-- Ruff (installed globally or via pip; version 0.14+ is used)
+- Ruff (included in `requirements-local.txt`; version 0.14+ is used)
 - R with the `lintr` package (`install.packages("lintr")`) for R script linting
+
+### Local Python Environment
+Prefer the repository-local `.venv` for Python tests and linting when it exists.
+It includes the Python runtime, test, GEE export, analysis extraction, and Ruff
+dependencies. Create or refresh it from the repository root with Python 3.13:
+```bash
+python3.13 -m venv .venv
+.venv/bin/python -m pip install -r requirements-local.txt
+```
+Use `.venv/bin/python -m pytest ...` and `.venv/bin/ruff ...` for local checks.
+The environment is ignored by Git; do not commit it. R packages and external
+services such as PostGIS are still provided separately as described below.
 
 ### Environment Setup (always do this first)
 ```bash
@@ -101,15 +113,15 @@ Users sign in with their Trends.Earth account via OIDC; there are no local accou
 #### Python — Ruff
 There is no `pyproject.toml` or `ruff.toml` — ruff uses its defaults. Always run from the repo root:
 ```bash
-ruff check webapp/ gee_export/ r-analysis/scripts/
-ruff format --check webapp/ gee_export/ r-analysis/scripts/
+.venv/bin/ruff check webapp/ gee_export/ r-analysis/scripts/
+.venv/bin/ruff format --check webapp/ gee_export/ r-analysis/scripts/
 ```
 To auto-fix:
 ```bash
-ruff format webapp/ gee_export/ r-analysis/scripts/
-ruff check --fix webapp/ gee_export/ r-analysis/scripts/
+.venv/bin/ruff format webapp/ gee_export/ r-analysis/scripts/
+.venv/bin/ruff check --fix webapp/ gee_export/ r-analysis/scripts/
 ```
-Both `ruff check` and `ruff format --check` **must pass with zero errors** before any code change is submitted.
+Both `.venv/bin/ruff check` and `.venv/bin/ruff format --check` **must pass with zero errors** before any code change is submitted.
 
 #### R — lintr
 R scripts in `r-analysis/scripts/` are linted with [lintr](https://lintr.r-lib.org/). Configuration is in `.lintr` at the repo root. Always run from the repo root:
@@ -160,8 +172,8 @@ docker exec -it "$CID" psql \
 
 ### Testing
 Validate changes by:
-1. Ensuring `ruff check` and `ruff format --check` pass (see above)
-2. Running the Python tests with `./run_tests.sh` (unit) or `./run_tests.sh -m integration` (needs PostGIS)
+1. Ensuring `.venv/bin/ruff check` and `.venv/bin/ruff format --check` pass (see above)
+2. Running the Python tests with `.venv/bin/python -m pytest tests/unit/ -v` (unit) or `.venv/bin/python -m pytest -m integration` (needs PostGIS); use the local `.venv` when available
 3. Running the R tests for analysis changes (see `r-analysis/scripts/README.md`); `test_pipeline.R` needs the analysis container's packages
 4. Starting the Docker Compose stack and verifying the health endpoint returns `ok`
 5. Manually checking affected functionality in the web UI
