@@ -669,3 +669,23 @@ def test_paginated_site_grids_include_page_size_in_selector(monkeypatch):
     for options in grids.values():
         assert options["pagination"] is True
         assert options["paginationPageSize"] in options["paginationPageSizeSelector"]
+
+
+def test_preview_grid_date_blank_filter_selects_ongoing_sites(monkeypatch):
+    from services import site_set
+
+    db = Mock()
+    db.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr(site_set, "get_db", lambda: db)
+
+    site_set.get_user_site_set_preview_rows(
+        "set",
+        filter_model={
+            "end_date": {"filterType": "date", "type": "blank"},
+            "start_date": {"filterType": "date", "type": "notBlank"},
+        },
+    )
+
+    sql = str(db.execute.call_args.args[0])
+    assert "end_date IS NULL" in sql
+    assert "start_date IS NOT NULL" in sql

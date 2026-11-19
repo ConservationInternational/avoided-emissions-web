@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
-from layouts.common import _make_ag_grid
+from layouts.common import _make_ag_grid, option_filter
 from layouts.documentation import help_link
 from services import download_results_csv
 from services.task_result_cache import QUALITY_WARNINGS_KEY, cached_task_result
@@ -798,6 +798,8 @@ def _matches_text_filter(value, spec):
         return all(results) if spec.get("operator") == "AND" else any(results)
     op = spec.get("type", "contains")
     value = str(value or "").lower()
+    if op.startswith("is:"):
+        return value == op[3:].lower()
     if op == "blank":
         return not value
     if op == "notBlank":
@@ -900,6 +902,26 @@ def _build_site_status_card(task, totals, warnings):
         )
     if subsampled:
         summary.append(f"{len(subsampled)} site(s) subsampled")
+    aggregate_warnings = [w for w in warnings or [] if w["scope"] == "aggregate"]
+    aggregate_note = (
+        dbc.Alert(
+            [
+                html.Strong("Across all sites: "),
+                html.Ul(
+                    [html.Li(w["message"]) for w in aggregate_warnings],
+                    className="mb-0",
+                ),
+            ],
+            color=(
+                "danger"
+                if any(w["level"] == "danger" for w in aggregate_warnings)
+                else "warning"
+            ),
+            className="small py-2 mb-2",
+        )
+        if aggregate_warnings
+        else None
+    )
 
     def numeric(field, header, fmt, width, suffix=""):
         return {
@@ -930,7 +952,9 @@ def _build_site_status_card(task, totals, warnings):
             "width": 80,
             "cellRenderer": "SeverityIcon",
             "headerTooltip": "Match quality: Critical, Caution, OK, or No results",
-            **text_filter,
+            **option_filter(
+                {q: q for q in _SITE_STATUS_QUALITY_RANK}, server_side=True
+            ),
         },
         {
             "headerName": "Site",
@@ -1022,6 +1046,7 @@ def _build_site_status_card(task, totals, warnings):
                         ],
                         className="small text-muted mb-2",
                     ),
+                    aggregate_note,
                     _make_ag_grid(
                         SITE_STATUS_GRID_ID,
                         columns,

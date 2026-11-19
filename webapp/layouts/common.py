@@ -82,6 +82,105 @@ TRUNCATED_CELL = {
     "textOverflow": "ellipsis",
 }
 
+# -- Typed AG Grid filters ---------------------------------------------------
+# Spread one of these into a column definition so filtering and sorting match
+# the column's data type instead of the text filter from DEFAULT_COL_DEF.
+
+TEXT_FILTER = {"filter": "agTextColumnFilter"}
+
+NUMBER_FILTER = {"filter": "agNumberColumnFilter"}
+
+NUMERIC_COLUMN = {**NUMBER_FILTER, "type": "numericColumn"}
+
+# Values are ISO date or datetime strings; placeholders ("-", "Ongoing") are
+# treated as blank.  Client-side grids only: infinite grids filter on the
+# server and must use server_date_filter().
+DATE_FILTER = {
+    "filter": "agDateColumnFilter",
+    "cellDataType": False,
+    "filterValueGetter": {"function": "localDateFilterValue(params)"},
+    "filterParams": {"buttons": ["clear"]},
+}
+
+
+def option_filter(options, *, server_side=False):
+    """Text filter limited to fixed choices.
+
+    ``options`` maps display labels to the value a matching cell must equal.
+    Server-side models receive ``type == "is:<value>"``.
+    """
+    return {
+        "filter": "agTextColumnFilter",
+        "filterParams": {
+            "maxNumConditions": 1,
+            "debounceMs": 0,
+            "buttons": ["clear"],
+            "filterOptions": [
+                # Without "empty" first, the first zero-input option would be
+                # active by default and the filter could never be cleared.
+                "empty",
+                *(
+                    {
+                        "displayKey": (
+                            f"is:{str(value).lower()}"
+                            if isinstance(value, bool)
+                            else f"is:{value}"
+                        ),
+                        "displayName": label,
+                        "numberOfInputs": 0,
+                        "predicate": (
+                            {"function": "isTruthyCell"}
+                            if value is True
+                            else {"function": "isFalsyCell"}
+                            if value is False
+                            else {"function": f"cellEquals({value!r})"}
+                        ),
+                    }
+                    for label, value in options.items()
+                ),
+            ],
+        },
+        **({} if server_side else {"cellDataType": False}),
+    }
+
+
+BOOLEAN_FILTER = option_filter({"Yes": True, "No": False})
+
+
+def server_text_filter(options=None):
+    """Text filter restricted to the operators an infinite grid's server
+    implements, with a single condition."""
+    return {
+        "filter": "agTextColumnFilter",
+        "filterParams": {
+            "maxNumConditions": 1,
+            "filterOptions": options
+            or ["contains", "notContains", "equals", "startsWith", "endsWith"],
+        },
+    }
+
+
+def server_date_filter(options=None):
+    """Date filter for infinite grids; the server parses ``dateFrom``/``dateTo``."""
+    return {
+        "filter": "agDateColumnFilter",
+        "filterParams": {
+            "maxNumConditions": 1,
+            "buttons": ["clear"],
+            "filterOptions": options
+            or [
+                "equals",
+                "notEqual",
+                "lessThan",
+                "greaterThan",
+                "inRange",
+                "blank",
+                "notBlank",
+            ],
+        },
+    }
+
+
 TASK_LIST_COLUMNS = [
     {
         "headerName": "Name",
@@ -179,7 +278,7 @@ TASK_LIST_COLUMNS = [
         "sort": "desc",
         "sortIndex": 0,
         "sortable": True,
-        "filter": "agTextColumnFilter",
+        **DATE_FILTER,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
     },
@@ -189,7 +288,7 @@ TASK_LIST_COLUMNS = [
         "flex": 1.5,
         "minWidth": 160,
         "sortable": True,
-        "filter": "agTextColumnFilter",
+        **DATE_FILTER,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
     },
@@ -209,7 +308,7 @@ TASK_LIST_COLUMNS = [
         "flex": 1.5,
         "minWidth": 160,
         "sortable": True,
-        "filter": "agTextColumnFilter",
+        **DATE_FILTER,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
     },
@@ -238,6 +337,7 @@ COVARIATE_COLUMNS = [
         "pinned": "left",
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "description",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Category",
@@ -268,6 +368,7 @@ COVARIATE_COLUMNS = [
         "minWidth": 150,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "11px"},
         "tooltipField": "gee_task_id",
+        **TEXT_FILTER,
     },
     {
         "headerName": "GCS Tiles",
@@ -275,6 +376,7 @@ COVARIATE_COLUMNS = [
         "flex": 0.7,
         "minWidth": 85,
         "cellRenderer": "TileCount",
+        **NUMBER_FILTER,
     },
     {
         "headerName": "On S3",
@@ -282,6 +384,7 @@ COVARIATE_COLUMNS = [
         "flex": 0.5,
         "minWidth": 65,
         "cellRenderer": "S3Status",
+        **BOOLEAN_FILTER,
     },
     {
         "headerName": "Analysis readiness",
@@ -309,6 +412,7 @@ COVARIATE_COLUMNS = [
         "cellRenderer": "CogLink",
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "11px"},
         "tooltipField": "merged_url",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Error",
@@ -317,6 +421,7 @@ COVARIATE_COLUMNS = [
         "minWidth": 200,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "11px", "color": "#721C24"},
         "tooltipField": "error_message",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Actions",
@@ -339,6 +444,7 @@ RESULTS_TOTAL_COLUMNS = [
         "pinned": "left",
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "site_id",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Name",
@@ -347,6 +453,7 @@ RESULTS_TOTAL_COLUMNS = [
         "minWidth": 150,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "site_name",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Emissions Avoided (MgCO₂e)",
@@ -382,6 +489,7 @@ RESULTS_TOTAL_COLUMNS = [
         "field": "period",
         "flex": 1,
         "minWidth": 110,
+        **TEXT_FILTER,
     },
     {
         "headerName": "Sampled %",
@@ -402,6 +510,7 @@ RESULTS_YEARLY_COLUMNS = [
         "minWidth": 120,
         "pinned": "left",
         "cellStyle": {**TRUNCATED_CELL},
+        **TEXT_FILTER,
     },
     {
         "headerName": "Year",
@@ -467,6 +576,7 @@ USER_MANAGEMENT_COLUMNS = [
         "minWidth": 150,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "name",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Email",
@@ -475,6 +585,7 @@ USER_MANAGEMENT_COLUMNS = [
         "minWidth": 200,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "email",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Access",
@@ -499,6 +610,7 @@ USER_MANAGEMENT_COLUMNS = [
         "minWidth": 150,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "institution",
+        **TEXT_FILTER,
     },
 ]
 
@@ -510,6 +622,7 @@ USER_SITE_SET_COLUMNS = [
         "minWidth": 180,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "name",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Source File",
@@ -518,6 +631,7 @@ USER_SITE_SET_COLUMNS = [
         "minWidth": 200,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "filename",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Sites",
@@ -547,6 +661,7 @@ USER_SITE_SET_COLUMNS = [
         "field": "file_format",
         "flex": 0.7,
         "minWidth": 90,
+        **TEXT_FILTER,
     },
     {
         "headerName": "Uploaded",
@@ -557,6 +672,7 @@ USER_SITE_SET_COLUMNS = [
         "sortIndex": 0,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
+        **DATE_FILTER,
     },
     {
         "headerName": "Archived",
@@ -564,6 +680,7 @@ USER_SITE_SET_COLUMNS = [
         "flex": 0.8,
         "minWidth": 100,
         "valueFormatter": {"function": "params.value ? 'Yes' : 'No'"},
+        **BOOLEAN_FILTER,
     },
     {
         "headerName": "Actions",
@@ -585,6 +702,7 @@ USER_SITE_UPLOAD_COLUMNS = [
         "minWidth": 200,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "filename",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Status",
@@ -592,6 +710,7 @@ USER_SITE_UPLOAD_COLUMNS = [
         "flex": 0.9,
         "minWidth": 110,
         "cellRenderer": "StatusBadge",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Detected Features",
@@ -631,6 +750,7 @@ USER_SITE_UPLOAD_COLUMNS = [
         "minWidth": 180,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "site_set_name",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Queued",
@@ -641,6 +761,7 @@ USER_SITE_UPLOAD_COLUMNS = [
         "sortIndex": 0,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
+        **DATE_FILTER,
     },
     {
         "headerName": "Started",
@@ -649,6 +770,7 @@ USER_SITE_UPLOAD_COLUMNS = [
         "minWidth": 165,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
+        **DATE_FILTER,
     },
     {
         "headerName": "Completed",
@@ -657,6 +779,7 @@ USER_SITE_UPLOAD_COLUMNS = [
         "minWidth": 165,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
+        **DATE_FILTER,
     },
     {
         "headerName": "Error",
@@ -665,6 +788,7 @@ USER_SITE_UPLOAD_COLUMNS = [
         "minWidth": 220,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "error_message",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Actions",
@@ -709,6 +833,7 @@ COMBINED_SITE_UPLOAD_COLUMNS = [
         "minWidth": 160,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "site_set_name",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Source File",
@@ -717,6 +842,7 @@ COMBINED_SITE_UPLOAD_COLUMNS = [
         "minWidth": 200,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "filename",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Status",
@@ -724,6 +850,7 @@ COMBINED_SITE_UPLOAD_COLUMNS = [
         "flex": 0.9,
         "minWidth": 110,
         "cellRenderer": "StatusBadge",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Sites Imported",
@@ -754,6 +881,7 @@ COMBINED_SITE_UPLOAD_COLUMNS = [
         "flex": 0.7,
         "minWidth": 90,
         "valueFormatter": {"function": "params.value ? 'Yes' : ''"},
+        **BOOLEAN_FILTER,
     },
     {
         "headerName": "Queued",
@@ -764,6 +892,7 @@ COMBINED_SITE_UPLOAD_COLUMNS = [
         "sortIndex": 0,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
+        **DATE_FILTER,
     },
     {
         "headerName": "Completed",
@@ -772,6 +901,7 @@ COMBINED_SITE_UPLOAD_COLUMNS = [
         "minWidth": 165,
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
+        **DATE_FILTER,
     },
     {
         "headerName": "Error",
@@ -780,6 +910,7 @@ COMBINED_SITE_UPLOAD_COLUMNS = [
         "minWidth": 220,
         "cellStyle": {**TRUNCATED_CELL},
         "tooltipField": "error_message",
+        **TEXT_FILTER,
     },
     {
         "headerName": "Actions",

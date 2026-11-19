@@ -298,6 +298,33 @@ def test_site_status_block_sorts_filters_and_slices_on_the_server():
     )
     assert [r["site_id"] for r in filtered["rowData"]] == ["b"]
 
+    critical = block(
+        rows,
+        {
+            "startRow": 0,
+            "endRow": 100,
+            "filterModel": {"quality": {"filterType": "text", "type": "is:Critical"}},
+        },
+    )
+    assert critical["rowCount"] > 0
+    assert {r["quality"] for r in critical["rowData"]} == {"Critical"}
+
+
+def test_site_status_card_keeps_task_wide_warnings_without_top_banner():
+    task = SimpleNamespace(extra_metadata={})
+    totals = [SimpleNamespace(site_id="a")]
+    card = _match_quality._build_site_status_card(
+        task,
+        totals,
+        [
+            {"scope": "aggregate", "level": "danger", "message": "Overall imbalance"},
+            {"scope": "a", "level": "warning", "message": "Site-only issue"},
+        ],
+    )
+    text = str(card)
+    assert "Overall imbalance" in text
+    assert "Site-only issue" not in text
+
 
 def test_raw_results_skips_replay_objects_until_the_text_download(mocker):
     task = SimpleNamespace(

@@ -1335,6 +1335,27 @@ def test_task_detail_has_no_separate_map_tab():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("shared_token", [None, "share"])
+def test_task_detail_refresh_outputs_exist_in_both_layouts(shared_token):
+    app = Dash(__name__, suppress_callback_exceptions=True)
+    registration.register_callbacks(app)
+    refresh = next(
+        callback for key, callback in app.callback_map.items()
+        if "task-title.children" in key
+    )
+    layout = task_detail_layout(None, "task", shared_token=shared_token)
+
+    for output in refresh["output"]:
+        assert layout[output.component_id] is not None
+    assert layout["cancel-task-control"].style == {"display": "none"}
+    if shared_token:
+        with pytest.raises(KeyError):
+            layout["cancel-task-btn"]
+    else:
+        assert layout["cancel-task-btn"] is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("shared_token", [None, "share"])
 def test_task_tabs_have_independent_loading_indicators(shared_token):
     layout = task_detail_layout(None, "task", shared_token=shared_token)
     assert layout["detail-tabs"] in layout.children

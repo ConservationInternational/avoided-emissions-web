@@ -8,6 +8,8 @@ from layouts.common import (
     COMBINED_SITE_UPLOAD_COLUMNS,
     COVARIATE_COLUMNS,
     COVARIATE_STATUS_ROW_STYLES,
+    NUMERIC_COLUMN,
+    TEXT_FILTER,
     USER_MANAGEMENT_COLUMNS,
     USER_SITE_UPLOAD_ROW_STYLES,
     _make_ag_grid,
@@ -38,23 +40,23 @@ SITE_CATALOG_COLUMNS = [
 ]
 IMPORT_HISTORY_COLUMNS = [
     *COMBINED_SITE_UPLOAD_COLUMNS[:3],
-    {"headerName": "Phase", "field": "phase", "minWidth": 140},
+    {"headerName": "Phase", "field": "phase", "minWidth": 140, **TEXT_FILTER},
     {
         "headerName": "Scanned",
         "field": "rows_scanned",
-        "type": "numericColumn",
+        **NUMERIC_COLUMN,
         "minWidth": 110,
     },
     {
         "headerName": "Accepted",
         "field": "rows_accepted",
-        "type": "numericColumn",
+        **NUMERIC_COLUMN,
         "minWidth": 110,
     },
     {
         "headerName": "Skipped",
         "field": "rows_skipped",
-        "type": "numericColumn",
+        **NUMERIC_COLUMN,
         "minWidth": 100,
     },
     *[

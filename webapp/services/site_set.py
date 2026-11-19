@@ -463,7 +463,9 @@ def get_user_site_set_preview_rows(
         elif ftype == "date" and col in {"start_date", "end_date"}:
             date_from = spec.get("dateFrom") or spec.get("filter") or ""
             date_to = spec.get("dateTo") or ""
-            if op == "inRange" and date_from and date_to:
+            if op in {"blank", "notBlank"}:
+                where_frags.append(f"{col} IS {'NOT ' if op == 'notBlank' else ''}NULL")
+            elif op == "inRange" and date_from and date_to:
                 params[f"flt_{col}_f"] = date_from
                 params[f"flt_{col}_t"] = date_to
                 where_frags.append(

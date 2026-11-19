@@ -30,6 +30,7 @@ from layouts import (
     TASK_LIST_COLUMNS,
     _make_ag_grid,
 )
+from layouts.common import TEXT_FILTER, server_date_filter, server_text_filter
 from layouts.documentation import variable_cards, variable_links
 from plot_selection import parse_plot_selection, parse_task_tab, plot_selection_query
 from services import (
@@ -113,7 +114,6 @@ from callbacks._match_quality import (
     SITE_STATUS_BLOCK_SIZE,
     SITE_STATUS_GRID_ID,
     _build_map,
-    _build_quality_warning_banner,
     _build_selected_match_quality,
     _compute_quality_warnings,
     _site_quality_rows,
@@ -1215,14 +1215,14 @@ def register_callbacks(app, limiter=None):
                 {
                     "field": "feature_id",
                     "hide": True,
-                    "filter": "agTextColumnFilter",
+                    **server_text_filter(),
                 },
                 {
                     "headerName": "Site ID",
                     "field": "site_id",
                     "flex": 1,
                     "minWidth": 110,
-                    "filter": "agTextColumnFilter",
+                    **server_text_filter(),
                     "sortable": True,
                 },
                 {
@@ -1230,7 +1230,7 @@ def register_callbacks(app, limiter=None):
                     "field": "site_name",
                     "flex": 2,
                     "minWidth": 160,
-                    "filter": "agTextColumnFilter",
+                    **server_text_filter(),
                     "sortable": True,
                 },
                 {
@@ -1238,7 +1238,7 @@ def register_callbacks(app, limiter=None):
                     "field": "start_date",
                     "flex": 1,
                     "minWidth": 120,
-                    "filter": "agTextColumnFilter",
+                    **server_date_filter(),
                     "sortable": True,
                 },
                 {
@@ -1246,7 +1246,7 @@ def register_callbacks(app, limiter=None):
                     "field": "end_date",
                     "flex": 1,
                     "minWidth": 120,
-                    "filter": "agTextColumnFilter",
+                    **server_date_filter(),
                     "sortable": True,
                 },
             ]
@@ -1646,7 +1646,7 @@ def register_callbacks(app, limiter=None):
                     "field": "submitted_by_name",
                     "flex": 1.2,
                     "minWidth": 140,
-                    "filter": "agTextColumnFilter",
+                    **TEXT_FILTER,
                     "filterParams": {
                         "buttons": ["clear", "apply"],
                         "closeOnApply": True,
@@ -1733,7 +1733,6 @@ def register_callbacks(app, limiter=None):
             Output("task-results-content", "children"),
             Output("task-plots", "children"),
             Output("task-raw-results", "children"),
-            Output("quality-warning-banner", "children"),
             Output("detail-refresh-interval", "disabled"),
             Output("resume-task-control", "style"),
             Output("cancel-task-control", "style"),
@@ -1764,7 +1763,6 @@ def register_callbacks(app, limiter=None):
                 None,
                 None,
                 None,
-                None,
                 True,
                 {"display": "none"},
                 {"display": "none"},
@@ -1782,7 +1780,6 @@ def register_callbacks(app, limiter=None):
         if not detail:
             return (
                 "Task Not Found",
-                None,
                 None,
                 None,
                 None,
@@ -1818,12 +1815,10 @@ def register_callbacks(app, limiter=None):
         }.get(task.status, "secondary")
         badge = dbc.Badge(task.status.upper(), color=status_color, className="fs-5")
 
-        # Quality warning banner (above tabs) — only for succeeded tasks
-        quality_banner = html.Div()
+        # Quality warnings are shown in the Overview's site status table.
         quality_warnings = []
         if task.status == "succeeded":
             quality_warnings = _compute_quality_warnings(task_id, task, totals)
-            quality_banner = _build_quality_warning_banner(quality_warnings)
 
         # -----------------------------------------------------------
         # Lazy tab rendering: only build content for the *active* tab.
@@ -1883,7 +1878,6 @@ def register_callbacks(app, limiter=None):
             results_content,
             plots,
             raw_results,
-            quality_banner,
             disable_interval,
             (
                 {}

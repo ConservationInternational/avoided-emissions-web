@@ -416,6 +416,11 @@ The **Elapsed** column shows time from submission to completion as **HH:MM:SS**.
 For submitted or running tasks it updates with each table refresh. Hours can
 exceed 24; a dash indicates missing timestamps. Numeric filters use seconds.
 
+Table filters match each column's type: number columns use numeric
+comparisons, date columns use a date picker based on your local calendar day
+(a dash or **Ongoing** counts as blank), and yes/no columns such as
+**Archived** offer **Yes** or **No**.
+
 The **Resume** action is enabled for failed Nextflow tasks with a tracked API
 execution that you own (or administer). It resumes the same execution using
 retained checkpoints; cancelled tasks cannot be resumed. **Recompute** opens
@@ -470,7 +475,9 @@ row per site. It combines the match quality rating (Critical, Caution, OK, or
 No results), quality issues, site fragments that could not be included and
 why, and whether the site was subsampled (with the percentage sampled). Rows
 load as you scroll; sorting and filtering apply to all sites, not only the
-loaded rows.
+loaded rows. Filter the **Quality** column by rating. Warnings that apply to
+the task as a whole, such as overall covariate balance, appear above the grid;
+there is no separate warning banner above the tabs.
 
 **Raw Results** lists the main download files. If matching replay files are
 available, use **Download matching replay links (.txt)** for a text file with

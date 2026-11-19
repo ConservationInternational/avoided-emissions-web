@@ -15,6 +15,7 @@ from layouts import (
     RESULTS_YEARLY_COLUMNS,
     _make_ag_grid,
 )
+from layouts.common import DATE_FILTER, NUMBER_FILTER, NUMERIC_COLUMN, TEXT_FILTER
 from layouts.documentation import help_link, setting_help, variable_links
 from layouts.task_detail import task_section_loading
 from services import (
@@ -791,16 +792,35 @@ def _build_results_content(
                 "field": "display_site_id",
                 "flex": 1,
                 "minWidth": 120,
+                **TEXT_FILTER,
             },
-            {"headerName": "Name", "field": "site_name", "flex": 1.5, "minWidth": 150},
-            {"headerName": "Start", "field": "start_date", "flex": 1, "minWidth": 110},
-            {"headerName": "End", "field": "end_date", "flex": 1, "minWidth": 110},
+            {
+                "headerName": "Name",
+                "field": "site_name",
+                "flex": 1.5,
+                "minWidth": 150,
+                **TEXT_FILTER,
+            },
+            {
+                "headerName": "Start",
+                "field": "start_date",
+                "flex": 1,
+                "minWidth": 110,
+                **DATE_FILTER,
+            },
+            {
+                "headerName": "End",
+                "field": "end_date",
+                "flex": 1,
+                "minWidth": 110,
+                **DATE_FILTER,
+            },
             {
                 "headerName": "Area (ha)",
                 "field": "area_ha",
                 "flex": 1,
                 "minWidth": 100,
-                "type": "numericColumn",
+                **NUMERIC_COLUMN,
                 "valueFormatter": {"function": "d3.format(',.0f')(params.value)"},
             },
         ]
@@ -926,13 +946,19 @@ def _build_yearly_results(results, agg_yearly=None, is_large=False, n_sites=0):
         ]
         # Aggregate columns drop the site_id column and add an "All sites" label
         agg_year_cols = [
-            {"headerName": "Year", "field": "year", "flex": 1, "minWidth": 90},
+            {
+                "headerName": "Year",
+                "field": "year",
+                "flex": 1,
+                "minWidth": 90,
+                **NUMBER_FILTER,
+            },
             {
                 "headerName": "Treatment Defor. (ha)",
                 "field": "treatment_defor_ha",
                 "flex": 1.2,
                 "minWidth": 140,
-                "type": "numericColumn",
+                **NUMERIC_COLUMN,
                 "valueFormatter": {"function": "d3.format(',.1f')(params.value)"},
             },
             {
@@ -940,7 +966,7 @@ def _build_yearly_results(results, agg_yearly=None, is_large=False, n_sites=0):
                 "field": "control_defor_ha",
                 "flex": 1.2,
                 "minWidth": 140,
-                "type": "numericColumn",
+                **NUMERIC_COLUMN,
                 "valueFormatter": {"function": "d3.format(',.1f')(params.value)"},
             },
             {
@@ -948,7 +974,7 @@ def _build_yearly_results(results, agg_yearly=None, is_large=False, n_sites=0):
                 "field": "emissions_avoided_mgco2e",
                 "flex": 1.5,
                 "minWidth": 180,
-                "type": "numericColumn",
+                **NUMERIC_COLUMN,
                 "valueFormatter": {"function": "d3.format(',.1f')(params.value)"},
             },
             {
@@ -956,7 +982,7 @@ def _build_yearly_results(results, agg_yearly=None, is_large=False, n_sites=0):
                 "field": "forest_loss_avoided_ha",
                 "flex": 1.3,
                 "minWidth": 160,
-                "type": "numericColumn",
+                **NUMERIC_COLUMN,
                 "valueFormatter": {"function": "d3.format(',.1f')(params.value)"},
             },
         ]

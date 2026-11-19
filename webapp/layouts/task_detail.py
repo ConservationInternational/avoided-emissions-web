@@ -157,7 +157,7 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
                     )
                 ]
                 if not is_shared
-                else []
+                else [html.Div(id="cancel-task-control", style={"display": "none"})]
             ),
         ],
         className="mb-3",
@@ -316,7 +316,8 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
                         dbc.Card(
                             dbc.CardBody(
                                 task_section_loading(
-                                    html.Div(id="task-plots"), "Loading results plots..."
+                                    html.Div(id="task-plots"),
+                                    "Loading results plots...",
                                 )
                             ),
                             className="ae-section-card",
@@ -357,7 +358,6 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
             html.Div(id="recompute-result"),
             html.Div(id="cancel-task-result"),
             html.Div(id="resume-task-result"),
-            html.Div(id="quality-warning-banner"),
             tabs,
             dcc.Store(id="task-plot-selection", data=selection),
             edit_modal,
