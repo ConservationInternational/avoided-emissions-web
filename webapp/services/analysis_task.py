@@ -5,12 +5,14 @@ import logging
 import tempfile
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
 import tasks as webapp_tasks
+from botocore.exceptions import BotoCoreError, ClientError
 from config import Config
 from models import (
     AnalysisTask,
@@ -20,6 +22,7 @@ from models import (
     get_db,
 )
 from sqlalchemy import case, func
+from task_timing import task_timing, timed_task_step
 
 from gee_export import gee_config
 from services.covariate import get_ready_covariate_names
@@ -41,6 +44,7 @@ from services.site_set import (
     upload_sites_to_geojson,
     upload_sites_to_s3,
 )
+from services.task_result_cache import QUALITY_WARNINGS_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -1361,7 +1365,32 @@ def get_task_site_results(task_id, site_id):
         db.close()
 
 
-def get_task_detail(task_id):
+@timed_task_step("task_header")
+def get_task_header(task_id):
+    """Fetch task metadata without loading any result rows or geometry."""
+    db = get_db()
+    try:
+        return db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
+    finally:
+        db.close()
+
+
+@timed_task_step("task_access_sql")
+def get_task_ownership(task_id):
+    """Return a row even for an unowned task, without reading task metadata."""
+    db = get_db()
+    try:
+        return (
+            db.query(AnalysisTask.submitted_by)
+            .filter(AnalysisTask.id == task_id)
+            .first()
+        )
+    finally:
+        db.close()
+
+
+@timed_task_step("task_data")
+def get_task_detail(task_id, *, section="full"):
     """Get full task details including sites and results.
 
     For tasks with more than ``LARGE_TASK_THRESHOLD`` sites the per-site-year
@@ -1369,7 +1398,8 @@ def get_task_detail(task_id):
     so the Dash process never has to hold tens of thousands of ORM objects in
     memory.  The ``is_large`` flag tells callers which path was taken.
     ``agg_yearly`` is the all-site yearly series (with replicate ranges)
-    computed by the R summary step.
+    computed by the R summary step. The web callbacks request only the
+    sections they need; ``full`` preserves the original service contract.
     """
     db = get_db()
     try:
@@ -1382,65 +1412,37 @@ def get_task_detail(task_id):
 
         # Always load per-site totals — one row per site, manageable even at
         # thousands of sites, and needed for the overview summary cards.
-        totals = (
-            db.query(TaskResultTotal).filter(TaskResultTotal.task_id == task_id).all()
-        )
+        totals = []
+        if section not in {"header", "yearly"} and (
+            section != "raw" or task.status == "succeeded"
+        ):
+            with task_timing("task_totals_sql"):
+                totals = (
+                    db.query(TaskResultTotal)
+                    .filter(TaskResultTotal.task_id == task_id)
+                    .all()
+                )
 
         # Portfolio (all-site) yearly series computed by the R summary step.
         # Bounds must come from here: summing per-site bounds is invalid.
         agg_yearly = (task.extra_metadata or {}).get("portfolio", {}).get("yearly", [])
 
-        if is_large:
-            # Avoid loading tens of thousands of per-site-year rows.
-            sites = []
-            results = None
-            # Load centroid GeoJSON for the results map so that all sites are
-            # shown as emission-coloured circles regardless of dataset size.
-            sites_geojson = None
-            if task.site_set_id:
-                try:
-                    sites_geojson = get_user_site_set_centroids_geojson(
-                        task.site_set_id
-                    )
-                except Exception:
-                    logger.warning(
-                        "get_task_detail: could not load centroids for site set %s",
-                        task.site_set_id,
-                        exc_info=True,
-                    )
-            logger.info(
-                "get_task_detail: task %s has %d sites (> threshold %d) — "
-                "using aggregated path",
-                task_id,
-                n_sites,
-                LARGE_TASK_THRESHOLD,
-            )
-        else:
-            sites = db.query(TaskSite).filter(TaskSite.task_id == task_id).all()
-            results = (
-                db.query(TaskResult)
-                .filter(TaskResult.task_id == task_id)
-                .order_by(TaskResult.site_id, TaskResult.year)
-                .all()
-            )
-            sites_geojson = None
-            if task.site_set_id:
-                sites_geojson = get_user_site_set_geojson(task.site_set_id)
-            if not sites_geojson or not sites_geojson.get("features"):
-                # Adopted tasks have no local site set — fall back to S3
-                s3_uri = task.sites_s3_uri
-                if not s3_uri:
-                    s3_uri = (task.config or {}).get("sites_s3_uri")
-                if s3_uri:
-                    sites_geojson = _fetch_sites_geojson_from_s3(s3_uri)
-                else:
-                    parquet_uri = (task.config or {}).get("sites_parquet_s3_uri")
-                    if parquet_uri:
-                        parquet_gdf = _fetch_sites_parquet_from_s3(parquet_uri)
-                        if parquet_gdf is not None and not parquet_gdf.empty:
-                            sites_geojson = json.loads(
-                                upload_sites_to_geojson(parquet_gdf)
-                            )
+        sites = []
+        results = None
+        sites_geojson = None
+        if not is_large and section in {"full", "overview", "results", "plots"}:
+            with task_timing("task_sites_sql"):
+                sites = db.query(TaskSite).filter(TaskSite.task_id == task_id).all()
+        if not is_large and section in {"full", "plots", "yearly"}:
+            with task_timing("task_yearly_sql"):
+                results = (
+                    db.query(TaskResult)
+                    .filter(TaskResult.task_id == task_id)
+                    .order_by(TaskResult.site_id, TaskResult.year)
+                    .all()
+                )
+        if section in {"full", "map"}:
+            sites_geojson = _get_task_geometry(task, is_large)
 
         return {
             "task": task,
@@ -1453,6 +1455,35 @@ def get_task_detail(task_id):
         }
     finally:
         db.close()
+
+
+@timed_task_step("task_geometry")
+def _get_task_geometry(task, is_large):
+    if is_large:
+        if task.site_set_id:
+            try:
+                return get_user_site_set_centroids_geojson(task.site_set_id)
+            except Exception:
+                logger.warning(
+                    "Could not load centroids for site set %s",
+                    task.site_set_id,
+                    exc_info=True,
+                )
+        return None
+
+    if task.site_set_id:
+        sites_geojson = get_user_site_set_geojson(task.site_set_id)
+        if sites_geojson and sites_geojson.get("features"):
+            return sites_geojson
+    config = task.config or {}
+    s3_uri = task.sites_s3_uri or config.get("sites_s3_uri")
+    if s3_uri:
+        return _fetch_sites_geojson_from_s3(s3_uri)
+    if parquet_uri := config.get("sites_parquet_s3_uri"):
+        parquet_gdf = _fetch_sites_parquet_from_s3(parquet_uri)
+        if parquet_gdf is not None and not parquet_gdf.empty:
+            return json.loads(upload_sites_to_geojson(parquet_gdf))
+    return None
 
 
 _YEAR_METRICS = (
@@ -1594,7 +1625,31 @@ def import_execution_results(task_id, results_payload, db=None):
     try:
         task_obj = db.query(AnalysisTask).filter(AnalysisTask.id == task_id).first()
         if task_obj:
-            task_obj.extra_metadata = {**(task_obj.extra_metadata or {}), **metadata}
+            task_metadata = {
+                **(task_obj.extra_metadata or {}),
+                **metadata,
+                "result_revision": uuid.uuid4().hex,
+            }
+            task_metadata.pop(QUALITY_WARNINGS_KEY, None)
+            if task_obj.results_s3_uri:
+                # The worker can compute warnings once rather than placing an
+                # artifact download on the first viewer's critical path.
+                from callbacks._match_quality import collect_quality_warnings
+
+                try:
+                    task_metadata[QUALITY_WARNINGS_KEY] = collect_quality_warnings(
+                        task_id,
+                        task_obj.results_s3_uri,
+                        task_metadata,
+                        [SimpleNamespace(**row) for row in total_rows],
+                    )
+                except (BotoCoreError, ClientError, OSError, ValueError, KeyError):
+                    logger.warning(
+                        "Could not precompute quality warnings for task %s",
+                        task_id,
+                        exc_info=True,
+                    )
+            task_obj.extra_metadata = task_metadata
         labels = {
             row.site_id: row.display_site_id
             for row in db.query(TaskSite).filter(TaskSite.task_id == task_id).all()
@@ -1842,6 +1897,7 @@ def download_results_csv(task_id, result_type="by_site_year", results_s3_uri=Non
         return None
 
 
+@timed_task_step("task_replicate_yearly_s3")
 def get_filtered_portfolio_yearly(task_id, site_ids, n_replicates, results_s3_uri=None):
     """Aggregate site-year replicate outcomes before computing group ranges."""
     bucket, prefix = _resolve_results_s3(task_id, results_s3_uri)
@@ -1924,7 +1980,15 @@ def get_filtered_portfolio_yearly(task_id, site_ids, n_replicates, results_s3_ur
         yearly[f"cum_{kind}_defor_ha"] = yearly.groupby("replicate")[
             f"{kind}_defor_ha"
         ].cumsum()
-    metrics = [*names.values(), "cum_treatment_defor_ha", "cum_control_defor_ha"]
+    yearly["cum_emissions_avoided_mgco2e"] = yearly.groupby("replicate")[
+        "emissions_avoided_mgco2e"
+    ].cumsum()
+    metrics = [
+        *names.values(),
+        "cum_treatment_defor_ha",
+        "cum_control_defor_ha",
+        "cum_emissions_avoided_mgco2e",
+    ]
     grouped = yearly.groupby("year")[metrics]
     result = grouped.mean()
     if n_replicates > 1:
@@ -1934,6 +1998,7 @@ def get_filtered_portfolio_yearly(task_id, site_ids, n_replicates, results_s3_ur
     return result.reset_index().to_dict("records")
 
 
+@timed_task_step("task_replicate_totals_s3")
 def get_filtered_portfolio_total(task_id, site_ids, n_replicates, results_s3_uri=None):
     """Aggregate per-site replicate totals before computing portfolio ranges."""
     site_ids = {str(site_id) for site_id in site_ids}

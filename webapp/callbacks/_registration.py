@@ -76,9 +76,12 @@ from services.analysis_task import (
     get_filtered_portfolio_total,
     get_filtered_portfolio_yearly,
     get_task_execution_logs,
+    get_task_header,
     get_task_top_site_yearly,
 )
+from services.task_result_cache import cached_task_result
 from session_store import SessionExpired, SessionUnavailable
+from task_timing import timed_task_step
 from trendsearth_client import TrendsEarthAPIError
 
 from callbacks._detail_builders import (
@@ -90,6 +93,7 @@ from callbacks._detail_builders import (
     _build_raw_results,
     _build_results_content,
     _build_selection_summary,
+    _build_yearly_results,
     _filter_site_ids,
     _site_filter_values,
 )
@@ -116,6 +120,25 @@ from callbacks._plot_colors import (
 from gee_export import gee_config
 
 logger = logging.getLogger(__name__)
+
+
+def _filtered_portfolio(task, site_ids, kind):
+    loader = (
+        get_filtered_portfolio_yearly
+        if kind == "yearly"
+        else get_filtered_portfolio_total
+    )
+    return cached_task_result(
+        task,
+        f"portfolio_{kind}",
+        lambda: loader(
+            str(task.id),
+            site_ids,
+            int((task.extra_metadata or {}).get("n_replicates", 1)),
+            results_s3_uri=task.results_s3_uri,
+        ),
+        site_ids=site_ids,
+    )
 
 
 def _site_catalog_rows(site_sets, include_archived=False):
@@ -1717,6 +1740,7 @@ def register_callbacks(app, limiter=None):
             State("task-plot-selection", "data"),
         ],
     )
+    @timed_task_step("task_detail")
     def refresh_task_detail(
         n, active_tab, resume_event, task_id, share_token, plot_selection=None
     ):
@@ -1739,7 +1763,13 @@ def register_callbacks(app, limiter=None):
 
         # Batch task status is polled by the Celery Beat worker;
         # this callback just reads the current DB state.
-        detail = get_task_detail(task_id)
+        section = {
+            "tab-overview": "overview",
+            "tab-results": "results",
+            "tab-plots": "plots",
+            "tab-raw-results": "raw",
+        }.get(active_tab, "header")
+        detail = get_task_detail(task_id, section=section)
         if not detail:
             return (
                 "Task Not Found",
@@ -1811,20 +1841,10 @@ def register_callbacks(app, limiter=None):
                 agg_yearly=agg_yearly,
                 is_large=is_large,
                 n_sites=task.n_sites or 0,
+                defer_yearly=True,
             )
         elif active_tab == "tab-plots":
             if results or agg_yearly:
-                task_cfg = task.config or {}
-                site_map = _build_map(
-                    detail.get("sites_geojson"),
-                    totals,
-                    covariates=task.covariates,
-                    task_id=task_id,
-                    sites=sites,
-                    resolution_m=task_cfg.get("resolution_m"),
-                    share_token=share_token,
-                    use_tiles=bool(getattr(task, "site_set_id", None)),
-                )
                 plots = _build_plots(
                     results,
                     totals,
@@ -1833,8 +1853,7 @@ def register_callbacks(app, limiter=None):
                     quality_warnings=quality_warnings,
                     agg_yearly=agg_yearly,
                     is_large=is_large,
-                    site_map=site_map,
-                    sites_geojson=detail.get("sites_geojson"),
+                    defer_map=True,
                     plot_selection=plot_selection,
                     bar_site_data=(
                         get_task_top_site_yearly(task_id, [t.site_id for t in totals])
@@ -1866,6 +1885,55 @@ def register_callbacks(app, limiter=None):
                 if not share_token and task.status not in terminal_states
                 else {"display": "none"}
             ),
+        )
+
+    @app.callback(
+        Output("task-yearly-results", "children"),
+        Input("task-yearly-request", "data"),
+        State("task-id-store", "data"),
+        State("share-token-store", "data"),
+    )
+    @timed_task_step("task_yearly_grid")
+    def load_task_yearly_results(requested, task_id, share_token):
+        if not requested or not _authorize_task_access(task_id, share_token):
+            raise PreventUpdate
+        detail = get_task_detail(task_id, section="yearly")
+        if not detail:
+            raise PreventUpdate
+        return _build_yearly_results(detail["results"])
+
+    @app.callback(
+        Output("task-map-content", "children"),
+        Output("site-filter-attributes", "data"),
+        Input("task-map-request", "data"),
+        State("task-id-store", "data"),
+        State("share-token-store", "data"),
+    )
+    @timed_task_step("task_map")
+    def load_task_map(requested, task_id, share_token):
+        if not requested or not _authorize_task_access(task_id, share_token):
+            raise PreventUpdate
+        detail = get_task_detail(task_id, section="map")
+        if not detail:
+            raise PreventUpdate
+        task = detail["task"]
+        geojson = detail["sites_geojson"]
+        attributes = {
+            str(props["site_id"]): (props.get("source_attributes") or {})
+            for feature in (geojson or {}).get("features", [])
+            if (props := feature.get("properties") or {}).get("site_id") is not None
+        }
+        return (
+            _build_map(
+                geojson,
+                detail["totals"],
+                covariates=task.covariates,
+                task_id=task_id,
+                resolution_m=(task.config or {}).get("resolution_m"),
+                share_token=share_token,
+                use_tiles=bool(task.site_set_id),
+            ),
+            attributes,
         )
 
     # -- Result downloads ----------------------------------------------------
@@ -2113,11 +2181,9 @@ def register_callbacks(app, limiter=None):
         if not user or not _check_task_access(task_id, user):
             raise PreventUpdate
 
-        detail = get_task_detail(task_id)
-        if not detail:
+        task = get_task_header(task_id)
+        if not task:
             raise PreventUpdate
-
-        task = detail["task"]
         return True, task.name, task.description or "", html.Div()
 
     @app.callback(
@@ -2210,13 +2276,21 @@ def register_callbacks(app, limiter=None):
     )
 
     @app.callback(
+        Output("site-filter-field", "options"),
+        Input("site-filter-attributes", "data"),
+    )
+    def update_site_filter_fields(attributes):
+        fields = sorted({key for props in (attributes or {}).values() for key in props})
+        return [{"label": name, "value": name} for name in fields]
+
+    @app.callback(
         Output("site-filter-value", "options"),
         Output("site-filter-value", "disabled"),
         Input("site-filter-field", "value"),
-        State("site-filter-attributes", "data"),
+        Input("site-filter-attributes", "data"),
     )
     def update_site_filter_values(field, attributes):
-        return _site_filter_values(field, attributes), not bool(field)
+        return _site_filter_values(field, attributes), not bool(field) or attributes is None
 
     @app.callback(
         Output("site-filtered-ids", "data"),
@@ -2225,6 +2299,8 @@ def register_callbacks(app, limiter=None):
     )
     def filter_site_ids(selection, attributes):
         selection = selection or {}
+        if attributes is None and selection.get("field"):
+            raise PreventUpdate
         return _filter_site_ids(
             selection.get("field"), selection.get("value"), attributes
         )
@@ -2349,7 +2425,7 @@ def register_callbacks(app, limiter=None):
 
     app.clientside_callback(
         """
-        function(filteredIds) {
+        function(filteredIds, mapChildren) {
             const el = document.getElementById("task-sites-map");
             if (el) {
                 el._allowedSiteIds = Array.isArray(filteredIds)
@@ -2363,16 +2439,39 @@ def register_callbacks(app, limiter=None):
         """,
         Output("site-filtered-ids", "id"),
         Input("site-filtered-ids", "data"),
+        Input("task-map-content", "children"),
+    )
+
+    app.clientside_callback(
+        """
+        function(selection, attributes, rendered) {
+            const next = selection || {};
+            const previous = rendered || {};
+            if ((next.field && attributes == null) ||
+                ["site", "field", "value", "error"].every(
+                    key => next[key] === previous[key]
+                )) {
+                return window.dash_clientside.no_update;
+            }
+            return next;
+        }
+        """,
+        Output("task-graph-selection", "data"),
+        Input("task-plot-selection", "data"),
+        Input("site-filter-attributes", "data"),
+        State("task-graph-selection", "data"),
     )
 
     @app.callback(
         Output("task-results-graphs", "children"),
-        Input("task-plot-selection", "data"),
-        Input("site-filter-attributes", "data"),
+        Input("task-graph-selection", "data"),
+        State("site-filter-attributes", "data"),
         State("task-id-store", "data"),
         State("share-token-store", "data"),
         State("site-defor-store", "data"),
+        prevent_initial_call=True,
     )
+    @timed_task_step("task_filtered_plots")
     def update_filtered_aggregate_plots(
         selection, attributes, task_id, share_token, site_store
     ):
@@ -2382,6 +2481,8 @@ def register_callbacks(app, limiter=None):
         if selection.get("error"):
             return dbc.Alert(selection["error"], color="warning")
         field, value = selection.get("field"), selection.get("value")
+        if field and attributes is None:
+            raise PreventUpdate
         if field and not any(field in props for props in (attributes or {}).values()):
             return dbc.Alert("The selected source field is not available.", color="warning")
         filtered_ids = _filter_site_ids(field, value, attributes)
@@ -2400,12 +2501,10 @@ def register_callbacks(app, limiter=None):
                         "Summary data is unavailable for the selected site.",
                         color="warning",
                     )
-                replicate_summary = get_filtered_portfolio_total(
-                    task_id,
-                    {site_id},
-                    int((site_store or {}).get("n_replicates", 1)),
-                    results_s3_uri=(site_store or {}).get("results_s3_uri"),
-                )
+                task = get_task_header(task_id)
+                if not task:
+                    raise PreventUpdate
+                replicate_summary = _filtered_portfolio(task, {site_id}, "total")
                 site_name = site_total.get("site_name") or site_id
                 summary = _build_selection_summary(
                     [site_total],
@@ -2422,7 +2521,7 @@ def register_callbacks(app, limiter=None):
                 )
                 return [summary, *plot_children]
 
-            detail = get_task_detail(task_id)
+            detail = get_task_detail(task_id, section="plots")
             if not detail:
                 return dbc.Alert("Task not found.", color="danger")
             task = detail["task"]
@@ -2441,39 +2540,24 @@ def register_callbacks(app, limiter=None):
                 if results is not None:
                     results = [row for row in results if str(row.site_id) in result_ids]
                 sites = [site for site in sites if str(site.site_id) in result_ids]
-                agg_yearly = get_filtered_portfolio_yearly(
-                    task_id,
-                    result_ids,
-                    int(task.extra_metadata["n_replicates"]),
-                    results_s3_uri=task.results_s3_uri,
-                )
-                replicate_summary = get_filtered_portfolio_total(
-                    task_id,
-                    result_ids,
-                    int(task.extra_metadata["n_replicates"]),
-                    results_s3_uri=task.results_s3_uri,
-                )
-            content = _build_plots(
+                agg_yearly = _filtered_portfolio(task, result_ids, "yearly")
+                replicate_summary = _filtered_portfolio(task, result_ids, "total")
+            graphs = _build_plots(
                 results,
                 totals,
                 sites,
                 task=task if filtered_ids is None else None,
                 agg_yearly=agg_yearly,
                 is_large=detail["is_large"],
+                graphs_only=True,
                 bar_site_data=(
                     get_task_top_site_yearly(task_id, [t.site_id for t in totals])
                     if detail["is_large"]
                     else None
                 ),
             )
-            if not isinstance(content, html.Div):
-                return content
-            graph_container = next(
-                child
-                for child in content.children[-1].children
-                if getattr(child, "id", None) == "task-results-graphs"
-            )
-            graphs = graph_container.children
+            if not isinstance(graphs, list):
+                return graphs
             if filtered_ids is not None:
                 description = "selected group"
                 if field and value is not None:
@@ -3207,7 +3291,7 @@ def register_callbacks(app, limiter=None):
             )
 
         try:
-            detail = get_task_detail(task_id)
+            detail = get_task_detail(task_id, section="totals")
             if not detail:
                 return dbc.Alert("Task not found.", color="danger")
             task = detail["task"]

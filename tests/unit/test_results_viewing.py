@@ -278,6 +278,26 @@ class TestGetTaskDetailStructure:
 
 @pytest.mark.unit
 class TestGetTaskDetailRouting:
+    @pytest.mark.parametrize(
+        ("section", "expected_tables"),
+        [
+            ("overview", [TaskResultTotal, TaskSite]),
+            ("results", [TaskResultTotal, TaskSite]),
+            ("yearly", [TaskResult]),
+            ("plots", [TaskResultTotal, TaskSite, TaskResult]),
+            ("map", [TaskResultTotal]),
+        ],
+    )
+    def test_tab_queries_only_its_required_data(self, mocker, section, expected_tables):
+        mock_db = _build_mock_db(_make_mock_task())
+        mocker.patch(_GET_DB, return_value=mock_db)
+        geometry = mocker.patch("services.analysis_task._get_task_geometry")
+        get_task_detail("any-task-id", section=section)
+        assert [args[0] for args, _ in mock_db.query.call_args_list] == [
+            AnalysisTask, *expected_tables
+        ]
+        assert geometry.call_count == (1 if section == "map" else 0)
+
     def _call_with_sizes(self, mocker, n_sites):
         task_obj = _make_mock_task(n_sites=n_sites)
         mock_db = _build_mock_db(task_obj)

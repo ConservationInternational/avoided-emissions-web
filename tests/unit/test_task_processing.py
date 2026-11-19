@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 from models import TaskResult, TaskResultTotal
 from services.analysis_task import ResultImportError, import_execution_results
+from services.task_result_cache import QUALITY_WARNINGS_KEY
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -23,6 +24,7 @@ def _make_mock_db_with_task():
     mock_db = MagicMock()
     task_obj = MagicMock()
     task_obj.extra_metadata = {}
+    task_obj.results_s3_uri = None
     mock_db.query.return_value.filter.return_value.first.return_value = task_obj
     return mock_db, task_obj
 
@@ -49,6 +51,25 @@ def _import(task_id, payload):
 
 @pytest.mark.unit
 class TestImportExecutionResultsRows:
+    def test_reimport_replaces_revision_and_warnings(
+        self, sample_results_payload, sample_task_id, mocker
+    ):
+        mock_db, task = _make_mock_db_with_task()
+        task.results_s3_uri = "s3://bucket/output"
+        task.extra_metadata = {
+            "result_revision": "old",
+            QUALITY_WARNINGS_KEY: [{"message": "old warning"}],
+        }
+        download = mocker.patch(
+            "callbacks._match_quality.download_results_csv", return_value=None
+        )
+        import_execution_results(sample_task_id, sample_results_payload, db=mock_db)
+        assert task.extra_metadata["result_revision"] != "old"
+        assert task.extra_metadata[QUALITY_WARNINGS_KEY] != [{"message": "old warning"}]
+        download.assert_called_once_with(
+            sample_task_id, "balance", results_s3_uri=task.results_s3_uri
+        )
+
     def test_row_counts(self, sample_results_payload, sample_task_id):
         mock_db, _ = _import(sample_task_id, sample_results_payload)
         assert len(_inserted_rows(mock_db, TaskResult)) == 10  # 2 sites × 5 years

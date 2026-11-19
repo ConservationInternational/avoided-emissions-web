@@ -1014,6 +1014,7 @@ def _build_results_content(
     agg_yearly=None,
     is_large=False,
     n_sites=0,
+    defer_yearly=False,
 ):
     """Build the results section with sites table, AG Grid tables, and downloads.
 
@@ -1134,7 +1135,54 @@ def _build_results_content(
         ]
     )
 
-    # --- Yearly results table -----------------------------------------------
+    if defer_yearly and not is_large:
+        content.extend(
+            [
+                dcc.Store(id="task-yearly-request", data=True),
+                dcc.Loading(html.Div(id="task-yearly-results")),
+            ]
+        )
+    else:
+        content.extend(_build_yearly_results(results, agg_yearly, is_large, n_sites))
+
+    content.extend(
+        [
+            dbc.ButtonGroup(
+                [
+                    dbc.Button(
+                        "Download CSV (by year)",
+                        id="download-by-year",
+                        color="secondary",
+                        size="sm",
+                    ),
+                    dbc.Button(
+                        "Download CSV (totals)",
+                        id="download-totals",
+                        color="secondary",
+                        size="sm",
+                    ),
+                    dbc.Button(
+                        "Site ID / label mapping",
+                        id="download-site-identity",
+                        color="secondary",
+                        size="sm",
+                        title=(
+                            "CSV mapping canonical site IDs to the original "
+                            "site labels and names"
+                        ),
+                    ),
+                ],
+                className="mt-3",
+            ),
+            dcc.Download(id="download-results"),
+        ]
+    )
+
+    return html.Div(content)
+
+
+def _build_yearly_results(results, agg_yearly=None, is_large=False, n_sites=0):
+    content = []
     # Large tasks: use the SQL aggregate (one row per year, summed across sites)
     # Small tasks: use the per-site-year ORM rows (site_id column included)
     if is_large and agg_yearly:
@@ -1230,40 +1278,7 @@ def _build_results_content(
             ]
         )
 
-    content.extend(
-        [
-            dbc.ButtonGroup(
-                [
-                    dbc.Button(
-                        "Download CSV (by year)",
-                        id="download-by-year",
-                        color="secondary",
-                        size="sm",
-                    ),
-                    dbc.Button(
-                        "Download CSV (totals)",
-                        id="download-totals",
-                        color="secondary",
-                        size="sm",
-                    ),
-                    dbc.Button(
-                        "Site ID / label mapping",
-                        id="download-site-identity",
-                        color="secondary",
-                        size="sm",
-                        title=(
-                            "CSV mapping canonical site IDs to the original "
-                            "site labels and names"
-                        ),
-                    ),
-                ],
-                className="mt-3",
-            ),
-            dcc.Download(id="download-results"),
-        ]
-    )
-
-    return html.Div(content)
+    return content
 
 
 _FILE_DESCRIPTIONS = {
@@ -1492,12 +1507,13 @@ def _build_plots(
     sites_geojson=None,
     plot_selection=None,
     bar_site_data=None,
+    graphs_only=False,
+    defer_map=False,
 ):
     """Build interactive plots for task results.
 
-    Includes aggregate deforestation comparison (project sites vs matched
-    controls), existing avoided-emissions/forest-loss bar charts, and a
-    site-level drill-down section with intervention date markers.
+    Includes aggregate deforestation comparisons, avoided-emissions line and
+    bar charts, forest-loss bars, and a site-level drill-down section.
 
     For tasks with ``is_large=True`` the ``results`` argument is ``None``.
     In this case the SQL-pre-aggregated ``agg_yearly`` list (one dict per
@@ -1611,6 +1627,23 @@ def _build_plots(
     has_ci = "treatment_defor_ha_ci_lower" in agg_df.columns
 
     plots = []
+    title_suffix = f" ({n_sites_display} sites"
+    if failed_site_ids:
+        title_suffix += f", {len(failed_site_ids)} failed"
+    title_suffix += ")"
+    # Only shade pre/post-intervention when all sites share the same
+    # start/end year — mixed dates make a single band misleading.
+    # For large tasks `sites` is empty so these bands are omitted.
+    unique_start_years = set()
+    unique_end_years = set()
+    if sites:
+        for s in sites:
+            start_date = getattr(s, "start_date", None)
+            end_date = getattr(s, "end_date", None)
+            if start_date:
+                unique_start_years.add(start_date.year)
+            if end_date:
+                unique_end_years.add(end_date.year)
 
     # --- Aggregate deforestation comparison (treatment vs control) ----------
     has_defor_data = (
@@ -1655,10 +1688,6 @@ def _build_plots(
                 color=CONTROL_BAND_COLOR,
                 name=f"Matched Controls ({BOUNDS_NAME.lower()})",
             )
-        title_suffix = f" ({n_sites_display} sites"
-        if failed_site_ids:
-            title_suffix += f", {len(failed_site_ids)} failed"
-        title_suffix += ")"
         fig_defor.update_layout(
             title=(
                 "Annual Deforestation: Project Sites vs Matched Controls" + title_suffix
@@ -1669,18 +1698,6 @@ def _build_plots(
             legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 1.02},
             hovermode="x unified",
         )
-        # Only shade pre/post-intervention when all sites share the
-        # same start/end year — mixed dates make a single band misleading.
-        # For large tasks `sites` is empty so these bands are omitted.
-        unique_start_years = set()
-        unique_end_years = set()
-        if sites:
-            for s in sites:
-                if s.start_date:
-                    unique_start_years.add(s.start_date.year)
-                if s.end_date:
-                    unique_end_years.add(s.end_date.year)
-
         if len(unique_start_years) == 1 and df is not None:
             pre_years = df.loc[df["is_pre_intervention"], "year"]
             if not pre_years.empty:
@@ -1801,16 +1818,137 @@ def _build_plots(
     )
     for metric, title, label in (
         (
-            "emissions_avoided_mgco2e",
-            "Avoided Emissions by Year",
-            "Emissions Avoided (MgCO₂e)",
-        ),
-        (
             "forest_loss_avoided_ha",
             "Forest Loss Avoided by Year",
             "Forest Loss Avoided (ha)",
         ),
+        (
+            "emissions_avoided_mgco2e",
+            "Avoided Emissions by Year",
+            "Emissions Avoided (MgCO₂e)",
+        ),
     ):
+        if metric == "emissions_avoided_mgco2e":
+            annual_emissions = agg_df["emissions_avoided_mgco2e"]
+            if annual_emissions.abs().sum() > 0:
+                annual_emissions_ci = (
+                    "emissions_avoided_mgco2e_ci_lower" in agg_df.columns
+                    and "emissions_avoided_mgco2e_ci_upper" in agg_df.columns
+                    and agg_df["emissions_avoided_mgco2e_ci_lower"].notna().any()
+                )
+                fig_annual_emissions = go.Figure()
+                fig_annual_emissions.add_trace(
+                    go.Scatter(
+                        x=agg_df["year"],
+                        y=annual_emissions,
+                        mode="lines+markers",
+                        name="Avoided Emissions",
+                        line={"color": PROJECT_COLOR, "width": 2},
+                        marker={"size": 6},
+                    )
+                )
+                if annual_emissions_ci:
+                    _add_ci_band(
+                        fig_annual_emissions,
+                        agg_df["year"],
+                        agg_df["emissions_avoided_mgco2e_ci_lower"],
+                        agg_df["emissions_avoided_mgco2e_ci_upper"],
+                        color=PROJECT_BAND_COLOR,
+                        name=f"Avoided Emissions ({BOUNDS_NAME.lower()})",
+                    )
+                fig_annual_emissions.update_layout(
+                    title="Annual Avoided Emissions" + title_suffix,
+                    xaxis_title="Year",
+                    xaxis={"tickformat": "d", "dtick": 1},
+                    yaxis_title="Emissions Avoided (MgCO₂e)",
+                    legend={
+                        "yanchor": "top",
+                        "y": 0.99,
+                        "xanchor": "left",
+                        "x": 1.02,
+                    },
+                    hovermode="x unified",
+                )
+
+                cumulative_emissions = (
+                    agg_df["cum_emissions_avoided_mgco2e"]
+                    if "cum_emissions_avoided_mgco2e" in agg_df.columns
+                    else annual_emissions.cumsum()
+                )
+                fig_cumulative_emissions = go.Figure()
+                fig_cumulative_emissions.add_trace(
+                    go.Scatter(
+                        x=agg_df["year"],
+                        y=cumulative_emissions,
+                        mode="lines+markers",
+                        name="Cumulative Avoided Emissions",
+                        line={"color": PROJECT_COLOR, "width": 2},
+                        marker={"size": 6},
+                    )
+                )
+                cumulative_emissions_ci = (
+                    "cum_emissions_avoided_mgco2e_ci_lower" in agg_df.columns
+                    and "cum_emissions_avoided_mgco2e_ci_upper" in agg_df.columns
+                    and agg_df["cum_emissions_avoided_mgco2e_ci_lower"]
+                    .notna()
+                    .any()
+                )
+                if cumulative_emissions_ci:
+                    _add_ci_band(
+                        fig_cumulative_emissions,
+                        agg_df["year"],
+                        agg_df["cum_emissions_avoided_mgco2e_ci_lower"],
+                        agg_df["cum_emissions_avoided_mgco2e_ci_upper"],
+                        color=PROJECT_BAND_COLOR,
+                        name=f"Cumulative Avoided Emissions ({BOUNDS_NAME.lower()})",
+                    )
+                fig_cumulative_emissions.update_layout(
+                    title="Cumulative Avoided Emissions" + title_suffix,
+                    xaxis_title="Year",
+                    xaxis={"tickformat": "d", "dtick": 1},
+                    yaxis_title="Cumulative Emissions Avoided (MgCO₂e)",
+                    legend={
+                        "yanchor": "top",
+                        "y": 0.99,
+                        "xanchor": "left",
+                        "x": 1.02,
+                    },
+                    hovermode="x unified",
+                )
+
+                for fig_emissions in (fig_annual_emissions, fig_cumulative_emissions):
+                    if len(unique_start_years) == 1 and df is not None:
+                        pre_years = df.loc[df["is_pre_intervention"], "year"]
+                        if not pre_years.empty:
+                            fig_emissions.add_vrect(
+                                x0=pre_years.min() - 0.5,
+                                x1=pre_years.max() + 0.5,
+                                fillcolor="gray",
+                                opacity=0.12,
+                                line_width=0,
+                                annotation_text="Pre-intervention",
+                                annotation_position="top left",
+                                annotation_font_color="gray",
+                            )
+                    if len(unique_end_years) == 1:
+                        (post_start,) = unique_end_years
+                        fig_emissions.add_vrect(
+                            x0=post_start + 0.5,
+                            x1=agg_df["year"].max() + 0.5,
+                            fillcolor="gray",
+                            opacity=0.12,
+                            line_width=0,
+                            annotation_text="Post-intervention",
+                            annotation_position="top right",
+                            annotation_font_color="gray",
+                        )
+                plots.extend(
+                    [
+                        dcc.Graph(figure=fig_annual_emissions),
+                        dcc.Graph(figure=fig_cumulative_emissions),
+                    ]
+                )
+
         if bar_df is not None:
             contributions = bar_df.groupby(["site_id", "year"])[metric].sum()
             ranking = (
@@ -2075,11 +2213,13 @@ def _build_plots(
         )
         plots.append(dcc.Graph(figure=fig_site_totals))
 
+    if graphs_only:
+        return plots
     aggregate_plots = plots
     plots = []
 
     # --- Site-level drill-down section -------------------------------------
-    if has_defor_data or site_map is not None:
+    if has_defor_data or site_map is not None or defer_map:
         # Build site options for the dropdown.
         # For large tasks we read IDs/names from `totals` (always loaded).
         # For small tasks we read from the per-site rows.
@@ -2180,7 +2320,13 @@ def _build_plots(
         selection = plot_selection or {}
         field = selection.get("field")
         value = selection.get("value")
-        plots.append(dcc.Store(id="site-filter-attributes", data=attributes))
+        if defer_map:
+            plots.append(dcc.Store(id="task-graph-selection", data={}))
+        plots.append(
+            dcc.Store(
+                id="site-filter-attributes", data=None if defer_map else attributes
+            )
+        )
         plots.append(
             dcc.Store(
                 id="site-filtered-ids",
@@ -2292,6 +2438,13 @@ def _build_plots(
         plots.append(dcc.Store(id="site-defor-store", data=store_data))
         if site_map is not None:
             plots.append(site_map)
+        if defer_map:
+            plots.extend(
+                [
+                    dcc.Store(id="task-map-request", data=True),
+                    dcc.Loading(html.Div(id="task-map-content")),
+                ]
+            )
         plots.append(
             dcc.Input(
                 id="site-map-selection", type="text", value="", style={"display": "none"}

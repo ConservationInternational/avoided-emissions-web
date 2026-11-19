@@ -170,6 +170,7 @@ class Config:
         "SESSION_REDIS_URL",
         os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0"),
     )
+    TASK_RESULTS_CACHE_URL = os.environ.get("TASK_RESULTS_CACHE_URL", SESSION_REDIS_URL)
 
     # trends.earth API integration.  The TRENDSEARTH_CLIENT_* service client
     # is used only for background status polling and task adoption; analyses

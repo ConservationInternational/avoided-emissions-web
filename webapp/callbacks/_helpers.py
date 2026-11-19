@@ -9,7 +9,8 @@ from auth import get_current_user
 from dash import dcc, html
 from models import Covariate, get_db
 from plot_selection import plot_selection_query
-from services import get_task_detail, validate_share_token
+from services import validate_share_token
+from services.analysis_task import get_task_ownership
 
 
 def _is_valid_uuid(value):
@@ -30,12 +31,12 @@ def _check_task_access(task_id, user):
     """
     if not _is_valid_uuid(task_id):
         return False
-    detail = get_task_detail(task_id)
-    if not detail:
+    ownership = get_task_ownership(task_id)
+    if ownership is None:
         return False
     if user.is_admin:
         return True
-    return str(detail["task"].submitted_by) == str(user.id)
+    return str(ownership.submitted_by) == str(user.id)
 
 
 def _authorize_task_access(task_id, share_token=None):

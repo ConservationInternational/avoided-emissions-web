@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import uuid as _uuid
+from time import perf_counter
 from urllib.parse import parse_qs, urlencode
 
 import dash
@@ -27,7 +28,7 @@ from callbacks import register_callbacks
 from config import Config
 from dash import Input, Output, State, dcc, html
 from documentation import PAGES
-from flask import got_request_exception, request
+from flask import g, got_request_exception, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_wtf.csrf import CSRFProtect
@@ -44,6 +45,7 @@ from layouts import (
     task_detail_layout,
 )
 from layouts.documentation import documentation_layout
+from task_timing import add_task_timing_headers
 
 # ---------------------------------------------------------------------------
 # Logging — configure the root logger so that all application loggers (auth,
@@ -220,6 +222,8 @@ _REFRESH_SKIP_PREFIXES = (
 
 @server.before_request
 def _refresh_session():
+    if request.path.endswith("/_dash-update-component"):
+        g.dash_request_start = perf_counter()
     if any(request.path.startswith(p) for p in _REFRESH_SKIP_PREFIXES):
         return
     refresh_current_session()
@@ -228,6 +232,11 @@ def _refresh_session():
 # -- Security headers -------------------------------------------------------
 # Applied to every response.  CSP is intentionally permissive for the CDN
 # assets loaded by Dash/OpenLayers; tighten further when possible.
+
+
+@server.after_request
+def _record_task_timings(response):
+    return add_task_timing_headers(response)
 
 
 @server.after_request

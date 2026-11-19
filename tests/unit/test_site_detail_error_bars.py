@@ -141,7 +141,7 @@ def test_yearly_bars_rank_2025_and_split_remaining_sites_by_yearly_sign(
         in ("Avoided Emissions by Year", "Forest Loss Avoided by Year")
     ]
     for metric, figure in zip(
-        ("emissions_avoided_mgco2e", "forest_loss_avoided_ha"), figures
+        ("forest_loss_avoided_ha", "emissions_avoided_mgco2e"), figures
     ):
         top_ids = top_ids_by_metric[metric]
         labels = {
@@ -266,7 +266,7 @@ def test_ranked_emissions_charts_limit_sort_and_link_sites(selection):
     if selection == "single":
         assert not ranked
         return
-    assert graphs[1:3] == ranked
+    assert graphs[-len(ranked) :] == ranked
     expected_values = {
         "all": [list(range(25, 5, -1)), list(range(-25, -5))],
         "group": [[2, 1], [-2, -1]],
@@ -530,6 +530,13 @@ def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years, monk
     monkeypatch.setattr(registration, "_authorize_task_access", lambda *_: True)
     monkeypatch.setattr(
         registration,
+        "get_task_header",
+        lambda task_id: SimpleNamespace(
+            id=task_id, status="running", extra_metadata={}, results_s3_uri=None
+        ),
+    )
+    monkeypatch.setattr(
+        registration,
         "get_filtered_portfolio_total",
         lambda *_args, **_kwargs: {
             "emissions_avoided_mgco2e": 10.0,
@@ -564,7 +571,7 @@ def test_aggregate_and_site_plots_use_unformatted_integer_year_ticks(years, monk
         else:
             children = content
         graphs = [item for item in children if isinstance(item, dcc.Graph)]
-        assert len(graphs) == 4
+        assert len(graphs) == (6 if content is aggregate else 4)
         for graph in graphs:
             axis = graph.figure.layout.xaxis
             assert axis.tickformat == "d"
@@ -624,6 +631,16 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
     monkeypatch.setattr(registration, "_authorize_task_access", lambda *_: True)
     monkeypatch.setattr(
         registration,
+        "get_task_header",
+        lambda task_id: SimpleNamespace(
+            id=task_id,
+            status="running",
+            extra_metadata={"n_replicates": 2},
+            results_s3_uri=None,
+        ),
+    )
+    monkeypatch.setattr(
+        registration,
         "get_filtered_portfolio_total",
         lambda *_args, **_kwargs: {
             "emissions_avoided_mgco2e": 10.0,
@@ -658,6 +675,7 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
             "cum_treatment_defor_ha": row["cumulative_treatment_defor_ha"],
             "cum_control_defor_ha": row["cumulative_control_defor_ha"],
             "emissions_avoided_mgco2e": 10,
+            "cum_emissions_avoided_mgco2e": 10 * (row["year"] - 2019),
         }
         if with_ranges:
             for kind in ("treatment", "control"):
@@ -667,6 +685,12 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
                     ]
             aggregate_row["emissions_avoided_mgco2e_ci_lower"] = 8
             aggregate_row["emissions_avoided_mgco2e_ci_upper"] = 12
+            aggregate_row["cum_emissions_avoided_mgco2e_ci_lower"] = 8 * (
+                row["year"] - 2019
+            )
+            aggregate_row["cum_emissions_avoided_mgco2e_ci_upper"] = 12 * (
+                row["year"] - 2019
+            )
         aggregate_rows.append(aggregate_row)
     aggregate = _build_plots(
         results=None, totals=[], is_large=True, agg_yearly=aggregate_rows
@@ -727,9 +751,26 @@ def test_site_comparison_plots_use_bands_and_avoided_loss_uses_bars(
         assert list(error.error_y.arrayminus) == [1, 1]
     for site_fig, aggregate_fig in zip(
         (graphs[0], graphs[1], avoided),
-        (aggregate_graphs[0], aggregate_graphs[1], aggregate_graphs[3]),
+        (aggregate_graphs[0], aggregate_graphs[1], aggregate_graphs[5]),
     ):
         assert site_fig.data[0].type == aggregate_fig.data[0].type
+
+    forest_loss = aggregate_graphs[2]
+    annual_emissions, cumulative_emissions = aggregate_graphs[3:5]
+    assert forest_loss.layout.title.text.startswith("Forest Loss Avoided by Year")
+    assert annual_emissions.layout.title.text.startswith("Annual Avoided Emissions")
+    assert cumulative_emissions.layout.title.text.startswith(
+        "Cumulative Avoided Emissions"
+    )
+    assert list(annual_emissions.data[0].y) == [10, 10]
+    assert list(cumulative_emissions.data[0].y) == [10, 20]
+    for figure in (annual_emissions, cumulative_emissions):
+        assert figure.data[0].type == "scatter"
+        assert figure.data[0].mode == "lines+markers"
+        assert figure.data[0].line.color == PROJECT_COLOR
+        assert len([trace for trace in figure.data if trace.fill == "tonexty"]) == (
+            1 if with_ranges else 0
+        )
 
 
 @pytest.mark.unit
@@ -888,7 +929,10 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
         for site in ("a", "b")
     ]
     task = SimpleNamespace(
-        extra_metadata={"n_replicates": 2}, results_s3_uri="s3://bucket/output"
+        id="task",
+        status="running",
+        extra_metadata={"n_replicates": 2},
+        results_s3_uri="s3://bucket/output",
     )
     mocker.patch.object(registration, "_authorize_task_access", return_value=True)
     mocker.patch.object(
@@ -965,11 +1009,11 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
     assert summary_columns[2].children[1].children == "25.0 ha"
     assert summary_columns[2].children[2].children == "25.0% of total area"
     graphs = content[2:]
-    assert len(graphs) == 4
+    assert len(graphs) == 6
     assert list(graphs[0].figure.data[0].y) == [1]
     assert "1 sites" in graphs[0].figure.layout.title.text
-    assert graphs[2].figure.data[0].name == "All other sites (positive)"
-    assert list(graphs[2].figure.data[0].y) == [2]
+    assert graphs[5].figure.data[0].name == "All other sites (positive)"
+    assert list(graphs[5].figure.data[0].y) == [2]
     message = callbacks["update_filtered_aggregate_plots"](
         {"field": "region", "value": '"North"'},
         {"a": {"region": "South"}}, "task", None, {}
@@ -1003,6 +1047,9 @@ def test_filtered_portfolio_aggregates_each_replicate_before_quantiles(mocker):
     assert output[0]["treatment_defor_ha_ci_upper"] == 10
     assert output[1]["cum_treatment_defor_ha_ci_lower"] == 20
     assert output[1]["cum_treatment_defor_ha_ci_upper"] == 20
+    assert [row["cum_emissions_avoided_mgco2e"] for row in output] == [10, 20]
+    assert output[1]["cum_emissions_avoided_mgco2e_ci_lower"] == 20
+    assert output[1]["cum_emissions_avoided_mgco2e_ci_upper"] == 20
     s3.get_object.assert_called_once_with(
         Bucket="bucket", Key="path/results_by_site_replicate_year.csv"
     )
@@ -1014,6 +1061,12 @@ def test_filtered_portfolio_aggregates_each_replicate_before_quantiles(mocker):
     assert single_site[0]["treatment_defor_ha_ci_upper"] == pytest.approx(8.8)
     assert single_site[1]["cum_treatment_defor_ha_ci_lower"] == pytest.approx(2.4)
     assert single_site[1]["cum_treatment_defor_ha_ci_upper"] == pytest.approx(17.6)
+    assert single_site[1]["cum_emissions_avoided_mgco2e_ci_lower"] == pytest.approx(
+        2.4
+    )
+    assert single_site[1]["cum_emissions_avoided_mgco2e_ci_upper"] == pytest.approx(
+        17.6
+    )
     s3.get_object.return_value = {"Body": io.BytesIO(content)}
     with pytest.raises(analysis_task.ResultImportError, match="missing"):
         analysis_task.get_filtered_portfolio_yearly(

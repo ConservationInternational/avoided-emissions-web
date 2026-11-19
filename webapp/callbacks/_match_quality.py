@@ -1,5 +1,6 @@
 """Match quality assessment helpers and plot builders."""
 
+import io
 import logging
 
 import dash_bootstrap_components as dbc
@@ -9,6 +10,8 @@ import plotly.graph_objects as go
 from dash import dcc, html
 from layouts.documentation import help_link
 from services import download_results_csv
+from services.task_result_cache import QUALITY_WARNINGS_KEY, cached_task_result
+from task_timing import task_timing, timed_task_step
 
 from callbacks._helpers import (
     _attach_totals_to_geojson,
@@ -527,30 +530,33 @@ def _build_quality_warning_banner(warnings, scope_filter=None):
     )
 
 
+@timed_task_step("task_quality_warnings")
 def _compute_quality_warnings(task_id, task, totals):
-    """Load balance data from S3 and run quality checks.
+    """Read imported warnings, or compute and cache them for legacy tasks."""
+    meta = task.extra_metadata or {}
+    if QUALITY_WARNINGS_KEY in meta:
+        return meta[QUALITY_WARNINGS_KEY]
+    return cached_task_result(
+        task,
+        QUALITY_WARNINGS_KEY,
+        lambda: collect_quality_warnings(task_id, task.results_s3_uri, meta, totals),
+    )
 
-    Returns
-    -------
-    list[dict]
-        Warning dicts from :func:`_assess_match_quality`.
-    """
-    import io
 
+def collect_quality_warnings(task_id, results_s3_uri, meta, totals):
+    """Compute quality warnings using the same rules for import and legacy tasks."""
     balance_df = None
-    if task.status == "succeeded":
+    with task_timing("task_balance_s3"):
         balance_csv = download_results_csv(
-            task_id, "balance", results_s3_uri=task.results_s3_uri
+            task_id, "balance", results_s3_uri=results_s3_uri
         )
-        if balance_csv:
+    if balance_csv:
+        with task_timing("task_balance_parse"):
             balance_df = pd.read_csv(io.StringIO(balance_csv))
-            if balance_df.empty:
-                balance_df = None
 
     warnings = _assess_match_quality(balance_df=balance_df, totals=totals)
 
     # Methodology warnings from the R summary step (stored on import).
-    meta = task.extra_metadata or {}
     for mw in meta.get("methodology_warnings", []):
         message = mw["message"]
         affected = [

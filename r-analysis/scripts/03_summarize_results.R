@@ -1026,10 +1026,16 @@ if (nrow(site_year_rep) > 0) {
         group_by(replicate) %>%
         mutate(
             cum_treatment_defor_ha = cumsum(treatment_defor_ha),
-            cum_control_defor_ha = cumsum(control_defor_ha)
+            cum_control_defor_ha = cumsum(control_defor_ha),
+            cum_emissions_avoided_mgco2e = cumsum(emissions_avoided_mgco2e)
         ) %>%
         ungroup()
-    yearly_metrics <- c(names(portfolio_cols), "cum_treatment_defor_ha", "cum_control_defor_ha")
+    yearly_metrics <- c(
+        names(portfolio_cols),
+        "cum_treatment_defor_ha",
+        "cum_control_defor_ha",
+        "cum_emissions_avoided_mgco2e"
+    )
     portfolio_yearly <- summarise_replicates(
         select(yearly_rep, -n_sites), "year", yearly_metrics
     ) %>%

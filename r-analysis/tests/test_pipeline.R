@@ -784,8 +784,11 @@ for (method in c("optimal", "nearest")) {
                      sum(totals$extrapolated_emissions_avoided_mgco2e))
         yearly <- summary$portfolio$yearly
         expect_equal(nrow(yearly), length(unique(by_year$year)))
-        expect_true(all(c("cum_control_defor_ha_ci_upper", "emissions_avoided_mgco2e_ci_lower")
-                        %in% names(yearly)))
+        expect_true(all(c(
+            "cum_control_defor_ha_ci_upper",
+            "emissions_avoided_mgco2e_ci_lower",
+            "cum_emissions_avoided_mgco2e_ci_lower"
+        ) %in% names(yearly)))
         expect_true(any(summary$methodology_warnings$code == "replicate_range"))
     })
 }

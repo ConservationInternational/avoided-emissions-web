@@ -457,6 +457,37 @@ it is assumed the Celery worker died and is marked `failed`.
 Clicking a completed task opens the **Task Detail** page, which has five
 panels:
 
+The Overview loads without fetching map geometry or per-site yearly results.
+On the Plots tab, the map and its source-field filters load separately from
+the initial charts. On Results Tables, the per-site yearly grid loads after
+the sites and totals grids. These changes do not truncate the tables or change
+the contents of CSV downloads.
+
+### Measuring task-page performance
+
+On staging, use the browser's Network and Performance panels to capture these
+intervals: **View Task → Overview usable**, **Plots → first chart usable**,
+**Results Tables → first grid usable**, and **filter change → updated chart
+usable**. Also record time to map and yearly-grid readiness to distinguish a
+faster first render from a slower full load. Record response sizes for the
+Dash `/_dash-update-component` requests. Their `Server-Timing` headers break
+down task data reads, geometry, replicate calculations, cache access, and
+overall request time. The difference between the overall request time and its
+callback span includes Dash serialization and other request overhead; use the
+browser trace to measure client rendering separately.
+
+Compare p50 and p95 on the same fixtures before and after deployment: tasks
+with at most 200 sites and tasks above 200 sites, signed-in and shared-link
+visits, and cold versus repeated views. Include an exact repeat of a site or
+group filter to measure a warm derived-result cache hit. Use new fixtures or
+an isolated cache for cold tests; do not flush the shared Redis instance.
+
+New imports with an output URI store the computed quality warnings alongside
+the results. Older tasks compute them on demand. The Redis cache for derived
+results uses 15-minute entries and a 512 KiB per-entry limit. Set
+`TASK_RESULTS_CACHE_URL` to use a separate Redis instance, or set it to an
+empty string to disable this cache. Otherwise it uses the session Redis URL.
+
 ### Summary table
 
 A per-site table showing, for each site:
@@ -472,13 +503,18 @@ A per-site table showing, for each site:
 
 Annual and cumulative deforestation comparisons use line charts for project
 sites and matched controls, with shaded ranges across matching replicates when
-available. The site-level annual emissions comparison uses the same style.
-Avoided emissions and forest loss by year use bar charts, with replicate ranges
-shown as error bars when available. Each chart independently highlights the three
-largest positive and three most negative sites using that metric's **2025**
-values. Separate site-ID legends identify these groups, with six distinct colors
-from Paul Tol's color-blind-friendly muted qualitative palette. These site colors
-stay fixed across years, even when a site's contribution changes sign.
+available. Annual and cumulative avoided emissions use line charts with the
+same styling and replicate-range bands when available; the site-level annual
+emissions comparison uses the same style. Avoided emissions and forest loss by
+year use bar charts, with replicate ranges shown as error bars when available.
+The forest-loss-by-year chart appears immediately after
+cumulative deforestation; the avoided-emissions line charts appear immediately
+before the avoided-emissions-by-year chart. The yearly bar charts independently
+highlight the three largest positive and three most negative sites using that
+metric's **2025** values. Separate site-ID legends identify these groups, with
+six distinct colors from Paul Tol's color-blind-friendly muted qualitative
+palette. These site colors stay fixed across years, even when a site's
+contribution changes sign.
 All remaining sites are combined into **All other sites (positive)** in blue and
 **All other sites (negative)** in orange, splitting contributions by their sign
 in each plotted year rather than netting them together. Group filters recalculate
