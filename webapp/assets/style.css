@@ -79,6 +79,13 @@ h1, h2, h3, h4, h5 {
     align-items: center;
 }
 
+.ae-task-table-button {
+    padding: 1px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 14px;
+}
+
 .ae-map-card {
     overflow: visible;
 }

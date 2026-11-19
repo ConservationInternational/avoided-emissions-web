@@ -424,7 +424,7 @@ Cancel and resume show progress and prevent repeated clicks while the request
 is in progress. Both actions require confirmation on the task list and detail
 page. The table temporarily disables its action buttons during a
 request. The API may reject a resume while cleanup is still underway.
-**Logs** shows the execution's user-visible task logs, with manual refresh and
+The **Logs** column opens the execution's user-visible task logs, with manual refresh and
 automatic refresh every 30 seconds while the dialog is open. Logs are available
 only for tasks with a tracked API execution and require API access.
 

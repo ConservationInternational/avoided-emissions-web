@@ -22,6 +22,20 @@ window.taskListAction = {
     },
 };
 
+function useTaskListActionPending() {
+    var pendingState = React.useState(window.taskListAction.pending);
+    React.useEffect(function () {
+        function updatePending() {
+            pendingState[1](window.taskListAction.pending);
+        }
+        window.addEventListener("task-list-action-pending", updatePending);
+        return function () {
+            window.removeEventListener("task-list-action-pending", updatePending);
+        };
+    }, []);
+    return pendingState[0];
+}
+
 /**
  * TaskLink – renders the task name as a clickable link to /task/{id}.
  *
@@ -59,7 +73,7 @@ dagcomponentfuncs.TaskParams = function (props) {
         "button",
         {
             type: "button",
-            className: "btn btn-outline-primary btn-sm",
+            className: "btn btn-outline-primary btn-sm ae-task-table-button",
             disabled: !data.id,
             title: "View task parameters",
             onClick: function (e) {
@@ -72,6 +86,28 @@ dagcomponentfuncs.TaskParams = function (props) {
             },
         },
         "View"
+    );
+};
+
+dagcomponentfuncs.TaskLogs = function (props) {
+    var data = props.data || {};
+    var canViewLogs = data.has_logs === true && !!data.id;
+    var pending = useTaskListActionPending();
+    return React.createElement(
+        "button",
+        {
+            type: "button",
+            className: "btn btn-outline-primary btn-sm ae-task-table-button",
+            disabled: pending || !canViewLogs,
+            title: canViewLogs ? "Show task logs" : "No API execution is available",
+            onClick: function (e) {
+                e.stopPropagation();
+                if (canViewLogs && !window.taskListAction.pending) {
+                    props.setData({ action: "logs", task_id: data.id });
+                }
+            },
+        },
+        "Logs"
     );
 };
 
@@ -449,18 +485,7 @@ dagcomponentfuncs.TaskActions = function (props) {
     var status = (data.status || "").toLowerCase();
     var canCancel = ["pending", "submitted", "running"].indexOf(status) >= 0;
     var canResume = data.can_resume === true;
-    var canViewLogs = data.has_logs === true;
-    var pendingState = React.useState(window.taskListAction.pending);
-    var pending = pendingState[0];
-    React.useEffect(function () {
-        function updatePending() {
-            pendingState[1](window.taskListAction.pending);
-        }
-        window.addEventListener("task-list-action-pending", updatePending);
-        return function () {
-            window.removeEventListener("task-list-action-pending", updatePending);
-        };
-    }, []);
+    var pending = useTaskListActionPending();
 
     function requestAction(action, message) {
         if (window.taskListAction.pending || !data.id) return;
@@ -552,32 +577,6 @@ dagcomponentfuncs.TaskActions = function (props) {
                 },
             },
             "\u25B6 Resume"
-        ),
-        React.createElement(
-            "button",
-            {
-                style: {
-                    padding: "1px 6px",
-                    fontSize: "10px",
-                    fontWeight: 600,
-                    lineHeight: "normal",
-                    whiteSpace: "nowrap",
-                    border: "1px solid #0d6efd",
-                    borderRadius: "3px",
-                    backgroundColor: canViewLogs ? "#fff" : "#e9ecef",
-                    color: canViewLogs ? "#084298" : "#6c757d",
-                    cursor: canViewLogs ? "pointer" : "not-allowed",
-                },
-                disabled: pending || !canViewLogs,
-                title: canViewLogs ? "Show task logs" : "No API execution is available",
-                onClick: function (e) {
-                    e.stopPropagation();
-                    if (canViewLogs && !window.taskListAction.pending) {
-                        props.setData({ action: "logs", task_id: data.id });
-                    }
-                },
-            },
-            "Logs"
         )
     );
 };

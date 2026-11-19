@@ -7,9 +7,22 @@ from unittest.mock import MagicMock
 import pytest
 from callbacks import _registration as registration
 from dash import Dash, html
+from layouts.common import TASK_LIST_COLUMNS
 from layouts.dashboard import dashboard_layout
 from services.analysis_task import get_task_execution_logs
 from trendsearth_client import TrendsEarthAPIError, TrendsEarthClient
+
+
+def test_task_table_places_method_and_logs_in_their_columns():
+    headers = [column["headerName"] for column in TASK_LIST_COLUMNS]
+    resolution = headers.index("Resolution")
+    assert headers[resolution : resolution + 4] == [
+        "Resolution",
+        "Method",
+        "Params",
+        "Logs",
+    ]
+    assert TASK_LIST_COLUMNS[resolution + 3]["cellRenderer"] == "TaskLogs"
 
 
 def test_log_controls_remain_outside_the_scrollable_body():
