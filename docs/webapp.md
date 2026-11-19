@@ -515,6 +515,9 @@ group filters, and results tabs without reloading the whole page. The map also
 returns to its saved center, zoom, and rotation. Panning and zooming alone do not
 add history entries. Map positions stay in browser history, not in shared URLs;
 opening a direct or shared link still fits the selected site or the full map.
+A centered **Loading results...** indicator appears while a plot selection,
+group filter, or Back/Forward navigation is updating results. It stays visible
+until the selection and filtered plots finish loading.
 Group ranges are calculated from the selected sites' yearly outcomes within
 each matching replicate, not by adding site-level bounds. Site sets must be
 reimported to retain source attributes, and analyses rerun to produce the

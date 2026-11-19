@@ -74,6 +74,9 @@ test_that("all replicates, failed fits and unsampled declared atoms remain disco
     expect_equal(length(records), 4L)
     expect_equal(records[[2]]$replicate, 2L)
     expect_false(records[[1]]$stratum_consistent)
+    expect_true(all(vapply(records, function(record) {
+        identical(record$matching_policy, "shared_support_v2")
+    }, logical(1))))
     expect_equal(records[[3]]$missing_replicates, 2L)
     expect_equal(records[[4]]$inclusion_reason, "no_grid_pixels")
     replay <- fromJSON(file.path(fixture$root, result$artifacts$replay), simplifyVector = FALSE)

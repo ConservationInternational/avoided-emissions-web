@@ -817,14 +817,21 @@ summarise_replicates <- function(df, by, metrics) {
 
 # -- Balance diagnostics -----------------------------------------------------
 
-balance_row <- function(covariate, x, treatment, w, binary = FALSE) {
+balance_row <- function(covariate, x, treatment, w, binary = FALSE,
+                        weighted_sd = FALSE, include_counts = FALSE) {
     # Weighted means and the standardized mean difference.  The SMD uses the
     # treated sample's SD (ATT convention), which does not depend on the scale
     # of the weights.  Binary indicators (factor levels) report the raw
     # difference in proportions.  An undefined SMD is NA.
-    m_t <- weighted.mean(x[treatment], w[treatment])
-    m_c <- weighted.mean(x[!treatment], w[!treatment])
-    sd_t <- if (sum(treatment) > 1) sd(x[treatment]) else NA_real_
+    m_t <- if (any(treatment)) weighted.mean(x[treatment], w[treatment]) else NA_real_
+    m_c <- if (any(!treatment)) weighted.mean(x[!treatment], w[!treatment]) else NA_real_
+    sd_t <- if (sum(treatment) > 1) {
+        if (weighted_sd) {
+            sqrt(weighted.mean((x[treatment] - m_t)^2, w[treatment]))
+        } else {
+            sd(x[treatment])
+        }
+    } else NA_real_
     smd <- if (binary) {
         m_t - m_c
     } else if (isTRUE(sd_t > 0)) {
@@ -834,31 +841,57 @@ balance_row <- function(covariate, x, treatment, w, binary = FALSE) {
     } else {
         NA_real_
     }
-    tibble(
+    result <- tibble(
         covariate = covariate, mean_treatment = m_t, mean_control = m_c,
         sd_treatment = sd_t, smd = smd
     )
+    if (include_counts) {
+        result <- result %>%
+            mutate(
+                n_treatment = sum(treatment), n_control = sum(!treatment),
+                weight_treatment = sum(w[treatment]),
+                weight_control = sum(w[!treatment])
+            )
+    }
+    result
 }
 
 
-balance_table <- function(df, covariates, categorical = character(0)) {
+balance_table <- function(df, covariates, categorical = character(0),
+                          weight_col = "match_weight", weighted_sd = FALSE,
+                          include_counts = FALSE) {
     # One row per numeric covariate and per level of each categorical one.
     rows <- list()
     for (cov in covariates) {
-        ok <- !is.na(df[[cov]])
+        ok <- !is.na(df[[cov]]) & is.finite(df[[weight_col]])
         x <- df[[cov]][ok]
         t <- df$treatment[ok]
-        w <- df$match_weight[ok]
-        if (sum(t) == 0 || sum(!t) == 0) next
+        w <- df[[weight_col]][ok]
+        if (!length(x)) {
+            if (include_counts) {
+                rows[[length(rows) + 1]] <- tibble(
+                    covariate = cov, mean_treatment = NA_real_,
+                    mean_control = NA_real_, sd_treatment = NA_real_,
+                    smd = NA_real_, n_treatment = 0L, n_control = 0L,
+                    weight_treatment = 0, weight_control = 0
+                )
+            }
+            next
+        }
+        if (!include_counts && (sum(t) == 0 || sum(!t) == 0)) next
         if (cov %in% categorical) {
             for (lvl in sort(unique(x))) {
                 rows[[length(rows) + 1]] <- balance_row(
                     paste0(cov, "=", lvl), as.numeric(x == lvl), t, w,
-                    binary = TRUE
+                    binary = TRUE, weighted_sd = weighted_sd,
+                    include_counts = include_counts
                 )
             }
         } else {
-            rows[[length(rows) + 1]] <- balance_row(cov, x, t, w)
+            rows[[length(rows) + 1]] <- balance_row(
+                cov, x, t, w, weighted_sd = weighted_sd,
+                include_counts = include_counts
+            )
         }
     }
     bind_rows(rows)

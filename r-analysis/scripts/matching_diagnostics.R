@@ -365,6 +365,7 @@ write_matching_diagnostics <- function(paths, config, fragments, complete_strata
                     matched_replicates = integer(), cause_codes = character(), missing_strata = list())
         status$record_type <- "atom_inclusion"
         status$diagnostics_schema_version <- 1L
+        status$matching_policy <- policy
         status$atom_run_id <- atom_run
         status$atomic_id <- atom_id
         status$task_id <- config$task_id

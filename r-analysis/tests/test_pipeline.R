@@ -165,6 +165,7 @@ test_that("summary uses the same included strata for estimates and pixel downloa
             match_group = c("stable_1", "stable_1", "unstable_1", "unstable_1"),
             match_weight = 1, sampling_weight = 10,
             area_ha = 100, total_biomass_2000 = 100, fc_2000 = 100, x1 = 0, pscore = 0.5,
+            defor_pre_intervention = 1,
             n_eligible = 20, n_sampled = 2, n_control_pool = 100, n_control_sampled = 10,
             id_numeric = 1L, replicate = k, n_forest_pixels = 30L
         ) %>% bind_cols(forest_cover(4, 1))
@@ -176,6 +177,9 @@ test_that("summary uses the same included strata for estimates and pixel downloa
     totals <- read.csv(file.path(out, "results_by_site_total.csv"))
     detail <- read.csv(file.path(out, "results_pixel_year_emissions.csv"))
     covariates <- read.csv(file.path(out, "results_pixel_covariates.csv"))
+    replicate_balance <- read.csv(
+        file.path(out, "results_covariate_balance_replicates.csv")
+    )
     summary <- fromJSON(file.path(out, "results_summary.json"))
     match_quality <- fromJSON(file.path(out, "results_match_quality_summary.json"))
     expect_equal(totals$n_sample_pixels, 1)
@@ -188,6 +192,21 @@ test_that("summary uses the same included strata for estimates and pixel downloa
     expect_true(all(c(
         "site_id", "treatment", "match_weight", "pscore", "x1"
     ) %in% names(covariates)))
+    expect_equal(sort(unique(replicate_balance$replicate)), 1:2)
+    expect_true(all(c("matched_sample", "represented_domain") %in%
+                    unique(replicate_balance$scope)))
+    expect_true(all(c("portfolio", "matching_unit", "fragment", "stratum") %in%
+                    unique(replicate_balance$scope_type)))
+    expect_equal(unique(replicate_balance$task_id), "test")
+    expect_true(all(c("baseline_forest_ha", "baseline_biomass_mg",
+                      "defor_pre_intervention") %in%
+                    unique(sub("=.*$", "", replicate_balance$covariate))))
+    expect_true(all(c(
+        "n_treatment", "n_control", "weight_treatment", "weight_control",
+        "mean_difference", "sd_method", "weight_method",
+        "n_replicates_defined", "worst_abs_smd",
+        "share_replicates_abs_smd_gt_010", "status"
+    ) %in% names(replicate_balance)))
     expect_true("categorical_cols" %in% names(match_quality))
     expect_true(any(summary$methodology_warnings$code == "inconsistent_strata"))
     # Pixel-level weighted totals agree with the reported annual sample.
@@ -428,7 +447,7 @@ test_that("summary rejects match outputs of another estimator", {
     sidecar$compatibility$estimator_version <- ESTIMATOR_VERSION
     write_json(sidecar, sidecar_path, auto_unbox = TRUE, digits = NA)
     run_script("03_summarize_results.R", config_path)
-    expect_equal(fromJSON(file.path(out, "results_summary.json"))$estimator$version, 2)
+    expect_equal(fromJSON(file.path(out, "results_summary.json"))$estimator$version, 3)
 })
 
 test_that("atom runs sample every atom and take observed loss from the census", {
@@ -947,6 +966,14 @@ test_that("Nextflow atom summary shards retain unmapped parents and empty diagno
     )
     first <- readRDS(states[1])
     second <- readRDS(states[2])
+    merged <- read_summary_states(states)
+    expect_true(all(c(
+        "id_numeric", "group", "replicate", "sampling_weight"
+    ) %in% names(merged$cov_data)))
+    expect_equal(
+        sort(unique(merged$cov_data$replicate)),
+        seq_len(config$n_replicates)
+    )
     bad_path <- file.path(data_dir, "invalid_state.rds")
     duplicate <- second
     duplicate$atom_declarations$atomic_id[1] <- first$atom_declarations$atomic_id[1]

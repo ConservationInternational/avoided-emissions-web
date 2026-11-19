@@ -316,13 +316,43 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
             html.Div(id="cancel-task-result"),
             html.Div(id="resume-task-result"),
             html.Div(id="quality-warning-banner"),
-            tabs,
+            dcc.Loading(
+                [
+                    tabs,
+                    dcc.Store(id="task-plot-selection", data=selection),
+                ],
+                id="task-results-loading",
+                target_components={
+                    "task-plot-selection": "data",
+                    "task-results-graphs": "children",
+                    "task-plots": "children",
+                    "site-filtered-ids": "data",
+                },
+                delay_show=150,
+                delay_hide=150,
+                show_initially=False,
+                overlay_style={"visibility": "visible"},
+                custom_spinner=html.Div(
+                    html.Div(
+                        [
+                            html.Div(
+                                className="spinner-border text-primary",
+                                **{"aria-hidden": "true"},
+                            ),
+                            html.Div("Loading results...", className="mt-2"),
+                        ],
+                        className="bg-white rounded shadow p-4 text-center",
+                    ),
+                    className="ae-results-loading",
+                    role="status",
+                    **{"aria-live": "polite"},
+                ),
+            ),
             edit_modal,
             share_modal,
             dcc.Store(id="task-id-store", data=task_id),
             dcc.Store(id="task-resume-refresh"),
             dcc.Store(id="share-token-store", data=shared_token),
-            dcc.Store(id="task-plot-selection", data=selection),
             dcc.Store(id="task-view-navigation"),
             dcc.Interval(id="detail-refresh-interval", interval=15000, n_intervals=0),
         ]

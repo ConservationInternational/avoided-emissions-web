@@ -1271,11 +1271,30 @@ def test_site_selection_preserves_group_filter(monkeypatch):
 @pytest.mark.unit
 def test_task_detail_has_no_separate_map_tab():
     layout = task_detail_layout(None, "task-1")
-    tabs = next(child for child in layout.children if isinstance(child, dbc.Tabs))
+    tabs = layout["detail-tabs"]
 
     assert "tab-plots" in {tab.tab_id for tab in tabs.children}
     assert "tab-map" not in {tab.tab_id for tab in tabs.children}
     assert "tab-match-quality" not in {tab.tab_id for tab in tabs.children}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("shared_token", [None, "share"])
+def test_results_loading_covers_selection_and_chained_plot_updates(shared_token):
+    layout = task_detail_layout(None, "task", shared_token=shared_token)
+    loading = layout["task-results-loading"]
+
+    assert isinstance(loading, dcc.Loading)
+    assert loading["task-plot-selection"] is layout["task-plot-selection"]
+    assert loading["task-plots"] is layout["task-plots"]
+    assert loading.target_components == {
+        "task-plot-selection": "data",
+        "task-results-graphs": "children",
+        "task-plots": "children",
+        "site-filtered-ids": "data",
+    }
+    assert loading.custom_spinner.role == "status"
+    assert loading.custom_spinner.children.children[-1].children == "Loading results..."
 
 
 @pytest.mark.unit
@@ -1292,7 +1311,7 @@ def test_task_detail_has_no_separate_map_tab():
 )
 def test_task_history_urls_restore_tabs_without_losing_selection(search, tab):
     layout = task_detail_layout(None, "task", shared_token="share", search=search)
-    tabs = next(child for child in layout.children if isinstance(child, dbc.Tabs))
+    tabs = layout["detail-tabs"]
     assert tabs.active_tab == parse_task_tab(search) == tab
     assert any(
         getattr(child, "id", None) == "task-view-navigation"
@@ -1516,8 +1535,8 @@ def test_plot_selection_query_round_trip_and_default_tab(selection):
     query = plot_selection_query(selection, "tab-plots")
     assert parse_plot_selection(query) == selection
     layout = task_detail_layout(None, "task", shared_token="share", search=query)
-    tabs = next(child for child in layout.children if isinstance(child, dbc.Tabs))
-    stored = next(child for child in layout.children if getattr(child, "id", None) == "task-plot-selection")
+    tabs = layout["detail-tabs"]
+    stored = layout["task-plot-selection"]
     assert tabs.active_tab == "tab-plots"
     assert stored.data == selection
     assert plot_selection_query(selection, "tab-overview") == ""

@@ -314,6 +314,24 @@ test_that("SMD is invariant to weight scale (F14)", {
     expect_equal(a$smd, b$smd)
 })
 
+test_that("represented-domain balance uses expansion weights and weighted SD", {
+    d <- tibble(
+        treatment = c(TRUE, TRUE, FALSE, FALSE),
+        x = c(1, 3, 0, 2),
+        match_weight = 1,
+        represented_weight = c(1, 3, 1, 3)
+    )
+    out <- balance_table(
+        d, "x", weight_col = "represented_weight",
+        weighted_sd = TRUE, include_counts = TRUE
+    )
+    expect_equal(out$mean_treatment, 2.5)
+    expect_equal(out$mean_control, 1.5)
+    expect_equal(out$sd_treatment, sqrt(0.75))
+    expect_equal(out$n_treatment, 2L)
+    expect_equal(out$weight_treatment, 4)
+})
+
 test_that("categorical covariates use per-level proportion differences", {
     d <- tibble(treatment = c(TRUE, TRUE, FALSE, FALSE), eco = c(1, 2, 1, 1), match_weight = 1)
     out <- balance_table(d, "eco", categorical = "eco")

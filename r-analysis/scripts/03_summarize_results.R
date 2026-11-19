@@ -24,7 +24,8 @@
 #   results_site_status.csv,
 #   results_summary.json,
 #   results_pixel_year_emissions.csv (replicate 1), results_pixel_covariates.csv,
-#   results_covariate_balance.csv, results_propensity_scores.csv,
+#   results_covariate_balance.csv, results_covariate_balance_replicates.csv,
+#   results_propensity_scores.csv,
 #   results_pixel_locations.csv, results_match_quality_summary.json,
 #   results_sampling_by_site.csv, results_failed_sites.csv,
 #   na_exclusion_summary.csv
@@ -279,12 +280,26 @@ summarize_batch <- function(path) {
             ids <- tibble(id_numeric = id, site_id = frag$site_id, replicate = k)
             atom_ids <- if (atom_enabled) as.character(m$atomic_id) else rep(NA_character_, nrow(m))
             detail <- NULL
-            covariates <- NULL
+            baseline_fc <- m[[paste0("fc_", baseline_year(frag$start_year, FC_YEAR_MIN))]]
+            covariates <- m %>%
+                select(cell, group, treatment, match_group, match_weight, pscore,
+                       any_of(COVARIATES)) %>%
+                mutate(id_numeric = id, site_id = frag$site_id, replicate = k,
+                       .before = 1) %>%
+                mutate(
+                    atomic_id = atom_ids,
+                    baseline_forest_ha = baseline_fc / 100 * m$area_ha,
+                    baseline_biomass_mg = if_else(
+                        m$fc_2000 > 0,
+                        m$total_biomass_2000 * m$area_ha * baseline_fc / m$fc_2000, 0
+                    )
+                )
             if (k == 1L) {
                 n_years <- length(outcomes$years)
                 detail <- tibble(
                     cell = rep(m$cell, times = n_years), id_numeric = id,
-                    site_id = frag$site_id, group = rep(m$group, times = n_years),
+                    site_id = frag$site_id, replicate = rep(k, nrow(m) * n_years),
+                    group = rep(m$group, times = n_years),
                     year = rep(outcomes$years, each = nrow(m)),
                     treatment = rep(m$treatment, times = n_years),
                     match_group = rep(m$match_group, times = n_years),
@@ -294,22 +309,6 @@ summarize_batch <- function(path) {
                     emissions_mgco2e = as.vector(outcomes$emissions),
                     atomic_id = rep(atom_ids, times = n_years)
                 )
-                # Forest and biomass each pixel held at the site's baseline: what
-                # it could lose.  Outcomes are absolute, so these stocks should
-                # be alike between a treatment pixel and its controls.
-                baseline_fc <- m[[paste0("fc_", baseline_year(frag$start_year, FC_YEAR_MIN))]]
-                covariates <- m %>%
-                    select(cell, group, treatment, match_group, match_weight, pscore,
-                           any_of(COVARIATES)) %>%
-                    mutate(id_numeric = id, site_id = frag$site_id, .before = 1) %>%
-                    mutate(
-                        atomic_id = atom_ids,
-                        baseline_forest_ha = baseline_fc / 100 * m$area_ha,
-                        baseline_biomass_mg = if_else(
-                            m$fc_2000 > 0,
-                            m$total_biomass_2000 * m$area_ha * baseline_fc / m$fc_2000, 0
-                        )
-                    )
             }
             # Matched-sample sums per cell; expansion is applied after all
             # replicates are read.
@@ -403,6 +402,8 @@ process_batches <- function(paths, invalid_sites = list()) {
                 write_parquet(result$detail, file.path(
                     detail_parts, sprintf("part%06d.parquet", length(cov_rows) + 1L)
                 ))
+            }
+            if (!is.null(result$covariates)) {
                 cov_rows[[length(cov_rows) + 1L]] <- result$covariates
             }
         }
@@ -530,18 +531,23 @@ census_agreement <- cell_year_rep %>%
         .groups = "drop"
     )
 
-# Final weights for the replicate-1 pixel detail and covariates.
-factors_r1 <- filter(inclusion$factors, replicate == 1L)
+# Final weights for the pixel detail and covariates.
 final_pixels <- function(pixels) {
     # Keep pixels of included cells, with their final weights.
     if (nrow(pixels) == 0) return(pixels)
-    weights <- factors_r1[factors_r1$id_numeric == pixels$id_numeric[1], ]
+    replicates <- unique(pixels$replicate)
+    if (length(replicates) != 1L) stop("Pixel covariates must contain one replicate")
+    weights <- inclusion$factors[
+        inclusion$factors$id_numeric == pixels$id_numeric[1] &
+            inclusion$factors$replicate == replicates,
+    ]
     if (!atom_enabled) weights$atomic_id <- NULL
     apply_cell_weights(if (atom_enabled) pixels else select(pixels, -atomic_id), weights) %>%
         select(-any_of("atomic_id"))
 }
 for (path in list.files(detail_parts, "\\.parquet$", full.names = TRUE)) {
-    detail <- final_pixels(read_parquet(path))
+    detail <- final_pixels(read_parquet(path)) %>%
+        select(-replicate)
     if (nrow(detail)) write_csv(detail, detail_path, append = file.exists(detail_path))
 }
 unlink(detail_parts, recursive = TRUE)
@@ -1044,7 +1050,8 @@ log_summary_phase("Portfolio statistics")
 message("  Finalizing: pixel covariate exports")
 if (summary_mode != "reduce") {
     cov_data <- bind_rows(
-        tibble(id_numeric = integer(), site_id = character(), cell = numeric(),
+        tibble(id_numeric = integer(), site_id = character(), replicate = integer(),
+               cell = numeric(),
                group = character(), treatment = logical(), match_group = character(),
                match_weight = numeric(), pscore = numeric(), sampling_weight = numeric(),
                baseline_forest_ha = numeric(), baseline_biomass_mg = numeric()),
@@ -1054,6 +1061,7 @@ if (summary_mode != "reduce") {
     # weighted as in the estimates (replicate 1).  A ratio far from 1 means
     # the two arms could not lose the same amount, whatever their loss rates.
     stock_balance <- cov_data %>%
+        filter(replicate == 1L) %>%
         mutate(weight = match_weight * sampling_weight) %>%
         group_by(site_id) %>%
         summarise(
@@ -1065,13 +1073,14 @@ if (summary_mode != "reduce") {
                 sum(weight[!treatment] * baseline_biomass_mg[!treatment]),
             .groups = "drop"
         )
-    cov_data <- select(cov_data, -id_numeric, -group, -sampling_weight)
 }
-covariates <- intersect(COVARIATES, names(cov_data))
+cov_data_r1 <- filter(cov_data, replicate == 1L) %>%
+    select(-id_numeric, -group, -replicate, -sampling_weight)
+covariates <- intersect(COVARIATES, names(cov_data_r1))
 if (summary_mode != "reduce") {
-    write_csv(cov_data, out_path("results_pixel_covariates.csv"))
+    write_csv(cov_data_r1, out_path("results_pixel_covariates.csv"))
     write_csv(
-        select(cov_data, cell, site_id, treatment, match_group, match_weight, pscore),
+        select(cov_data_r1, cell, site_id, treatment, match_group, match_weight, pscore),
         out_path("results_propensity_scores.csv")
     )
 }
@@ -1082,19 +1091,143 @@ site_balance <- if (summary_mode == "reduce") {
     read_csv(out_path("results_covariate_balance.csv"), show_col_types = FALSE) %>%
         filter(site_id != "__all__")
 } else {
-    cov_data %>%
+    cov_data_r1 %>%
         group_by(site_id) %>%
         group_modify(~ balance_table(.x, covariates, CATEGORICAL)) %>%
         ungroup()
 }
 balance <- bind_rows(
-    balance_table(cov_data, covariates, CATEGORICAL) %>% mutate(site_id = "__all__"),
+    balance_table(cov_data_r1, covariates, CATEGORICAL) %>% mutate(site_id = "__all__"),
     site_balance
 )
 if (nrow(balance) == 0) {
     balance <- tibble(site_id = character(), covariate = character(), smd = numeric())
 }
 write_csv(balance, out_path("results_covariate_balance.csv"))
+
+# Replicate-level balance is reported separately so the legacy replicate-1
+# matched-sample balance file retains its existing schema and meaning.
+balance_covariates <- unique(c(
+    covariates, "baseline_forest_ha", "baseline_biomass_mg"
+))
+make_replicate_balance <- function(df, replicate, scope_type, site_id,
+                                   fragment_id = NA_integer_,
+                                   stratum = NA_character_,
+                                   not_applicable = FALSE) {
+    matched <- balance_table(
+        df, balance_covariates, CATEGORICAL,
+        weight_col = "match_weight", include_counts = TRUE
+    ) %>% mutate(
+        scope = "matched_sample",
+        weight_method = "match_weight",
+        sd_method = if_else(
+            sub("=.*$", "", covariate) %in% CATEGORICAL,
+            "proportion_difference", "unweighted_treatment_sd"
+        )
+    )
+    df$represented_weight <- df$match_weight * df$sampling_weight
+    represented <- balance_table(
+        df, balance_covariates, CATEGORICAL,
+        weight_col = "represented_weight", weighted_sd = TRUE,
+        include_counts = TRUE
+    ) %>% mutate(
+        scope = "represented_domain",
+        weight_method = "match_weight * sampling_weight",
+        sd_method = if_else(
+            sub("=.*$", "", covariate) %in% CATEGORICAL,
+            "proportion_difference", "weighted_population_treatment_sd"
+        )
+    )
+    bind_rows(matched, represented) %>%
+        mutate(
+            task_id = config$task_id, replicate = replicate,
+            scope_type = scope_type, site_id = site_id,
+            fragment_id = fragment_id, stratum = stratum,
+            not_applicable = not_applicable
+        )
+}
+replicate_balance_rows <- list()
+balance_sites <- sort(unique(sites$site_id))
+not_applicable_sites <- union(
+    sites$site_id[!sites$site_id %in% site_status$site_id],
+    site_status$site_id[site_status$status == "not_applicable"]
+)
+balance_fragments <- distinct(cov_data, id_numeric, site_id)
+balance_strata <- distinct(cov_data, id_numeric, site_id, group)
+for (replicate in seq_len(N_REPLICATES)) {
+    replicate_data <- filter(cov_data, replicate == !!replicate)
+    replicate_balance_rows[[length(replicate_balance_rows) + 1L]] <-
+        make_replicate_balance(
+            replicate_data, replicate, "portfolio", "__all__",
+            not_applicable = length(balance_sites) > 0L &&
+                all(balance_sites %in% not_applicable_sites)
+        )
+    for (site in balance_sites) {
+        site_data <- filter(replicate_data, site_id == !!site)
+        replicate_balance_rows[[length(replicate_balance_rows) + 1L]] <-
+            make_replicate_balance(
+                site_data, replicate, "matching_unit", site,
+                not_applicable = site %in% not_applicable_sites
+            )
+    }
+    for (i in seq_len(nrow(balance_fragments))) {
+        fragment <- balance_fragments[i, ]
+        fragment_data <- filter(
+            replicate_data, id_numeric == !!fragment$id_numeric,
+            site_id == !!fragment$site_id
+        )
+        replicate_balance_rows[[length(replicate_balance_rows) + 1L]] <-
+            make_replicate_balance(
+                fragment_data, replicate, "fragment", fragment$site_id,
+                fragment$id_numeric
+            )
+    }
+    for (i in seq_len(nrow(balance_strata))) {
+        stratum <- balance_strata[i, ]
+        stratum_data <- filter(
+            replicate_data, id_numeric == !!stratum$id_numeric,
+            site_id == !!stratum$site_id, group == !!stratum$group
+        )
+        replicate_balance_rows[[length(replicate_balance_rows) + 1L]] <-
+            make_replicate_balance(
+                stratum_data, replicate, "stratum", stratum$site_id,
+                stratum$id_numeric, stratum$group
+            )
+    }
+}
+replicate_balance <- bind_rows(replicate_balance_rows) %>%
+    mutate(status = case_when(
+        not_applicable ~ "not_applicable",
+        n_treatment == 0L | n_control == 0L ~ "unavailable",
+        is.finite(smd) ~ "defined",
+        TRUE ~ "undefined"
+    )) %>%
+    group_by(task_id, scope_type, site_id, fragment_id, stratum, scope, covariate) %>%
+    mutate(
+        smd_screen_applicable = !sub("=.*$", "", covariate) %in%
+            c("baseline_forest_ha", "baseline_biomass_mg"),
+        n_replicates_defined = sum(status == "defined"),
+        worst_abs_smd = if (any(is.finite(smd))) max(abs(smd), na.rm = TRUE) else NA_real_,
+        n_replicates_abs_smd_gt_010 = if_else(
+            smd_screen_applicable,
+            sum(is.finite(smd) & abs(smd) > 0.10), NA_integer_
+        ),
+        share_replicates_abs_smd_gt_010 = if_else(
+            smd_screen_applicable & n_replicates_defined > 0,
+            n_replicates_abs_smd_gt_010 / n_replicates_defined, NA_real_
+        ),
+        n_replicates_abs_smd_ge_025 = if_else(
+            smd_screen_applicable,
+            sum(is.finite(smd) & abs(smd) >= 0.25), NA_integer_
+        )
+    ) %>%
+    ungroup() %>%
+    mutate(mean_difference = mean_treatment - mean_control) %>%
+    select(-not_applicable)
+write_csv(
+    replicate_balance,
+    out_path("results_covariate_balance_replicates.csv")
+)
 
 log_summary_phase("Covariate balance")
 message("  Finalizing: match-quality distributions")
@@ -1130,10 +1263,10 @@ if (summary_mode == "reduce") {
         mq[[field]] <- prior_quality[[field]]
     }
 }
-if (nrow(cov_data) > 0) {
-    scopes <- if (summary_mode == "reduce") "__all__" else c("__all__", unique(cov_data$site_id))
+if (nrow(cov_data_r1) > 0) {
+    scopes <- if (summary_mode == "reduce") "__all__" else c("__all__", unique(cov_data_r1$site_id))
     for (scope in scopes) {
-        df <- if (scope == "__all__") cov_data else cov_data[cov_data$site_id == scope, ]
+        df <- if (scope == "__all__") cov_data_r1 else cov_data_r1[cov_data_r1$site_id == scope, ]
         counts <- if (scope == "__all__") {
             site_counts
         } else {
@@ -1162,7 +1295,7 @@ message("  Finalizing: pixel locations")
 if (summary_mode != "reduce") {
 gm <- fromJSON(out_path("grid_metadata.json"))
 tf <- gm$transform
-cov_data %>%
+cov_data_r1 %>%
     transmute(
         cell, site_id, treatment, match_group,
         lon = tf[3] + (cell %% gm$width + 0.5) * tf[1],
