@@ -74,6 +74,14 @@ h1, h2, h3, h4, h5 {
     box-shadow: 0 1px 3px rgba(16, 24, 40, 0.15);
 }
 
+/* A chart click can happen far below the top of the plot section. */
+#task-results-graphs-loading .ae-section-loading-status {
+    position: fixed;
+    inset: auto auto 1rem 50%;
+    transform: translateX(-50%);
+    z-index: 1030;
+}
+
 .nav-tabs .nav-link {
     font-weight: 600;
 }
