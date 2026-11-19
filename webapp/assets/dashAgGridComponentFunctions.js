@@ -53,6 +53,28 @@ dagcomponentfuncs.TaskLink = function (props) {
     );
 };
 
+dagcomponentfuncs.TaskParams = function (props) {
+    var data = props.data || {};
+    return React.createElement(
+        "button",
+        {
+            type: "button",
+            className: "btn btn-outline-primary btn-sm",
+            disabled: !data.id,
+            title: "View task parameters",
+            onClick: function (e) {
+                e.stopPropagation();
+                props.setData({
+                    action: "params",
+                    task_name: data.name,
+                    params: data.params,
+                });
+            },
+        },
+        "View"
+    );
+};
+
 dagcomponentfuncs.TaskProgress = function (props) {
     var value = props.value;
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {

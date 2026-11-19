@@ -75,7 +75,19 @@ def test_task_list_passes_cached_percentage_to_renderer(mocker):
     )
     user = SimpleNamespace(id=uuid.uuid4(), is_admin=False)
     task = AnalysisTask(
-        id=uuid.uuid4(), name="Analysis", status="running", progress=42.5
+        id=uuid.uuid4(),
+        name="Analysis",
+        status="running",
+        progress=42.5,
+        covariates=["precip", "elev"],
+        config={
+            "max_treatment_pixels": 1000,
+            "control_multiplier": 50,
+            "caliper_width": 0,
+            "max_controls_per_treatment": 1,
+            "exact_match_vars": ["admin1"],
+            "nested": {"enabled": True},
+        },
     )
     mocker.patch.object(registration, "get_current_user", return_value=user)
     get_tasks = mocker.patch.object(registration, "get_task_list", return_value=[task])
@@ -83,6 +95,13 @@ def test_task_list_passes_cached_percentage_to_renderer(mocker):
     rows, columns, count = callbacks["refresh_task_list"](1, 0, False)
 
     assert rows[0]["progress"] == 42.5
+    assert rows[0]["params"] == {**task.config, "covariates": task.covariates}
+    assert not {
+        "max_treatment_pixels",
+        "control_multiplier",
+        "caliper_width",
+        "max_controls_per_treatment",
+    }.intersection(column["field"] for column in columns)
     assert (
         next(col for col in columns if col["field"] == "progress")["cellRenderer"]
         == "TaskProgress"

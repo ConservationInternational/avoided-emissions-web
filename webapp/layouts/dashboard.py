@@ -103,6 +103,19 @@ def dashboard_layout(user):
             # Stores & intervals
             dcc.Store(id="task-list-action-refresh"),
             dcc.Store(id="task-list-action-complete"),
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(dbc.ModalTitle(id="task-params-title")),
+                    dbc.ModalBody(id="task-params-body"),
+                    dbc.ModalFooter(
+                        dbc.Button("Close", id="task-params-close", color="secondary")
+                    ),
+                ],
+                id="task-params-modal",
+                size="lg",
+                scrollable=True,
+                is_open=False,
+            ),
             dcc.Store(id="task-logs-task-id"),
             dcc.Interval(id="task-logs-interval", interval=30000, disabled=True),
             dbc.Modal(

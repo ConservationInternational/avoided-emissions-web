@@ -1645,10 +1645,7 @@ def register_callbacks(app, limiter=None):
                 "covariates_full": ", ".join(covariates),
                 "exact_matches_short": ", ".join(exact_matches),
                 "exact_matches_full": ", ".join(exact_matches),
-                "max_treatment_pixels": cfg.get("max_treatment_pixels"),
-                "control_multiplier": cfg.get("control_multiplier"),
-                "caliper_width": cfg.get("caliper_width"),
-                "max_controls_per_treatment": cfg.get("max_controls_per_treatment"),
+                "params": {**cfg, "covariates": covariates},
                 "matching_method": cfg.get("matching_method", "optimal"),
                 "created_at": _fmt_dt(task.created_at),
                 "submitted_at": _fmt_dt(task.submitted_at),
@@ -1662,6 +1659,30 @@ def register_callbacks(app, limiter=None):
             rows.append(row)
 
         return rows, columns, f"Total: {len(rows)}"
+
+    @app.callback(
+        Output("task-params-modal", "is_open"),
+        Output("task-params-title", "children"),
+        Output("task-params-body", "children"),
+        Input("task-list-table", "cellRendererData"),
+        Input("task-params-close", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def show_task_params(renderer_data, _close):
+        if callback_context.triggered_id == "task-params-close":
+            return False, no_update, no_update
+        value = (renderer_data or {}).get("value") or {}
+        if value.get("action") != "params":
+            raise PreventUpdate
+        return (
+            True,
+            f"Params: {value['task_name']}",
+            html.Pre(
+                json.dumps(value["params"], indent=2, sort_keys=True),
+                className="bg-light border rounded p-3 mb-0",
+                style={"whiteSpace": "pre-wrap", "overflowWrap": "anywhere"},
+            ),
+        )
 
     # -- Task detail ---------------------------------------------------------
 
