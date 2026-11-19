@@ -241,39 +241,62 @@ submissions fail with the excluded parent IDs.
 
 Atom-enabled results include:
 
-- `results_by_atom_replicate_year.csv`: one row per consistently represented
-  `(run_id, atomic_id, replicate, year)`, with the parent `site_id`, the
-  inclusive intervention-period flag, and the six additive extrapolated
-  treatment/control/avoided loss and emissions metrics. It includes all
-  available annual result years, including pre-intervention years.
+- `results_by_atom_replicate_year.csv`: one row per
+  `(run_id, atomic_id, replicate, year)` for every atom with estimates, with
+  the parent `site_id`, the inclusive intervention-period flag, and the six
+  additive extrapolated treatment/control/avoided loss and emissions metrics.
+  It includes all available annual result years, including pre-intervention
+  years, and every replicate.
 - `results_atom_status.csv`: one row for every declared atom, including atoms
-  with no grid pixels. It reports `estimated`, `partial`, `failed`, or
-  `not_applicable`, a reason, pixel and forest counts, forest coverage, and
-  supported result-year and parent intervention-year bounds.
-- `results_summary.json`: `atom_results_schema_version: 1` and
+  with no grid pixels. Columns:
+
+  | Column | Description |
+  |---|---|
+  | `run_id`, `atomic_id`, `site_id` | Atom and its parent site |
+  | `status` | `estimated`, `partial`, `failed`, or `not_applicable` |
+  | `status_reason` | Why the atom is not fully estimated |
+  | `n_site_pixels`, `n_forest_pixels` | Grid pixels, and those with forest at the parent baseline year |
+  | `n_eligible_pixels` | Forest pixels with complete inputs in a stratum that has controls |
+  | `n_supported_pixels` | Eligible pixels the estimates stand for |
+  | `forest_coverage_fraction` | `n_supported_pixels / n_forest_pixels` |
+  | `eligible_area_ha`, `supported_area_ha` | The same two counts as cell area |
+  | `n_sample_pixels` | Matched treatment pixels, mean across replicates |
+  | `min_replicates_matched` | Fewest replicates in which any of the atom's included cells matched |
+  | `treatment_arm` | `census` when observed loss is the sum over all eligible pixels; `sample` when a match rate below 50% leaves it to the matched sample |
+  | `first_year`, `last_year`, `start_year`, `end_year` | Result-year and parent intervention-year bounds |
+
+- `results_summary.json`: `atom_results_schema_version: 2` and
   `atom_run_id: <run_id>`.
 
-Atom treatment contributions retain matching and stratum-sampling weights.
-When a matched set contains multiple treatment atoms, each control's outcome
-is assigned across those atoms in proportion to the treatment-unit matching
-weights; no parent total is apportioned by polygon area. Atoms missing any
-configured replicate, modeled year, or matching stratum are not emitted as
-annual zeroes. For atom-enabled analyses, parent site and portfolio estimates
-are rebuilt from consistently represented atoms, so their replicate-year
-totals equal the sum of the corresponding atom rows over the same domain.
-Incomplete atoms remain explicit in the atom status file and their omitted
-coverage is reflected in parent/site coverage and status. Both atom CSVs are
-available from the normal task results prefix and via the `atom_replicates`
-and `atom_status` result-download types.
+Coverage is counted from the atom's eligible pixels in included cells, not from
+whether the atom has an estimate. An atom spanning two strata, one of which is
+not matched, is covered only by the pixels in the other. Below 80% forest
+coverage an atom is `partial`; with no supported pixel it is `failed`.
 
-New matching runs also publish
-[all-replicate matching diagnostics](analysis-outputs.md#matching-diagnostic-exports)
-with per-atom sampling/matching counts and final inclusion evidence. These
-distinguish completed processing from consistently represented atoms. Preserve
+Every atom with eligible pixels is sampled in every replicate: atoms of 50 or
+fewer eligible pixels in a stratum are sampled in full, larger ones contribute
+at least 50 (see [matching.md](matching.md#pixel-sampling-limits)). Matched
+pixels are scaled to the atom's own eligible pixels in each stratum, and its
+observed loss is taken from all of them. When a matched set contains multiple
+treatment atoms, each control's outcome is assigned across those atoms in
+proportion to the treatment-unit matching weights; no parent total is
+apportioned by polygon area. An atom's stratum is used when it matched in at
+least 80% of replicates; a replicate in which it did not match takes the mean
+of the others, never zero. Parent site and portfolio estimates are sums of
+atom rows, so their replicate-year totals equal the sum of the corresponding
+atom rows. Both atom CSVs are available from the normal task results prefix
+and via the `atom_replicates` and `atom_status` result-download types.
+
+Matching runs also publish
+[per-replicate matching diagnostics](analysis-outputs.md#matching-diagnostic-exports)
+with per-atom sampling/matching counts and final inclusion evidence. Preserve
 the atom run identity when joining downstream original-site memberships:
 wholly duplicated sites can have usable atom statistics without owning a
 matching unit, while missing atom domains must remain explicit rather than
 being replaced by zeroes or copied parent totals.
+
+Results written before atom result schema 2 reported full forest coverage for
+any atom with an estimate. They are not accepted downstream; rerun the task.
 
 The read-only audit command can inventory historical jobs and references or
 validate downloaded artifacts. Run from the repository root with the application's
@@ -381,9 +404,17 @@ appear. A dash means no percentage has been reported, rather than 0% complete.
 Percentages are driver estimates, not the fraction of submitted Batch tasks
 that have finished. Resuming a failed analysis resets its cached progress.
 
+The sortable **Resolution** column shows each task's analysis resolution (for
+example, **250 m** or **1 km**). Older tasks without a saved resolution use the
+original **1 km** default. Numeric filters use metres.
+
 Select **View** in the **Params** column to open the task's saved configuration,
 including covariates and exact-match variables, as pretty-printed JSON in a
 scrollable dialog. These settings are shown there rather than in separate columns.
+
+The **Elapsed** column shows time from submission to completion as **HH:MM:SS**.
+For submitted or running tasks it updates with each table refresh. Hours can
+exceed 24; a dash indicates missing timestamps. Numeric filters use seconds.
 
 The **Resume** action is enabled for failed Nextflow tasks with a tracked API
 execution that you own (or administer). It resumes the same execution using

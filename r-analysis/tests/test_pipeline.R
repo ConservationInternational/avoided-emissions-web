@@ -95,10 +95,69 @@ read_sidecars <- function(out) {
            fromJSON, simplifyVector = FALSE)
 }
 
-test_that("summary uses the same complete strata for estimates and pixel downloads", {
+
+write_fixture_matches <- function(out, batches) {
+    # Write hand-made matches the way step 2 does: treatment rows carry their
+    # cell's eligible and sampled pixel counts, and each sidecar the census of
+    # observed outcomes by cell.  The census here equals the expanded sample,
+    # as if the matched treatment pixels were every eligible pixel.
+    cells_of <- function(m) intersect(c("group", "atomic_id"), names(m))
+    batches <- lapply(batches, function(m) {
+        if ("cell_n_eligible" %in% names(m)) return(m)
+        m %>%
+            group_by(across(all_of(cells_of(m)))) %>%
+            mutate(
+                cell_n_eligible = if_else(treatment, sampling_weight * sum(treatment), NA_real_),
+                cell_n_sampled = if_else(treatment, as.numeric(sum(treatment)), NA_real_)
+            ) %>%
+            ungroup()
+    })
+    everything <- bind_rows(batches)
+    census <- lapply(split(everything, everything$id_numeric), function(d) {
+        by <- cells_of(d)
+        treated <- d %>%
+            filter(treatment) %>%
+            group_by(across(all_of(by))) %>%
+            filter(replicate == min(replicate)) %>%
+            ungroup()
+        tryCatch({
+            outcomes <- pixel_outcomes(treated, 2014, min(FC_YEARS), max(FC_YEARS))
+            rows <- split(seq_len(nrow(treated)), cell_key(treated, by))
+            list(
+                id_numeric = d$id_numeric[1], years = outcomes$years,
+                cells = unname(lapply(rows, function(r) {
+                    w <- treated$sampling_weight[r[1]]
+                    c(lapply(as.list(treated[r[1], by]), as.character), list(
+                        n_pixels = treated$cell_n_eligible[r[1]],
+                        area_ha = sum(treated$area_ha[r]) * w,
+                        loss_ha = as.list(colSums(outcomes$loss_ha[r, , drop = FALSE]) * w),
+                        emissions_mgco2e =
+                            as.list(colSums(outcomes$emissions[r, , drop = FALSE]) * w)
+                    ))
+                }))
+            )
+        }, invalid_pixel_outcomes = function(e) {
+            list(id_numeric = d$id_numeric[1], error = conditionMessage(e))
+        })
+    })
+    for (batch in names(batches)) {
+        m <- batches[[batch]]
+        write_parquet(m, file.path(out, "matches", paste0("mb_", batch, ".parquet")))
+        write_json(
+            list(batch = batch, matches_file = paste0("mb_", batch, ".parquet"),
+                 failures = list(), diagnostics = list(), na_exclusions = list(),
+                 treatment_census = unname(census[as.character(unique(m$id_numeric))])),
+            file.path(out, "matches", paste0("mb_", batch, ".json")),
+            auto_unbox = TRUE, digits = NA
+        )
+    }
+}
+
+test_that("summary uses the same included strata for estimates and pixel downloads", {
     data_dir <- tempfile("ae_summary_")
     config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
     out <- file.path(data_dir, "output")
+    batches <- list()
     for (k in 1:2) {
         m <- tibble(
             cell = 1:4, treatment = c(TRUE, FALSE, TRUE, FALSE),
@@ -110,11 +169,9 @@ test_that("summary uses the same complete strata for estimates and pixel downloa
             id_numeric = 1L, replicate = k, n_forest_pixels = 30L
         ) %>% bind_cols(forest_cover(4, 1))
         if (k == 2) m <- filter(m, group == "stable")
-        write_parquet(m, file.path(out, "matches", paste0("mb_u1_b", k, ".parquet")))
-        write_json(list(batch = paste0("u1_b", k), matches_file = paste0("mb_u1_b", k, ".parquet"),
-                        failures = list(), diagnostics = list(), na_exclusions = list()),
-                   file.path(out, "matches", paste0("mb_u1_b", k, ".json")), auto_unbox = TRUE)
+        batches[[paste0("u1_b", k)]] <- m
     }
+    write_fixture_matches(out, batches)
     run_script("03_summarize_results.R", config_path)
     totals <- read.csv(file.path(out, "results_by_site_total.csv"))
     detail <- read.csv(file.path(out, "results_pixel_year_emissions.csv"))
@@ -194,6 +251,7 @@ test_that("atom outputs require complete replicate domains and reconcile parent 
         file.path(out, "ae_atom_counts.parquet")
     )
 
+    batches <- list()
     for (id in 1:3) {
         for (replicate in if (id == 2) 1 else 1:2) {
             treatment <- tibble(
@@ -203,7 +261,7 @@ test_that("atom outputs require complete replicate domains and reconcile parent 
                 group = paste0("group", id),
                 match_group = paste0("group", id, "_set"),
                 match_weight = 1,
-                sampling_weight = 5,
+                sampling_weight = c(5, 5, 8)[id],
                 area_ha = 100,
                 total_biomass_2000 = 100,
                 fc_2000 = 100,
@@ -218,34 +276,22 @@ test_that("atom outputs require complete replicate domains and reconcile parent 
                 n_forest_pixels = 10
             ) %>% bind_cols(forest_cover(2, 1))
             if (id == 1 && replicate == 1) {
-                # Atom 101 should still be estimated from its complete stratum.
+                # Atom 101 is estimated from its included stratum only.
                 treatment <- bind_rows(treatment, treatment %>%
                     mutate(cell = cell + 100L, group = "unstable",
                            match_group = "unstable_set"))
             }
-            batch <- paste0("atoms", id, "_", replicate)
-            write_parquet(
-                treatment,
-                file.path(out, "matches", paste0("mb_", batch, ".parquet"))
-            )
-            write_json(
-                list(
-                    batch = batch,
-                    matches_file = paste0("mb_", batch, ".parquet"),
-                    failures = list(), diagnostics = list(), na_exclusions = list()
-                ),
-                file.path(out, "matches", paste0("mb_", batch, ".json")),
-                auto_unbox = TRUE
-            )
+            batches[[paste0("atoms", id, "_", replicate)]] <- treatment
         }
     }
+    write_fixture_matches(out, batches)
 
     run_script("03_summarize_results.R", config_path)
     atom_status <- read.csv(file.path(out, "results_atom_status.csv"))
     atom_reps <- read.csv(file.path(out, "results_by_atom_replicate_year.csv"))
     parent_reps <- read.csv(file.path(out, "results_by_site_replicate_year.csv"))
     summary <- fromJSON(file.path(out, "results_summary.json"))
-    expect_equal(summary$atom_results_schema_version, 1)
+    expect_equal(summary$atom_results_schema_version, 2)
     expect_equal(summary$atom_run_id, "kpi-job-42")
     expect_true(is.integer(summary$n_replicates))
     expect_type(atom_reps$is_intervention_period, "logical")
@@ -259,8 +305,22 @@ test_that("atom outputs require complete replicate domains and reconcile parent 
     )
     expect_equal(
         setNames(atom_status$status, atom_status$atomic_id),
-        c("101" = "estimated", "102" = "failed", "201" = "estimated", "301" = "not_applicable")
+        c("101" = "partial", "102" = "failed", "201" = "estimated", "301" = "not_applicable")
     )
+    # Coverage counts eligible pixels in included strata, not every forest
+    # pixel of an atom that has an estimate: atom 101 loses its unstable
+    # stratum, and atom 102 matched in one of two replicates.
+    by_atom <- atom_status[match(c("101", "102", "201", "301"), atom_status$atomic_id), ]
+    expect_equal(by_atom$n_eligible_pixels, c(10, 5, 8, 0))
+    expect_equal(by_atom$n_supported_pixels, c(5, 0, 8, 0))
+    expect_equal(by_atom$forest_coverage_fraction, c(0.5, 0, 1, 0))
+    expect_equal(by_atom$treatment_arm, c("census", NA, "census", NA))
+    expect_match(by_atom$status_reason[1], "50% of the atom's baseline forest")
+    expect_match(by_atom$status_reason[2], "at least 80% of replicates")
+    site_status <- read.csv(file.path(out, "results_site_status.csv"))
+    expect_equal(site_status$forest_coverage_fraction[site_status$site_id == "A"], 5 / 20)
+    expect_equal(summary$coverage$n_represented_pixels, 13)
+    expect_equal(summary$estimator$min_replicate_share, 0.8)
     expect_false(any(atom_reps$atomic_id == 102))
     expect_true(all(c("run_id", "atomic_id", "site_id", "replicate", "year",
                       "is_intervention_period",
@@ -285,11 +345,174 @@ test_that("atom outputs require complete replicate domains and reconcile parent 
     )
 })
 
+fixture_pair <- function(id, k, group, weight = 10, control_loss = 1) {
+    # One treatment pixel losing 1 point a year and its matched control.
+    tibble(
+        cell = c(1L, 2L) + 10L * match(group, c("kept", "dropped", "guarded")),
+        treatment = c(TRUE, FALSE), group = group, match_group = paste0(group, "_1"),
+        match_weight = 1, sampling_weight = weight,
+        area_ha = 100, total_biomass_2000 = 100, fc_2000 = 100, x1 = 0, pscore = 0.5,
+        n_eligible = 20, n_sampled = 2, n_control_pool = 100, n_control_sampled = 10,
+        id_numeric = id, replicate = k, n_forest_pixels = 30L
+    ) %>% bind_cols(bind_rows(forest_cover(1, 1), forest_cover(1, control_loss)))
+}
+
+test_that("a stratum matched in 80% of replicates is kept and its missing replicate filled", {
+    data_dir <- tempfile("ae_share_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 5)
+    out <- file.path(data_dir, "output")
+    batches <- list()
+    for (k in 1:5) {
+        # "kept" matches in 4 of 5 replicates, "dropped" in 3 of 5; the control
+        # loses more forest in later replicates.
+        m <- bind_rows(
+            if (k <= 4) fixture_pair(1L, k, "kept", control_loss = k),
+            if (k <= 3) fixture_pair(1L, k, "dropped", control_loss = 9)
+        )
+        if (nrow(m)) batches[[paste0("u1_b", k)]] <- m
+    }
+    write_fixture_matches(out, batches)
+    run_script("03_summarize_results.R", config_path)
+    totals <- read.csv(file.path(out, "results_by_site_total.csv"))
+    reps <- read.csv(file.path(out, "results_by_site_replicate_total.csv")) %>% arrange(replicate)
+    detail <- read.csv(file.path(out, "results_pixel_year_emissions.csv"))
+    summary <- fromJSON(file.path(out, "results_summary.json"))
+    expect_equal(reps$replicate, 1:5)
+    # 3 intervention years, 10 eligible pixels of 100 ha, control losing k points a year.
+    expect_equal(reps$extrapolated_control_defor_ha, c(30, 60, 90, 120, 75))
+    expect_equal(reps$extrapolated_control_defor_ha[5], mean(reps$extrapolated_control_defor_ha[1:4]))
+    expect_true(all(reps$extrapolated_treatment_defor_ha == 30))
+    expect_equal(totals$extrapolated_control_defor_ha, 75)
+    expect_equal(totals$n_represented_pixels, 10)
+    expect_equal(sort(unique(detail$cell)), c(11, 12))
+    expect_true(any(summary$methodology_warnings$code == "inconsistent_strata"))
+    expect_match(summary$methodology_warnings$message[
+        summary$methodology_warnings$code == "inconsistent_strata"], "fewer than 80% of replicates")
+})
+
+test_that("a low match rate is not expanded over unmatched pixels", {
+    data_dir <- tempfile("ae_guard_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)
+    out <- file.path(data_dir, "output")
+    # 100 eligible pixels, 10 sampled, 1 matched: a 10% match rate.
+    guarded <- fixture_pair(1L, 1L, "guarded", weight = 100, control_loss = 3) %>%
+        mutate(cell_n_eligible = if_else(treatment, 100, NA_real_),
+               cell_n_sampled = if_else(treatment, 10, NA_real_))
+    write_fixture_matches(out, list(u1_b1 = guarded))
+    run_script("03_summarize_results.R", config_path)
+    totals <- read.csv(file.path(out, "results_by_site_total.csv"))
+    detail <- read.csv(file.path(out, "results_pixel_year_emissions.csv"))
+    # The matched pixel stands for the 10 sampled-and-matchable pixels in 100
+    # (eligible / sampled = 10), not for all 100.
+    expect_equal(totals$n_represented_pixels, 10)
+    expect_equal(totals$extrapolated_control_defor_ha, 10 * totals$sample_control_defor_ha)
+    expect_equal(totals$extrapolated_treatment_defor_ha, 10 * totals$sample_treatment_defor_ha)
+    expect_true(all(detail$sampling_weight == 10))
+    expect_equal(totals$status, "partial")
+})
+
+test_that("summary rejects match outputs of another estimator", {
+    data_dir <- tempfile("ae_estimator_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)
+    out <- file.path(data_dir, "output")
+    m <- fixture_pair(1L, 1L, "kept")
+    write_fixture_matches(out, list(u1_b1 = m))
+    write_parquet(m, file.path(out, "matches", "mb_u1_b1.parquet"))
+    expect_error(run_script("03_summarize_results.R", config_path), "lacks cell counts")
+    write_fixture_matches(out, list(u1_b1 = m))
+    sidecar_path <- file.path(out, "matches", "mb_u1_b1.json")
+    sidecar <- fromJSON(sidecar_path, simplifyVector = FALSE)
+    sidecar$compatibility <- list(task_id = "test", matching_policy = "shared_support_v1")
+    write_json(sidecar, sidecar_path, auto_unbox = TRUE, digits = NA)
+    expect_error(run_script("03_summarize_results.R", config_path), "another estimator version")
+    sidecar$compatibility$estimator_version <- ESTIMATOR_VERSION
+    write_json(sidecar, sidecar_path, auto_unbox = TRUE, digits = NA)
+    run_script("03_summarize_results.R", config_path)
+    expect_equal(fromJSON(file.path(out, "results_summary.json"))$estimator$version, 2)
+})
+
+test_that("atom runs sample every atom and take observed loss from the census", {
+    data_dir <- tempfile("ae_census_")
+    config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
+    out <- file.path(data_dir, "output")
+    sites <- read_parquet(file.path(out, "sites_processed.parquet"))
+    atoms <- list(A = c("101", "102", "103"), B = "201", C = "301")
+    sites$ae_atoms <- vapply(sites$site_id, function(site) {
+        toJSON(list(run_id = "census-run", atoms = lapply(atoms[[site]], function(id) {
+            list(atomic_id = id, geometry = list(type = "Polygon", coordinates = list()))
+        })), auto_unbox = TRUE)
+    }, character(1))
+    write_parquet(sites, file.path(out, "sites_processed.parquet"))
+    # Atom 102 is a single pixel inside fragment 1, which is larger than the cap.
+    key <- read_parquet(file.path(out, "treatment_cell_key.parquet")) %>%
+        group_by(id_numeric) %>%
+        mutate(site_id = c("A", "A", "B", "C")[id_numeric],
+               atomic_id = c("101", "103", "201", "301")[id_numeric],
+               atomic_id = if_else(id_numeric == 1 & row_number() == 1, "102", atomic_id)) %>%
+        ungroup()
+    write_parquet(key, file.path(out, "treatment_cell_key.parquet"))
+    forest <- read_parquet(file.path(out, "treatment_pixels.parquet")) %>% select(cell, fc_2008)
+    key %>%
+        left_join(forest, by = "cell") %>%
+        group_by(site_id, atomic_id) %>%
+        summarise(n_site_pixels = n(), n_forest_pixels = sum(fc_2008 > 0), .groups = "drop") %>%
+        write_parquet(file.path(out, "ae_atom_counts.parquet"))
+    config <- fromJSON(config_path, simplifyVector = FALSE)
+    config$caliper_width <- 0
+    write_json(config, config_path, auto_unbox = TRUE)
+    run_script("02_perform_matching.R", config_path)
+    matches <- read_batches(out)
+    drawn <- matches %>% filter(treatment, id_numeric == 1) %>% count(replicate, atomic_id)
+    expect_equal(drawn$atomic_id, rep(c("101", "102"), 2))
+    weights <- matches %>% filter(treatment) %>%
+        group_by(id_numeric, replicate, atomic_id) %>%
+        summarise(represented = sum(sampling_weight), eligible = cell_n_eligible[1], .groups = "drop")
+    expect_equal(weights$represented, weights$eligible)
+    census <- unlist(lapply(read_sidecars(out), `[[`, "treatment_census"), recursive = FALSE)
+    by_id <- setNames(census, vapply(census, function(x) as.character(x$id_numeric), ""))
+    expect_setequal(names(by_id), as.character(1:4))
+    pixels_of <- function(id) vapply(by_id[[id]]$cells, function(cell) cell$n_pixels, numeric(1))
+    expect_setequal(pixels_of("1"), c(29, 1))
+    expect_equal(pixels_of("3"), 29)
+    expect_length(by_id[["4"]]$cells, 0)
+
+    run_script("03_summarize_results.R", config_path)
+    atom_status <- read.csv(file.path(out, "results_atom_status.csv"))
+    by_atom <- atom_status[match(c(101, 102, 103, 201, 301), atom_status$atomic_id), ]
+    expect_equal(by_atom$status, c(rep("estimated", 4), "failed"))
+    expect_equal(by_atom$n_supported_pixels, c(29, 1, 30, 29, 0))
+    expect_equal(by_atom$n_forest_pixels, c(29, 1, 30, 29, 30))
+    expect_equal(by_atom$forest_coverage_fraction, c(1, 1, 1, 1, 0))
+    expect_true(all(by_atom$treatment_arm[1:4] == "census"))
+    # Every treatment pixel loses one point of 100 ha a year, so the observed
+    # loss of a cell is exactly its eligible pixel count in every replicate.
+    atom_reps <- read.csv(file.path(out, "results_by_atom_replicate_year.csv"))
+    one <- filter(atom_reps, atomic_id == 102)
+    expect_equal(nrow(one), 2 * 8)
+    expect_true(all(one$extrapolated_treatment_defor_ha == 1))
+    site_reps <- read.csv(file.path(out, "results_by_site_replicate_year.csv"))
+    expect_true(all(site_reps$extrapolated_treatment_defor_ha[site_reps$site_id == "B"] == 29))
+    expect_true(all(site_reps$extrapolated_treatment_defor_ha[site_reps$site_id == "A"] == 60))
+    summary <- fromJSON(file.path(out, "results_summary.json"))
+    check <- summary$treatment_census_check
+    expect_equal(check$sampled_treatment_defor_ha, check$census_treatment_defor_ha)
+    expect_equal(check$census_treatment_defor_ha[check$site_id == "B"], 29 * 8)
+    # Both arms start fully forested and lose one point a year before 2014.
+    stock <- summary$baseline_stock_balance
+    expect_equal(stock$treatment_baseline_forest_ha[stock$site_id == "B"], 2900)
+    expect_equal(stock$control_baseline_forest_ha, stock$treatment_baseline_forest_ha)
+    expect_equal(stock$control_baseline_biomass_mg, stock$treatment_baseline_biomass_mg)
+    pre <- summary$pre_intervention_check
+    expect_equal(pre$pre_treatment_defor_ha[pre$site_id == "B"], 29 * 5)
+    expect_equal(pre$pre_control_defor_ha, pre$pre_treatment_defor_ha)
+})
+
 test_that("summary preserves cell IDs across integer and integer64 match files", {
     data_dir <- tempfile("ae_cell_types_")
     config_path <- make_fixture(data_dir, "nearest", n_replicates = 1)
     out <- file.path(data_dir, "output")
     cells <- list(1:2, bit64::as.integer64(c("2316608818", "4798800599")))
+    batches <- list()
     for (id in 1:2) {
         m <- tibble(
             cell = cells[[id]], treatment = c(TRUE, FALSE),
@@ -300,12 +523,9 @@ test_that("summary preserves cell IDs across integer and integer64 match files",
             n_control_pool = 100, n_control_sampled = 10,
             id_numeric = id, replicate = 1L, n_forest_pixels = 30L
         ) %>% bind_cols(forest_cover(2, 1))
-        batch <- paste0("cells", id)
-        write_parquet(m, file.path(out, "matches", paste0("mb_", batch, ".parquet")))
-        write_json(list(batch = batch, matches_file = paste0("mb_", batch, ".parquet"),
-                        failures = list(), diagnostics = list(), na_exclusions = list()),
-                   file.path(out, "matches", paste0("mb_", batch, ".json")), auto_unbox = TRUE)
+        batches[[paste0("cells", id)]] <- m
     }
+    write_fixture_matches(out, batches)
     run_script("03_summarize_results.R", config_path)
     expected_cells <- c(1, 2, 2316608818, 4798800599)
     for (name in c("pixel_year_emissions", "pixel_covariates", "propensity_scores", "pixel_locations")) {
@@ -337,6 +557,7 @@ test_that("invalid outcomes exclude the entire site and preserve other sites", {
     data_dir <- tempfile("ae_invalid_outcomes_")
     config_path <- make_fixture(data_dir, "nearest", n_replicates = 2)
     out <- file.path(data_dir, "output")
+    batches <- list()
     for (id in 1:3) {
         for (k in 1:2) {
             m <- tibble(
@@ -349,13 +570,10 @@ test_that("invalid outcomes exclude the entire site and preserve other sites", {
                 id_numeric = id, replicate = k, n_forest_pixels = 30L
             ) %>% bind_cols(forest_cover(2, 1))
             if (id == 2 && k == 2) m$total_biomass_2000[2] <- -9999
-            batch <- paste0("u", id, "_b", k)
-            write_parquet(m, file.path(out, "matches", paste0("mb_", batch, ".parquet")))
-            write_json(list(batch = batch, matches_file = paste0("mb_", batch, ".parquet"),
-                            failures = list(), diagnostics = list(), na_exclusions = list()),
-                       file.path(out, "matches", paste0("mb_", batch, ".json")), auto_unbox = TRUE)
+            batches[[paste0("u", id, "_b", k)]] <- m
         }
     }
+    write_fixture_matches(out, batches)
     log <- run_script("03_summarize_results.R", config_path)
     result_files <- list.files(out, "^results_.*\\.(csv|json)$", full.names = TRUE)
     baseline <- lapply(result_files, function(path) {
@@ -400,10 +618,7 @@ test_that("summary succeeds when the first and only matched site has invalid out
         n_control_pool = 100, n_control_sampled = 10,
         id_numeric = 1L, replicate = 1L, n_forest_pixels = 30L
     ) %>% bind_cols(forest_cover(2, 1))
-    write_parquet(m, file.path(out, "matches", "mb_invalid.parquet"))
-    write_json(list(batch = "invalid", matches_file = "mb_invalid.parquet",
-                    failures = list(), diagnostics = list(), na_exclusions = list()),
-               file.path(out, "matches", "mb_invalid.json"), auto_unbox = TRUE)
+    write_fixture_matches(out, list(invalid = m))
     run_script("03_summarize_results.R", config_path)
     status <- read.csv(file.path(out, "results_site_status.csv"))
     summary <- fromJSON(file.path(out, "results_summary.json"))

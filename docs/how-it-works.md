@@ -42,8 +42,9 @@ and counterfactual emissions are 400 and 900 MgCO2e respectively, estimated
 avoided emissions are **900 - 400 = 500 MgCO2e**.
 
 These illustrative numbers are already weighted totals. Real analyses compute
-emissions from each pixel's forest loss and biomass, then apply matching and
-sampling weights to the pixel outcomes.
+emissions from each pixel's forest loss and biomass. Observed loss is summed
+over every eligible treatment pixel; counterfactual loss applies matching and
+sampling weights to the matched controls.
 
 A negative estimate means treatment loss or emissions exceeded the matched
 counterfactual. Report it transparently; it does not by itself establish that
@@ -55,8 +56,9 @@ Matching improves comparability on measured characteristics. Treatment
 assignment remains observational, so unmeasured drivers, inappropriate time
 periods, poor overlap, or spillovers can still bias results.
 
-Estimates represent eligible pixels in strata matched in every replicate,
-which may cover part of the submitted site. Repeated matching measures
+Estimates represent eligible pixels in strata matched in at least 80% of
+replicates, which may cover part of the submitted site. They are not scaled up
+to the rest of it. Repeated matching measures
 sampling and matching variability. Its ranges omit other scientific
 uncertainty and should not be interpreted as confidence intervals.
 

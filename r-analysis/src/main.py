@@ -103,7 +103,10 @@ def _collect_results(output_dir, task_id, log):
         "methodology_warnings": summary["methodology_warnings"],
         "portfolio": summary["portfolio"],
     }
-    for key in ("atom_results_schema_version", "atom_run_id"):
+    for key in (
+        "atom_results_schema_version", "atom_run_id", "estimator", "coverage",
+        "treatment_census_check", "baseline_stock_balance", "pre_intervention_check",
+    ):
         if key in summary:
             summary_dict[key] = summary[key]
     diagnostics_path = os.path.join(

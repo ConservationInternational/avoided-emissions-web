@@ -115,17 +115,23 @@ test_that("shared support narrows controls before either matcher without rescali
 })
 
 test_that("a later GLM failure within partial success replays its exact warning on either resume path", {
-    t <- tibble(cell = 1:5, admin = c(1, 1, 1, 2, 2), loss = 0,
-                x = c(0, 1, 0.125, 0, 1), atomic_id = c("1", "1", "2", "1", "1"))
-    c <- tibble(cell = 101:106, admin = rep(1:2, each = 3), loss = 0, x = rep(c(-2, 0, 2), 2))
-    f <- paste0("treatment ~ I({ if (any(x == 0.125)) ",
-                "warning('glm.fit: fitted probabilities numerically 0 or 1 occurred'); x })")
-    # Select a seed omitting atom 2 in the first sample but hitting it in the second.
+    # Atom 1 has 60 pixels in stratum 1, so 50 are sampled; one of them lies so
+    # far from the controls that, when drawn, its fitted probability is 1 and
+    # the propensity model is rejected.  Atom 2 has a single pixel there.
+    rare <- 1e4
+    t <- tibble(cell = 1:63, admin = c(rep(1, 61), 2, 2), loss = 0,
+                x = c(rare, rep(c(0, 1), length.out = 59), 0.5, 0, 1),
+                atomic_id = c(rep("1", 60), "2", "1", "1"))
+    c <- tibble(cell = 101:183, admin = c(rep(1, 80), rep(2, 3)), loss = 0,
+                x = c(seq(-2, 2, length.out = 80), -2, 0, 2))
+    f <- "treatment ~ x"
+    # Select a seed omitting the rare pixel in the first sample but drawing it in the second.
     seed <- which(vapply(1:100, function(seed) {
         sampled_rare <- function(k) {
             set.seed(bitwXor(seed, bitwXor(bitwShiftL(1L, 10L), k)))
-            p <- sample_strata(mutate(t, treatment = TRUE, group = admin), 2L, 10L)
-            any(p$atomic_id == "2")
+            p <- sample_strata(mutate(t, treatment = TRUE, group = admin), 2L, 10L,
+                               MIN_CELL_SAMPLE)
+            any(p$x == rare)
         }
         !sampled_rare(1L) && sampled_rare(2L)
     }, logical(1)))[1]
@@ -146,8 +152,12 @@ test_that("a later GLM failure within partial success replays its exact warning 
         by_group <- function(item, group) Filter(function(g) g$group == group, item$group_diagnostics)[[1]]
         first <- by_group(items[[1]], "1")
         expect_false(first$glm_failed)
-        omitted <- Filter(function(a) a$atomic_id == "2", first$atoms)[[1]]
-        expect_equal(omitted$cause, "not_sampled")
+        # Sampling by atom draws the one-pixel atom in every replicate.
+        for (item in items) {
+            single <- Filter(function(a) a$atomic_id == "2", by_group(item, "1")$atoms)[[1]]
+            expect_equal(single$n_sampled, 1)
+        }
+        expect_equal(first$counts$sampled$treatment, 51)
         failed <- by_group(items[[2]], "1")
         expect_equal(failed$reason_code, "glm_warning")
         expect_true(failed$glm_failed)

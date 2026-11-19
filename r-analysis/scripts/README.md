@@ -77,25 +77,38 @@ For each site fragment:
    (forest cover change from `start_year - 6` to `start_year - 1`).
 3. For each replicate, sample up to `max_treatment_pixels` treatment pixels
    and `control_multiplier` controls per sampled treatment pixel in each
-   stratum. With `shared_support_controls: true`, first restrict controls
+   stratum. Atom-enabled inputs are sampled by atom: atoms of at most
+   `MIN_CELL_SAMPLE` (50) eligible pixels in full, larger atoms at least that
+   many, so every atom is drawn in every replicate. With `shared_support_controls: true`, first restrict controls
    jointly to values of direct numeric covariates constant across all eligible
    treatment in that stratum. Treatment and atom memberships are unchanged;
    the flag defaults to true. Set it to false to retain legacy control
    selection. Resumed workflows keep their frozen policy.
 4. In each stratum, choose the distance:
    - fewer than `min_glm_treatment_pixels` treatment pixels: Mahalanobis;
-   - separation (detected before fitting, or GLM non-convergence / fitted
-     probabilities of 0 or 1): Mahalanobis without the separating variables
-     if `separation_fallback_mahalanobis` is set, otherwise the stratum is
-     not matched;
+   - separation (detected before fitting, or a GLM that errors, does not
+     converge, or fits a *treatment* pixel at probability 0 or 1): Mahalanobis
+     without the separating variables if `separation_fallback_mahalanobis` is
+     set, otherwise the stratum is not matched. Controls fitted at 0 do not
+     reject the fit;
    - otherwise: logistic propensity score, with a caliper of `caliper_width`
      SDs of the linear predictor.
 5. Match with `optmatch` (`optimal`: k:1 pair matching or full matching) or
    `MatchIt` (`nearest`: greedy k:1). Control weights in each matched set sum
-   to the number of treated pixels. Stratum weights
-   `n_eligible / n_matched` scale results to eligible pixels in that stratum.
-   Summary includes only strata matched in every replicate, including in
-   the pixel-level downloads and balance diagnostics.
+   to the number of treated pixels. Cell weights `n_eligible / n_matched`
+   scale results to the eligible pixels of each cell (an atom within the
+   stratum, or the stratum).
+6. Sum the observed outcomes of every eligible treatment pixel by cell and
+   write this census to the batch sidecar.
+
+Summary includes cells matched in at least `MIN_REPLICATE_SHARE` (80%) of
+replicates, filling a missing replicate with the cell's mean; takes observed
+loss from the census; and does not expand over unmatched pixels where a
+cell's match rate is below `MIN_MATCH_RATE` (50%). The same cells and weights
+are used in the pixel-level downloads and balance diagnostics. The constants
+live in `stats_functions.R` with `ESTIMATOR_VERSION`; raise the version when
+sampling, weighting or inclusion changes, so that older match outputs are
+rejected instead of mixed with new ones.
 
 ## Reconciliation and summary
 

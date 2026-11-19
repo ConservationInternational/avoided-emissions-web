@@ -525,25 +525,38 @@ def _build_overview(task, sites, totals, quality_warnings=None):
             t.extrapolated_emissions_avoided_mgco2e or 0 for t in totals
         )
         total_forest = sum(t.extrapolated_forest_loss_avoided_ha or 0 for t in totals)
-        forest_lower = [
-            _summary_number(
-                getattr(t, "extrapolated_forest_loss_avoided_ha_ci_lower", None)
-            )
-            for t in totals
-        ]
-        forest_upper = [
-            _summary_number(
-                getattr(t, "extrapolated_forest_loss_avoided_ha_ci_upper", None)
-            )
-            for t in totals
-        ]
+        # The portfolio range is the quantiles of the summed replicates.  Site
+        # bounds cannot be added: quantiles of sums are not sums of quantiles.
+        metadata = task.extra_metadata or {}
+        portfolio_total = (metadata.get("portfolio") or {}).get("total") or {}
+        forest_lower = _summary_number(
+            portfolio_total.get("extrapolated_forest_loss_avoided_ha_ci_lower")
+        )
+        forest_upper = _summary_number(
+            portfolio_total.get("extrapolated_forest_loss_avoided_ha_ci_upper")
+        )
         forest_range = (
             html.Small(
                 f"Range across matching replicates: "
-                f"{sum(forest_lower):,.0f} to {sum(forest_upper):,.0f} ha",
+                f"{forest_lower:,.0f} to {forest_upper:,.0f} ha",
                 className="text-muted",
             )
-            if all(value is not None for value in forest_lower + forest_upper)
+            if forest_lower is not None and forest_upper is not None
+            else None
+        )
+        # Totals describe the forest the estimates represent, not every site.
+        coverage = metadata.get("coverage") or {}
+        represented = _summary_number(coverage.get("n_represented_pixels"))
+        forest_pixels = _summary_number(coverage.get("n_forest_pixels"))
+        coverage_note = (
+            dbc.Alert(
+                f"Totals represent {represented / forest_pixels:.0%} of the "
+                "baseline forest pixels in the submitted sites. They are not "
+                "scaled up to the remaining forest.",
+                color="warning" if represented / forest_pixels < 0.8 else "light",
+                className="py-2 mb-3",
+            )
+            if represented is not None and forest_pixels
             else None
         )
         total_area = sum(t.area_ha or 0 for t in totals)
@@ -613,6 +626,8 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                 className="mb-3",
             )
         )
+        if coverage_note is not None:
+            cards.append(coverage_note)
 
     # --- Matching statistics boxes -------------------------------------------
     if task.status == "succeeded":

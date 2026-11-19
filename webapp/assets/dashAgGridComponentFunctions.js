@@ -75,6 +75,17 @@ dagcomponentfuncs.TaskParams = function (props) {
     );
 };
 
+dagcomponentfuncs.TaskElapsed = function (props) {
+    var value = props.value;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        return "\u2014";
+    }
+    var seconds = Math.floor(value);
+    return String(Math.floor(seconds / 3600)).padStart(2, "0") + ":" +
+        String(Math.floor(seconds / 60) % 60).padStart(2, "0") + ":" +
+        String(seconds % 60).padStart(2, "0");
+};
+
 dagcomponentfuncs.TaskProgress = function (props) {
     var value = props.value;
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {

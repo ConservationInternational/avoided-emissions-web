@@ -82,6 +82,11 @@ other matching restrictions.
 Maximum treatment pixels sampled without replacement per exact-match stratum
 of each site fragment. Each stratum has its own cap.
 
+For atom-enabled inputs the sample is drawn by atom. An atom with 50 or fewer
+eligible pixels in a stratum is sampled in full and every larger atom
+contributes at least 50, so a stratum holding many atoms can draw more than
+the cap.
+
 Larger samples can improve representation and increase optimal-matching
 runtime. Review sampling fractions and match rates to see how many treatment
 pixels obtained matches.
@@ -201,8 +206,9 @@ interpreted as confidence intervals.
 With one replicate there is no informative between-replicate range.
 Fewer than 50 replicates gives imprecise bounds and triggers a warning.
 
-Only strata matched in every replicate contribute to the estimates. More
-replicates increase cost and may expose inconsistent strata.
+A stratum (for atom-enabled inputs, an atom within a stratum) contributes when
+it matched in at least 80% of replicates. A replicate in which it did not
+match takes its mean over the others. More replicates increase cost.
 
 ## Random seed
 

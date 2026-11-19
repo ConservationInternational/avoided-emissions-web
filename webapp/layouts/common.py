@@ -127,6 +127,18 @@ TASK_LIST_COLUMNS = [
         "sortable": True,
     },
     {
+        "headerName": "Resolution",
+        "field": "resolution_m",
+        "flex": 0.7,
+        "minWidth": 110,
+        "filter": "agNumberColumnFilter",
+        "sortable": True,
+        "headerTooltip": "Analysis resolution (metres)",
+        "valueFormatter": {
+            "function": "params.value === 1000 ? '1 km' : params.value + ' m'"
+        },
+    },
+    {
         "headerName": "Params",
         "field": "params",
         "flex": 0.6,
@@ -169,6 +181,16 @@ TASK_LIST_COLUMNS = [
         "filter": "agTextColumnFilter",
         "cellStyle": {**TRUNCATED_CELL, "fontSize": "12px"},
         "cellRenderer": "LocalDateTime",
+    },
+    {
+        "headerName": "Elapsed",
+        "field": "elapsed_seconds",
+        "flex": 0.8,
+        "minWidth": 115,
+        "sortable": True,
+        "filter": "agNumberColumnFilter",
+        "headerTooltip": "Time since submission (HH:MM:SS); numeric filters use seconds",
+        "cellRenderer": "TaskElapsed",
     },
     {
         "headerName": "Completed",

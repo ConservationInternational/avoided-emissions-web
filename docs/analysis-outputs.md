@@ -179,7 +179,8 @@ replicate in the batch (absent when nothing in the batch matched)
 | `group` | character | Exact-match stratum |
 | `match_group` | character | Matched set identifier, prefixed with the stratum |
 | `match_weight` | numeric | 1 for treatment; controls in a set sum to the number of treated pixels in it |
-| `sampling_weight` | numeric | `n_eligible / n_matched` for the pixel's stratum |
+| `sampling_weight` | numeric | `n_eligible / n_matched` for the treatment pixel's cell in this replicate (a control takes the mean over the treatment pixels of its matched set). Step 3 replaces it once inclusion is known across replicates |
+| `cell_n_eligible`, `cell_n_sampled` | integer | Eligible and sampled treatment pixels of the cell (the atom within the stratum, or the stratum); empty for controls |
 | `pscore` | numeric | Fitted propensity score (`NA` for Mahalanobis matching) |
 | `area_ha` | numeric | Cell area (ha) |
 | `total_biomass_2000` | numeric | Unmasked year-2000 whole-cell biomass density (Mg/ha) |
@@ -231,8 +232,9 @@ reasons remain compatible.
 Atom breakdowns do not create extra model attempts. Atom-inclusion records
 retain every declared atom, including zero-grid atoms, with sampled/matched
 replicates, missing domains, upstream attempt references, and a final inclusion
-reason. An atom sampled but unmatched is distinct from an atom never sampled;
-an otherwise successful match excluded by the consistency rule is also
+reason. Every atom with eligible pixels is sampled in every replicate, so an
+atom without estimates was either never eligible, never matched, or matched in
+too few replicates; a successful match excluded by the replicate rule is
 identifiable. `atom_run_id` is the KPI job/export ID, not the AE task ID.
 Original-site membership belongs to the downstream KPI export: join by
 `(run_id, atomic_id)` there to assess impact on overlapping/non-owning sites.
@@ -258,9 +260,11 @@ unchanged. Standalone summary also produces these artifacts.
 
 Summary files are produced by `03_summarize_results.R` (with diagnostic exports
 handled separately by `04_export_diagnostics.R` in Nextflow) and written to
-`{results_s3_uri}`. An exact-match stratum of a site fragment is included
-only when it was matched in every replicate; site results sum their included
-strata and fragments. Pixel-level downloads use the same inclusion rule.
+`{results_s3_uri}`. A cell (an atom within one exact-match stratum of a site
+fragment, or the whole stratum without atoms) is included when it matched in
+at least 80% of replicates; site results sum their included cells. Pixel-level
+downloads use the same inclusion rule and the final weights (see
+[matching.md](matching.md#sampling-weights-and-coverage)).
 If any matched pixel has invalid outcome inputs, the entire affected site is
 excluded from estimates and flagged as failed; other sites are still summarized.
 The first detected failure per site is recorded in the summary worker and driver
@@ -319,11 +323,11 @@ pre-intervention years
 | `n_eligible_pixels` | integer | Treatment pixels eligible for matching |
 | `n_sample_pixels` | integer | Matched treatment pixels (mean across replicates) |
 | `sampled_fraction` | numeric | Sampled / eligible treatment pixels |
-| `n_represented_pixels` | numeric | Eligible treatment pixels in strata matched in every replicate |
+| `n_represented_pixels` | numeric | Eligible treatment pixels the estimates stand for: those of included cells, or their matched share where the match rate is below 50% |
 | `coverage_fraction` | numeric | Represented / all treatment pixels |
 | `n_forest_pixels` | numeric | Pixels with forest at baseline in matched fragments |
 | `forest_coverage_fraction` | numeric | Represented / forest pixels |
-| `status` | string | `estimated`, or `partial` when `forest_coverage_fraction` < 0.8 or a matched fragment failed |
+| `status` | string | `estimated`, or `partial` when `forest_coverage_fraction` < 0.8, a matched fragment failed, or a cell's match rate was below 50% |
 | `match_rate` | numeric | Matched / sampled treatment pixels |
 | `n_control_pool`, `n_control_sampled` | numeric | Control pixel counts |
 
@@ -351,7 +355,7 @@ Bounds in the other files cannot be summed.
 | `n_site_pixels` | integer | All pixels in the site |
 | `status` | string | `estimated`, `partial`, `failed` (including invalid outcome inputs), or `not_applicable` (no exact-match region, or no forest at baseline) |
 | `n_forest_pixels`, `coverage_fraction`, `forest_coverage_fraction` | numeric | As in `results_by_site_total.csv`; empty for sites without estimates |
-| `status_reason` | string | Reasons of the fragments that were not included |
+| `status_reason` | string | Reasons of the fragments that were not included, or the share of baseline forest represented for a `partial` site |
 
 ---
 
@@ -363,7 +367,7 @@ Bounds in the other files cannot be summed.
 |---|---|---|
 | `cell`, `site_id`, `year`, `treatment` | | Pixel, site, year, and group |
 | `id_numeric`, `group` | integer, string | Site fragment and exact-match stratum |
-| `match_group`, `match_weight`, `sampling_weight` | | Matching and stratum weights |
+| `match_group`, `match_weight`, `sampling_weight` | | Matching weight and the final cell expansion factor used in the totals |
 | `forest_loss_ha` | numeric | Forest lost during the year (ha) |
 | `emissions_mgco2e` | numeric | Emissions from that loss (MgCO₂e) |
 
@@ -375,7 +379,10 @@ Bounds in the other files cannot be summed.
 
 Columns: `site_id`, `cell`, `treatment`, `match_group`, `match_weight`, and
 one column per matching covariate (including `defor_pre_intervention` when
-used).
+used). It also carries
+`baseline_forest_ha` and `baseline_biomass_mg`, the forest area and biomass the
+pixel held at the site's baseline year. These are not matching covariates; they
+feed `baseline_stock_balance` in `results_summary.json`.
 
 ---
 
@@ -479,13 +486,32 @@ Task-level summary: `n_sites`, `n_failed_sites` (distinct sites with a
 failed fragment), `n_not_applicable_sites`, `n_partial_sites`, `n_replicates`,
 `bounds_label`, extrapolated and sample totals, `total_area_ha`,
 `year_range`, `failed_sites`, `worker_failures`, `subsampled_sites`,
-`na_exclusion_summary`, `methodology_warnings`, `group_diagnostics`, and
-`portfolio`. `portfolio.yearly` holds the all-site series plotted by the web
+`na_exclusion_summary`, `methodology_warnings`, `group_diagnostics`,
+`portfolio`, `estimator`, `coverage` and `treatment_census_check`. `portfolio.yearly` holds the all-site series plotted by the web
 app (`treatment_defor_ha`, `control_defor_ha`, `forest_loss_avoided_ha`,
 `emissions_avoided_mgco2e`, `treatment_emissions_mgco2e`,
 `control_emissions_mgco2e`, `cum_treatment_defor_ha`,
 `cum_control_defor_ha`, their bounds, and `n_sites`); `portfolio.total`
-holds the all-site totals and bounds.
+holds the all-site totals and bounds. Only `portfolio.total` gives a valid
+range for the task total: site bounds cannot be added.
+
+- `estimator`: `version` and the fixed rules `min_cell_sample` (50),
+  `min_replicate_share` (0.8) and `min_match_rate` (0.5).
+- `coverage`: `n_site_pixels`, `n_forest_pixels`, `n_eligible_pixels` and
+  `n_represented_pixels` over all sites. Totals describe the represented
+  pixels only.
+- `treatment_census_check`: per site, the observed loss from the census
+  (`census_treatment_defor_ha`) beside the expanded matched sample
+  (`sampled_treatment_defor_ha` and its standard error across replicates),
+  over all years. The two should agree within sampling error.
+- `baseline_stock_balance`: per site, the forest area and biomass that the
+  matched treatment pixels and their controls held at the site's baseline
+  year, weighted as in the estimates (replicate 1). Outcomes are absolute
+  hectares and tonnes, so the two arms should hold similar stock; a ratio far
+  from 1 means they could not lose the same amount whatever their loss rates.
+- `pre_intervention_check`: per site, treatment and counterfactual forest loss
+  summed over the years before the intervention. These should be close: a
+  difference in those years cannot be an effect of the intervention.
 
 ---
 
@@ -513,18 +539,39 @@ stratum, separation without the fallback, or no feasible match):
     }
   ],
   "diagnostics": [{"id_numeric": 8, "replicate": 1, "group_diagnostics": [ ... ]}],
-  "na_exclusions": [ ... ]
+  "na_exclusions": [ ... ],
+  "treatment_census": [
+    {
+      "id_numeric": 8,
+      "site_id": "SITE_DEF",
+      "years": [2010, 2011],
+      "cells": [
+        {"group": "12.34.0", "atomic_id": "501", "n_pixels": 412, "area_ha": 2190.5,
+         "loss_ha": [3.1, 0.4], "emissions_mgco2e": [1620.0, 211.5]}
+      ]
+    }
+  ]
 }
 ```
+
+`treatment_census` holds, for each fragment a worker processed, the observed
+annual forest loss and emissions summed over every eligible treatment pixel of
+each cell. It does not vary by replicate, so one copy per worker is written.
+Step 3 uses it for the observed arm and as the roster of eligible cells. A
+fragment whose census finds invalid outcome inputs carries an `error` instead
+of `cells`, and its site is excluded.
 
 `reason` is `no_eligible_treatment` (no forest at baseline; reported as
 not applicable), `no_overlap`, `no_matches`, or `error`.
 
 If the R process crashes, the Python wrapper writes
 `matches/failed_array_{step}_{index}.json` with the array index and error,
-without attributing it to a site. Step 3 reports every fragment without
-output for every replicate as failed, using the marker's error when
-available.
+without attributing it to a site. Step 3 reports every fragment without an
+included cell as failed, using the marker's error when available.
+
+Match outputs record the estimator version that wrote them. Step 3 refuses
+outputs from another version, and matching refuses to resume from them: a
+task started under an older estimator must be resubmitted.
 
 ---
 
@@ -546,8 +593,10 @@ $$\text{emissions}_t = (\text{biomass}_{t-1} - \text{biomass}_t) \times 0.5 \tim
   results and task metadata.
 
 Avoided emissions are the weighted control emissions minus the treatment
-emissions. Extrapolated values multiply each matched pixel by its stratum's
-`sampling_weight`.
+emissions. Extrapolated control values multiply each matched control by its
+`sampling_weight`. Extrapolated treatment values are the census over every
+eligible treatment pixel of the included cells (the weighted matched sample
+where a cell's match rate is below 50%).
 
 ---
 

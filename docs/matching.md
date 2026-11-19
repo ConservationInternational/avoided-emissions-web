@@ -221,7 +221,8 @@ Otherwise, the distance used within each exact-match stratum is chosen as follow
    reliably with so few positives.
 2. **Separation** — detected before fitting (a factor level, or one side of a
    numeric or binary covariate's range, present in only one group) or while
-   fitting (the GLM does not converge or fits probabilities of 0 or 1).
+   fitting (the GLM errors, does not converge, or gives a *treatment* pixel a
+   fitted probability numerically 0 or 1, meaning no control resembles it).
    - With `separation_fallback_mahalanobis = true`, the stratum is matched on
      Mahalanobis distance with the separating variables removed.
    - With `false`, the stratum is not matched and the reason is recorded in
@@ -230,6 +231,15 @@ Otherwise, the distance used within each exact-match stratum is chosen as follow
    model.
 
 For Mahalanobis matching no caliper is applied and `pscore` is `NA`.
+
+A fit that pushes only *control* pixels to a fitted probability of 0 is
+accepted. Those controls are unlike every treatment pixel and are never chosen
+as matches. R's warning "fitted probabilities numerically 0 or 1 occurred" is
+kept in the diagnostics for such fits, with the number of treatment and
+control pixels at each bound, but it does not stop the match. Controls far
+from the site widen the spread of the linear predictor, and with it a caliper
+expressed in standard deviations; judge these matches by their covariate
+balance.
 
 ### Shared-support controls
 
@@ -253,13 +263,13 @@ after selection can be omitted from the fitted formula because their equality
 is enforced by control selection. The requested control multiplier is a
 sampling ceiling, not a minimum required pool size. Strata without remaining
 controls are explicitly unmatchable. GLM separation handling, calipers,
-control-distance exclusions, and all-replicate inclusion rules are unchanged.
+control-distance exclusions, and replicate inclusion rules are unchanged.
 
 Atoms retain their identity. The model and restriction remain at the existing
 parent fragment/stratum level. Constancy in one atom or one random sample does
-not establish constancy across the eligible treatment stratum. Small atoms may
-be unsampled in some replicates.
-Atom-level diagnostics distinguish that sampling omission from model failure.
+not establish constancy across the eligible treatment stratum. Every atom with
+eligible pixels is sampled in every replicate (see
+[Pixel Sampling Limits](#pixel-sampling-limits)).
 
 Both policies produce versioned diagnostics for every replicate, including
 failed strata in partly successful fragments. See
@@ -289,11 +299,14 @@ and model uncertainty, so they are not confidence intervals for avoided
 emissions. Fewer than 50 replicates gives imprecise bounds; the web app shows
 a warning.
 
-An exact-match stratum of a site fragment is included only if it has matches
-in every replicate. This keeps the represented population constant across
-replicates. Excluded strata produce an `inconsistent_strata` warning; a fragment
-with no consistently matched stratum is reported as failed. Pixel downloads
-and balance diagnostics use the same included strata as the estimates.
+Estimates are built from **cells**: an atom within one exact-match stratum of
+a site fragment, or the whole stratum when the input has no atoms. A cell is
+included when it has matches in at least 80% of the replicates. In a replicate
+where an included cell did not match, it takes its own mean over the
+replicates where it did, so every replicate total covers the same population.
+Strata with no included cell produce an `inconsistent_strata` warning; a
+fragment with none is reported as failed. Pixel downloads and balance
+diagnostics use the same included cells as the estimates.
 
 Runtime scales approximately linearly with `n_replicates`.
 
@@ -336,6 +349,17 @@ matching at that scale can be computationally infeasible. When a stratum exceeds
 (without replacement). The `sampled_fraction` column in the results records
 what fraction of treatment pixels were used.
 
+For atom-enabled inputs the subsample is drawn by atom, so that every atom has
+its own sample in every replicate:
+
+- An atom with 50 or fewer eligible pixels in the stratum is sampled in full.
+- Every larger atom contributes at least 50 pixels.
+- What is left of `max_treatment_pixels` is shared among the larger atoms in
+  proportion to their remaining pixels.
+
+The minimum takes precedence over the cap, so a stratum holding many small
+atoms can draw somewhat more than `max_treatment_pixels`.
+
 The sampled control pool for each stratum has up to
 `sampled treatment count × control_multiplier` eligible control pixels.
 This is a ceiling, not a required minimum or the final matching ratio.
@@ -362,19 +386,43 @@ distance is used instead.
 
 ### Sampling Weights and Coverage
 
-Totals are scaled to **eligible treatment pixels in consistently matched
-strata**. In each included exact-match stratum, matched treatment pixels
-(and their controls) are weighted by
-`n_eligible / n_matched`. This assumes treatment pixels dropped by the
-caliper resemble matched ones. Pixels that are not eligible (no forest at
-baseline, missing data, or no shared stratum) are not represented. Nor are
-pixels in strata that could not be matched in every replicate.
+Totals describe **eligible treatment pixels in included cells**, and nothing
+else. They are never divided by coverage or multiplied by site area to stand
+for the rest of a site.
+
+**Expansion.** In each included cell, matched treatment pixels and their
+controls are weighted by `n_eligible / n_matched`, counted for that cell and
+replicate. A control matched to treatment pixels of several cells carries each
+cell's own factor for its share.
+
+**Observed loss.** The observed (treatment) loss of an included cell is not
+estimated from the sample. It is the sum over every eligible treatment pixel
+of the cell, so it has no sampling error and is the same in every replicate.
+The expanded sample is kept as a check: `treatment_census_check` in
+`results_summary.json` compares it with the census for each site.
+
+**Low match rates.** Expanding by `n_eligible / n_matched` assumes that
+unmatched treatment pixels resemble matched ones. Where fewer than 50% of a
+cell's sampled pixels match on average, that assumption is not made: the cell
+is weighted by `n_eligible / n_sampled`, both arms come from the matched
+sample, only the matched share of the cell counts as represented, and the
+result is marked `partial`.
+
+**What is not represented.** Pixels that are not eligible (no forest at
+baseline, missing data, or no shared stratum), pixels of cells matched in fewer
+than 80% of replicates, and the unmatched share of low-match-rate cells.
 
 Per-site results report `n_treatment_pixels` (all site pixels),
-`n_eligible_pixels`, `n_represented_pixels` (eligible pixels in included
-strata), `n_sample_pixels` (matched), `coverage_fraction`
-(represented / all site pixels), and `match_rate` (matched / sampled). The web app
-warns when either fraction is below 80%.
+`n_eligible_pixels`, `n_represented_pixels` (eligible pixels the estimates
+stand for), `n_sample_pixels` (matched), `coverage_fraction`
+(represented / all site pixels), `forest_coverage_fraction` (represented /
+baseline forest pixels) and `match_rate` (matched / sampled). A site or atom
+below 80% forest coverage is `partial`. The web app warns when a fraction is
+below 80% and shows the share of baseline forest that the task totals
+represent.
+
+The thresholds (50 pixels per atom, 80% of replicates, 50% match rate) are
+fixed and are written to `results_summary.json` under `estimator`.
 
 ### Batch work allocation
 

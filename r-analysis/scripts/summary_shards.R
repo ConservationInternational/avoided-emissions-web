@@ -3,7 +3,7 @@ summary_state_fields <- c(
     "results_by_year", "unused_fragments", "failed_fragments", "site_status",
     "n_failed_sites", "n_inconsistent_strata", "worker_failures", "diagnostics",
     "fragment_markers", "atom_enabled", "atom_metadata", "atom_declarations",
-    "metric_cols", "cov_data", "na_records"
+    "metric_cols", "cov_data", "na_records", "census_agreement", "stock_balance"
 )
 
 read_summary_states <- function(paths) {
@@ -15,7 +15,7 @@ read_summary_states <- function(paths) {
     for (field in c(
         "sites", "site_counts", "site_year_rep", "site_total_rep", "results_total",
         "results_by_year", "unused_fragments", "failed_fragments", "site_status",
-        "atom_declarations", "cov_data"
+        "atom_declarations", "cov_data", "census_agreement", "stock_balance"
     )) {
         result[[field]] <- dplyr::bind_rows(lapply(states, `[[`, field))
     }

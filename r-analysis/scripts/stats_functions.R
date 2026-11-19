@@ -9,6 +9,19 @@ CO2_PER_CARBON <- 44 / 12
 PRE_INTERVENTION_YEARS <- 5
 MATCH_DIAGNOSTICS_SCHEMA_VERSION <- 1L
 
+# Estimator contract shared by matching and summary.  Raise ESTIMATOR_VERSION
+# whenever sampling, weighting or inclusion changes: match outputs written by
+# another version are then rejected instead of being mixed with new ones.
+ESTIMATOR_VERSION <- 2L
+ATOM_RESULTS_SCHEMA_VERSION <- 2L
+# Treatment pixels sampled from each atom cell (an atom within one exact-match
+# stratum of one fragment).  Smaller cells are sampled in full.
+MIN_CELL_SAMPLE <- 50L
+# A cell is estimated when it matched in at least this share of replicates.
+MIN_REPLICATE_SHARE <- 0.8
+# Below this mean match rate a cell is not expanded over its unmatched pixels.
+MIN_MATCH_RATE <- 0.5
+
 
 # -- Timing ------------------------------------------------------------------
 
@@ -65,15 +78,49 @@ restrict_shared_support <- function(d, f) {
     )
 }
 
-sample_strata <- function(vals, max_treatment, control_multiplier) {
+sample_quota <- function(n_eligible, cap, min_cell) {
+    # Treatment pixels to draw from each cell of one stratum.  Cells of at
+    # most `min_cell` pixels are taken in full; larger cells get `min_cell`
+    # plus a share of what is left of `cap` in proportion to their remaining
+    # size.  The minimum takes precedence, so many small cells can exceed `cap`.
+    if (sum(n_eligible) <= cap) return(n_eligible)
+    quota <- pmin(n_eligible, min_cell)
+    spare <- n_eligible - quota
+    left <- cap - sum(quota)
+    if (left > 0 && sum(spare) > 0) {
+        quota <- quota + pmin(spare, floor(left * spare / sum(spare)))
+    }
+    quota
+}
+
+
+sample_strata <- function(vals, max_treatment, control_multiplier, min_cell = 0L) {
     # Sample up to max_treatment treatment pixels per exact-match stratum and
-    # control_multiplier controls per sampled treatment pixel.
+    # control_multiplier controls per sampled treatment pixel.  With
+    # `min_cell` > 0 and atom identities, the treatment sample is stratified
+    # by atom (see sample_quota) so that every atom is sampled in every draw.
     treated <- vals %>%
         filter(treatment) %>%
-        slice_sample(prop = 1) %>%
-        group_by(group) %>%
-        filter(row_number() <= max_treatment) %>%
-        ungroup()
+        slice_sample(prop = 1)
+    if (min_cell > 0 && "atomic_id" %in% names(vals)) {
+        quota <- treated %>%
+            count(group, atomic_id, name = "n_eligible") %>%
+            group_by(group) %>%
+            mutate(quota = sample_quota(n_eligible, max_treatment, min_cell)) %>%
+            ungroup() %>%
+            select(-n_eligible)
+        treated <- treated %>%
+            inner_join(quota, by = c("group", "atomic_id")) %>%
+            group_by(group, atomic_id) %>%
+            filter(row_number() <= quota) %>%
+            ungroup() %>%
+            select(-quota)
+    } else {
+        treated <- treated %>%
+            group_by(group) %>%
+            filter(row_number() <= max_treatment) %>%
+            ungroup()
+    }
     n_treated <- count(treated, group, name = "n_treated")
     controls <- vals %>%
         filter(!treatment) %>%
@@ -94,6 +141,38 @@ set_match_weights <- function(d) {
     n_c <- ave(as.numeric(!d$treatment), d$match_group, FUN = sum)
     d$match_weight <- ifelse(d$treatment, 1, n_t / n_c)
     d
+}
+
+
+cell_columns <- function(d) {
+    # A cell is an atom within one exact-match stratum, or the whole stratum
+    # when the input carries no atoms.
+    if ("atomic_id" %in% names(d)) c("group", "atomic_id") else "group"
+}
+
+
+cell_key <- function(d, by = cell_columns(d)) {
+    do.call(paste, c(lapply(by, function(v) as.character(d[[v]])), sep = "\r"))
+}
+
+
+apply_cell_weights <- function(m, weights) {
+    # Set `sampling_weight` on matched pixels from `weights`, one row per cell
+    # with the factor that scales its matched treatment pixels to the cell's
+    # eligible pixels.  A control takes the mean factor of the treatment
+    # pixels in its matched set, so control and treatment weights stay equal
+    # within every set.  Treatment pixels of cells without a factor are
+    # dropped, with any set left without treatment.
+    by <- intersect(cell_columns(m), names(weights))
+    factors <- setNames(weights$sampling_weight, cell_key(weights, by))
+    t <- m$treatment
+    m$sampling_weight <- NA_real_
+    m$sampling_weight[t] <- unname(factors[cell_key(m[t, , drop = FALSE], by)])
+    m <- m[!m$treatment | !is.na(m$sampling_weight), , drop = FALSE]
+    t <- m$treatment
+    set_factor <- tapply(m$sampling_weight[t], m$match_group[t], mean)
+    m$sampling_weight[!t] <- unname(set_factor[as.character(m$match_group[!t])])
+    set_match_weights(m[!is.na(m$sampling_weight), , drop = FALSE])
 }
 
 
@@ -256,14 +335,18 @@ covariate_diagnostics <- function(d, f) {
 
 
 fit_propensity <- function(f, d) {
-    # Preserve the existing rejection criterion, not "any GLM warning".
+    # Fit the propensity model and reject it when it errors, does not
+    # converge, or gives a treatment pixel a fitted probability numerically 0
+    # or 1.  Controls fitted at 0 are merely unlike the site and would never
+    # be chosen as matches, so glm's "fitted probabilities numerically 0 or 1"
+    # warning is recorded but does not reject the fit on their account.
     lp <- NULL
     model <- NULL
     warned <- FALSE
     phase <- "fit"
     captured <- capture_match_conditions(withCallingHandlers({
         model <- glm(f, data = d, family = binomial())
-        if (!warned && isTRUE(model$converged)) {
+        if (isTRUE(model$converged)) {
             phase <- "predict"
             lp <- predict(model, type = "link")
         }
@@ -272,22 +355,29 @@ fit_propensity <- function(f, d) {
             warned <<- TRUE
         }
     }))
+    treated_fit <- if (is.null(model)) logical(0) else {
+        d$treatment[match(rownames(model$model), rownames(d))]
+    }
+    eps <- 10 * .Machine$double.eps  # glm.fit's warning boundary
+    treatment_at_bound <- warned && !is.null(model) && any(
+        model$fitted.values[treated_fit] < eps | model$fitted.values[treated_fit] > 1 - eps
+    )
     cause <- if (!is.null(captured$error)) {
         "glm_error"
     } else if (!isTRUE(model$converged)) {
         "glm_nonconvergence"
-    } else if (warned) {
+    } else if (treatment_at_bound) {
         "glm_warning"
     } else NULL
+    if (!is.null(cause)) lp <- NULL
     by_arm <- function(x, probabilities = FALSE) {
         if (is.null(x)) return(NULL)
         # Align the model frame to sampled treatment, including fits that
         # subsequently fail on prediction.
-        treated <- d$treatment[match(rownames(model$model), rownames(d))]
+        treated <- treated_fit
         arm <- function(y) {
             out <- arm_summary(y)
             if (probabilities) {
-                eps <- 10 * .Machine$double.eps  # glm.fit's warning boundary
                 y <- y[is.finite(y)]
                 out$n_one <- sum(y == 1)
                 out$n_near_zero <- sum(y < eps)
@@ -299,7 +389,7 @@ fit_propensity <- function(f, d) {
     }
     coefs <- if (!is.null(model)) coef(model) else NULL
     list(
-        model = model, lp = lp, separated = warned || (!is.null(model) && !model$converged),
+        model = model, lp = lp, separated = !is.null(cause),
         cause = cause, diagnostics = list(
             warnings = captured$warnings, error = captured$error,
             error_phase = if (!is.null(captured$error)) phase else NULL,
@@ -496,11 +586,12 @@ aggregate_atom_outcomes <- function(m, outcomes) {
     if (nrow(treated) == 0) return(tibble())
     atom_shares <- treated %>%
         group_by(match_group, atomic_id) %>%
-        summarise(atom_share_weight = sum(match_weight), .groups = "drop") %>%
+        summarise(atom_share_weight = sum(match_weight),
+                  cell_weight = sampling_weight[1], .groups = "drop") %>%
         group_by(match_group) %>%
         mutate(atom_share = atom_share_weight / sum(atom_share_weight)) %>%
         ungroup() %>%
-        select(match_group, atomic_id, atom_share)
+        select(match_group, atomic_id, atom_share, cell_weight)
     controls <- indexed %>%
         filter(!treatment) %>%
         select(-atomic_id) %>%
@@ -508,13 +599,15 @@ aggregate_atom_outcomes <- function(m, outcomes) {
     if (nrow(controls) == 0 && any(!m$treatment)) {
         stop("Matched controls could not be attributed to treatment atoms.")
     }
+    # The share of a control attributed to an atom is expanded with that
+    # atom's cell factor, not the mean factor of the control's matched set.
     expanded <- bind_rows(
-        treated %>% mutate(atom_share = 1),
+        treated %>% mutate(atom_share = 1, cell_weight = sampling_weight),
         controls
     ) %>%
         mutate(
             sample_weight = match_weight * atom_share,
-            extrapolation_weight = sample_weight * sampling_weight
+            extrapolation_weight = sample_weight * cell_weight
         )
 
     bind_rows(lapply(seq_along(outcomes$years), function(i) {
@@ -547,6 +640,99 @@ aggregate_atom_outcomes <- function(m, outcomes) {
                 .groups = "drop"
             )
     }))
+}
+
+
+cell_inclusion <- function(attempts, n_replicates,
+                           min_share = MIN_REPLICATE_SHARE, min_match_rate = MIN_MATCH_RATE) {
+    # Decide, across replicates, which cells are estimated and how they are
+    # expanded.  `attempts` has one row per cell and replicate in which the
+    # cell matched, with its eligible, sampled and matched treatment pixels.
+    #
+    # A cell is included when it matched in at least `min_share` of the
+    # replicates.  With a mean match rate of at least `min_match_rate` its
+    # matched pixels stand for every eligible pixel (factor eligible / matched)
+    # and its observed loss can be taken from the census.  Otherwise unmatched
+    # pixels are not assumed to resemble matched ones: the factor is eligible /
+    # sampled and only the matched share of the cell is supported.
+    keys <- c("id_numeric", "group", "atomic_id")
+    attempts <- attempts[attempts$n_matched > 0, , drop = FALSE]
+    cells <- attempts %>%
+        group_by(across(all_of(keys))) %>%
+        summarise(
+            n_distinct_eligible = n_distinct(n_eligible),
+            n_eligible = n_eligible[1],
+            n_replicates_matched = n_distinct(replicate),
+            match_rate = mean(n_matched / n_sampled),
+            mean_matched = mean(n_matched), mean_sampled = mean(n_sampled),
+            .groups = "drop"
+        )
+    if (any(cells$n_distinct_eligible != 1L)) {
+        stop("Eligible treatment pixels of a cell differ between replicates")
+    }
+    cells <- cells %>%
+        select(-n_distinct_eligible) %>%
+        mutate(
+            included = n_eligible > 0 &
+                n_replicates_matched >= ceiling(min_share * n_replicates - 1e-9),
+            census_arm = included & match_rate >= min_match_rate,
+            n_supported = case_when(
+                !included ~ 0,
+                census_arm ~ as.numeric(n_eligible),
+                TRUE ~ n_eligible * match_rate
+            )
+        )
+    factors <- attempts %>%
+        inner_join(select(filter(cells, included), all_of(keys), census_arm), by = keys) %>%
+        transmute(
+            across(all_of(keys)), replicate, census_arm,
+            sampling_weight = n_eligible / if_else(census_arm, n_matched, n_sampled)
+        )
+    list(cells = cells, factors = factors)
+}
+
+
+fill_missing_replicates <- function(df, by, replicates, metrics) {
+    # Give every `by` group one row per replicate.  A replicate in which an
+    # included cell did not match takes the cell's mean over the replicates in
+    # which it did, so every replicate total covers the same population.
+    if (nrow(df) == 0) return(df)
+    expected <- cross_join(distinct(df, across(all_of(by))), tibble(replicate = replicates))
+    missing <- anti_join(expected, df, by = c(by, "replicate"))
+    if (nrow(missing) == 0) return(df)
+    means <- df %>%
+        group_by(across(all_of(by))) %>%
+        summarise(across(all_of(metrics), mean), .groups = "drop")
+    bind_rows(df, inner_join(missing, means, by = by))
+}
+
+
+treatment_census <- function(vals, start_year, fc_year_min, fc_year_max) {
+    # Observed annual forest loss and emissions summed over every eligible
+    # treatment pixel of each cell: the exact treatment arm, free of sampling
+    # error.  Returns one record per cell with its pixel count, area and
+    # year-ordered sums.
+    treated <- vals[vals$treatment, , drop = FALSE]
+    if (nrow(treated) == 0) return(list(years = integer(), cells = list()))
+    outcomes <- pixel_outcomes(treated, start_year, fc_year_min, fc_year_max)
+    by <- cell_columns(treated)
+    keys <- cell_key(treated, by)
+    first <- !duplicated(keys)
+    cell <- match(keys, keys[first])
+    loss <- rowsum(outcomes$loss_ha, cell)
+    emissions <- rowsum(outcomes$emissions, cell)
+    area <- rowsum(treated$area_ha, cell)
+    n <- tabulate(cell)
+    cells <- treated[first, by, drop = FALSE]
+    list(
+        years = outcomes$years,
+        cells = lapply(seq_len(nrow(cells)), function(i) c(
+            lapply(as.list(cells[i, , drop = FALSE]), as.character),
+            list(n_pixels = n[i], area_ha = unname(area[i, 1]),
+                 loss_ha = as.list(unname(loss[i, ])),
+                 emissions_mgco2e = as.list(unname(emissions[i, ])))
+        ))
+    )
 }
 
 

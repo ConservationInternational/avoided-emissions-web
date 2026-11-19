@@ -102,7 +102,20 @@ def test_overview_shows_forest_loss_avoided_range_and_correct_co2_label(monkeypa
     text = [c for c in _walk(component) if isinstance(c, str)]
 
     assert "Total Avoided Emissions (MgCO₂e)" in text
-    assert "Range across matching replicates: 10 to 18 ha" in text
+    # Site bounds (10 to 18 when added) are not a range for the total.
+    assert not any("Range across matching replicates" in value for value in text)
+
+    task.extra_metadata = {
+        "portfolio": {"total": {
+            "extrapolated_forest_loss_avoided_ha_ci_lower": 11,
+            "extrapolated_forest_loss_avoided_ha_ci_upper": 17,
+        }},
+        "coverage": {"n_forest_pixels": 300, "n_represented_pixels": 100},
+    }
+    component = _build_overview(task, [], totals)
+    text = [c for c in _walk(component) if isinstance(c, str)]
+    assert "Range across matching replicates: 11 to 17 ha" in text
+    assert any(value.startswith("Totals represent 33% of the baseline forest") for value in text)
 
 
 def test_upload_limits_are_visible_before_transfer_and_match_archive_validation():

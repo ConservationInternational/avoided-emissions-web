@@ -30,6 +30,8 @@ SCRIPTS = Path(os.environ.get("R_SCRIPTS_DIR", "/app/scripts"))
 # remainder absorbs solve-time variance and data loading.
 REPACK_BUDGET_FRACTION = 0.6
 DIAGNOSTICS_SCHEMA_VERSION = 1
+# Must equal ATOM_RESULTS_SCHEMA_VERSION in scripts/stats_functions.R.
+ATOM_RESULTS_SCHEMA_VERSION = 2
 GLM_REPLAY_CAUSES = {"glm_error", "glm_nonconvergence", "glm_warning"}
 DIAGNOSTIC_RESULTS = (
     "results_matching_diagnostics.jsonl.gz",
@@ -235,7 +237,9 @@ def fragment_identities(sites_path: Path, ids: set[int]) -> dict[str, dict]:
             "atom_run_id": json.loads(row["ae_atoms"])["run_id"]
             if row.get("ae_atoms") is not None
             else None,
-            "atom_results_schema_version": 1 if row.get("ae_atoms") is not None else None,
+            "atom_results_schema_version": (
+                ATOM_RESULTS_SCHEMA_VERSION if row.get("ae_atoms") is not None else None
+            ),
         }
     if set(result) != {str(id_) for id_ in ids}:
         raise ValueError("Expected fragments are missing from committed extraction")

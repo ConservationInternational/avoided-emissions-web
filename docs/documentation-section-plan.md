@@ -61,7 +61,7 @@ Explain:
 - Propensity-score estimation and matching algorithms.
 - Calipers, control ratios, and matched-set weights.
 - Shared-support restrictions and fallback behavior.
-- Sampling, replicates, and consistently included strata.
+- Sampling, replicates, and included strata.
 - Coverage, represented population, and scaling to treatment area.
 - Forest-loss and avoided-emissions calculations.
 

@@ -342,3 +342,147 @@ test_that("sample_strata caps treatment per stratum and scales controls", {
     counts <- count(s, group, treatment)
     expect_equal(counts$n, c(6, 2, 6, 2))
 })
+
+test_that("a propensity fit is rejected for treatment, not control, probabilities at the bounds", {
+    set.seed(1)
+    regular <- rep(c(0, 1), 25)
+    controls <- seq(-2, 2, length.out = 80)
+    arm <- rep(c(TRUE, FALSE), c(50, 80))
+    # Controls far from every treatment pixel are fitted at 0; they are not
+    # candidate matches, so the fit stands and its warning is kept.
+    far <- data.frame(treatment = c(arm, rep(FALSE, 20)),
+                      x = c(regular, controls, rep(-1e4, 20)))
+    fit <- fit_propensity(treatment ~ x, far)
+    expect_null(fit$cause)
+    expect_false(fit$separated)
+    expect_length(fit$lp, nrow(far))
+    expect_equal(fit$diagnostics$fitted_probabilities$control$n_near_zero, 20L)
+    expect_equal(fit$diagnostics$fitted_probabilities$treatment$n_near_one, 0L)
+    expect_match(fit$diagnostics$warnings[[1]]$message, "fitted probabilities numerically 0 or 1")
+    # A treatment pixel beyond all controls is fitted at 1: no control resembles it.
+    beyond <- data.frame(treatment = arm, x = c(1e4, regular[-1], controls))
+    fit <- fit_propensity(treatment ~ x, beyond)
+    expect_identical(fit$cause, "glm_warning")
+    expect_true(fit$separated)
+    expect_null(fit$lp)
+    expect_equal(fit$diagnostics$fitted_probabilities$treatment$n_near_one, 1L)
+})
+
+test_that("sampling by atom draws every atom and keeps small atoms whole", {
+    expect_equal(sample_quota(c(400, 100), cap = 100, min_cell = 0), c(80, 20))
+    expect_equal(sample_quota(c(940, 60, 3, 1), cap = 100, min_cell = 50), c(50, 50, 3, 1))
+    expect_equal(sample_quota(c(900, 100), cap = 200, min_cell = 50), c(144, 55))
+    expect_equal(sample_quota(c(30, 20), cap = 100, min_cell = 50), c(30, 20))
+    set.seed(3)
+    vals <- tibble(
+        treatment = rep(c(TRUE, FALSE), c(1004, 5000)),
+        group = factor("s"),
+        atomic_id = c(rep("big", 940), rep("mid", 60), rep("small", 3), "one", rep(NA, 5000))
+    )
+    for (i in 1:5) {
+        s <- sample_strata(vals, max_treatment = 100, control_multiplier = 2, min_cell = 50)
+        drawn <- count(filter(s, treatment), atomic_id)
+        expect_equal(setNames(drawn$n, drawn$atomic_id), c(big = 50, mid = 50, one = 1, small = 3))
+        expect_equal(sum(!s$treatment), 2 * 104)
+    }
+    # Without a minimum the stratum cap applies and a small atom can be missed.
+    legacy <- sample_strata(vals, max_treatment = 100, control_multiplier = 2)
+    expect_equal(sum(legacy$treatment), 100)
+})
+
+test_that("cell weights expand each atom to its own eligible pixels", {
+    m <- tibble(
+        cell = 1:6, treatment = rep(c(TRUE, FALSE), each = 3), group = "g",
+        atomic_id = c("a", "a", "b", NA, NA, NA),
+        match_group = rep(c("g_1", "g_2", "g_3"), 2)
+    ) %>% set_match_weights()
+    weights <- tibble(group = "g", atomic_id = c("a", "b"), sampling_weight = c(45, 10))
+    w <- apply_cell_weights(m, weights)
+    # 90 eligible pixels in atom a and 10 in atom b, not 50 each.
+    expect_equal(as.vector(tapply(w$sampling_weight[w$treatment], w$atomic_id[w$treatment], sum)),
+                 c(90, 10))
+    expect_equal(w$sampling_weight[!w$treatment], c(45, 45, 10))
+    # A cell without a factor is dropped together with its matched controls.
+    only_a <- apply_cell_weights(m, weights[1, ])
+    expect_equal(only_a$cell, c(1, 2, 4, 5))
+    # Without atoms the stratum is the cell.
+    plain <- apply_cell_weights(select(m, -atomic_id), tibble(group = "g", sampling_weight = 7))
+    expect_true(all(plain$sampling_weight == 7))
+})
+
+test_that("a control shared by two atoms is expanded with each atom's own factor", {
+    m <- tibble(
+        cell = 1:3, treatment = c(TRUE, TRUE, FALSE),
+        atomic_id = c("101", "102", NA_character_), group = "g", match_group = "g_set",
+        area_ha = 100, total_biomass_2000 = 100, fc_2000 = 100,
+        fc_2014 = 100, fc_2015 = c(100, 100, 90), fc_2016 = c(100, 100, 90)
+    ) %>%
+        set_match_weights() %>%
+        apply_cell_weights(tibble(group = "g", atomic_id = c("101", "102"),
+                                  sampling_weight = c(9, 1)))
+    atoms <- aggregate_atom_outcomes(m, pixel_outcomes(m, 2020, 2014, 2016)) %>%
+        filter(year == 2015)
+    # The control lost 10 ha; each atom's one pixel takes it as counterfactual.
+    expect_equal(atoms$extrapolated_control_defor_ha[atoms$atomic_id == "101"], 90)
+    expect_equal(atoms$extrapolated_control_defor_ha[atoms$atomic_id == "102"], 10)
+    expect_equal(atoms$sample_control_defor_ha, c(10, 10))
+})
+
+test_that("cells are included by replicate share and expanded by match rate", {
+    attempts <- bind_rows(
+        tibble(group = "kept", replicate = 1:4, n_eligible = 100, n_sampled = 50, n_matched = 40),
+        tibble(group = "dropped", replicate = 1:3, n_eligible = 100, n_sampled = 50, n_matched = 50),
+        tibble(group = "guarded", replicate = 1:5, n_eligible = 100, n_sampled = 50, n_matched = 10)
+    ) %>% mutate(id_numeric = 1L, atomic_id = NA_character_)
+    out <- cell_inclusion(attempts, n_replicates = 5, min_share = 0.8, min_match_rate = 0.5)
+    cells <- out$cells[match(c("kept", "dropped", "guarded"), out$cells$group), ]
+    expect_equal(cells$included, c(TRUE, FALSE, TRUE))
+    expect_equal(cells$n_replicates_matched, c(4, 3, 5))
+    expect_equal(cells$census_arm, c(TRUE, FALSE, FALSE))
+    # A low match rate supports only the matched share of the cell.
+    expect_equal(cells$n_supported, c(100, 0, 20))
+    factors <- out$factors %>% distinct(group, sampling_weight)
+    expect_equal(factors$sampling_weight[factors$group == "kept"], 100 / 40)
+    expect_equal(factors$sampling_weight[factors$group == "guarded"], 100 / 50)
+    expect_false("dropped" %in% factors$group)
+    attempts$n_eligible[1] <- 99
+    expect_error(cell_inclusion(attempts, 5), "differ between replicates")
+})
+
+test_that("a missing replicate takes the cell's mean over the others", {
+    df <- tibble(cell = c("a", "a", "a", "b", "b"), year = 2015L,
+                 replicate = c(1, 2, 4, 1, 2), value = c(1, 2, 6, 10, 20))
+    out <- fill_missing_replicates(df, c("cell", "year"), 1:4, "value") %>%
+        arrange(cell, replicate)
+    expect_equal(nrow(out), 8)
+    expect_equal(out$value[out$cell == "a"], c(1, 2, 3, 6))
+    expect_equal(out$value[out$cell == "b"], c(10, 20, 15, 15))
+    expect_equal(mean(out$value[out$cell == "a"]), mean(df$value[df$cell == "a"]))
+    expect_identical(fill_missing_replicates(df[1:2, ], c("cell", "year"), 1:2, "value"), df[1:2, ])
+})
+
+test_that("the treatment census sums every eligible treatment pixel by cell", {
+    vals <- tibble(
+        treatment = c(TRUE, TRUE, TRUE, FALSE), group = factor(c("g", "g", "h", "g")),
+        atomic_id = c("1", "2", "1", NA), area_ha = c(100, 50, 10, 100),
+        total_biomass_2000 = 100, fc_2000 = 100,
+        fc_2014 = 100, fc_2015 = c(90, 80, 100, 0), fc_2016 = c(90, 60, 50, 0)
+    )
+    census <- treatment_census(vals, 2020, 2014, 2016)
+    expect_equal(census$years, 2015:2016)
+    cells <- setNames(census$cells, vapply(census$cells, function(x) {
+        paste(x$group, x$atomic_id)
+    }, ""))
+    expect_setequal(names(cells), c("g 1", "g 2", "h 1"))
+    expect_equal(unlist(cells[["g 1"]]$loss_ha), c(10, 0))
+    expect_equal(unlist(cells[["g 2"]]$loss_ha), c(10, 10))
+    expect_equal(unlist(cells[["h 1"]]$loss_ha), c(0, 5))
+    expect_equal(cells[["g 2"]]$n_pixels, 1)
+    expect_equal(cells[["h 1"]]$area_ha, 10)
+    # Whole strata when the input has no atoms; the control never counts.
+    plain <- treatment_census(select(vals, -atomic_id), 2020, 2014, 2016)
+    g <- Filter(function(x) x$group == "g", plain$cells)[[1]]
+    expect_equal(g$n_pixels, 2)
+    expect_equal(unlist(g$loss_ha), c(20, 10))
+    expect_length(treatment_census(vals[4, ], 2020, 2014, 2016)$cells, 0)
+})

@@ -16,9 +16,11 @@
 # Output, one pair of files per batch (array element):
 #   - {matches_dir}/mb_{batch}.parquet  matched pixels of every fragment and
 #                                       replicate (id_numeric, replicate columns)
-#   - {matches_dir}/mb_{batch}.json     match diagnostics, failure markers and
-#                                       missing-data exclusions; written last,
-#                                       so its presence marks a complete batch
+#   - {matches_dir}/mb_{batch}.json     match diagnostics, failure markers,
+#                                       missing-data exclusions and the census
+#                                       of observed treatment outcomes by cell;
+#                                       written last, so its presence marks a
+#                                       complete batch
 
 library(dplyr, warn.conflicts = FALSE)
 library(optmatch)
@@ -186,11 +188,15 @@ format_formula <- function(f) paste(deparse(f, width.cutoff = 500L), collapse = 
 task_id <- if (is.null(config$task_id)) "" else as.character(config$task_id)
 code_files <- c("02_perform_matching.R", "stats_functions.R", "utils.R")
 code_md5 <- as.list(setNames(unname(tools::md5sum(file.path(scripts_dir, code_files))), code_files))
-atom_schema_version <- if (atom_enabled) 1L else NULL
+atom_schema_version <- if (atom_enabled) ATOM_RESULTS_SCHEMA_VERSION else NULL
+# Atom inputs are sampled by atom cell; other inputs keep one cell per stratum.
+MIN_CELL <- if (atom_enabled) MIN_CELL_SAMPLE else 0L
+CELL_COLS <- if (atom_enabled) c("group", "atomic_id") else "group"
 compatibility <- list(
     diagnostics_schema_version = MATCH_DIAGNOSTICS_SCHEMA_VERSION,
     matching_policy = MATCHING_POLICY, task_id = task_id, atom_run_id = atom_run_id,
     atom_results_schema_version = atom_schema_version,
+    estimator_version = ESTIMATOR_VERSION,
     atom_key_type = if (atom_enabled) {
         treatment_key_dataset$schema$GetFieldByName("atomic_id")$type$ToString()
     } else NULL,
@@ -204,7 +210,8 @@ compatibility <- list(
         forest_cover_years = as.list(FC_YEARS), max_treatment = MAX_TREATMENT,
         control_multiplier = CONTROL_MULTIPLIER, min_glm = MIN_GLM, ratio = MAX_CONTROLS,
         caliper_width = CALIPER_WIDTH, matching_method = MATCHING_METHOD,
-        separation_fallback = SEPARATION_FALLBACK, random_seed = RANDOM_SEED
+        separation_fallback = SEPARATION_FALLBACK, random_seed = RANDOM_SEED,
+        min_cell_sample = MIN_CELL
     ),
     code_md5 = code_md5
 )
@@ -462,7 +469,7 @@ match_stratum <- function(gd, f) {
                     separated = TRUE, sep_vars = character(0),
                     details = if (!is.null(fit$diagnostics$error)) {
                         fit$diagnostics$error$message
-                    } else "GLM did not converge or fitted probabilities of 0 or 1"
+                    } else "GLM did not converge or fitted treatment probabilities of 0 or 1"
                 )
             } else {
                 lp <- fit$lp
@@ -603,6 +610,7 @@ batch_out$matches <- list()
 batch_out$failures <- list()
 batch_out$diagnostics <- list()
 batch_out$na_exclusions <- list()
+batch_out$census <- list()
 append_to <- function(name, x) batch_out[[name]][[length(batch_out[[name]]) + 1L]] <- x
 
 attempt_keys <- function(records) lapply(records, function(d) d$attempt_key)
@@ -662,7 +670,8 @@ write_batch <- function(batch) {
                  c(batch_out$diagnostics, batch_out$failures),
                  `[[`, "expected_attempt_keys"), recursive = FALSE)),
              failures = batch_out$failures,
-             diagnostics = batch_out$diagnostics, na_exclusions = batch_out$na_exclusions),
+             diagnostics = batch_out$diagnostics, na_exclusions = batch_out$na_exclusions,
+             treatment_census = batch_out$census),
         tmp, auto_unbox = TRUE, null = "null", na = "null", digits = NA
     )
     if (!file.rename(tmp, paste0(stem, ".json"))) stop("Could not write ", stem, ".json")
@@ -673,6 +682,7 @@ begin_item <- function(na_exclusions) {
     batch_out$failures <- list()
     batch_out$diagnostics <- list()
     batch_out$na_exclusions <- na_exclusions
+    batch_out$census <- list()
 }
 
 commit_item <- function(id, k) {
@@ -855,8 +865,8 @@ process_site <- function(site, pixels, missing_exact, missing_extracted, n_site_
     no_overlap <- !any(vals$treatment) || !any(!vals$treatment)
     eligible <- vals %>%
         filter(treatment) %>%
-        count(group, name = "n_eligible") %>%
-        mutate(group = as.character(group))
+        mutate(group = as.character(group)) %>%
+        count(across(all_of(CELL_COLS)), name = "n_eligible")
     # Construct the roster independently of sampling, preserving input order in
     # the sampler (including legacy seeded results).
     pre_rows <- split(seq_len(nrow(vals)), vals$group, drop = TRUE)
@@ -913,6 +923,16 @@ process_site <- function(site, pixels, missing_exact, missing_extracted, n_site_
                                      this_f, declared_ids = zero_grid)
     }
     vals <- vals[retain, ]
+    # Observed outcomes of every eligible treatment pixel, by cell.  Invalid
+    # outcome inputs are reported to the summary, which excludes the site.
+    census <- tryCatch(
+        c(list(id_numeric = this_id, site_id = site$site_id),
+          treatment_census(vals, site$start_year, min(FC_YEARS), max(FC_YEARS))),
+        invalid_pixel_outcomes = function(e) {
+            list(id_numeric = this_id, site_id = site$site_id, error = conditionMessage(e))
+        }
+    )
+    census_pending <- TRUE
     keep_cols <- unique(c(
         "cell", "atomic_id", "treatment", "group", "match_group", "match_weight", "pscore",
         "area_ha", "total_biomass_2000", FC_COLS, setdiff(all.vars(this_f), "treatment")
@@ -945,6 +965,11 @@ process_site <- function(site, pixels, missing_exact, missing_extracted, n_site_
             }
             begin_item(na_exclusions)
         }
+        # One copy per worker suffices: the census does not vary by replicate.
+        if (census_pending) {
+            append_to("census", census)
+            census_pending <- FALSE
+        }
         item_timer <- proc.time()
         if (!is.null(RANDOM_SEED)) set.seed(replicate_seed(this_id, k))
         progress$current_item <- item_name(this_id, k)
@@ -963,7 +988,7 @@ process_site <- function(site, pixels, missing_exact, missing_extracted, n_site_
             sampled <- saved_sample$data
             restore_rng(saved_sample$rng)
         } else {
-            sampled <- sample_strata(vals, MAX_TREATMENT, CONTROL_MULTIPLIER)
+            sampled <- sample_strata(vals, MAX_TREATMENT, CONTROL_MULTIPLIER, MIN_CELL)
             saved_sample <- list(
                 data = sampled, rng = get_rng(), compatibility = compatibility,
                 item = progress$current_item, expected_attempt_keys = expected,
@@ -1012,17 +1037,31 @@ process_site <- function(site, pixels, missing_exact, missing_extracted, n_site_
             }
             next
         }
-        # Stratum weights scale matched treatment pixels (and their controls)
-        # to all eligible treatment pixels in the stratum.
+        # Cell weights scale matched treatment pixels (and their controls) to
+        # all eligible treatment pixels of the cell in this replicate.  The
+        # summary replaces them once inclusion is known across replicates.
         weights <- res$result %>%
             filter(treatment) %>%
-            count(group, name = "n_matched") %>%
-            inner_join(eligible, by = "group") %>%
+            count(across(all_of(CELL_COLS)), name = "n_matched") %>%
+            inner_join(eligible, by = CELL_COLS) %>%
+            inner_join(
+                sampled %>%
+                    filter(treatment) %>%
+                    mutate(group = as.character(group)) %>%
+                    count(across(all_of(CELL_COLS)), name = "n_sampled"),
+                by = CELL_COLS
+            ) %>%
             mutate(sampling_weight = n_eligible / n_matched)
         m <- res$result[, intersect(keep_cols, names(res$result))] %>%
             as_tibble() %>%
-            inner_join(select(weights, group, sampling_weight), by = "group") %>%
+            apply_cell_weights(weights)
+        # Treatment rows carry their cell's eligible and sampled counts, from
+        # which the summary decides inclusion and the final expansion factor.
+        cell_index <- match(cell_key(m, CELL_COLS), cell_key(weights, CELL_COLS))
+        m <- m %>%
             mutate(
+                cell_n_eligible = if_else(treatment, weights$n_eligible[cell_index], NA_integer_),
+                cell_n_sampled = if_else(treatment, weights$n_sampled[cell_index], NA_integer_),
                 id_numeric = this_id, site_id = site$site_id, replicate = k,
                 n_site_pixels = n_site_pixels,
                 n_forest_pixels = n_forest_pixels,

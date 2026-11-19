@@ -8,10 +8,15 @@ forest loss, with suitable overlap between treatment and controls.
 Unmeasured governance, tenure, enforcement, threats, and economic changes can
 violate that assumption. Treatment assignment remains observational.
 
-Results principally concern the eligible treatment population in consistently
-matched strata. Extrapolation within a stratum assumes unmatched treatment
-resembles matched treatment. Entirely unmatched strata cannot be recovered
-by larger weights.
+Results concern the eligible treatment population in included strata only, and
+report what share of baseline forest that is. Extrapolation within a stratum
+assumes unmatched treatment resembles matched treatment; it is not applied
+where fewer than 50% of sampled pixels match. Unmatched strata are left out,
+not recovered by larger weights, and totals are not scaled up to cover them.
+
+Outcomes are absolute hectares and tonnes. Baseline forest cover and biomass
+are matching covariates only if selected, and are not otherwise balanced
+between a treatment pixel and its control.
 
 ## Temporal leakage
 

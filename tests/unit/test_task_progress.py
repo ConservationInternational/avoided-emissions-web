@@ -2,6 +2,7 @@
 
 import runpy
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -58,7 +59,8 @@ def test_adoption_keeps_api_progress():
     assert task.progress == 40
 
 
-def test_task_list_passes_cached_percentage_to_renderer(mocker):
+@pytest.fixture
+def task_list_callbacks():
     callbacks = {}
 
     def callback(*args, **kwargs):
@@ -73,6 +75,21 @@ def test_task_list_passes_cached_percentage_to_renderer(mocker):
             callback=callback, clientside_callback=lambda *args, **kwargs: None
         )
     )
+    return callbacks
+
+
+@pytest.mark.parametrize(
+    "resolution_config,expected_resolution",
+    [
+        ({"resolution_m": 250}, 250),
+        ({"resolution_m": 1000}, 1000),
+        ({}, 1000),
+        ({"resolution_m": None}, 1000),
+    ],
+)
+def test_task_list_passes_cached_percentage_to_renderer(
+    mocker, task_list_callbacks, resolution_config, expected_resolution
+):
     user = SimpleNamespace(id=uuid.uuid4(), is_admin=False)
     task = AnalysisTask(
         id=uuid.uuid4(),
@@ -87,14 +104,16 @@ def test_task_list_passes_cached_percentage_to_renderer(mocker):
             "max_controls_per_treatment": 1,
             "exact_match_vars": ["admin1"],
             "nested": {"enabled": True},
+            **resolution_config,
         },
     )
     mocker.patch.object(registration, "get_current_user", return_value=user)
     get_tasks = mocker.patch.object(registration, "get_task_list", return_value=[task])
 
-    rows, columns, count = callbacks["refresh_task_list"](1, 0, False)
+    rows, columns, count = task_list_callbacks["refresh_task_list"](1, 0, False)
 
     assert rows[0]["progress"] == 42.5
+    assert rows[0]["resolution_m"] == expected_resolution
     assert rows[0]["params"] == {**task.config, "covariates": task.covariates}
     assert not {
         "max_treatment_pixels",
@@ -110,6 +129,47 @@ def test_task_list_passes_cached_percentage_to_renderer(mocker):
     )
     assert count == "Total: 1"
     get_tasks.assert_called_once_with(user_id=user.id)
+
+
+@pytest.mark.parametrize(
+    "status,has_submission,completion_seconds,expected",
+    [
+        ("succeeded", True, 90061, 90061),
+        ("failed", True, 0, 0),
+        ("cancelled", True, 60, 60),
+        ("running", True, None, 360001),
+        ("submitted", True, None, 360001),
+        ("failed", True, None, None),
+        ("cancelled", True, None, None),
+        ("pending", False, None, None),
+        ("running", False, None, None),
+    ],
+)
+def test_task_list_elapsed_uses_submission_and_stops_at_completion(
+    mocker, task_list_callbacks, status, has_submission, completion_seconds, expected
+):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    mocker.patch.object(registration, "datetime").now.return_value = start + timedelta(
+        seconds=360001
+    )
+    user = SimpleNamespace(id=uuid.uuid4(), is_admin=False)
+    task = AnalysisTask(
+        id=uuid.uuid4(),
+        name="Analysis",
+        status=status,
+        submitted_at=start if has_submission else None,
+        completed_at=(
+            start + timedelta(seconds=completion_seconds)
+            if completion_seconds is not None
+            else None
+        ),
+    )
+    mocker.patch.object(registration, "get_current_user", return_value=user)
+    mocker.patch.object(registration, "get_task_list", return_value=[task])
+
+    rows, _, _ = task_list_callbacks["refresh_task_list"](1, 0, False)
+
+    assert rows[0]["elapsed_seconds"] == expected
 
 
 def test_progress_migration_preserves_existing_tasks_and_can_be_reversed():

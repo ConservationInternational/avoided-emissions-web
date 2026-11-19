@@ -603,7 +603,8 @@ class WorkflowTests(unittest.TestCase):
         for stratum in ("a", "b"):
             groups.append({
                 **contract, "id_numeric": 1, "replicate": 1, "site_id": "a",
-                "sub_site_index": 0, "atom_run_id": "atoms", "atom_results_schema_version": 1,
+                "sub_site_index": 0, "atom_run_id": "atoms",
+                "atom_results_schema_version": worker.ATOM_RESULTS_SCHEMA_VERSION,
                 "task_id": "task", "group": stratum, "attempt_key": stratum,
                 "cause": "glm_warning",
                 "replay": {
@@ -620,7 +621,7 @@ class WorkflowTests(unittest.TestCase):
             **contract, "atom_run_id": "atoms",
             "compatibility": {
                 **contract, "task_id": "task", "atom_run_id": "atoms",
-                "atom_results_schema_version": 1,
+                "atom_results_schema_version": worker.ATOM_RESULTS_SCHEMA_VERSION,
             },
             "matches_file": None, "expected_attempt_keys": ["a", "b"], "failures": [item],
         }
@@ -718,7 +719,8 @@ class WorkflowTests(unittest.TestCase):
         params, _, sidecar, _ = self.replay_fixture()
         contract = worker.workflow_contract(params)
         fragment = {
-            "atom_run_id": "atoms", "atom_results_schema_version": 1,
+            "atom_run_id": "atoms",
+            "atom_results_schema_version": worker.ATOM_RESULTS_SCHEMA_VERSION,
             "site_id": "a", "sub_site_index": 0,
         }
         for field, value, error in (

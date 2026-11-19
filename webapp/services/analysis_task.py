@@ -1484,6 +1484,8 @@ _SUMMARY_METADATA = (
     "methodology_warnings",
     "portfolio",
 )
+# Estimator rules and the forest the totals represent; absent from older results.
+_OPTIONAL_SUMMARY_METADATA = ("estimator", "coverage")
 
 
 class ResultImportError(ValueError):
@@ -1547,6 +1549,9 @@ def _parse_results_payload(task_id, payload):
                 }
             )
         metadata = {key: summary[key] for key in _SUMMARY_METADATA}
+        metadata.update(
+            {key: summary[key] for key in _OPTIONAL_SUMMARY_METADATA if key in summary}
+        )
     except (KeyError, TypeError, ValueError) as exc:
         raise ResultImportError(f"Invalid results payload: {exc!r}") from exc
 

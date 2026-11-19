@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import uuid as _uuid
+from datetime import UTC, datetime
 
 import dash_bootstrap_components as dbc
 import flask_login
@@ -1626,9 +1627,13 @@ def register_callbacks(app, limiter=None):
             return [], columns, "Total: 0"
 
         rows = []
+        now = datetime.now(UTC)
         for task in tasks:
             cfg = task.config or {}
             covariates = task.covariates or []
+            elapsed_end = task.completed_at
+            if elapsed_end is None and task.status in ("submitted", "running"):
+                elapsed_end = now
             row = {
                 "id": str(task.id),
                 "name": task.name,
@@ -1640,11 +1645,18 @@ def register_callbacks(app, limiter=None):
                 ),
                 "progress": task.progress,
                 "n_sites": task.n_sites or 0,
+                "resolution_m": cfg.get("resolution_m")
+                or ANALYSIS_DEFAULTS["resolution_m"],
                 "params": {**cfg, "covariates": covariates},
                 "matching_method": cfg.get("matching_method", "optimal"),
                 "created_at": _fmt_dt(task.created_at),
                 "submitted_at": _fmt_dt(task.submitted_at),
                 "completed_at": _fmt_dt(task.completed_at),
+                "elapsed_seconds": (
+                    int((elapsed_end - task.submitted_at).total_seconds())
+                    if elapsed_end is not None and task.submitted_at is not None
+                    else None
+                ),
                 "error_message": task.error_message or "",
             }
             if show_all_users:
