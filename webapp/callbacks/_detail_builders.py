@@ -2047,6 +2047,14 @@ def _build_plots(
                 "site_id": "Site",
             },
         )
+        fig_site_totals.update_traces(
+            hovertext=[
+                hover_labels.get(str(site_id), f"Site ID: {site_id}")
+                for site_id in df_totals["site_id"]
+            ],
+            hovertemplate="%{hovertext}<br>"
+            "Emissions Avoided (MgCO₂e): %{y:,.2f}<extra></extra>",
+        )
         if df_totals["emissions_avoided_mgco2e_ci_lower"].notna().any():
             _add_range_error_bars(
                 fig_site_totals,

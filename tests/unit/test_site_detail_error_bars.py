@@ -335,12 +335,30 @@ def test_range_error_bars_skip_years_without_both_bounds():
 def test_avoided_emissions_aggregate_plots_show_replicate_ranges():
     total = SimpleNamespace(
         site_id="site-1",
-        display_site_id="site-1",
+        display_site_id="123",
         site_name="Site 1",
         extrapolated_emissions_avoided_mgco2e=10.0,
         extrapolated_emissions_avoided_mgco2e_ci_lower=8.0,
         extrapolated_emissions_avoided_mgco2e_ci_upper=12.0,
         extrapolated_forest_loss_avoided_ha=0.0,
+    )
+    second_total = SimpleNamespace(
+        **{
+            **vars(total),
+            "site_id": "site-2",
+            "display_site_id": "456",
+            "site_name": None,
+            "extrapolated_emissions_avoided_mgco2e": -5.0,
+        }
+    )
+    third_total = SimpleNamespace(
+        **{
+            **vars(total),
+            "site_id": "site-3",
+            "display_site_id": "789",
+            "site_name": None,
+            "extrapolated_emissions_avoided_mgco2e": 0.0,
+        }
     )
     aggregate_year = {
         "year": 2020,
@@ -360,7 +378,12 @@ def test_avoided_emissions_aggregate_plots_show_replicate_ranges():
 
     content = _build_plots(
         results=[],
-        totals=[total],
+        totals=[total, second_total, third_total],
+        sites=[
+            SimpleNamespace(
+                site_id="site-2", display_site_id="456", site_name="Site 2"
+            )
+        ],
         agg_yearly=[aggregate_year],
     )
     graphs = content.children[0].children[0].children
@@ -380,6 +403,17 @@ def test_avoided_emissions_aggregate_plots_show_replicate_ranges():
     )
     assert any(
         trace.error_y is not None and trace.error_y.visible for trace in per_site.data
+    )
+    bars = next(trace for trace in per_site.data if trace.type == "bar")
+    assert list(bars.x) == ["site-1", "site-2", "site-3"]
+    assert list(bars.y) == [10.0, -5.0, 0.0]
+    assert list(bars.hovertext) == [
+        "Site ID: 123<br>Site name: Site 1",
+        "Site ID: 456<br>Site name: Site 2",
+        "Site ID: 789<br>Site name: Not available",
+    ]
+    assert bars.hovertemplate == (
+        "%{hovertext}<br>Emissions Avoided (MgCO₂e): %{y:,.2f}<extra></extra>"
     )
 
 
