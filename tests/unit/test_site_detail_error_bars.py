@@ -1358,7 +1358,7 @@ def test_task_detail_refresh_outputs_exist_in_both_layouts(shared_token):
 @pytest.mark.parametrize("shared_token", [None, "share"])
 def test_task_tabs_have_independent_loading_indicators(shared_token):
     layout = task_detail_layout(None, "task", shared_token=shared_token)
-    assert layout["detail-tabs"] in layout.children
+    assert layout["detail-tabs"] in layout["task-selection-content"].children
     for tab, output_id in zip(
         layout["detail-tabs"].children,
         ("task-overview", "task-results-content", "task-plots", "task-raw-results"),
@@ -1370,6 +1370,29 @@ def test_task_tabs_have_independent_loading_indicators(shared_token):
         assert loading.target_components == {output_id: "children"}
         assert loading.overlay_style == {"visibility": "visible"}
         assert loading.custom_spinner.role == "status"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("shared_token", [None, "share"])
+def test_plot_navigation_loading_covers_selection_and_chart_callbacks(shared_token):
+    layout = task_detail_layout(None, "task", shared_token=shared_token)
+    loading = layout["task-selection-content-loading"]
+
+    assert loading["task-plot-selection"] is layout["task-plot-selection"]
+    assert loading["detail-tabs"] is layout["detail-tabs"]
+    assert loading.target_components == {
+        "detail-tabs": "active_tab",
+        "task-plot-selection": "*",
+        "site-filter-field": "value",
+        "site-filter-value": "*",
+        "site-defor-selector": "value",
+        "site-map-selection": "value",
+        "task-graph-selection": "data",
+        "task-results-graphs": "children",
+    }
+    assert loading.delay_hide == 150
+    assert loading.overlay_style == {"visibility": "visible"}
+    assert loading.custom_spinner.role == "status"
 
 
 @pytest.mark.unit

@@ -2265,10 +2265,7 @@ def _build_plots(
     plots.append(
         html.Div(
             [
-                task_section_loading(
-                    html.Div(aggregate_plots, id="task-results-graphs"),
-                    "Updating results plots...",
-                ),
+                html.Div(aggregate_plots, id="task-results-graphs"),
                 dbc.Accordion(
                     [
                         dbc.AccordionItem(

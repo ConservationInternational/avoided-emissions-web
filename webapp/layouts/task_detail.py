@@ -10,14 +10,19 @@ from layouts.common import (
 from layouts.documentation import help_link
 
 
-def task_section_loading(content, label):
-    """Show progress for one callback output without hiding or blocking it."""
+def task_section_loading(content, label, *, target_components=None):
+    """Show progress for callback outputs without hiding or blocking content."""
     return dcc.Loading(
         content,
         id=f"{content.id}-loading",
-        target_components={content.id: "children"},
+        target_components=(
+            target_components
+            if target_components is not None
+            else {content.id: "children"}
+        ),
         parent_className="ae-section-loading",
         delay_show=150,
+        delay_hide=150,
         show_initially=False,
         overlay_style={"visibility": "visible"},
         custom_spinner=html.Div(
@@ -358,8 +363,27 @@ def task_detail_layout(user, task_id, shared_token=None, search=None):
             html.Div(id="recompute-result"),
             html.Div(id="cancel-task-result"),
             html.Div(id="resume-task-result"),
-            tabs,
-            dcc.Store(id="task-plot-selection", data=selection),
+            task_section_loading(
+                html.Div(
+                    [
+                        tabs,
+                        dcc.Store(id="task-plot-selection", data=selection),
+                    ],
+                    id="task-selection-content",
+                ),
+                "Updating results plots...",
+                target_components={
+                    "detail-tabs": "active_tab",
+                    # Duplicate-output callbacks report hashed property names.
+                    "task-plot-selection": "*",
+                    "site-filter-field": "value",
+                    "site-filter-value": "*",
+                    "site-defor-selector": "value",
+                    "site-map-selection": "value",
+                    "task-graph-selection": "data",
+                    "task-results-graphs": "children",
+                },
+            ),
             edit_modal,
             share_modal,
             dcc.Store(id="task-id-store", data=task_id),

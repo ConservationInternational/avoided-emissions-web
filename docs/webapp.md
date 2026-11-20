@@ -578,8 +578,10 @@ opening a direct or shared link still fits the selected site or the full map.
 Loading indicators appear in the tab or section being updated. The map,
 yearly results table, filtered plots, and Match Quality each show their own
 progress without blocking navigation or hiding results that are already visible.
-When a plot selection updates the charts, its loading indicator stays visible
-at the bottom of the viewport, even if you are scrolled down.
+Plot clicks and Back/Forward navigation use the same plot-level indicator,
+covering both selection restoration and the subsequent chart update. It stays
+at the bottom of the viewport, even if you are scrolled down; it does not block
+interaction or replace the independent tab, map, and Match Quality indicators.
 Group ranges are calculated from the selected sites' yearly outcomes within
 each matching replicate, not by adding site-level bounds. Site sets must be
 reimported to retain source attributes, and analyses rerun to produce the
