@@ -19,7 +19,6 @@ from models import (
     TaskResult,
     TaskResultTotal,
     TaskSite,
-    UserSiteFeature,
     get_db,
 )
 from sqlalchemy import case, func
@@ -38,6 +37,7 @@ from services.reference_layers import (
 from services.s3 import get_s3_client
 from services.site_set import (
     _get_site_set_min_start_year,
+    _get_user_site_set_filter_attributes,
     _stream_site_set_to_parquet_buf,
     get_user_site_set_centroids_geojson,
     get_user_site_set_geojson,
@@ -1395,7 +1395,7 @@ def get_task_ownership(task_id):
 
 
 @timed_task_step("task_data")
-def get_task_detail(task_id, *, section="full"):
+def get_task_detail(task_id, *, section="full", include_filter_attributes=True):
     """Get full task details including sites and results.
 
     For tasks with more than ``LARGE_TASK_THRESHOLD`` sites the per-site-year
@@ -1405,6 +1405,9 @@ def get_task_detail(task_id, *, section="full"):
     ``agg_yearly`` is the all-site yearly series (with replicate ranges)
     computed by the R summary step. The web callbacks request only the
     sections they need; ``full`` preserves the original service contract.
+    The ``plots`` section includes filterable site source attributes unless
+    ``include_filter_attributes`` is false. The ``map`` section omits source
+    attributes from site-set geometry because the map does not use them.
     """
     db = get_db()
     try:
@@ -1436,16 +1439,11 @@ def get_task_detail(task_id, *, section="full"):
         results = None
         sites_geojson = None
         site_filter_attributes = None
-        if section == "plots" and task.site_set_id:
+        if section == "plots" and include_filter_attributes and task.site_set_id:
             with task_timing("task_filter_attributes_sql"):
-                rows = (
-                    db.query(UserSiteFeature.id, UserSiteFeature.source_attributes)
-                    .filter(UserSiteFeature.site_set_id == task.site_set_id)
-                    .all()
+                site_filter_attributes = _get_user_site_set_filter_attributes(
+                    db, task.site_set_id
                 )
-                site_filter_attributes = {
-                    str(row.id): row.source_attributes or {} for row in rows
-                }
         if not is_large and section in {"full", "overview", "results", "plots"}:
             with task_timing("task_sites_sql"):
                 sites = db.query(TaskSite).filter(TaskSite.task_id == task_id).all()
@@ -1458,7 +1456,9 @@ def get_task_detail(task_id, *, section="full"):
                     .all()
                 )
         if section in {"full", "map"}:
-            sites_geojson = _get_task_geometry(task, is_large)
+            sites_geojson = _get_task_geometry(
+                task, is_large, include_source_attributes=section != "map"
+            )
 
         return {
             "task": task,
@@ -1514,11 +1514,14 @@ def get_task_site_index(task_id):
 
 
 @timed_task_step("task_geometry")
-def _get_task_geometry(task, is_large):
+def _get_task_geometry(task, is_large, include_source_attributes=True):
     if is_large:
         if task.site_set_id:
             try:
-                return get_user_site_set_centroids_geojson(task.site_set_id)
+                return get_user_site_set_centroids_geojson(
+                    task.site_set_id,
+                    include_source_attributes=include_source_attributes,
+                )
             except Exception:
                 logger.warning(
                     "Could not load centroids for site set %s",
@@ -1528,7 +1531,9 @@ def _get_task_geometry(task, is_large):
         return None
 
     if task.site_set_id:
-        sites_geojson = get_user_site_set_geojson(task.site_set_id)
+        sites_geojson = get_user_site_set_geojson(
+            task.site_set_id, include_source_attributes=include_source_attributes
+        )
         if sites_geojson and sites_geojson.get("features"):
             return sites_geojson
     config = task.config or {}

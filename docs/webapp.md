@@ -565,7 +565,8 @@ their ID. Switching order preserves the selected site.
 The optional field and value filter above the site map uses attributes from the
 uploaded source file. It filters the map, site selector, and plots; other results
 tabs are unchanged. For imported site sets, source fields and values are loaded
-with the plot controls, independently of the deferred map.
+with the plot controls, independently of the deferred map. The reserved
+`ae_atoms` geometry field is used by the analysis and is not offered as a filter.
 Matching sites are highlighted on the map. Selecting a site
 on the map clears the group filter and shows that site's plots. Clear the
 selection to restore all sites.

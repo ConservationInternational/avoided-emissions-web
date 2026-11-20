@@ -59,7 +59,7 @@ def test_imported_warnings_do_not_download_the_balance_artifact(mocker):
 
 def test_plot_controls_have_source_filters_before_the_map_loads(mocker):
     from dash import Dash
-    from models import AnalysisTask, UserSiteFeature
+    from models import AnalysisTask
 
     attributes = {
         str(i): {"region": "North" if i % 2 else "South", "count": 0}
@@ -76,9 +76,8 @@ def test_plot_controls_have_source_filters_before_the_map_loads(mocker):
     db = mocker.Mock()
     task_query = mocker.Mock()
     task_query.filter.return_value.first.return_value = task
-    attribute_query = mocker.Mock()
-    attribute_query.filter.return_value.all.return_value = [
-        SimpleNamespace(id=sid, source_attributes=props)
+    db.execute.return_value.fetchall.return_value = [
+        SimpleNamespace(site_id=sid, attributes=props)
         for sid, props in attributes.items()
     ]
     totals_query = mocker.Mock()
@@ -87,9 +86,6 @@ def test_plot_controls_have_source_filters_before_the_map_loads(mocker):
     def query(*columns):
         if columns[0] is AnalysisTask:
             return task_query
-        if columns[0] is UserSiteFeature.id:
-            assert columns[1] is UserSiteFeature.source_attributes
-            return attribute_query
         return totals_query
 
     db.query.side_effect = query
@@ -127,6 +123,15 @@ def test_plot_controls_have_source_filters_before_the_map_loads(mocker):
     ]
     assert content["task-map-content"].children is None
     geometry.assert_not_called()
+    statement, params = db.execute.call_args.args
+    assert "e.key <> 'ae_atoms'" in str(statement)
+    assert params == {"site_set_id": "site-set"}
+
+    db.execute.reset_mock()
+    analysis_task.get_task_detail(
+        "task", section="plots", include_filter_attributes=False
+    )
+    db.execute.assert_not_called()
 
 
 @pytest.mark.parametrize("site_set_id", ["site-set", None])
@@ -144,11 +149,17 @@ def test_deferred_map_preserves_early_filters_and_legacy_attributes(mocker, site
         "task": SimpleNamespace(site_set_id=site_set_id, covariates=[], config={}),
         "totals": [],
         "sites_geojson": {"features": [{
-            "properties": {"site_id": "site", "source_attributes": {"region": "North"}}
+            "properties": {
+                "site_id": "site",
+                "source_attributes": {"region": "North", "ae_atoms": "x" * 1_000_000},
+            }
         }]},
     })
-    mocker.patch.object(_registration, "_build_map", return_value=html.Div())
+    build_map = mocker.patch.object(_registration, "_build_map", return_value=html.Div())
     _, attributes = load_map(True, "task", None)
+    assert build_map.call_args.args[0]["features"][0]["properties"] == {
+        "site_id": "site"
+    }
     if site_set_id:
         assert attributes is no_update
     else:

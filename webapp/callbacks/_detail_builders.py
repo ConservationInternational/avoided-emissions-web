@@ -23,6 +23,7 @@ from services import (
     list_task_s3_files,
 )
 from services.analysis_task import SITE_RANKING_YEAR
+from services.site_set import filterable_source_attributes
 
 from callbacks._helpers import (
     _fmt_dt,
@@ -2084,8 +2085,8 @@ def _build_plots(
         plots.append(html.H5("Results selection", className="mt-3"))
         features = (sites_geojson or {}).get("features", [])
         attributes = {
-            str(feature["properties"]["site_id"]): feature["properties"].get(
-                "source_attributes", {}
+            str(feature["properties"]["site_id"]): filterable_source_attributes(
+                feature["properties"].get("source_attributes")
             )
             for feature in features
             if feature.get("properties", {}).get("site_id") is not None

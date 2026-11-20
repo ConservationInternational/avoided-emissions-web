@@ -26,6 +26,32 @@ logger = logging.getLogger(__name__)
 _PARQUET_BATCH_COORDINATES = 250_000
 
 
+def filterable_source_attributes(attributes):
+    """Keep source fields except the reserved analysis-only atom geometries."""
+    if not isinstance(attributes, dict):
+        return {}
+    return {key: value for key, value in attributes.items() if key != "ae_atoms"}
+
+
+def _get_user_site_set_filter_attributes(db, site_set_id):
+    """Exclude atom geometry in PostgreSQL, before transferring rows."""
+    rows = db.execute(
+        text(
+            """
+            SELECT f.id::text AS site_id, (
+                SELECT json_object_agg(e.key, e.value)
+                FROM json_each(NULLIF(f.source_attributes::text, 'null')::json) AS e
+                WHERE e.key <> 'ae_atoms'
+            ) AS attributes
+            FROM user_site_features f
+            WHERE f.site_set_id = :site_set_id
+            """
+        ),
+        {"site_set_id": str(site_set_id)},
+    ).fetchall()
+    return {row.site_id: row.attributes or {} for row in rows}
+
+
 def _site_set_summary_row(row):
     meta = row.extra_metadata if isinstance(row.extra_metadata, dict) else {}
     # Normalise ``bounds`` to ``{west, south, east, north}`` regardless of
@@ -62,8 +88,11 @@ def list_user_site_sets(user_id, include_archived=False):
         db.close()
 
 
-def get_user_site_set_geojson(site_set_id):
+def get_user_site_set_geojson(site_set_id, *, include_source_attributes=True):
     """Export a user site set from PostGIS as a GeoJSON FeatureCollection.
+
+    Pass ``include_source_attributes=False`` for display-only uses; source
+    attributes can hold megabytes of atom geometry per site.
 
     Rows are fetched individually and assembled into the FeatureCollection on
     the Python side rather than using jsonb_agg() inside PostgreSQL.  The
@@ -86,12 +115,16 @@ def get_user_site_set_geojson(site_set_id):
                         ELSE to_char(f.end_date, 'YYYY-MM-DD')
                     END AS end_date,
                     f.area_ha,
-                    f.source_attributes,
+                    {source_attributes_column}
                     ST_AsGeoJSON(f.geom) AS geom_json
                 FROM user_site_features f
                 WHERE f.site_set_id = :site_set_id
                 ORDER BY f.site_id
-                """
+                """.format(
+                    source_attributes_column=_source_attributes_column(
+                        include_source_attributes
+                    )
+                )
             ),
             {"site_set_id": str(site_set_id)},
         ).fetchall()
@@ -121,7 +154,11 @@ def get_user_site_set_geojson(site_set_id):
         db.close()
 
 
-def get_user_site_set_centroids_geojson(site_set_id):
+def _source_attributes_column(include):
+    return "f.source_attributes," if include else "'{}'::json AS source_attributes,"
+
+
+def get_user_site_set_centroids_geojson(site_set_id, *, include_source_attributes=True):
     """Return all sites as lightweight centroid Point features.
 
     Returns every site in the set as a GeoJSON Point (``ST_Centroid``) with
@@ -140,12 +177,16 @@ def get_user_site_set_centroids_geojson(site_set_id):
                     f.id::text AS site_id,
                     f.site_id AS display_site_id,
                     f.area_ha,
-                    f.source_attributes,
+                    {source_attributes_column}
                     ST_AsGeoJSON(ST_Centroid(f.geom)) AS centroid_json
                 FROM user_site_features f
                 WHERE f.site_set_id = :site_set_id
                 ORDER BY f.site_id
-                """
+                """.format(
+                    source_attributes_column=_source_attributes_column(
+                        include_source_attributes
+                    )
+                )
             ),
             {"site_set_id": str(site_set_id)},
         ).fetchall()

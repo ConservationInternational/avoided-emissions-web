@@ -82,6 +82,7 @@ from services.analysis_task import (
     get_task_top_site_yearly,
     matching_replay_links,
 )
+from services.site_set import filterable_source_attributes
 from services.task_result_cache import cached_task_result
 from session_store import SessionExpired, SessionUnavailable
 from task_timing import timed_task_step
@@ -1986,11 +1987,15 @@ def register_callbacks(app, limiter=None):
             raise PreventUpdate
         task = detail["task"]
         geojson = detail["sites_geojson"]
-        attributes = {
-            str(props["site_id"]): (props.get("source_attributes") or {})
-            for feature in (geojson or {}).get("features", [])
-            if (props := feature.get("properties") or {}).get("site_id") is not None
-        }
+        attributes = {}
+        for feature in (geojson or {}).get("features", []):
+            props = feature.get("properties") or {}
+            # The map never reads source attributes; they can be very large.
+            source_attributes = props.pop("source_attributes", None)
+            if props.get("site_id") is not None:
+                attributes[str(props["site_id"])] = filterable_source_attributes(
+                    source_attributes
+                )
         return (
             _build_map(
                 geojson,
@@ -2634,7 +2639,10 @@ def register_callbacks(app, limiter=None):
                 )
                 return [summary, *plot_children]
 
-            detail = get_task_detail(task_id, section="plots")
+            # Filter attributes are already in the browser; don't reload them.
+            detail = get_task_detail(
+                task_id, section="plots", include_filter_attributes=False
+            )
             if not detail:
                 return dbc.Alert("Task not found.", color="danger")
             task = detail["task"]
