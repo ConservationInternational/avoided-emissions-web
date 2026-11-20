@@ -1,6 +1,7 @@
 """Map, catalog, mapping and persisted preparation UX regressions."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -41,6 +42,47 @@ def _walk(component):
             yield from _walk(child)
     elif children is not None:
         yield from _walk(children)
+
+
+def test_overview_displays_task_completion_time_and_elapsed_duration(monkeypatch):
+    from callbacks import _detail_builders
+
+    monkeypatch.setattr(_detail_builders, "download_results_csv", lambda *a, **k: None)
+    submitted_at = datetime(2026, 11, 19, 10, 0, tzinfo=UTC)
+    completed_at = submitted_at + timedelta(hours=25, minutes=1, seconds=2)
+    task = SimpleNamespace(
+        config={},
+        extract_job_id=None,
+        description=None,
+        n_sites=1,
+        created_at=None,
+        submitted_at=submitted_at,
+        completed_at=completed_at,
+        status="succeeded",
+        covariates=[],
+        results_s3_uri=None,
+        id="task",
+        error_message=None,
+        extra_metadata={},
+    )
+
+    component = _build_overview(task, [], [])
+    rows = {
+        row.children[0].children: row
+        for row in _walk(component)
+        if isinstance(getattr(row, "children", None), list)
+        and row.children
+        and isinstance(getattr(row.children[0], "children", None), str)
+        and getattr(row.children[0], "children", None)
+        in {"Created", "Completed", "Elapsed", "Status"}
+    }
+
+    assert rows["Completed"].children[1].children == "2026-11-20T11:01:02Z"
+    assert rows["Completed"].children[1].className == "utc-datetime"
+    assert rows["Completed"].children[1].to_plotly_json()["props"]["data-utc"] == (
+        "2026-11-20T11:01:02Z"
+    )
+    assert rows["Elapsed"].children[1].children == "25:01:02"
 
 
 def test_overview_displays_invalid_outcome_site_details(monkeypatch):

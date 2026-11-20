@@ -4,6 +4,7 @@ import json
 import logging
 import math
 from collections import Counter
+from datetime import UTC, datetime
 
 import dash_bootstrap_components as dbc
 import pandas as pd
@@ -252,6 +253,29 @@ def _build_overview(task, sites, totals, quality_warnings=None):
     # Task info card
     config = task.config or {}
 
+    def _datetime_detail_row(label, value):
+        formatted = _fmt_dt(value)
+        return html.Div(
+            [
+                html.Span(
+                    label,
+                    className="text-muted",
+                    style={"minWidth": "200px"},
+                ),
+                html.Span(
+                    formatted,
+                    className="utc-datetime",
+                    style={"fontWeight": "500"},
+                    **{"data-utc": formatted},
+                ),
+            ],
+            style={
+                "display": "flex",
+                "gap": "0.5rem",
+                "marginBottom": "0.25rem",
+            },
+        )
+
     def _detail_row(label, value):
         setting = {
             "Resolution": "resolution-m",
@@ -307,6 +331,24 @@ def _build_overview(task, sites, totals, quality_warnings=None):
         else:
             batch_job_names.append(f"te-{api_exec_id[:8]}")
 
+    submitted_at = getattr(task, "submitted_at", None)
+    completed_at = getattr(task, "completed_at", None)
+    elapsed_end = completed_at
+    if elapsed_end is None and task.status in ("submitted", "running"):
+        elapsed_end = datetime.now(UTC)
+    elapsed_seconds = (
+        int((elapsed_end - submitted_at).total_seconds())
+        if elapsed_end is not None and submitted_at is not None
+        else None
+    )
+    elapsed_display = (
+        f"{elapsed_seconds // 3600:02d}:"
+        f"{elapsed_seconds // 60 % 60:02d}:"
+        f"{elapsed_seconds % 60:02d}"
+        if elapsed_seconds is not None and elapsed_seconds >= 0
+        else "—"
+    )
+
     cards.append(
         dbc.Card(
             [
@@ -315,26 +357,9 @@ def _build_overview(task, sites, totals, quality_warnings=None):
                     [
                         _detail_row("Description", task.description or "None"),
                         _detail_row("Sites", task.n_sites or 0),
-                        html.Div(
-                            [
-                                html.Span(
-                                    "Created",
-                                    className="text-muted",
-                                    style={"minWidth": "200px"},
-                                ),
-                                html.Span(
-                                    _fmt_dt(task.created_at),
-                                    className="utc-datetime",
-                                    style={"fontWeight": "500"},
-                                    **{"data-utc": _fmt_dt(task.created_at)},
-                                ),
-                            ],
-                            style={
-                                "display": "flex",
-                                "gap": "0.5rem",
-                                "marginBottom": "0.25rem",
-                            },
-                        ),
+                        _datetime_detail_row("Created", task.created_at),
+                        _datetime_detail_row("Completed", completed_at),
+                        _detail_row("Elapsed", elapsed_display),
                         _detail_row("Status", task.status),
                         html.Hr(className="my-2"),
                         html.H6(
