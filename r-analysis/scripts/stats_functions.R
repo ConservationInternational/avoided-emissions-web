@@ -817,6 +817,16 @@ summarise_replicates <- function(df, by, metrics) {
 
 # -- Balance diagnostics -----------------------------------------------------
 
+balance_group_indices <- function(df, by, roster, replicates) {
+    keys <- c("replicate", by)
+    grouped <- group_by(df, across(all_of(keys)))
+    groups <- group_keys(grouped)
+    groups$.rows <- group_rows(grouped)
+    # Retain empty fragment/stratum replicates and sites with no matched pixels.
+    expected <- cross_join(tibble(replicate = replicates), select(roster, all_of(by)))
+    left_join(expected, groups, by = keys)
+}
+
 balance_row <- function(covariate, x, treatment, w, binary = FALSE,
                         weighted_sd = FALSE, include_counts = FALSE) {
     # Weighted means and the standardized mean difference.  The SMD uses the

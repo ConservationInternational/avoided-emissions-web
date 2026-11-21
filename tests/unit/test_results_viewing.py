@@ -32,6 +32,56 @@ _GET_GEOJSON = "services.analysis_task.get_user_site_set_geojson"
 
 
 @pytest.mark.unit
+def test_top_site_query_uses_selected_year_for_leaders_and_remainders(mocker):
+    task_id = UUID("00000000-0000-0000-0000-000000000001")
+    metadata = MetaData()
+    table = Table(
+        "task_results", metadata,
+        *(Column(name, TaskResult.__table__.c[name].type) for name in (
+            "task_id", "site_id", "year", "extrapolated_emissions_avoided_mgco2e",
+            "extrapolated_forest_loss_avoided_ha",
+        )),
+    )
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    rows = [
+        {
+            "task_id": task_id, "site_id": f"site-{index}", "year": year,
+            **{
+                metric: (index if year == 2025 else 9 - index)
+                * (1 if index % 2 else -1)
+                for metric in (
+                    "extrapolated_emissions_avoided_mgco2e",
+                    "extrapolated_forest_loss_avoided_ha",
+                )
+            },
+        }
+        for index in range(1, 9) for year in (2024, 2025)
+    ]
+    with engine.begin() as connection:
+        connection.execute(table.insert(), rows)
+    session = Session(engine)
+    mocker.patch(_GET_DB, return_value=session)
+    allowed = [f"site-{index}" for index in range(1, 9)]
+    try:
+        original = get_task_top_site_yearly(task_id, allowed)
+        changed = get_task_top_site_yearly(task_id, allowed, 2024)
+        assert {row["site_id"] for row in original["site_yearly"]} == {
+            f"site-{index}" for index in (3, 4, 5, 6, 7, 8)
+        }
+        assert {row["site_id"] for row in changed["site_yearly"]} == {
+            f"site-{index}" for index in (1, 2, 3, 4, 5, 6)
+        }
+        assert changed["signed_yearly"]["forest_loss_avoided_ha"] == [
+            {"year": 2024, "positive": 2, "negative": -1},
+            {"year": 2025, "positive": 7, "negative": -8},
+        ]
+    finally:
+        session.close()
+        engine.dispose()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("allowed_count", [0, 3, 12, 24])
 @pytest.mark.parametrize("has_2025", [False, True])
 def test_top_site_yearly_query_ranks_2025_and_preserves_signed_remainders(

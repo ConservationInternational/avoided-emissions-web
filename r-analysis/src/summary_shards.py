@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import re
 import shutil
@@ -70,8 +71,6 @@ def archive_summary(
         {"schema_version": 1, "kind": kind, "shard": shard, "files": sorted(names)},
         sort_keys=True,
     ).encode()
-    import io
-
     with tarfile.open(filename, "w") as archive:
         info = tarfile.TarInfo("shard.json")
         info.size = len(manifest)
@@ -142,23 +141,48 @@ def restore_summary(
     return sorted(folders)
 
 
+def merge_csv_tables(paths: list[Path], output: Path) -> None:
+    headers = []
+    offsets = []
+    for path in paths:
+        with path.open("rb") as stream:
+            # Read only the header record, without buffering past its byte offset.
+            lines = iter(lambda: stream.readline().decode("utf-8"), "")
+            header = next(csv.reader(lines), None)
+            if not header or len(header) != len(set(header)):
+                raise ValueError(f"Missing or duplicate CSV header: {path.name}")
+            headers.append(header)
+            offsets.append(stream.tell())
+    fields = list(max(headers, key=len))
+    if all(header == fields for header in headers):
+        header_text = io.StringIO(newline="")
+        csv.writer(header_text).writerow(fields)
+        with output.open("wb") as target:
+            target.write(header_text.getvalue().encode("utf-8"))
+            for path, offset in zip(paths, offsets, strict=True):
+                with path.open("rb") as source:
+                    source.seek(offset)
+                    shutil.copyfileobj(source, target)
+                    if source.tell() > offset:
+                        source.seek(-1, io.SEEK_END)
+                        if source.read(1) not in (b"\n", b"\r"):
+                            target.write(b"\n")
+        return
+    for header in headers:
+        fields.extend(field for field in header if field not in fields)
+    with output.open("w", encoding="utf-8", newline="") as target:
+        writer = csv.DictWriter(target, fieldnames=fields)
+        writer.writeheader()
+        for path in paths:
+            with path.open(encoding="utf-8", newline="") as stream:
+                writer.writerows(csv.DictReader(stream))
+
+
 def merge_report_tables(folders: list[Path], output: Path) -> None:
     names = sorted({path.name for folder in folders for path in folder.glob("*.csv")})
     for name in names:
         paths = [folder / name for folder in folders if (folder / name).is_file()]
-        headers = []
-        for path in paths:
-            with path.open(newline="") as stream:
-                headers.append(next(csv.reader(stream)))
-        fields = list(max(headers, key=len))
-        for header in headers:
-            fields.extend(field for field in header if field not in fields)
-        with (output / name).open("w", newline="") as target:
-            writer = csv.DictWriter(target, fieldnames=fields)
-            writer.writeheader()
-            for path in paths:
-                with path.open(newline="") as stream:
-                    writer.writerows(csv.DictReader(stream))
+        merge_csv_tables(paths, output / name)
     quality = None
     for folder in folders:
         value = json.loads((folder / "results_match_quality_summary.json").read_text())

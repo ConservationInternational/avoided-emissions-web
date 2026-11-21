@@ -17,6 +17,7 @@
     function viewKey(selection, tab) {
         return JSON.stringify([
             tab, selection.site || "", selection.field || "", selection.value ?? null,
+            selection.field2 || "", selection.value2 ?? null, selection.year ?? null,
         ]);
     }
 
@@ -102,13 +103,20 @@
     function urlForView(selection, tab) {
         const url = new URL(window.location.href);
         url.searchParams.set("tab", tabs[tab]);
-        ["site", "field", "value"].forEach(key => url.searchParams.delete(key));
+        ["site", "field", "value", "field2", "value2", "year"].forEach(key => url.searchParams.delete(key));
         if (selection.site) {
             url.searchParams.set("site", selection.site);
         }
         if (selection.field && selection.value != null) {
             url.searchParams.set("field", selection.field);
             url.searchParams.set("value", selection.value);
+        }
+        if (selection.field2 && selection.value2 != null) {
+            url.searchParams.set("field2", selection.field2);
+            url.searchParams.set("value2", selection.value2);
+        }
+        if (selection.year != null) {
+            url.searchParams.set("year", selection.year);
         }
         return url;
     }
@@ -133,7 +141,8 @@
             current = { owner, selection, tab, viewport: null };
             return window.dash_clientside.no_update;
         }
-        if (selection.field && selection.value == null) {
+        if ((selection.field && selection.value == null) ||
+            (selection.field2 && selection.value2 == null)) {
             changingMap = true;
             return window.dash_clientside.no_update;
         }

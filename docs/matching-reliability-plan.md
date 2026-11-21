@@ -333,8 +333,8 @@ silent success; failures beyond approved resources remain explicit and resumable
    approved child-role `iam:PassRole`. Child roles need scoped artifact/input
    access; Batch compute instances need standard ECR/ECS/logging permissions.
    Check these against the pinned executor in a dedicated AWS environment.
-6. Driver environment controls include `AE_NEXTFLOW_MAX_FORKS` (default 100,
-   maximum 100), generic `NEXTFLOW_MAX_HOURS`, and
+6. Driver environment controls include `AE_NEXTFLOW_MAX_FORKS` (default 250
+   concurrent jobs, maximum 500), generic `NEXTFLOW_MAX_HOURS`, and
    `AE_NEXTFLOW_MATCH_MEMORY_MIB` (default 30720, maximum 122880).
    Set server-controlled `AE_NEXTFLOW_ALLOW_ONDEMAND=true` **only after cost
    approval**. Otherwise retries/final passes remain on the initial queue.

@@ -38,7 +38,7 @@ function harness(fetch) {
     ).replace(/\}\)\(\);\s*$/, `
         globalThis.subject = { makeMvtTileLoadFunction, zoomToFeature, renderElement,
             renderAll, mountedMaps, focusTableRow, featureStyle, selectPlotSiteFromMap,
-            bindPlotSiteSelection };
+            bindPlotSiteSelection, selectRankingYear };
     })();`);
     context.window.ol = context.ol;
     vm.runInNewContext(source, context);
@@ -218,7 +218,7 @@ test("site legend clicks select canonical identities without hiding traces", () 
     };
     env.subject.bindPlotSiteSelection();
     env.subject.bindPlotSiteSelection();
-    assert.equal(bindings, 3);
+    assert.equal(bindings, 4);
     assert.equal(handlers.plotly_legendclick({ curveNumber: 0 }), false);
     assert.equal(updates[0].id, "site-map-selection");
     assert.equal(updates[0].properties.value, "canonical-site");
@@ -251,6 +251,50 @@ test("ranked bar clicks select canonical IDs, not display labels", () => {
     handlers.plotly_click({ points: [{ x: 2020, data: { name: "All other sites" } }] });
     handlers.plotly_click({ points: [] });
     assert.deepEqual(selections, ["canonical-a", "canonical-b"]);
+});
+
+test("filtered yearly bars remain selectable without the graph wrapper class", () => {
+    const env = harness();
+    const selections = [];
+    const handlers = {};
+    const plot = {
+        data: [{ meta: { site_id: "filtered-site" } }, { name: "All other sites" }],
+        on(name, handler) { handlers[name] = handler; },
+    };
+    env.document.querySelectorAll = selector =>
+        selector.split(",").some(part => part.trim() === "#task-results-graphs .js-plotly-plot")
+            ? [plot] : [];
+    env.elements["site-map-selection"] = {};
+    env.window.dash_clientside = {
+        set_props: (_id, properties) => selections.push(properties.value),
+    };
+    env.subject.bindPlotSiteSelection();
+    assert.equal(typeof handlers.plotly_click, "function");
+    handlers.plotly_click({ points: [{ data: plot.data[0] }] });
+    assert.equal(handlers.plotly_legendclick({ curveNumber: 0 }), false);
+    handlers.plotly_click({ points: [{ data: plot.data[1] }] });
+    assert.deepEqual(selections, ["filtered-site", "filtered-site"]);
+});
+
+test("year ticks rerank stacked charts without selecting sites or aggregate plots", () => {
+    const env = harness();
+    const updates = [];
+    env.window.dash_clientside = {
+        set_props: (id, props) => updates.push({ id, props }),
+    };
+    const plot = { layout: { meta: { site_ranking: true, ranking_years: [2024, 2025] } } };
+    const event = { annotation: { name: "ranking-year:2024" } };
+    env.subject.selectRankingYear(plot, event);
+    assert.equal(updates[0].id, "task-ranking-year-request");
+    assert.equal(updates[0].props.data.year, 2024);
+    env.subject.selectRankingYear(plot, event);
+    assert.notEqual(updates[0].props.data.sequence, updates[1].props.data.sequence);
+    event.annotation.name = "ranking-year:2023";
+    env.subject.selectRankingYear(plot, event);
+    event.annotation.name = "ranking-year:2025";
+    plot.layout.meta.site_ranking = false;
+    env.subject.selectRankingYear(plot, event);
+    assert.equal(updates.length, 2);
 });
 
 test("unmount cancels pending requests, removes listeners and disposes the map", () => {

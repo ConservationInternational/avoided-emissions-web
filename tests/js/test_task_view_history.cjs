@@ -144,6 +144,24 @@ test("initialization, duplicate callbacks, partial group edits and panning do no
     assert.equal(env.entries.length, 2);
 });
 
+test("nested filters and ranking year round-trip through shared history", () => {
+    const env = harness("/shared/token?tab=plots");
+    const group = { field: "region", value: '"North"' };
+    const nested = { ...group, field2: "active", value2: "false", year: 2024 };
+    env.subject.sync(group, "tab-plots", "task");
+    env.subject.sync({ ...group, field2: "active" }, "tab-plots", "task");
+    assert.equal(env.entries.length, 1);
+    env.subject.sync(nested, "tab-plots", "task");
+    assert.equal(env.window.location.searchParams.get("field2"), "active");
+    assert.equal(env.window.location.searchParams.get("value2"), "false");
+    assert.equal(env.window.location.searchParams.get("year"), "2024");
+    env.go(-1);
+    env.subject.sync(group, "tab-plots", "task");
+    assert.equal(env.window.location.searchParams.has("field2"), false);
+    env.go(1);
+    env.subject.sync(nested, "tab-plots", "task");
+    assert.equal(env.window.location.searchParams.get("year"), "2024");
+});
 test("tab navigation retains selection and ignores stale updates while restoring", () => {
     const env = harness();
     const selection = { site: "a" };

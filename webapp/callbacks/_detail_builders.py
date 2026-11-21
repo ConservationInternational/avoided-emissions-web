@@ -1296,6 +1296,22 @@ def _filter_site_ids(field, value, attributes):
     ]
 
 
+def _filter_selection_site_ids(selection, attributes):
+    selection = selection or {}
+    primary = _filter_site_ids(
+        selection.get("field"), selection.get("value"), attributes
+    )
+    secondary = _filter_site_ids(
+        selection.get("field2"), selection.get("value2"), attributes
+    )
+    if primary is None:
+        return secondary
+    if secondary is None:
+        return primary
+    allowed = set(secondary)
+    return [site_id for site_id in primary if site_id in allowed]
+
+
 def _build_plots(
     results,
     totals,
@@ -1311,6 +1327,7 @@ def _build_plots(
     graphs_only=False,
     defer_map=False,
     site_filter_attributes=None,
+    ranking_year=SITE_RANKING_YEAR,
 ):
     """Build interactive plots for task results.
 
@@ -1753,7 +1770,7 @@ def _build_plots(
             contributions = bar_df.groupby(["site_id", "year"])[metric].sum()
             ranking = (
                 contributions[
-                    contributions.index.get_level_values("year") == SITE_RANKING_YEAR
+                    contributions.index.get_level_values("year") == ranking_year
                 ]
                 .groupby(level="site_id")
                 .sum()
@@ -1826,11 +1843,11 @@ def _build_plots(
                     )
             if not top_ids:
                 fig.add_annotation(
-                    text=f"No nonzero {SITE_RANKING_YEAR} site results available for ranking.",
+                    text=f"No nonzero {ranking_year} site results available for ranking.",
                     xref="paper",
                     yref="paper",
                     x=0,
-                    y=1.08,
+                    y=1.05,
                     showarrow=False,
                 )
             fig.update_layout(
@@ -1839,13 +1856,13 @@ def _build_plots(
                 xaxis_title="Year",
                 yaxis_title=label,
                 legend={
-                    "title": f"Site ID: top positive ({SITE_RANKING_YEAR})",
+                    "title": f"Site ID: top positive ({ranking_year})",
                     "x": 1.02,
                     "y": 1,
                     "yanchor": "top",
                 },
                 legend2={
-                    "title": f"Site ID: top negative ({SITE_RANKING_YEAR})",
+                    "title": f"Site ID: top negative ({ranking_year})",
                     "x": 1.02,
                     "y": 0.6,
                     "yanchor": "top",
@@ -1853,6 +1870,39 @@ def _build_plots(
                 legend3={"x": 1.02, "y": 0.2, "yanchor": "top"},
                 showlegend=True,
                 height=550,
+                meta={
+                    "site_ranking": True,
+                    "ranking_year": ranking_year,
+                    "ranking_years": [int(year) for year in agg_df["year"]],
+                },
+                margin={"t": 110, "b": 90},
+                xaxis={
+                    "showticklabels": False,
+                    "title": {"text": "Year", "standoff": 60},
+                },
+            )
+            for year in agg_df["year"]:
+                fig.add_annotation(
+                    x=int(year),
+                    xref="x",
+                    y=-0.04,
+                    yref="paper",
+                    text=str(int(year)),
+                    name=f"ranking-year:{int(year)}",
+                    showarrow=False,
+                    captureevents=True,
+                    hovertext=f"Rank sites for {int(year)}",
+                    yanchor="top",
+                    textangle=-90 if len(agg_df) > 12 else 0,
+                )
+            fig.add_annotation(
+                text=f"Top 3/bottom 3 sites for {ranking_year}. Click a year to re-rank.",
+                xref="paper",
+                yref="paper",
+                x=0,
+                y=1.15,
+                xanchor="left",
+                showarrow=False,
             )
         else:
             fig = px.bar(
@@ -2122,8 +2172,15 @@ def _build_plots(
         selection = plot_selection or {}
         field = selection.get("field")
         value = selection.get("value")
+        primary_ids = _filter_site_ids(field, value, attributes)
+        secondary_attributes = (
+            {site_id: attributes[site_id] for site_id in primary_ids}
+            if primary_ids is not None
+            else {}
+        )
         if defer_map:
             plots.append(dcc.Store(id="task-graph-selection", data=selection))
+        plots.append(dcc.Store(id="task-ranking-year-request"))
         plots.append(
             dcc.Store(
                 id="site-filter-attributes",
@@ -2135,7 +2192,7 @@ def _build_plots(
         plots.append(
             dcc.Store(
                 id="site-filtered-ids",
-                data=_filter_site_ids(field, value, attributes),
+                data=_filter_selection_site_ids(selection, attributes),
             )
         )
         plots.append(
@@ -2183,6 +2240,52 @@ def _build_plots(
                             ),
                         ],
                         className="g-2",
+                    ),
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    html.Label(
+                                        "Filter within the selected group:",
+                                        htmlFor="site-filter-field2",
+                                        className="form-label",
+                                    ),
+                                    dcc.Dropdown(
+                                        id="site-filter-field2",
+                                        options=[
+                                            {"label": name, "value": name}
+                                            for name in fields if name != field
+                                        ],
+                                        value=selection.get("field2"),
+                                        placeholder="No secondary filter",
+                                        clearable=True,
+                                        disabled=not field or value is None,
+                                    ),
+                                ],
+                                md=6,
+                            ),
+                            dbc.Col(
+                                [
+                                    html.Label(
+                                        "Value:",
+                                        htmlFor="site-filter-value2",
+                                        className="form-label",
+                                    ),
+                                    dcc.Dropdown(
+                                        id="site-filter-value2",
+                                        options=_site_filter_values(
+                                            selection.get("field2"), secondary_attributes
+                                        ),
+                                        value=selection.get("value2"),
+                                        placeholder="Select a value",
+                                        clearable=True,
+                                        disabled=not selection.get("field2"),
+                                    ),
+                                ],
+                                md=6,
+                            ),
+                        ],
+                        className="g-2 mt-2",
                     ),
                     html.Small(
                         "Choose a group or an individual site; clear the selection to show all sites.",

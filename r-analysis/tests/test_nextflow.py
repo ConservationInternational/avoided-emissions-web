@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "nextflow"))
 
 import driver
 import nextflow_worker as worker
+from summary_shards import merge_csv_tables
 from workflow_store import Store, checkpoint_key, digest
 
 
@@ -151,6 +152,8 @@ def exercise_fixture(config_path: Path, invalid_late_outcome: bool = False) -> N
         summary.mkdir()
         with contextlib.chdir(summary):
             worker.summarize_shard(params, descriptor, archives[-1], 120, 1)
+        with (summary / "output/results_covariate_balance_replicates.csv").open(newline="") as stream:
+            assert all(row["scope_type"] != "portfolio" for row in csv.DictReader(stream))
         reports.append(str(summary / "reports.tar"))
         diagnostics = root / f"diagnostics-{batch.stem}"
         diagnostics.mkdir()
@@ -206,7 +209,16 @@ def exercise_fixture(config_path: Path, invalid_late_outcome: bool = False) -> N
             expected_rows = list(csv.DictReader(stream))
         with (published / "output" / path.name).open(newline="") as stream:
             actual_rows = list(csv.DictReader(stream))
-        normalize = lambda rows: sorted(rows, key=lambda row: json.dumps(row, sort_keys=True))
+        if path.name == "results_covariate_balance_replicates.csv":
+            keys = (
+                "task_id", "replicate", "scope_type", "site_id", "fragment_id",
+                "stratum", "scope", "covariate",
+            )
+            normalize = lambda rows, keys=keys: sorted(
+                rows, key=lambda row: tuple(row[key] for key in keys)
+            )
+        else:
+            normalize = lambda rows: sorted(rows, key=lambda row: json.dumps(row, sort_keys=True))
         actual_rows, expected_rows = normalize(actual_rows), normalize(expected_rows)
         assert len(actual_rows) == len(expected_rows), path.name
         for actual, expected_row in zip(actual_rows, expected_rows, strict=True):
@@ -221,6 +233,43 @@ def exercise_fixture(config_path: Path, invalid_late_outcome: bool = False) -> N
                 assert math.isclose(
                     float(value), float(expected_row[key]), rel_tol=1e-12, abs_tol=1e-12
                 ), (path.name, key, value, expected_row[key])
+
+    # A legacy shard-local portfolio row must not survive reduction, while
+    # nonportfolio rows must be reused rather than recomputed from cov_data.
+    altered = root / "altered-report"
+    altered.mkdir()
+    with tarfile.open(reports[0]) as archive:
+        archive.extractall(altered, filter="data")
+    balance_path = altered / "results_covariate_balance_replicates.csv"
+    with balance_path.open(newline="") as stream:
+        reader = csv.DictReader(stream)
+        fields = reader.fieldnames
+        rows = list(reader)
+    reused = next(row for row in rows if row["scope_type"] == "matching_unit")
+    reused["worst_abs_smd"] = "987654321"
+    legacy = dict(reused, scope_type="portfolio", site_id="__all__")
+    with balance_path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows([*rows, legacy])
+    altered_archive = root / "altered-report.tar"
+    with tarfile.open(altered_archive, "w") as archive:
+        for path in sorted(altered.iterdir()):
+            archive.add(path, arcname=path.name, recursive=False)
+    reuse_reduced = root / "reuse-reduced"
+    reuse_reduced.mkdir()
+    with contextlib.chdir(reuse_reduced):
+        worker.finalize_reports(params, plan, [str(altered_archive), *reports[1:]], 120)
+        with Path("output/results_covariate_balance_replicates.csv").open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+    assert any(
+        row["scope_type"] == "matching_unit" and row["worst_abs_smd"] == "987654321"
+        for row in rows
+    )
+    assert not any(
+        row["scope_type"] == "portfolio" and row["worst_abs_smd"] == "987654321"
+        for row in rows
+    )
 
 
 class WorkflowTests(unittest.TestCase):
@@ -961,6 +1010,47 @@ class WorkflowTests(unittest.TestCase):
                 archives, {**plan, "expected_ids": [1, 2, 3]}, "reports", self.root / "coverage"
             )
 
+    def test_csv_merge_copies_matching_schemas_without_reencoding_rows(self):
+        first = self.root / "first.csv"
+        empty = self.root / "empty.csv"
+        last = self.root / "last.csv"
+        first.write_bytes(b'site_id,note\r\n001,"two\r\nlines, ""quoted"""\r\n')
+        empty.write_bytes(b"site_id,note\n")
+        last.write_bytes('site_id,note\n002,"caf\u00e9"\n003,last'.encode("utf-8"))
+        output = self.root / "merged.csv"
+        with patch("summary_shards.csv.DictReader", side_effect=AssertionError("row parsing")):
+            merge_csv_tables([first, empty, last, first], output)
+        with output.open(encoding="utf-8", newline="") as stream:
+            self.assertEqual(list(csv.reader(stream)), [
+                ["site_id", "note"],
+                ["001", 'two\r\nlines, "quoted"'],
+                ["002", "caf\u00e9"],
+                ["003", "last"],
+                ["001", 'two\r\nlines, "quoted"'],
+            ])
+        self.assertIn(first.read_bytes().split(b"\n", 1)[1], output.read_bytes())
+
+    def test_csv_merge_unions_different_headers_including_empty_shards(self):
+        paths = [self.root / f"part{index}.csv" for index in range(3)]
+        paths[0].write_text("site_id,value\n001,1\n")
+        paths[1].write_text("site_id,value,extra\n")
+        paths[2].write_text('extra,site_id,note\n2,002,"comma, text"\n')
+        output = self.root / "merged.csv"
+        merge_csv_tables(paths, output)
+        with output.open(newline="") as stream:
+            self.assertEqual(list(csv.DictReader(stream)), [
+                {"site_id": "001", "value": "1", "extra": "", "note": ""},
+                {"site_id": "002", "value": "", "extra": "2", "note": "comma, text"},
+            ])
+
+    def test_csv_merge_rejects_missing_and_duplicate_headers(self):
+        path = self.root / "invalid.csv"
+        for content in ("", "site_id,site_id\nA,B\n"):
+            with self.subTest(content=content):
+                path.write_text(content)
+                with self.assertRaisesRegex(ValueError, "Missing or duplicate CSV header"):
+                    merge_csv_tables([path], self.root / "merged.csv")
+
     def test_summary_partition_cap_preserves_parent_and_unscheduled_fragment_coverage(self):
         expected = {
             "ids": list(range(1, 60)), "n_replicates": 100,
@@ -1185,7 +1275,7 @@ class WorkflowTests(unittest.TestCase):
                 "ae_" + env["EXECUTION_ID"].replace("-", "_"),
             )
             self.assertEqual(command[command.index("--spot_queue") + 1], "ae-spot-gp3")
-            self.assertEqual(command[command.index("--max_forks") + 1], "100")
+            self.assertEqual(command[command.index("--max_forks") + 1], "250")
             self.assertNotIn("--job_role", command)
             self.assertEqual(
                 popen.call_args.kwargs["env"]["NXF_IGNORE_RESUME_HISTORY"], "true"

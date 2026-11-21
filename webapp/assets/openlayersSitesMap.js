@@ -216,7 +216,9 @@
     }
 
     function bindPlotSiteSelection() {
-        document.querySelectorAll(".site-selectable-plot .js-plotly-plot").forEach(plot => {
+        document.querySelectorAll(
+            "#task-results-graphs .js-plotly-plot, .site-selectable-plot .js-plotly-plot"
+        ).forEach(plot => {
             if (plot._siteSelectionBound || typeof plot.on !== "function") {
                 return;
             }
@@ -242,7 +244,23 @@
                 const point = event.points?.[0];
                 selectSite(point?.customdata || point?.data?.meta?.site_id);
             });
+            plot.on("plotly_clickannotation", event => selectRankingYear(plot, event));
         });
+    }
+
+    let rankingYearSequence = 0;
+
+    function selectRankingYear(plot, event) {
+        const name = event.annotation?.name;
+        if (!plot.layout?.meta?.site_ranking || !name?.startsWith("ranking-year:")) {
+            return;
+        }
+        const year = Number(name.slice("ranking-year:".length));
+        if (Number.isInteger(year) && plot.layout.meta.ranking_years.includes(year)) {
+            window.dash_clientside.set_props("task-ranking-year-request", {
+                data: { year, sequence: ++rankingYearSequence },
+            });
+        }
     }
 
     function bindMapTableSync(mapEl, map, config) {

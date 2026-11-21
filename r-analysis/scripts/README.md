@@ -31,6 +31,9 @@ recovery, reconciliation, and summarization. Matching workers reuse loaded pixel
 across replicate blocks and publish durable sample, stratum, and replicate
 checkpoints. See the [operational contract](../../docs/matching-reliability-plan.md#8-implementation-and-operational-contract).
 Standalone commands remain available for local debugging, not API dispatch.
+The default concurrency ceiling is 250 jobs (not EC2 nodes), controlled by
+`AE_NEXTFLOW_MAX_FORKS` up to 500. Actual concurrency depends on Batch capacity
+and job memory reservations; this does not change the 16-way summary partition.
 
 Recovery tiers are skipped when no unfinished work remains. Reconciliation
 accepts an empty final-tier outcome list and still verifies every expected
@@ -129,11 +132,22 @@ Two independently resumable branches follow: `EXPORT_DIAGNOSTICS` encodes each
 shard's diagnostics while `FINALIZE_REPORTS` combines report shards. The reducer
 sums site totals **within each replicate before computing portfolio quantiles**;
 it recomputes global quality distributions from replicate-1 covariates rather
-than averaging site distributions. Site estimates, atom coverage, whole-site
+than averaging site distributions. Replicate-balance calculations index pixel
+groups once per scope, retaining empty replicates. Shards export matching-unit,
+fragment and stratum balance; the reducer reuses those rows and calculates
+only portfolio replicate balance from the combined pixels, never averaging
+shard SMDs or SDs. Older shard-local portfolio rows are replaced on reduction.
+If a shard lacks a covariate column present elsewhere, reduction restores its
+empty diagnostic rows with unavailable/not-applicable status, without
+recalculating existing shard balance values.
+Site estimates, atom coverage, whole-site
 invalidation, and complete-stratum rules are unchanged. Missing, duplicate, or
 overlapping shard domains are rejected.
 
-CSV tables are merged as streams. `PUBLISH_RESULTS` joins both branches,
+CSV tables with identical headers are concatenated in byte streams without
+parsing or reencoding their data rows, including quoted multiline fields.
+Differing headers retain schema-union merging; missing or duplicate headers
+fail explicitly. `PUBLISH_RESULTS` joins both branches,
 streams the replay-manifest merge, and concatenates gzip members without
 decoding or recompressing diagnostic records. Diagnostic JSONL remains readable through standard
 multi-member gzip readers (including Python gzip and R gzfile); record order is

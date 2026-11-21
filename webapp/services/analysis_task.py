@@ -1237,8 +1237,8 @@ LARGE_TASK_THRESHOLD = 200
 SITE_RANKING_YEAR = 2025
 
 
-def get_task_top_site_yearly(task_id, site_ids):
-    """Load 2025 leaders and signed yearly remainders without loading all sites."""
+def get_task_top_site_yearly(task_id, site_ids, ranking_year=SITE_RANKING_YEAR):
+    """Load leaders and signed yearly remainders without loading all sites."""
     db = get_db()
     try:
         metrics = (
@@ -1254,7 +1254,7 @@ def get_task_top_site_yearly(task_id, site_ids):
         for metric in metrics:
             ranking = (
                 db.query(TaskResult.site_id)
-                .filter(*filters, TaskResult.year == SITE_RANKING_YEAR)
+                .filter(*filters, TaskResult.year == ranking_year)
                 .group_by(TaskResult.site_id)
             )
             total = func.sum(metric)

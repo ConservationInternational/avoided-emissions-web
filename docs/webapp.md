@@ -532,7 +532,11 @@ The forest-loss-by-year chart appears immediately after
 cumulative deforestation; the avoided-emissions line charts appear immediately
 before the avoided-emissions-by-year chart. The yearly bar charts independently
 highlight the three largest positive and three most negative sites using that
-metric's **2025** values. Separate site-ID legends identify these groups, with
+metric's **2025** values by default. Click a year label below either stacked
+chart to re-rank both charts for that year within the current filtered group.
+Each chart states **Top 3/bottom 3 sites for [year]**; its legends, labeled bars,
+and signed remainder bars update together. Separate site-ID legends identify
+these groups, with
 six distinct colors from Paul Tol's color-blind-friendly muted qualitative
 palette. These site colors stay fixed across years, even when a site's
 contribution changes sign.
@@ -540,8 +544,8 @@ All remaining sites are combined into **All other sites (positive)** in blue and
 **All other sites (negative)** in orange, splitting contributions by their sign
 in each plotted year rather than netting them together. Group filters recalculate
 the ranking within the selected group; error bars retain the overall replicate
-range. If no nonzero 2025 site data exists, the charts show only the signed remainder
-groups and explain why there are no individually highlighted sites.
+range. If no nonzero site data exists for the ranking year, the charts show only
+the signed remainder groups and explain why there are no individually highlighted sites.
 Forest-loss error bars use dark charcoal to keep both limits visible against the bars.
 Click a site's legend entry or bar to select it and zoom the map to that site.
 The **All other sites** legend entries retain the usual show/hide behavior.
@@ -567,9 +571,15 @@ uploaded source file. It filters the map, site selector, and plots; other result
 tabs are unchanged. For imported site sets, source fields and values are loaded
 with the plot controls, independently of the deferred map. The reserved
 `ae_atoms` geometry field is used by the analysis and is not offered as a filter.
-Matching sites are highlighted on the map. Selecting a site
-on the map clears the group filter and shows that site's plots. Clear the
-selection to restore all sites.
+The second filter row narrows the primary group using a different source field.
+Its values come only from sites in the primary group, and its field list excludes
+the primary field. Changing the primary field or value clears the secondary
+filter and the selected site. Both filters and the ranking year are retained in
+shared URLs and browser history. **Updating results plots...** remains visible
+at the bottom of the viewport while filters or rankings are being applied.
+Matching sites are highlighted on the map. Selecting a site on the map preserves
+the group filters and shows that site's plots. Clear the site selection to
+restore the selected group, or clear all filters to restore all sites.
 Browser **Back** and **Forward** restore previous site selections, completed
 group filters, and results tabs without reloading the whole page. The map also
 returns to its saved center, zoom, and rotation. Panning and zooming alone do not
@@ -592,8 +602,11 @@ The site map appears near the top of this section. It shows the site polygons
 and, when pixel location data is available, matched treatment (green) and control
 (blue) pixel centroids. Covariate COG overlays can be toggled via the layer panel.
 Selecting a site zooms the map to it; clicking a site on the map selects it and
-loads its plots. Plot URLs retain the selected site or group and can be reloaded
-or shared.
+loads its plots. Clicking an individual site's bar or legend entry in the yearly
+forest-loss or avoided-emissions plots also selects and zooms to that site,
+including in filtered shared views. Aggregate "All other sites" bars do not
+select an individual site. Plot URLs retain the selected site or group and can
+be reloaded or shared.
 
 ### Match quality diagnostics
 

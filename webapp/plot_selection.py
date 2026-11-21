@@ -22,26 +22,39 @@ def parse_task_tab(search):
 
 def parse_plot_selection(search):
     params = parse_qs((search or "").lstrip("?"), keep_blank_values=True)
-    if any(len(params.get(key, [])) > 1 for key in ("site", "field", "value")):
+    if any(
+        len(params.get(key, [])) > 1
+        for key in ("site", "field", "value", "field2", "value2", "year")
+    ):
         return {"error": "The plot URL contains duplicate selection parameters."}
     site = params.get("site", [""])[0]
-    field = params.get("field", [""])[0]
-    has_value = "value" in params
-    if field and has_value:
+    selection = {"site": site} if site else {}
+    for field_key, value_key in (("field", "value"), ("field2", "value2")):
+        field = params.get(field_key, [""])[0]
+        has_value = value_key in params
+        if not field and not has_value:
+            continue
+        if not field or not has_value:
+            return {"error": "The plot URL needs both a group field and value."}
         try:
-            value = json.loads(params["value"][0])
+            value = json.loads(params[value_key][0])
         except (ValueError, TypeError):
             return {"error": "The group value in the plot URL is invalid."}
-        selection = {
-            "field": field,
-            "value": json.dumps(value, sort_keys=True, ensure_ascii=False),
-        }
-        if site:
-            selection["site"] = site
-        return selection
-    if field or has_value:
-        return {"error": "The plot URL needs both a group field and value."}
-    return {"site": site} if site else {}
+        selection[field_key] = field
+        selection[value_key] = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    if selection.get("field2") and (
+        not selection.get("field") or selection["field2"] == selection["field"]
+    ):
+        return {"error": "The secondary filter needs a different primary field."}
+    if "year" in params:
+        try:
+            year = int(params["year"][0])
+        except ValueError:
+            return {"error": "The ranking year in the plot URL is invalid."}
+        if not 1 <= year <= 9999:
+            return {"error": "The ranking year in the plot URL is invalid."}
+        selection["year"] = year
+    return selection
 
 
 def plot_selection_query(selection, active_tab):
@@ -51,7 +64,10 @@ def plot_selection_query(selection, active_tab):
     params = {"tab": "plots"}
     if selection.get("site"):
         params["site"] = selection["site"]
-    if selection.get("field") and selection.get("value") is not None:
-        params["field"] = selection["field"]
-        params["value"] = selection["value"]
+    for field_key, value_key in (("field", "value"), ("field2", "value2")):
+        if selection.get(field_key) and selection.get(value_key) is not None:
+            params[field_key] = selection[field_key]
+            params[value_key] = selection[value_key]
+    if selection.get("year") is not None:
+        params["year"] = selection["year"]
     return "?" + urlencode(params)

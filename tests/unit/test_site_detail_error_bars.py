@@ -213,7 +213,13 @@ def test_yearly_bars_rank_2025_and_split_remaining_sites_by_yearly_sign(
         assert error.legend == "legend3"
         assert figure.layout.legend.title.text == "Site ID: top positive (2025)"
         assert figure.layout.legend2.title.text == "Site ID: top negative (2025)"
-        assert bool(figure.layout.annotations) == (reference_data != "present")
+        assert any(
+            "No nonzero" in annotation.text for annotation in figure.layout.annotations
+        ) == (reference_data != "present")
+        assert any(
+            "Top 3/bottom 3 sites for 2025" in annotation.text
+            for annotation in figure.layout.annotations
+        )
 
 
 @pytest.mark.unit
@@ -906,11 +912,13 @@ def test_source_field_filter_values_and_site_selection():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("share_token", [None, "share"])
-def test_group_filter_rebuilds_aggregate_from_selected_results(mocker, share_token):
+@pytest.mark.parametrize("nested", [False, True])
+def test_group_filter_rebuilds_aggregate_from_selected_results(mocker, share_token, nested):
     app = Dash(__name__, suppress_callback_exceptions=True)
     app.layout = task_detail_layout(
         None, "task", shared_token=share_token,
-        search="?tab=plots&field=region&value=%22North%22",
+        search="?tab=plots&field=region&value=%22North%22"
+        + ("&field2=flag&value2=false" if nested else ""),
     )
     registration.register_callbacks(app)
     callback_id = "task-results-graphs.children"
@@ -923,7 +931,7 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker, share_tok
             area_ha=100 if site == "a" else 200,
             sampled_fraction=0.25 if site == "a" else 0.5,
         )
-        for site in ("a", "b")
+        for site in ("a", "b", "c")
     ]
     task = SimpleNamespace(
         id="task",
@@ -986,13 +994,21 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker, share_tok
         },
     )
     selection = app.layout["task-plot-selection"].data
-    attributes = {"a": {"region": "North"}, "b": {"region": "South"}}
+    attributes = {
+        "a": {"region": "North", "flag": False},
+        "b": {"region": "South", "flag": False},
+        "c": {"region": "North" if nested else "South", "flag": True},
+    }
     client = app.server.test_client()
     dependency = next(
         item for item in client.get("/_dash-dependencies").get_json()
         if item["output"] == callback_id
     )
     assert not dependency["prevent_initial_call"]
+    assert dependency["running"] == {
+        "running": {"task-selection-content-loading.display": "show"},
+        "runningOff": {"task-selection-content-loading.display": "auto"},
+    }
     response = client.post(
         "/_dash-update-component",
         json={
@@ -1019,6 +1035,8 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker, share_tok
     assert response.status_code == 200
     rendered = response.get_json()["response"]["task-results-graphs"]["children"]
     assert "region = North" in rendered[0]["props"]["children"]
+    if nested:
+        assert "flag = False" in rendered[0]["props"]["children"]
     figure = rendered[2]["props"]["figure"]
     assert "1 sites" in figure["layout"]["title"]["text"]
     assert figure["data"][0]["y"] == [1]
@@ -1029,7 +1047,7 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker, share_tok
     portfolio_total.assert_called_with(
         "task", {"a"}, 2, results_s3_uri="s3://bucket/output"
     )
-    top_sites.assert_called_with("task", ["a"])
+    top_sites.assert_called_with("task", ["a"], 2025)
     assert "region = North" in content[0].children
     assert isinstance(content[1], dbc.Card)
     summary_columns = content[1].children[1].children.children
@@ -1052,6 +1070,155 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker, share_tok
         "task", None, {}
     )
     assert missing.children == "The selected source field is not available."
+
+
+@pytest.mark.unit
+def test_secondary_filter_options_and_selection_preserve_ranking_year(monkeypatch):
+    app = Dash(__name__, suppress_callback_exceptions=True)
+    registration.register_callbacks(app)
+    callbacks = {
+        entry["callback"].__wrapped__.__name__: entry["callback"].__wrapped__
+        for entry in app.callback_map.values() if "callback" in entry
+    }
+    attributes = {
+        "a": {"region": "North", "country": "A"},
+        "b": {"region": "North", "country": "B"},
+        "c": {"region": "South", "country": "C"},
+    }
+    options = callbacks["update_secondary_filter_options"](
+        "region", '"North"', "country", attributes
+    )
+    assert options == (
+        [{"label": "country", "value": "country"}], False,
+        [{"label": "A", "value": '"A"'}, {"label": "B", "value": '"B"'}], False,
+    )
+    group = {
+        "field": "region", "value": '"North"', "field2": "country",
+        "value2": '"A"', "year": 2024,
+    }
+    assert callbacks["filter_site_ids"](group, attributes) == ["a"]
+    monkeypatch.setattr(
+        registration, "callback_context",
+        SimpleNamespace(triggered_id="site-map-selection"),
+    )
+    selected = callbacks["update_plot_selection"](
+        "region", '"North"', None, "a", 0, 0, group,
+        field2="country", value2='"A"',
+    )
+    assert selected[0] == {**group, "site": "a"}
+    monkeypatch.setattr(
+        registration, "callback_context",
+        SimpleNamespace(triggered_id="site-filter-value"),
+    )
+    changed = callbacks["update_plot_selection"](
+        "region", '"South"', "a", "", 0, 0, selected[0],
+        field2="country", value2='"A"',
+    )
+    assert changed[0] == {"field": "region", "value": '"South"', "year": 2024}
+    assert changed[3] is None
+    assert changed[-2:] == (None, None)
+    monkeypatch.setattr(
+        registration, "callback_context",
+        SimpleNamespace(triggered_id="task-ranking-year-request"),
+    )
+    reranked = callbacks["update_plot_selection"](
+        "region", '"North"', None, "", 0, 0, group,
+        field2="country", value2='"A"', ranking_request={"year": 2023, "sequence": 1},
+    )
+    assert reranked[0] == {**group, "year": 2023}
+    repeated = callbacks["update_plot_selection"](
+        "region", '"North"', None, "", 0, 0, group,
+        field2="country", value2='"A"', ranking_request={"year": 2024, "sequence": 2},
+    )
+    assert repeated[0] == group
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("large_task", [False, True])
+def test_year_change_replaces_labeled_sites_and_rebalances_remainders(large_task):
+    rows = [
+        {
+            "site_id": f"site-{index}", "year": year,
+            "emissions_avoided_mgco2e": (index if year == 2025 else 9 - index)
+            * (1 if index % 2 else -1),
+            "forest_loss_avoided_ha": (index if year == 2025 else 9 - index)
+            * (1 if index % 2 else -1),
+        }
+        for index in range(1, 9) for year in (2024, 2025)
+    ]
+    agg_yearly = [
+        {
+            "year": year, "treatment_defor_ha": 0, "control_defor_ha": 0,
+            **{
+                metric: sum(row[metric] for row in rows if row["year"] == year)
+                for metric in ("emissions_avoided_mgco2e", "forest_loss_avoided_ha")
+            },
+        }
+        for year in (2024, 2025)
+    ]
+    results = [
+        SimpleNamespace(**{
+            column.name: row.get(column.name.removeprefix("extrapolated_"))
+            for column in analysis_task.TaskResult.__table__.columns
+        })
+        for row in rows
+    ]
+    totals = [
+        SimpleNamespace(**{
+            **{column.name: None for column in analysis_task.TaskResultTotal.__table__.columns},
+            "site_id": f"site-{index}",
+        })
+        for index in range(1, 9)
+    ]
+    for year, expected in (
+        (2025, ["site-7", "site-5", "site-3", "site-8", "site-6", "site-4"]),
+        (2024, ["site-1", "site-3", "site-5", "site-2", "site-4", "site-6"]),
+    ):
+        bar_data = {
+            "site_yearly": [row for row in rows if row["site_id"] in expected],
+            "signed_yearly": {
+                metric: [
+                    {
+                        "year": plotted_year,
+                        **{
+                            sign: sum(
+                                row[metric] for row in rows
+                                if row["year"] == plotted_year
+                                and row["site_id"] not in expected
+                                and (row[metric] > 0 if sign == "positive" else row[metric] < 0)
+                            )
+                            for sign in ("positive", "negative")
+                        },
+                    }
+                    for plotted_year in (2024, 2025)
+                ]
+                for metric in ("emissions_avoided_mgco2e", "forest_loss_avoided_ha")
+            },
+        }
+        graphs = _build_plots(
+            None if large_task else results, totals, agg_yearly=agg_yearly,
+            is_large=large_task, ranking_year=year, graphs_only=True,
+            bar_site_data=bar_data if large_task else None,
+        )
+        for graph in graphs:
+            if not graph.figure.layout.meta:
+                continue
+            bars = [trace for trace in graph.figure.data if trace.type == "bar"]
+            assert [trace.meta["site_id"] for trace in bars if trace.meta] == expected
+            assert f"({year})" in graph.figure.layout.legend.title.text
+            assert any(
+                f"Top 3/bottom 3 sites for {year}" in note.text
+                for note in graph.figure.layout.annotations
+            )
+            year_labels = [
+                note for note in graph.figure.layout.annotations
+                if (note.name or "").startswith("ranking-year:")
+            ]
+            assert [note.text for note in year_labels] == ["2024", "2025"]
+            assert all(note.captureevents for note in year_labels)
+            assert [sum(trace.y[i] for trace in bars) for i in range(2)] == [
+                row["forest_loss_avoided_ha"] for row in agg_yearly
+            ]
 
 
 @pytest.mark.unit
@@ -1338,6 +1505,8 @@ def test_site_selection_preserves_group_filter(monkeypatch):
         "",
         registration.no_update,
         registration.no_update,
+        registration.no_update,
+        registration.no_update,
     )
     monkeypatch.setattr(
         registration,
@@ -1346,7 +1515,10 @@ def test_site_selection_preserves_group_filter(monkeypatch):
     )
     assert callbacks["update_plot_selection"](
         "region", '"North"', "site-1", "site-1", 0, 1, group
-    ) == ({}, None, None, None, "", registration.no_update, registration.no_update)
+    ) == (
+        {}, None, None, None, "", registration.no_update, registration.no_update,
+        None, None,
+    )
 
 
 @pytest.mark.unit
@@ -1411,6 +1583,9 @@ def test_plot_navigation_loading_covers_selection_and_chart_callbacks(shared_tok
         "task-plot-selection": "*",
         "site-filter-field": "value",
         "site-filter-value": "*",
+        "site-filter-field2": "*",
+        "site-filter-value2": "*",
+        "task-ranking-year-request": "data",
         "site-defor-selector": "value",
         "site-map-selection": "value",
         "task-graph-selection": "data",
@@ -1500,6 +1675,8 @@ def test_history_navigation_restores_controls_and_selection_together(
         "",
         [{"label": "North", "value": '"North"'}] if expected.get("field") else [],
         not bool(expected.get("field")),
+        expected.get("field2"),
+        expected.get("value2"),
     )
 
 
@@ -1653,6 +1830,11 @@ def test_match_quality_callback_uses_current_group_and_site_selection(mocker):
         },
         {"field": "active", "value": "false"},
         {"field": "class", "value": "null"},
+        {
+            "field": "region", "value": '"North"', "field2": "active",
+            "value2": "false", "year": 2024,
+        },
+        {"year": 2024},
     ],
 )
 def test_plot_selection_query_round_trip_and_default_tab(selection):
@@ -1668,7 +1850,12 @@ def test_plot_selection_query_round_trip_and_default_tab(selection):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "query", ["?site=a&field=x", "?field=x", "?field=x&value=bad", "?site=a&site=b"]
+    "query", [
+        "?site=a&field=x", "?field=x", "?field=x&value=bad", "?site=a&site=b",
+        "?field2=x&value2=null", "?field=x&value=null&field2=x&value2=null",
+        "?field=x&value=null&field2=y", "?year=bad", "?year=2024&year=2025",
+        "?year=0", "?year=10000",
+    ]
 )
 def test_invalid_plot_selection_urls_are_reported(query):
     assert parse_plot_selection(query).get("error")

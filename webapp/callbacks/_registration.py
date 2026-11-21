@@ -74,6 +74,7 @@ from services import (
     update_task_info,
 )
 from services.analysis_task import (
+    SITE_RANKING_YEAR,
     get_filtered_match_quality_pixels,
     get_filtered_portfolio_total,
     get_filtered_portfolio_yearly,
@@ -98,6 +99,7 @@ from callbacks._detail_builders import (
     _build_results_content,
     _build_selection_summary,
     _build_yearly_results,
+    _filter_selection_site_ids,
     _filter_site_ids,
     _site_filter_values,
 )
@@ -1850,6 +1852,7 @@ def register_callbacks(app, limiter=None):
             )
         elif active_tab == "tab-plots":
             if results or agg_yearly:
+                ranking_year = (plot_selection or {}).get("year", SITE_RANKING_YEAR)
                 plots = _build_plots(
                     results,
                     totals,
@@ -1861,8 +1864,11 @@ def register_callbacks(app, limiter=None):
                     defer_map=True,
                     site_filter_attributes=detail.get("site_filter_attributes"),
                     plot_selection=plot_selection,
+                    ranking_year=ranking_year,
                     bar_site_data=(
-                        get_task_top_site_yearly(task_id, [t.site_id for t in totals])
+                        get_task_top_site_yearly(
+                            task_id, [t.site_id for t in totals], ranking_year
+                        )
                         if is_large
                         else None
                     ),
@@ -2409,6 +2415,32 @@ def register_callbacks(app, limiter=None):
         ) or attributes is None
 
     @app.callback(
+        Output("site-filter-field2", "options"),
+        Output("site-filter-field2", "disabled"),
+        Output("site-filter-value2", "options"),
+        Output("site-filter-value2", "disabled"),
+        Input("site-filter-field", "value"),
+        Input("site-filter-value", "value"),
+        Input("site-filter-field2", "value"),
+        Input("site-filter-attributes", "data"),
+    )
+    def update_secondary_filter_options(field, value, field2, attributes):
+        attributes = attributes or {}
+        primary_ids = _filter_site_ids(field, value, attributes)
+        scoped = (
+            {site_id: attributes[site_id] for site_id in primary_ids}
+            if primary_ids is not None else {}
+        )
+        fields = sorted({key for props in attributes.values() for key in props})
+        enabled = bool(field) and value is not None
+        return (
+            [{"label": name, "value": name} for name in fields if name != field],
+            not enabled,
+            _site_filter_values(field2, scoped) if field2 != field else [],
+            not enabled or not field2 or field2 == field,
+        )
+
+    @app.callback(
         Output("site-filtered-ids", "data"),
         Input("task-plot-selection", "data"),
         Input("site-filter-attributes", "data"),
@@ -2417,9 +2449,7 @@ def register_callbacks(app, limiter=None):
         selection = selection or {}
         if attributes is None and selection.get("field"):
             raise PreventUpdate
-        return _filter_site_ids(
-            selection.get("field"), selection.get("value"), attributes
-        )
+        return _filter_selection_site_ids(selection, attributes)
 
     @app.callback(
         Output("task-plot-selection", "data", allow_duplicate=True),
@@ -2442,6 +2472,8 @@ def register_callbacks(app, limiter=None):
         Output("site-map-selection", "value"),
         Output("site-filter-value", "options", allow_duplicate=True),
         Output("site-filter-value", "disabled", allow_duplicate=True),
+        Output("site-filter-field2", "value"),
+        Output("site-filter-value2", "value"),
         Input("site-filter-field", "value"),
         Input("site-filter-value", "value"),
         Input("site-defor-selector", "value"),
@@ -2451,6 +2483,9 @@ def register_callbacks(app, limiter=None):
         State("task-plot-selection", "data"),
         Input("task-view-navigation", "data"),
         State("site-filter-attributes", "data"),
+        Input("site-filter-field2", "value"),
+        Input("site-filter-value2", "value"),
+        Input("task-ranking-year-request", "data"),
         prevent_initial_call=True,
     )
     def update_plot_selection(
@@ -2463,14 +2498,34 @@ def register_callbacks(app, limiter=None):
         selection,
         navigation=None,
         attributes=None,
+        field2=None,
+        value2=None,
+        ranking_request=None,
     ):
         trigger = callback_context.triggered_id
         selection = selection or {}
+
+        def response(
+            next_selection,
+            field_value=no_update,
+            filter_value=no_update,
+            site_value=no_update,
+            map_value=no_update,
+            options=no_update,
+            disabled=no_update,
+            field2_value=no_update,
+            value2_value=no_update,
+        ):
+            return (
+                next_selection, field_value, filter_value, site_value, map_value,
+                options, disabled, field2_value, value2_value,
+            )
+
         if trigger == "task-view-navigation":
             if not navigation:
                 raise PreventUpdate
             restored = parse_plot_selection(navigation.get("search"))
-            return (
+            return response(
                 restored,
                 restored.get("field"),
                 restored.get("value"),
@@ -2478,57 +2533,73 @@ def register_callbacks(app, limiter=None):
                 "",
                 _site_filter_values(restored.get("field"), attributes),
                 not bool(restored.get("field")),
+                restored.get("field2"),
+                restored.get("value2"),
             )
+        year_selection = (
+            {"year": selection["year"]} if "year" in selection else {}
+        )
         group_selection = (
             {"field": field, "value": value} if field and value is not None else {}
         )
+        if group_selection and field2 and field2 != field and value2 is not None:
+            group_selection.update(field2=field2, value2=value2)
+        group_selection.update(year_selection)
+        if trigger == "task-ranking-year-request":
+            ranking_year = (ranking_request or {}).get("year")
+            if not isinstance(ranking_year, int) or isinstance(ranking_year, bool):
+                raise PreventUpdate
+            return response({**group_selection, "year": ranking_year})
         if trigger == "clear-plot-selection-btn" and clear_all:
-            return {}, None, None, None, "", no_update, no_update
+            return response(
+                year_selection, None, None, None, "",
+                field2_value=None, value2_value=None,
+            )
         if trigger == "site-map-clear" and map_clear:
-            return group_selection, no_update, no_update, None, "", no_update, no_update
+            return response(group_selection, site_value=None, map_value="")
         if trigger == "site-map-selection" and map_site:
-            return (
-                {**group_selection, "site": map_site},
-                no_update,
-                no_update,
-                map_site,
-                no_update,
-                no_update,
-                no_update,
+            return response(
+                {**group_selection, "site": map_site}, site_value=map_site,
             )
         if trigger == "site-defor-selector":
             if selected_site == selection.get("site"):
                 raise PreventUpdate
             if selected_site:
                 group_selection["site"] = selected_site
-            return (
-                group_selection,
-                no_update,
-                no_update,
-                no_update,
-                "",
-                no_update,
-                no_update,
-            )
+            return response(group_selection, map_value="")
         if trigger == "site-filter-field":
             if field == selection.get("field"):
                 raise PreventUpdate
-            return (
-                {"field": field} if field else {},
-                no_update,
-                None,
-                None,
-                "",
-                no_update,
-                no_update,
+            return response(
+                {**year_selection, **({"field": field} if field else {})},
+                filter_value=None, site_value=None, map_value="",
+                field2_value=None, value2_value=None,
             )
         if trigger == "site-filter-value":
             if field == selection.get("field") and value == selection.get("value"):
                 raise PreventUpdate
-            selection = (
+            next_selection = (
                 {"field": field, "value": value} if field and value is not None else {}
             )
-            return selection, no_update, no_update, None, "", no_update, no_update
+            return response(
+                {**year_selection, **next_selection},
+                site_value=None, map_value="", field2_value=None, value2_value=None,
+            )
+        if trigger == "site-filter-field2":
+            if field2 == selection.get("field2"):
+                raise PreventUpdate
+            group_selection.pop("value2", None)
+            if field2 and field2 != field and field and value is not None:
+                group_selection["field2"] = field2
+            else:
+                group_selection.pop("field2", None)
+            return response(
+                group_selection, site_value=None, map_value="", value2_value=None,
+            )
+        if trigger == "site-filter-value2":
+            if field2 == selection.get("field2") and value2 == selection.get("value2"):
+                raise PreventUpdate
+            return response(group_selection, site_value=None, map_value="")
         raise PreventUpdate
 
     app.clientside_callback(
@@ -2564,7 +2635,7 @@ def register_callbacks(app, limiter=None):
             const next = selection || {};
             const previous = rendered || {};
             if ((next.field && attributes == null) ||
-                ["site", "field", "value", "error"].every(
+                ["site", "field", "value", "field2", "value2", "year", "error"].every(
                     key => next[key] === previous[key]
                 )) {
                 return window.dash_clientside.no_update;
@@ -2585,6 +2656,9 @@ def register_callbacks(app, limiter=None):
         State("task-id-store", "data"),
         State("share-token-store", "data"),
         State("site-defor-store", "data"),
+        running=[
+            (Output("task-selection-content-loading", "display"), "show", "auto"),
+        ],
     )
     @timed_task_step("task_filtered_plots")
     def update_filtered_aggregate_plots(
@@ -2598,11 +2672,15 @@ def register_callbacks(app, limiter=None):
         field, value = selection.get("field"), selection.get("value")
         if field and attributes is None:
             raise PreventUpdate
-        if field and not any(field in props for props in (attributes or {}).values()):
+        if any(
+            selection.get(key)
+            and not any(selection[key] in props for props in (attributes or {}).values())
+            for key in ("field", "field2")
+        ):
             return dbc.Alert(
                 "The selected source field is not available.", color="warning"
             )
-        filtered_ids = _filter_site_ids(field, value, attributes)
+        filtered_ids = _filter_selection_site_ids(selection, attributes)
         try:
             if selection.get("site"):
                 site_id = str(selection["site"])
@@ -2649,6 +2727,13 @@ def register_callbacks(app, limiter=None):
             results = detail["results"]
             sites = detail["sites"]
             agg_yearly = detail["agg_yearly"]
+            ranking_year = selection.get("year", SITE_RANKING_YEAR)
+            if "year" in selection and ranking_year not in {
+                row["year"] for row in agg_yearly
+            }:
+                return dbc.Alert(
+                    "The selected ranking year is not available.", color="warning"
+                )
             if filtered_ids is not None:
                 allowed = set(filtered_ids)
                 totals = [total for total in totals if str(total.site_id) in allowed]
@@ -2670,8 +2755,11 @@ def register_callbacks(app, limiter=None):
                 agg_yearly=agg_yearly,
                 is_large=detail["is_large"],
                 graphs_only=True,
+                ranking_year=ranking_year,
                 bar_site_data=(
-                    get_task_top_site_yearly(task_id, [t.site_id for t in totals])
+                    get_task_top_site_yearly(
+                        task_id, [t.site_id for t in totals], ranking_year
+                    )
                     if detail["is_large"]
                     else None
                 ),
@@ -2683,6 +2771,10 @@ def register_callbacks(app, limiter=None):
                 if field and value is not None:
                     label = "(missing)" if value == "null" else str(json.loads(value))
                     description = f"{field} = {label}"
+                if selection.get("field2") and selection.get("value2") is not None:
+                    token = selection["value2"]
+                    label = "(missing)" if token == "null" else str(json.loads(token))
+                    description += f"; {selection['field2']} = {label}"
                 return [
                     dbc.Alert(
                         f"Filtered to {len(totals)} sites: {description}",
@@ -3404,8 +3496,11 @@ def register_callbacks(app, limiter=None):
         selection = selection or {}
         if selection.get("error"):
             return dbc.Alert(selection["error"], color="warning")
-        field, value = selection.get("field"), selection.get("value")
-        if field and not any(field in props for props in (attributes or {}).values()):
+        if any(
+            selection.get(key)
+            and not any(selection[key] in props for props in (attributes or {}).values())
+            for key in ("field", "field2")
+        ):
             return dbc.Alert(
                 "The selected source field is not available.", color="warning"
             )
@@ -3419,7 +3514,7 @@ def register_callbacks(app, limiter=None):
                 return html.P("Results not yet available.", className="text-muted")
 
             available_ids = {str(total.site_id) for total in detail["totals"]}
-            filtered_ids = _filter_site_ids(field, value, attributes)
+            filtered_ids = _filter_selection_site_ids(selection, attributes)
             if selection.get("site"):
                 site_id = str(selection["site"])
                 if filtered_ids is not None and site_id not in filtered_ids:

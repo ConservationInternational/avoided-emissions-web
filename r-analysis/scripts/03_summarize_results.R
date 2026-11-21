@@ -1094,7 +1094,8 @@ if (summary_mode != "reduce") {
 log_summary_phase("Pixel covariate exports")
 message("  Finalizing: covariate balance")
 site_balance <- if (summary_mode == "reduce") {
-    read_csv(out_path("results_covariate_balance.csv"), show_col_types = FALSE) %>%
+    read_csv(out_path("results_covariate_balance.csv"),
+             col_types = cols(site_id = col_character())) %>%
         filter(site_id != "__all__")
 } else {
     cov_data_r1 %>%
@@ -1102,7 +1103,7 @@ site_balance <- if (summary_mode == "reduce") {
         group_modify(~ balance_table(.x, covariates, CATEGORICAL)) %>%
         ungroup()
 }
-balance <- bind_rows(
+balance <- if (summary_mode == "shard") site_balance else bind_rows(
     balance_table(cov_data_r1, covariates, CATEGORICAL) %>% mutate(site_id = "__all__"),
     site_balance
 )
@@ -1158,47 +1159,79 @@ not_applicable_sites <- union(
     sites$site_id[!sites$site_id %in% site_status$site_id],
     site_status$site_id[site_status$status == "not_applicable"]
 )
-balance_fragments <- distinct(cov_data, id_numeric, site_id)
-balance_strata <- distinct(cov_data, id_numeric, site_id, group)
-for (replicate in seq_len(N_REPLICATES)) {
-    replicate_data <- filter(cov_data, replicate == !!replicate)
-    replicate_balance_rows[[length(replicate_balance_rows) + 1L]] <-
+if (summary_mode != "shard") {
+    replicate_rows <- split(
+        seq_len(nrow(cov_data)),
+        factor(cov_data$replicate, levels = seq_len(N_REPLICATES))
+    )
+    replicate_balance_rows <- lapply(seq_len(N_REPLICATES), function(replicate) {
         make_replicate_balance(
-            replicate_data, replicate, "portfolio", "__all__",
+            cov_data[replicate_rows[[replicate]], ], replicate, "portfolio", "__all__",
             not_applicable = length(balance_sites) > 0L &&
                 all(balance_sites %in% not_applicable_sites)
         )
-    for (site in balance_sites) {
-        site_data <- filter(replicate_data, site_id == !!site)
-        replicate_balance_rows[[length(replicate_balance_rows) + 1L]] <-
-            make_replicate_balance(
-                site_data, replicate, "matching_unit", site,
-                not_applicable = site %in% not_applicable_sites
-            )
-    }
-    for (i in seq_len(nrow(balance_fragments))) {
-        fragment <- balance_fragments[i, ]
-        fragment_data <- filter(
-            replicate_data, id_numeric == !!fragment$id_numeric,
-            site_id == !!fragment$site_id
+    })
+}
+if (summary_mode != "reduce") {
+    rosters <- list(
+        matching_unit = tibble(site_id = balance_sites),
+        fragment = distinct(cov_data, id_numeric, site_id),
+        stratum = distinct(cov_data, id_numeric, site_id, group)
+    )
+    for (scope_type in names(rosters)) {
+        roster <- rosters[[scope_type]]
+        groups <- balance_group_indices(
+            cov_data, names(roster), roster, seq_len(N_REPLICATES)
         )
-        replicate_balance_rows[[length(replicate_balance_rows) + 1L]] <-
+        rows <- lapply(seq_len(nrow(groups)), function(i) {
+            key <- groups[i, ]
             make_replicate_balance(
-                fragment_data, replicate, "fragment", fragment$site_id,
-                fragment$id_numeric
+                cov_data[groups$.rows[[i]], ], key$replicate, scope_type, key$site_id,
+                if (scope_type == "matching_unit") NA_integer_ else key$id_numeric,
+                if (scope_type == "stratum") key$group else NA_character_,
+                not_applicable = scope_type == "matching_unit" &&
+                    key$site_id %in% not_applicable_sites
             )
+        })
+        replicate_balance_rows <- c(replicate_balance_rows, rows)
     }
-    for (i in seq_len(nrow(balance_strata))) {
-        stratum <- balance_strata[i, ]
-        stratum_data <- filter(
-            replicate_data, id_numeric == !!stratum$id_numeric,
-            site_id == !!stratum$site_id, group == !!stratum$group
+}
+message("  Replicate balance: ", length(replicate_balance_rows),
+        " scope/replicate groups calculated",
+        if (summary_mode == "reduce") " (portfolio only)" else "")
+if (summary_mode == "reduce") {
+    shard_balance <- read_csv(
+        out_path("results_covariate_balance_replicates.csv"),
+        col_types = cols(
+            task_id = col_character(), site_id = col_character(), stratum = col_character()
         )
-        replicate_balance_rows[[length(replicate_balance_rows) + 1L]] <-
-            make_replicate_balance(
-                stratum_data, replicate, "stratum", stratum$site_id,
-                stratum$id_numeric, stratum$group
-            )
+    ) %>%
+        filter(scope_type != "portfolio")
+    reported_covariates <- shard_balance %>%
+        transmute(site_id, covariate = sub("=.*$", "", covariate)) %>%
+        distinct()
+    missing_covariates <- cross_join(
+        tibble(site_id = balance_sites), tibble(covariate = balance_covariates)
+    ) %>%
+        anti_join(reported_covariates, by = c("site_id", "covariate"))
+    if (nrow(missing_covariates) > 0) {
+        # Empty shards may lack columns present elsewhere in the portfolio.
+        # Fill their missing diagnostic rows without recalculating matched pixels.
+        scopes <- shard_balance %>%
+            transmute(
+                task_id, replicate, scope_type, site_id, fragment_id, stratum, scope,
+                not_applicable = status == "not_applicable"
+            ) %>%
+            distinct()
+        empty_balance <- make_replicate_balance(
+            cov_data[integer(), ], NA_integer_, "portfolio", "__all__"
+        ) %>%
+            select(-task_id, -replicate, -scope_type, -site_id, -fragment_id,
+                   -stratum, -not_applicable)
+        missing_rows <- scopes %>%
+            inner_join(missing_covariates, by = "site_id", relationship = "many-to-many") %>%
+            inner_join(empty_balance, by = c("scope", "covariate"))
+        replicate_balance_rows <- c(replicate_balance_rows, list(missing_rows))
     }
 }
 replicate_balance <- bind_rows(replicate_balance_rows) %>%
@@ -1230,6 +1263,11 @@ replicate_balance <- bind_rows(replicate_balance_rows) %>%
     ungroup() %>%
     mutate(mean_difference = mean_treatment - mean_control) %>%
     select(-not_applicable)
+if (summary_mode == "reduce") {
+    # Older shard exports may contain shard-local portfolio rows; replace those,
+    # but keep all site/fragment/stratum values and cross-replicate diagnostics.
+    replicate_balance <- bind_rows(replicate_balance, shard_balance)
+}
 write_csv(
     replicate_balance,
     out_path("results_covariate_balance_replicates.csv")

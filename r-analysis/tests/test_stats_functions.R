@@ -1,5 +1,40 @@
 source(file.path(Sys.getenv("R_SCRIPTS_DIR", "../scripts"), "stats_functions.R"))
 
+test_that("balance indices preserve empty replicates and exact scope identities", {
+    df <- tibble(
+        replicate = c(2L, 1L, 2L, 1L),
+        site_id = c("001", "1", "1", "001"),
+        id_numeric = c(1L, 2L, 2L, 1L), group = c("a.b", NA, NA, "a.b"),
+        treatment = c(TRUE, TRUE, FALSE, FALSE),
+        match_weight = c(1, 2, 3, 4), x = c(2, NA, 5, 7), eco = c(1L, 2L, 3L, 1L)
+    )
+    roster <- distinct(df, site_id, id_numeric, group)
+    groups <- balance_group_indices(df, names(roster), roster, 1:3)
+    expect_equal(nrow(groups), 6L)
+    for (i in seq_len(nrow(groups))) {
+        key <- groups[i, ]
+        expected <- filter(
+            df, replicate == key$replicate, site_id == key$site_id,
+            id_numeric == key$id_numeric,
+            (is.na(group) & is.na(key$group)) | (!is.na(group) & group == key$group)
+        )
+        indexed <- df[groups$.rows[[i]], ]
+        expect_identical(indexed, expected)
+        for (weighted_sd in c(FALSE, TRUE)) {
+            expect_equal(
+                balance_table(indexed, c("x", "eco"), "eco",
+                              weighted_sd = weighted_sd, include_counts = TRUE),
+                balance_table(expected, c("x", "eco"), "eco",
+                              weighted_sd = weighted_sd, include_counts = TRUE)
+            )
+        }
+    }
+    sites <- bind_rows(distinct(df, site_id), tibble(site_id = "unmatched"))
+    site_groups <- balance_group_indices(df, "site_id", sites, 1:3)
+    expect_equal(nrow(site_groups), 9L)
+    expect_true(all(lengths(site_groups$.rows[site_groups$site_id == "unmatched"]) == 0L))
+})
+
 matched_pixels <- function(control_fc = c(100, 90, 80), weight = 1, n_controls = 1) {
     # One treatment pixel with no loss plus `n_controls` identical controls.
     n <- 1 + n_controls

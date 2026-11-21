@@ -351,7 +351,7 @@ def launch(store: Store, analysis: dict, env: dict, resume: bool) -> None:
         "--ondemand_queue",
         env.get("AE_NEXTFLOW_ONDEMAND_QUEUE", "ae-ondemand-gp3"),
         "--max_forks",
-        str(bounded_env("AE_NEXTFLOW_MAX_FORKS", 100, 500)),
+        str(bounded_env("AE_NEXTFLOW_MAX_FORKS", 250, 500)),
         "--match_memory_mib",
         str(analysis["_workflow"]["match_memory_mib"]),
         "--allow_ondemand",
