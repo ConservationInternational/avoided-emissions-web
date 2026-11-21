@@ -109,6 +109,9 @@ def test_plot_controls_have_source_filters_before_the_map_loads(mocker):
         0, "tab-plots", None, "task", None,
         {"field": "region", "value": '"North"'},
     )[4]
+    assert content["task-graph-selection"].data == {
+        "field": "region", "value": '"North"',
+    }
     assert content["site-filter-attributes"].data == attributes
     assert content["site-filter-field"].options == [
         {"label": "count", "value": "count"},

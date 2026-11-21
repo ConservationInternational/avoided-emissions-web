@@ -636,6 +636,8 @@ When a share link is created or copied from the **Results Plots** tab, it opens
 that tab with the current site or group selection, including for viewers who
 are not signed in. Existing share links shown in the modal also include the
 current selection when copied from that tab.
+On initial load, the selection applies to the plots as well as the map and
+selection controls; no additional filter interaction is needed.
 
 Share links are stored in the `TaskShareLink` table and validated on each
 request.

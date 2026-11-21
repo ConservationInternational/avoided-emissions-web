@@ -905,21 +905,16 @@ def test_source_field_filter_values_and_site_selection():
 
 
 @pytest.mark.unit
-def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
-    callbacks = {}
-
-    def callback(*args, **kwargs):
-        def capture(function):
-            callbacks[function.__name__] = function
-            return function
-
-        return capture
-
-    registration.register_callbacks(
-        SimpleNamespace(
-            callback=callback, clientside_callback=lambda *args, **kwargs: None
-        )
+@pytest.mark.parametrize("share_token", [None, "share"])
+def test_group_filter_rebuilds_aggregate_from_selected_results(mocker, share_token):
+    app = Dash(__name__, suppress_callback_exceptions=True)
+    app.layout = task_detail_layout(
+        None, "task", shared_token=share_token,
+        search="?tab=plots&field=region&value=%22North%22",
     )
+    registration.register_callbacks(app)
+    callback_id = "task-results-graphs.children"
+    update_plots = app.callback_map[callback_id]["callback"].__wrapped__
     totals = [
         SimpleNamespace(
             site_id=site,
@@ -990,20 +985,51 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
             },
         },
     )
-    content = callbacks["update_filtered_aggregate_plots"](
-        {"field": "region", "value": '"North"'},
-        {"a": {"region": "North"}, "b": {"region": "South"}},
-        "task",
-        None,
-        {},
+    selection = app.layout["task-plot-selection"].data
+    attributes = {"a": {"region": "North"}, "b": {"region": "South"}}
+    client = app.server.test_client()
+    dependency = next(
+        item for item in client.get("/_dash-dependencies").get_json()
+        if item["output"] == callback_id
     )
-    aggregate.assert_called_once_with(
+    assert not dependency["prevent_initial_call"]
+    response = client.post(
+        "/_dash-update-component",
+        json={
+            "output": callback_id,
+            "outputs": {"id": "task-results-graphs", "property": "children"},
+            "inputs": [
+                {"id": component_id, "property": "data", "value": value}
+                for component_id, value in (
+                    ("task-graph-selection", selection),
+                    ("site-filter-attributes", attributes),
+                )
+            ],
+            "state": [
+                {"id": component_id, "property": "data", "value": value}
+                for component_id, value in (
+                    ("task-id-store", "task"),
+                    ("share-token-store", share_token),
+                    ("site-defor-store", {}),
+                )
+            ],
+            "changedPropIds": [],
+        },
+    )
+    assert response.status_code == 200
+    rendered = response.get_json()["response"]["task-results-graphs"]["children"]
+    assert "region = North" in rendered[0]["props"]["children"]
+    figure = rendered[2]["props"]["figure"]
+    assert "1 sites" in figure["layout"]["title"]["text"]
+    assert figure["data"][0]["y"] == [1]
+    content = update_plots(selection, attributes, "task", share_token, {})
+    aggregate.assert_called_with(
         "task", {"a"}, 2, results_s3_uri="s3://bucket/output"
     )
-    portfolio_total.assert_called_once_with(
+    portfolio_total.assert_called_with(
         "task", {"a"}, 2, results_s3_uri="s3://bucket/output"
     )
-    top_sites.assert_called_once_with("task", ["a"])
+    top_sites.assert_called_with("task", ["a"])
     assert "region = North" in content[0].children
     assert isinstance(content[1], dbc.Card)
     summary_columns = content[1].children[1].children.children
@@ -1016,12 +1042,12 @@ def test_group_filter_rebuilds_aggregate_from_selected_results(mocker):
     assert "1 sites" in graphs[0].figure.layout.title.text
     assert graphs[5].figure.data[0].name == "All other sites (positive)"
     assert list(graphs[5].figure.data[0].y) == [2]
-    message = callbacks["update_filtered_aggregate_plots"](
+    message = update_plots(
         {"field": "region", "value": '"North"'},
         {"a": {"region": "South"}}, "task", None, {}
     )
     assert "No results" in message.children
-    missing = callbacks["update_filtered_aggregate_plots"](
+    missing = update_plots(
         {"field": "unknown", "value": "null"}, {"a": {"region": "North"}},
         "task", None, {}
     )

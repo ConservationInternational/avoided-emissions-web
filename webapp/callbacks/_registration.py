@@ -2581,11 +2581,10 @@ def register_callbacks(app, limiter=None):
     @app.callback(
         Output("task-results-graphs", "children"),
         Input("task-graph-selection", "data"),
-        State("site-filter-attributes", "data"),
+        Input("site-filter-attributes", "data"),
         State("task-id-store", "data"),
         State("share-token-store", "data"),
         State("site-defor-store", "data"),
-        prevent_initial_call=True,
     )
     @timed_task_step("task_filtered_plots")
     def update_filtered_aggregate_plots(

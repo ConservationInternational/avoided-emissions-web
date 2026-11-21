@@ -2123,7 +2123,7 @@ def _build_plots(
         field = selection.get("field")
         value = selection.get("value")
         if defer_map:
-            plots.append(dcc.Store(id="task-graph-selection", data={}))
+            plots.append(dcc.Store(id="task-graph-selection", data=selection))
         plots.append(
             dcc.Store(
                 id="site-filter-attributes",
